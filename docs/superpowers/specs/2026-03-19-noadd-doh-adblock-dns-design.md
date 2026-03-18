@@ -57,9 +57,9 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 ### 2. Filter Engine
 
 **Data structures:**
-- `HashSet<String>` for exact domain matching (O(1) lookup for rules without wildcards/subdomains)
-- Reverse domain trie for subdomain matching (e.g., `com → example → ads`)
-- Each rule stores its source list name for provenance tracking (needed for `matched_list` in query logs)
+- `HashMap<String, RuleSource>` for exact domain matching (O(1) lookup; value tracks source list for provenance)
+- Reverse domain trie for subdomain matching (e.g., `com → example → ads`; leaf nodes store `RuleSource`)
+- Provenance tracking enables `matched_list` in query logs
 
 **Supported rule formats:**
 - AdGuard/ABP syntax: `||domain.com^`
@@ -160,7 +160,6 @@ Filter runs before cache so that newly added block rules take effect immediately
 | `GET /api/rules/blocklist` | Get custom blocklist |
 | `POST /api/rules/blocklist` | Add blocklist rule |
 | `DELETE /api/rules/blocklist/:id` | Delete blocklist rule |
-
 | `DELETE /api/logs` | Clear all query logs |
 
 **Authentication & Security:**
@@ -244,7 +243,7 @@ noadd/
 │   │   └── doh.rs        # DoH endpoint
 │   ├── filter/
 │   │   ├── mod.rs
-│   │   ├── engine.rs     # Filter engine (trie + hashmap)
+│   │   ├── engine.rs     # Filter engine (trie + hashmap with provenance)
 │   │   ├── parser.rs     # Rule parsing (adblock/hosts formats)
 │   │   └── lists.rs      # List management and updates
 │   ├── upstream/
