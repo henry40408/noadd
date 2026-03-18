@@ -16,7 +16,7 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 │                                              │
 │  ┌──────────┐  ┌──────────┐  ┌───────────┐  │
 │  │ Plain DNS│  │   DoH    │  │ Admin API  │  │
-│  │ (UDP 53) │  │ (HTTPS)  │  │ + Web UI   │  │
+│  │(UDP+TCP) │  │ (HTTPS)  │  │ + Web UI   │  │
 │  └────┬─────┘  └────┬─────┘  └─────┬─────┘  │
 │       │              │              │         │
 │       └──────┬───────┘              │         │
@@ -43,8 +43,9 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 
 ### 1. DNS Listeners
 
-**Plain DNS (UDP 53):**
-- `tokio::net::UdpSocket` listener
+**Plain DNS (UDP+TCP, port 53):**
+- `tokio::net::UdpSocket` for UDP queries
+- `tokio::net::TcpListener` for TCP queries (required by RFC 1035/7766 for truncated responses)
 - `hickory-proto` for DNS packet parsing/serialization
 - Each query spawns a tokio task
 
@@ -56,8 +57,9 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 ### 2. Filter Engine
 
 **Data structures:**
-- `HashMap<String, ()>` for exact domain matching
+- `HashSet<String>` for exact domain matching (O(1) lookup for rules without wildcards/subdomains)
 - Reverse domain trie for subdomain matching (e.g., `com → example → ads`)
+- Each rule stores its source list name for provenance tracking (needed for `matched_list` in query logs)
 
 **Supported rule formats:**
 - AdGuard/ABP syntax: `||domain.com^`
@@ -84,7 +86,7 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 |----------|-----|
 | Cloudflare `1.1.1.1` | 24-hour log deletion, third-party audited |
 | Quad9 `9.9.9.9` | Swiss non-profit, Swiss privacy law, no personal data logging, built-in malware blocking |
-| Mullvad DNS `100.64.0.7` | Swedish, no-log policy, GDPR compliant |
+| Mullvad DNS `194.242.2.2` | Swedish, no-log policy, GDPR compliant |
 
 **Supported upstream protocols:** UDP, DoH, DoT (configurable via Admin UI).
 
@@ -95,13 +97,14 @@ Single binary, all-in-one deployment. One async runtime (tokio) drives all subsy
 ### 4. Query Flow
 
 ```
-Receive query → Parse DNS packet → Check cache
-  → Cache hit → Return cached result
-  → Cache miss → Filter Engine check
-    → Blocked → Return 0.0.0.0/::
-    → Allowed → Forward to upstream → Cache response → Return result
-  → Async log query event
+Receive query → Parse DNS packet → Filter Engine check
+  → Blocked → Return 0.0.0.0/:: → Async log (blocked)
+  → Allowed → Check cache
+    → Cache hit → Return cached result → Async log (allowed, cached)
+    → Cache miss → Forward to upstream → Cache response → Return result → Async log (allowed)
 ```
+
+Filter runs before cache so that newly added block rules take effect immediately without waiting for cache TTL expiry. Cache invalidation also occurs when filter rules change via Admin UI.
 
 ### 5. Query Logger & Statistics
 
@@ -137,7 +140,8 @@ Receive query → Parse DNS packet → Check cache
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/auth/login` | Login |
+| `POST /api/auth/login` | Login (rate-limited: 5 attempts per minute per IP) |
+| `GET /api/health` | Health check (no auth required) |
 | `GET /api/stats/summary` | Summary statistics |
 | `GET /api/stats/timeline` | Timeline trend data |
 | `GET /api/stats/top-domains` | Top queried/blocked domains |
@@ -157,9 +161,11 @@ Receive query → Parse DNS packet → Check cache
 | `POST /api/rules/blocklist` | Add blocklist rule |
 | `DELETE /api/rules/blocklist/:id` | Delete blocklist rule |
 
-**Authentication:**
-- First launch requires setting an admin password
-- Session-based auth (cookie)
+| `DELETE /api/logs` | Clear all query logs |
+
+**Authentication & Security:**
+- First launch requires setting an admin password (stored with `argon2` hashing)
+- Session-based auth (`SameSite=Strict` cookie + CSRF token for state-changing requests)
 - Admin UI listens on `127.0.0.1` by default, configurable to LAN
 
 ### 7. Web UI
@@ -171,7 +177,7 @@ Receive query → Parse DNS packet → Check cache
 ### 8. TLS
 
 - Optional built-in TLS termination via `rustls`
-- Optional Let's Encrypt auto-certificate via `instant-acme`
+- Optional Let's Encrypt auto-certificate via `rustls-acme` (handles renewal and TLS acceptor integration automatically)
 - Can also run behind a reverse proxy (nginx, Caddy) without TLS
 
 ### 9. Adblock Lists (compiled-in defaults)
@@ -192,6 +198,10 @@ Receive query → Parse DNS packet → Check cache
 - Enable/disable individual lists via Admin UI
 - Add custom lists via Admin UI
 
+**Build-time embedding:**
+- `build.rs` attempts to download latest lists; on network failure, falls back to snapshot files committed in `lists/` directory
+- Repository ships with a known-good snapshot so builds never fail due to network issues
+
 ## Dependencies
 
 All crates use `default-features = false` unless noted, enabling only required features.
@@ -202,11 +212,12 @@ All crates use `default-features = false` unless noted, enabling only required f
 | `axum` | default | HTTP server |
 | `hickory-proto` | (no dnssec) | DNS packet parsing |
 | `hickory-resolver` | `dns-over-https-rustls`, `dns-over-tls-rustls` | Upstream forwarding |
-| `rusqlite` | `bundled` | SQLite |
+| `tokio-rusqlite` | `bundled` | Async SQLite wrapper (runs rusqlite on dedicated thread) |
 | `moka` | `future` | Memory cache |
 | `arc-swap` | default | Atomic filter swap |
 | `rustls` | default | TLS |
-| `instant-acme` | default | Let's Encrypt |
+| `rustls-acme` | default | Let's Encrypt (auto-renewal) |
+| `argon2` | default | Password hashing |
 | `reqwest` | `rustls-tls`, `gzip` | HTTP client for list downloads |
 | `serde` | `derive` | Serialization |
 | `serde_json` | default | JSON |
@@ -220,7 +231,7 @@ All crates use `default-features = false` unless noted, enabling only required f
 ```
 noadd/
 ├── Cargo.toml
-├── build.rs              # Download/embed default adblock lists
+├── build.rs              # Embed default adblock lists (with fallback snapshots in lists/)
 ├── src/
 │   ├── main.rs           # Entry point, CLI args
 │   ├── config.rs         # Settings management (read/write SQLite)
@@ -228,7 +239,8 @@ noadd/
 │   ├── dns/
 │   │   ├── mod.rs
 │   │   ├── handler.rs    # Query processing flow
-│   │   ├── plain.rs      # UDP 53 listener
+│   │   ├── udp.rs        # UDP listener (port 53)
+│   │   ├── tcp.rs        # TCP listener (port 53)
 │   │   └── doh.rs        # DoH endpoint
 │   ├── filter/
 │   │   ├── mod.rs
@@ -251,6 +263,16 @@ noadd/
 └── lists/                # Compile-time embedded default lists
     └── ...
 ```
+
+## Graceful Shutdown
+
+On SIGTERM/SIGINT:
+1. Stop accepting new DNS queries (close listeners)
+2. Wait for in-flight queries to complete (with timeout)
+3. Flush query logger buffer to SQLite
+4. Persist any ACME state
+5. Close SQLite connection
+6. Exit
 
 ## Storage
 
