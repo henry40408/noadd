@@ -4,3 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util"] }
+axum = "0.8"
+axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
+hickory-proto = "0.25"
+hickory-resolver = { version = "0.25", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio"] }
+tokio-rusqlite = { version = "0.7", features = ["bundled"] }
+moka = { version = "0.12", default-features = false, features = ["future"] }
+arc-swap = "1"
+rustls = { version = "0.23", default-features = false }
+rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs"] }
+argon2 = "0.5"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+include_dir = "0.7"
+clap = { version = "4", default-features = false, features = ["derive", "std", "help"] }
+base64 = "0.22"
+rand = "0.9"
+bytes = "1"
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
+thiserror = "2"
+anyhow = "1"
+mime_guess = "2"
+rustls-pemfile = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+tower = "0.5"
