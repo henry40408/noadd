@@ -5,5 +5,6 @@ pub mod db;
 pub mod dns;
 pub mod filter;
 pub mod logger;
+pub mod shutdown;
 pub mod tls;
 pub mod upstream;
