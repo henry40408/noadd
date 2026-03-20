@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>noadd</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-root: #0a0c10;
+  --bg-panel: #12151c;
+  --bg-card: #181c25;
+  --bg-input: #1e2330;
+  --bg-hover: #242938;
+  --border: #2a3040;
+  --border-focus: #4a90e2;
+  --text-primary: #e8ecf4;
+  --text-secondary: #8892a4;
+  --text-dim: #5a6478;
+  --accent: #4a90e2;
+  --accent-glow: rgba(74, 144, 226, 0.15);
+  --green: #34d399;
+  --green-dim: rgba(52, 211, 153, 0.12);
+  --red: #f87171;
+  --red-dim: rgba(248, 113, 113, 0.12);
+  --orange: #fbbf24;
+  --orange-dim: rgba(251, 191, 36, 0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'DM Sans', sans-serif;
+  --radius: 6px;
+  --transition: 150ms ease;
+}
+
+html { font-size: 14px; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-root);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* App Shell */
+.app-shell { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 220px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 10;
+}
+
+.sidebar-brand {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-brand h1 {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.sidebar-brand h1 span { color: var(--accent); }
+
+.sidebar-brand .tagline {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-family: var(--font-mono);
+}
+
+.sidebar-nav { flex: 1; padding: 12px 8px; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+  font-weight: 500;
+  font-size: 0.9rem;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-item.active { background: var(--accent-glow); color: var(--accent); }
+.nav-item svg { width: 18px; height: 18px; flex-shrink: 0; opacity: 0.7; }
+.nav-item.active svg { opacity: 1; }
+
+.main-content {
+  flex: 1;
+  margin-left: 220px;
+  padding: 24px 32px;
+  max-width: 1200px;
+}
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.page-header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.page-header p {
+  color: var(--text-secondary);
+  margin-top: 4px;
+  font-size: 0.9rem;
+}
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+
+/* Stat Grid */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 2rem;
+  font-weight: 700;
+  margin-top: 4px;
+  line-height: 1;
+}
+
+.stat-value.green { color: var(--green); }
+.stat-value.red { color: var(--red); }
+.stat-value.accent { color: var(--accent); }
+
+.stat-sub {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+
+/* Tables */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th {
+  text-align: left;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+}
+
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+tr:hover td { background: var(--bg-hover); }
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-blocked { background: var(--red-dim); color: var(--red); }
+.badge-allowed { background: var(--green-dim); color: var(--green); }
+.badge-on { background: var(--green-dim); color: var(--green); }
+.badge-off { background: var(--bg-hover); color: var(--text-dim); }
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.btn:hover { background: var(--bg-hover); border-color: var(--text-dim); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover { background: #3d7fcf; }
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--red);
+}
+
+.btn-danger:hover { background: var(--red-dim); border-color: var(--red); }
+
+.btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+
+/* Inputs */
+input[type="text"], input[type="password"], input[type="url"], select {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color var(--transition);
+  width: 100%;
+}
+
+input:focus, select:focus { border-color: var(--border-focus); }
+
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.input-row input { flex: 1; }
+
+/* Toggle */
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.toggle input { display: none; }
+
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-hover);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+
+.toggle input:checked + .toggle-track {
+  background: var(--green-dim);
+  border-color: var(--green);
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition: all var(--transition);
+}
+
+.toggle input:checked ~ .toggle-thumb {
+  left: 19px;
+  background: var(--green);
+}
+
+/* Chart */
+.chart-container {
+  height: 200px;
+  position: relative;
+  margin-top: 12px;
+}
+
+.chart-bar-group {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 100%;
+  padding-bottom: 24px;
+}
+
+.chart-bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+}
+
+.chart-bar {
+  width: 100%;
+  min-height: 1px;
+  border-radius: 2px 2px 0 0;
+  transition: height 0.4s ease;
+}
+
+.chart-bar.total { background: var(--accent); opacity: 0.3; }
+.chart-bar.blocked { background: var(--red); opacity: 0.8; }
+
+.chart-bar-stack {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  position: relative;
+}
+
+.chart-label {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  text-align: center;
+}
+
+/* Filters row */
+.filters-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.filters-row input { max-width: 300px; }
+.filters-row select { max-width: 150px; }
+
+/* Login */
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-root);
+}
+
+.login-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 40px;
+  width: 380px;
+}
+
+.login-box h1 {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.login-box h1 span { color: var(--accent); }
+
+.login-box .sub {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  margin-bottom: 24px;
+}
+
+.login-box label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.login-box input {
+  margin-bottom: 16px;
+}
+
+.login-error {
+  color: var(--red);
+  font-size: 0.8rem;
+  margin-bottom: 12px;
+  display: none;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.pagination span {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in { animation: fadeIn 0.3s ease both; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sidebar { width: 60px; }
+  .sidebar-brand h1, .sidebar-brand .tagline, .nav-item span { display: none; }
+  .sidebar-nav { padding: 12px 4px; }
+  .nav-item { justify-content: center; padding: 10px; }
+  .main-content { margin-left: 60px; padding: 16px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<script>
+// ============================================================
+// API Client
+// ============================================================
+const api = {
+  async request(method, path, body) {
+    const opts = { method, headers: {}, credentials: 'same-origin' };
+    if (body) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(path, opts);
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('auth-required'));
+      throw new Error('Unauthorized');
+    }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json();
+  },
+  get: (p) => api.request('GET', p),
+  post: (p, b) => api.request('POST', p, b),
+  put: (p, b) => api.request('PUT', p, b),
+  del: (p) => api.request('DELETE', p),
+};
+
+// ============================================================
+// Router
+// ============================================================
+class AppRouter {
+  constructor() {
+    this.routes = new Map();
+    this.current = null;
+    window.addEventListener('hashchange', () => this.navigate());
+  }
+  on(hash, cb) { this.routes.set(hash, cb); return this; }
+  navigate() {
+    const hash = location.hash || '#dashboard';
+    const cb = this.routes.get(hash) || this.routes.get('#dashboard');
+    if (cb) {
+      this.current = hash;
+      cb();
+    }
+  }
+  start() { this.navigate(); }
+}
+
+// ============================================================
+// Utility
+// ============================================================
+function formatNum(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'never';
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function formatTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ============================================================
+// Icons (inline SVG)
+// ============================================================
+const icons = {
+  dashboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
+  logs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+  filter: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>',
+  rules: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+};
+
+// ============================================================
+// Web Components
+// ============================================================
+
+// --- Login Page ---
+class LoginPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="login-container">
+        <div class="login-box fade-in">
+          <h1>no<span>add</span></h1>
+          <p class="sub">DNS ad-blocker admin</p>
+          <div class="login-error" id="login-error"></div>
+          <label for="pw">Password</label>
+          <input type="password" id="pw" placeholder="Enter admin password" autofocus>
+          <button class="btn btn-primary" style="width:100%;justify-content:center" id="login-btn">Sign in</button>
+        </div>
+      </div>`;
+    const pw = this.querySelector('#pw');
+    const btn = this.querySelector('#login-btn');
+    const err = this.querySelector('#login-error');
+    const doLogin = async () => {
+      try {
+        err.style.display = 'none';
+        await api.post('/api/auth/login', { password: pw.value });
+        this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
+      } catch (e) {
+        err.textContent = 'Invalid password';
+        err.style.display = 'block';
+      }
+    };
+    btn.onclick = doLogin;
+    pw.onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+  }
+}
+customElements.define('login-page', LoginPage);
+
+// --- App Shell ---
+class AppShell extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="app-shell">
+        <nav class="sidebar">
+          <div class="sidebar-brand">
+            <h1>no<span>add</span></h1>
+            <div class="tagline">dns ad-blocker</div>
+          </div>
+          <div class="sidebar-nav">
+            <button class="nav-item" data-route="#dashboard">${icons.dashboard}<span>Dashboard</span></button>
+            <button class="nav-item" data-route="#logs">${icons.logs}<span>Query Log</span></button>
+            <button class="nav-item" data-route="#lists">${icons.filter}<span>Filter Lists</span></button>
+            <button class="nav-item" data-route="#rules">${icons.rules}<span>Custom Rules</span></button>
+            <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
+          </div>
+        </nav>
+        <main class="main-content" id="page-content"></main>
+      </div>`;
+
+    this.querySelectorAll('.nav-item').forEach(btn => {
+      btn.onclick = () => { location.hash = btn.dataset.route; };
+    });
+
+    const updateActive = () => {
+      const hash = location.hash || '#dashboard';
+      this.querySelectorAll('.nav-item').forEach(b => {
+        b.classList.toggle('active', b.dataset.route === hash);
+      });
+    };
+    window.addEventListener('hashchange', updateActive);
+    updateActive();
+  }
+
+  get pageContent() { return this.querySelector('#page-content'); }
+}
+customElements.define('app-shell', AppShell);
+
+// --- Dashboard Page ---
+class DashboardPage extends HTMLElement {
+  async connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
+      <div class="stat-grid fade-in" id="stats"></div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Queries (24h)</div>
+        <div class="chart-container" id="chart"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="card fade-in" style="animation-delay:0.15s">
+          <div class="card-title">Top Queried Domains</div>
+          <div id="top-domains"></div>
+        </div>
+        <div class="card fade-in" style="animation-delay:0.2s">
+          <div class="card-title">Top Clients</div>
+          <div id="top-clients"></div>
+        </div>
+      </div>`;
+    try {
+      const [summary, timeline, domains, clients] = await Promise.all([
+        api.get('/api/stats/summary'),
+        api.get('/api/stats/timeline'),
+        api.get('/api/stats/top-domains'),
+        api.get('/api/stats/top-clients'),
+      ]);
+      this.renderStats(summary);
+      this.renderChart(timeline);
+      this.renderTopDomains(domains);
+      this.renderTopClients(clients);
+    } catch (e) { console.error(e); }
+  }
+
+  renderStats(s) {
+    const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
+    this.querySelector('#stats').innerHTML = `
+      <div class="stat-card"><div class="stat-label">Queries Today</div><div class="stat-value accent">${formatNum(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
+      <div class="stat-card"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
+      <div class="stat-card"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>`;
+  }
+
+  renderChart(data) {
+    if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; return; }
+    const max = Math.max(...data.map(d => d.total), 1);
+    let html = '<div class="chart-bar-group">';
+    for (const d of data) {
+      const totalH = (d.total / max * 100).toFixed(1);
+      const blockedH = (d.blocked / max * 100).toFixed(1);
+      html += `<div class="chart-bar-col" title="Total: ${d.total}, Blocked: ${d.blocked}">
+        <div class="chart-bar total" style="height:${totalH}%"></div>
+        <div class="chart-bar blocked" style="height:${blockedH}%;margin-top:-${blockedH}%"></div>
+        <div class="chart-label">${formatTime(d.timestamp)}</div>
+      </div>`;
+    }
+    html += '</div>';
+    this.querySelector('#chart').innerHTML = html;
+  }
+
+  renderTopDomains(data) {
+    if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    for (const d of data.slice(0, 10)) {
+      html += `<tr><td>${d.domain}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    this.querySelector('#top-domains').innerHTML = html;
+  }
+
+  renderTopClients(data) {
+    if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    for (const d of data.slice(0, 10)) {
+      html += `<tr><td>${d.client_ip}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    this.querySelector('#top-clients').innerHTML = html;
+  }
+}
+customElements.define('dashboard-page', DashboardPage);
+
+// --- Query Log Page ---
+class LogsPage extends HTMLElement {
+  constructor() {
+    super();
+    this.offset = 0;
+    this.limit = 50;
+    this.search = '';
+    this.actionFilter = '';
+  }
+
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Query Log</h2><p>DNS query history</p></div>
+      <div class="filters-row fade-in">
+        <input type="text" id="log-search" placeholder="Search domain...">
+        <select id="log-action">
+          <option value="">All</option>
+          <option value="allowed">Allowed</option>
+          <option value="blocked">Blocked</option>
+        </select>
+        <button class="btn btn-danger btn-sm" id="clear-logs">${icons.trash} Clear All</button>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="table-wrap"><table><thead><tr>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Upstream</th><th>ms</th>
+        </tr></thead><tbody id="log-body"></tbody></table></div>
+        <div class="pagination" id="log-pagination"></div>
+      </div>`;
+
+    let debounce;
+    this.querySelector('#log-search').oninput = (e) => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => { this.search = e.target.value; this.offset = 0; this.load(); }, 300);
+    };
+    this.querySelector('#log-action').onchange = (e) => {
+      this.actionFilter = e.target.value; this.offset = 0; this.load();
+    };
+    this.querySelector('#clear-logs').onclick = async () => {
+      if (confirm('Delete all query logs?')) {
+        await api.del('/api/logs');
+        this.load();
+      }
+    };
+    this.load();
+  }
+
+  async load() {
+    try {
+      let url = `/api/logs?limit=${this.limit}&offset=${this.offset}`;
+      if (this.search) url += `&search=${encodeURIComponent(this.search)}`;
+      if (this.actionFilter) url += `&blocked=${this.actionFilter === 'blocked'}`;
+      const logs = await api.get(url);
+      this.renderLogs(logs);
+    } catch (e) { console.error(e); }
+  }
+
+  renderLogs(logs) {
+    const body = this.querySelector('#log-body');
+    if (!logs.length) {
+      body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+    } else {
+      body.innerHTML = logs.map(l => `<tr>
+        <td>${timeAgo(l.timestamp)}</td>
+        <td style="color:var(--text-primary)">${l.domain}</td>
+        <td>${l.query_type}</td>
+        <td>${l.client_ip}</td>
+        <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
+        <td>${l.upstream || '-'}</td>
+        <td>${l.response_time_ms}</td>
+      </tr>`).join('');
+    }
+
+    const pag = this.querySelector('#log-pagination');
+    const hasPrev = this.offset > 0;
+    const hasNext = logs.length === this.limit;
+    pag.innerHTML = `
+      <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
+      <span>Page ${Math.floor(this.offset / this.limit) + 1}</span>
+      <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
+    pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
+    pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
+  }
+}
+customElements.define('logs-page', LogsPage);
+
+// --- Filter Lists Page ---
+class ListsPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Filter Lists</h2><p>Manage adblock filter lists</p></div>
+      <div class="filters-row fade-in">
+        <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="table-wrap"><table><thead><tr>
+          <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
+        </tr></thead><tbody id="lists-body"></tbody></table></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Add Custom List</div>
+        <div class="input-row">
+          <input type="text" id="list-name" placeholder="List name">
+          <input type="url" id="list-url" placeholder="https://...">
+          <button class="btn btn-primary btn-sm" id="add-list">${icons.plus} Add</button>
+        </div>
+      </div>`;
+
+    this.querySelector('#update-all').onclick = async () => {
+      this.querySelector('#update-all').disabled = true;
+      this.querySelector('#update-all').textContent = 'Updating...';
+      try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
+      this.load();
+    };
+
+    this.querySelector('#add-list').onclick = async () => {
+      const name = this.querySelector('#list-name').value.trim();
+      const url = this.querySelector('#list-url').value.trim();
+      if (!name || !url) return;
+      await api.post('/api/lists', { name, url });
+      this.querySelector('#list-name').value = '';
+      this.querySelector('#list-url').value = '';
+      this.load();
+    };
+
+    this.load();
+  }
+
+  async load() {
+    try {
+      const lists = await api.get('/api/lists');
+      this.renderLists(lists);
+    } catch (e) { console.error(e); }
+  }
+
+  renderLists(lists) {
+    const body = this.querySelector('#lists-body');
+    body.innerHTML = lists.map(l => `<tr>
+      <td>
+        <label class="toggle">
+          <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </td>
+      <td style="color:var(--text-primary)">${l.name}</td>
+      <td>${formatNum(l.rule_count)}</td>
+      <td>${timeAgo(l.last_updated)}</td>
+      <td>${l.builtin ? '' : `<button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>`}</td>
+    </tr>`).join('');
+
+    body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.onchange = async () => {
+        await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+      };
+    });
+
+    body.querySelectorAll('.del-list').forEach(btn => {
+      btn.onclick = async () => {
+        if (confirm('Delete this list?')) {
+          await api.del(`/api/lists/${btn.dataset.id}`);
+          this.load();
+        }
+      };
+    });
+  }
+}
+customElements.define('lists-page', ListsPage);
+
+// --- Custom Rules Page ---
+class RulesPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Custom Rules</h2><p>Allowlist and blocklist overrides</p></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="card fade-in">
+          <div class="card-title">Blocklist</div>
+          <div class="input-row">
+            <input type="text" id="block-rule" placeholder="||ads.example.com^">
+            <button class="btn btn-primary btn-sm" id="add-block">${icons.plus}</button>
+          </div>
+          <div id="blocklist"></div>
+        </div>
+        <div class="card fade-in" style="animation-delay:0.05s">
+          <div class="card-title">Allowlist</div>
+          <div class="input-row">
+            <input type="text" id="allow-rule" placeholder="@@||safe.example.com^">
+            <button class="btn btn-primary btn-sm" id="add-allow">${icons.plus}</button>
+          </div>
+          <div id="allowlist"></div>
+        </div>
+      </div>`;
+
+    this.querySelector('#add-block').onclick = async () => {
+      const v = this.querySelector('#block-rule').value.trim();
+      if (!v) return;
+      await api.post('/api/rules/blocklist', { rule: v });
+      this.querySelector('#block-rule').value = '';
+      this.load();
+    };
+    this.querySelector('#block-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-block').click(); };
+
+    this.querySelector('#add-allow').onclick = async () => {
+      const v = this.querySelector('#allow-rule').value.trim();
+      if (!v) return;
+      await api.post('/api/rules/allowlist', { rule: v });
+      this.querySelector('#allow-rule').value = '';
+      this.load();
+    };
+    this.querySelector('#allow-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-allow').click(); };
+
+    this.load();
+  }
+
+  async load() {
+    try {
+      const [block, allow] = await Promise.all([
+        api.get('/api/rules/blocklist'),
+        api.get('/api/rules/allowlist'),
+      ]);
+      this.renderRules('#blocklist', block, 'blocklist');
+      this.renderRules('#allowlist', allow, 'allowlist');
+    } catch (e) { console.error(e); }
+  }
+
+  renderRules(sel, rules, type) {
+    const el = this.querySelector(sel);
+    if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
+    let html = '<table><tbody>';
+    for (const r of rules) {
+      html += `<tr>
+        <td style="color:var(--text-primary)">${r.rule}</td>
+        <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}" data-type="${type}">${icons.trash}</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+    el.querySelectorAll('.del-rule').forEach(btn => {
+      btn.onclick = async () => {
+        await api.del(`/api/rules/${btn.dataset.type}/${btn.dataset.id}`);
+        this.load();
+      };
+    });
+  }
+}
+customElements.define('rules-page', RulesPage);
+
+// --- Settings Page ---
+class SettingsPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>
+      <div class="card fade-in">
+        <div class="card-title">DNS Settings</div>
+        <div class="input-row"><label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">DNS Port</label><input type="text" id="s-dns-port" placeholder="53"></div>
+        <div class="input-row"><label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">HTTP/DoH Port</label><input type="text" id="s-http-port" placeholder="3000"></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="card-title">Upstream DNS</div>
+        <div class="input-row"><input type="text" id="s-upstream" placeholder="1.1.1.1:53, 9.9.9.9:53"></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Log Retention</div>
+        <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+      </div>
+      <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>`;
+
+    this.load();
+
+    this.querySelector('#save-settings').onclick = async () => {
+      const settings = {
+        dns_port: this.querySelector('#s-dns-port').value,
+        http_port: this.querySelector('#s-http-port').value,
+        upstream_servers: this.querySelector('#s-upstream').value,
+        log_retention_days: this.querySelector('#s-retention').value,
+      };
+      await api.put('/api/settings', settings);
+      this.querySelector('#save-settings').textContent = 'Saved!';
+      setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
+    };
+  }
+
+  async load() {
+    try {
+      const s = await api.get('/api/settings');
+      if (s.dns_port) this.querySelector('#s-dns-port').value = s.dns_port;
+      if (s.http_port) this.querySelector('#s-http-port').value = s.http_port;
+      if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers;
+      if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
+    } catch (e) { console.error(e); }
+  }
+}
+customElements.define('settings-page', SettingsPage);
+
+// ============================================================
+// App Bootstrap
+// ============================================================
+const app = document.getElementById('app');
+let shell = null;
+const router = new AppRouter();
+
+function showLogin() {
+  app.innerHTML = '';
+  const login = document.createElement('login-page');
+  app.appendChild(login);
+}
+
+function showApp() {
+  app.innerHTML = '';
+  shell = document.createElement('app-shell');
+  app.appendChild(shell);
+  router.start();
+}
+
+function setPage(tag) {
+  if (!shell) return;
+  const container = shell.pageContent;
+  container.innerHTML = '';
+  const page = document.createElement(tag);
+  container.appendChild(page);
+}
+
+router
+  .on('#dashboard', () => setPage('dashboard-page'))
+  .on('#logs', () => setPage('logs-page'))
+  .on('#lists', () => setPage('lists-page'))
+  .on('#rules', () => setPage('rules-page'))
+  .on('#settings', () => setPage('settings-page'));
+
+window.addEventListener('auth-required', showLogin);
+window.addEventListener('login-success', showApp);
+
+// Check auth by hitting a protected endpoint
+api.get('/api/settings').then(() => showApp()).catch(() => showLogin());
+</script>
+</body>
+</html>

@@ -4,11 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri};
+use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
+use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::auth::{
@@ -76,7 +78,36 @@ pub fn admin_router(
         .route("/api/stats/top-clients", get(get_stats_top_clients))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
+        .fallback(serve_static)
         .with_state(state)
+}
+
+static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
+
+async fn serve_static(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match ADMIN_UI.get_file(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                StatusCode::OK,
+                [("content-type", mime.to_string())],
+                file.contents().to_vec(),
+            )
+                .into_response()
+        }
+        None => {
+            // SPA fallback: serve index.html for client-side routing
+            match ADMIN_UI.get_file("index.html") {
+                Some(file) => {
+                    Html(String::from_utf8_lossy(file.contents()).to_string()).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, "not found").into_response(),
+            }
+        }
+    }
 }
 
 // --- Auth helper ---
