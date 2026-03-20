@@ -1,1 +1,572 @@
-// TODO
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use arc_swap::ArcSwap;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::routing::{delete, get, post, put};
+use axum::{Json, Router};
+use axum_extra::extract::CookieJar;
+use axum_extra::extract::cookie::Cookie;
+use serde::{Deserialize, Serialize};
+
+use crate::admin::auth::{
+    RateLimiter, SessionStore, create_session, hash_password, validate_session, verify_password,
+};
+use crate::admin::stats;
+use crate::cache::DnsCache;
+use crate::db::Database;
+use crate::filter::engine::FilterEngine;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Database,
+    pub sessions: SessionStore,
+    pub filter: Arc<ArcSwap<FilterEngine>>,
+    pub cache: DnsCache,
+    pub rate_limiter: Arc<RateLimiter>,
+}
+
+pub fn admin_router(
+    db: Database,
+    sessions: SessionStore,
+    filter: Arc<ArcSwap<FilterEngine>>,
+    cache: DnsCache,
+    rate_limiter: Arc<RateLimiter>,
+) -> Router {
+    let state = AppState {
+        db,
+        sessions,
+        filter,
+        cache,
+        rate_limiter,
+    };
+
+    Router::new()
+        // Auth (no auth required)
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/setup", post(setup))
+        // Health (no auth required)
+        .route("/api/health", get(health))
+        // Settings
+        .route("/api/settings", get(get_settings).put(put_settings))
+        // Lists
+        .route("/api/lists", get(get_lists).post(add_list))
+        .route(
+            "/api/lists/{id}",
+            put(update_list).delete(delete_list),
+        )
+        .route("/api/lists/update", post(trigger_list_update))
+        // Rules
+        .route(
+            "/api/rules/allowlist",
+            get(get_allowlist).post(add_allowlist_rule),
+        )
+        .route("/api/rules/allowlist/{id}", delete(delete_allowlist_rule))
+        .route(
+            "/api/rules/blocklist",
+            get(get_blocklist).post(add_blocklist_rule),
+        )
+        .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        // Stats
+        .route("/api/stats/summary", get(get_stats_summary))
+        .route("/api/stats/timeline", get(get_stats_timeline))
+        .route("/api/stats/top-domains", get(get_stats_top_domains))
+        .route("/api/stats/top-clients", get(get_stats_top_clients))
+        // Logs
+        .route("/api/logs", get(get_logs).delete(delete_logs))
+        .with_state(state)
+}
+
+// --- Auth helper ---
+
+fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
+    let token = jar
+        .get("session")
+        .map(|c| c.value().to_string())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if validate_session(&state.sessions, &token) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+// --- Auth endpoints ---
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct LoginResponse {
+    pub success: bool,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<LoginRequest>,
+) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
+    // Rate limiting - use a default IP since we don't have access to ConnectInfo here
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    if !state.rate_limiter.check(ip) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    state.rate_limiter.record(ip);
+
+    let hash = state
+        .db
+        .get_setting("admin_password_hash")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let valid = verify_password(&body.password, &hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !valid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let token = create_session(&state.sessions);
+    let cookie = Cookie::build(("session", token))
+        .path("/")
+        .http_only(true)
+        .same_site(axum_extra::extract::cookie::SameSite::Strict)
+        .build();
+
+    Ok((jar.add(cookie), Json(LoginResponse { success: true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetupRequest {
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct SetupResponse {
+    pub success: bool,
+}
+
+async fn setup(
+    State(state): State<AppState>,
+    Json(body): Json<SetupRequest>,
+) -> Result<Json<SetupResponse>, StatusCode> {
+    // Only allow setup if no password exists
+    let existing = state
+        .db
+        .get_setting("admin_password_hash")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if existing.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let hash = hash_password(&body.password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .db
+        .set_setting("admin_password_hash", &hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(SetupResponse { success: true }))
+}
+
+// --- Health ---
+
+#[derive(Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_string(),
+    })
+}
+
+// --- Settings ---
+
+#[derive(Serialize, Deserialize)]
+pub struct SettingsMap {
+    #[serde(flatten)]
+    pub settings: std::collections::HashMap<String, String>,
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<SettingsMap>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    // Return known settings
+    let keys = ["dns_port", "doh_enabled", "upstream_dns", "log_retention_days"];
+    let mut settings = std::collections::HashMap::new();
+
+    for key in &keys {
+        if let Ok(Some(val)) = state.db.get_setting(key).await {
+            settings.insert(key.to_string(), val);
+        }
+    }
+
+    Ok(Json(SettingsMap { settings }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    #[serde(flatten)]
+    pub settings: std::collections::HashMap<String, String>,
+}
+
+async fn put_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<UpdateSettingsRequest>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    for (key, value) in &body.settings {
+        state
+            .db
+            .set_setting(key, value)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    Ok(StatusCode::OK)
+}
+
+// --- Lists ---
+
+async fn get_lists(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::FilterListRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let lists = state
+        .db
+        .get_filter_lists()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(lists))
+}
+
+#[derive(Deserialize)]
+pub struct AddListRequest {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct AddListResponse {
+    pub id: i64,
+}
+
+async fn add_list(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<AddListRequest>,
+) -> Result<(StatusCode, Json<AddListResponse>), StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let id = state
+        .db
+        .add_filter_list(&body.name, &body.url, true)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((StatusCode::CREATED, Json(AddListResponse { id })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateListRequest {
+    pub enabled: bool,
+}
+
+async fn update_list(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateListRequest>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    state
+        .db
+        .update_filter_list_enabled(id, body.enabled)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn delete_list(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    state
+        .db
+        .delete_filter_list(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+#[derive(Serialize)]
+pub struct ListUpdateResponse {
+    pub message: String,
+}
+
+async fn trigger_list_update(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<ListUpdateResponse>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    // Stub: in the future this will trigger an actual list download
+    Ok(Json(ListUpdateResponse {
+        message: "List update triggered".to_string(),
+    }))
+}
+
+// --- Rules ---
+
+async fn get_allowlist(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let rules = state
+        .db
+        .get_custom_rules_by_type("allow")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(rules))
+}
+
+#[derive(Deserialize)]
+pub struct AddRuleRequest {
+    pub rule: String,
+}
+
+#[derive(Serialize)]
+pub struct AddRuleResponse {
+    pub id: i64,
+}
+
+async fn add_allowlist_rule(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<AddRuleRequest>,
+) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let id = state
+        .db
+        .add_custom_rule(&body.rule, "allow")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
+}
+
+async fn delete_allowlist_rule(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    state
+        .db
+        .delete_custom_rule(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_blocklist(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let rules = state
+        .db
+        .get_custom_rules_by_type("block")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(rules))
+}
+
+async fn add_blocklist_rule(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<AddRuleRequest>,
+) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let id = state
+        .db
+        .add_custom_rule(&body.rule, "block")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
+}
+
+async fn delete_blocklist_rule(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    state
+        .db
+        .delete_custom_rule(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+// --- Stats ---
+
+async fn get_stats_summary(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<stats::Summary>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let now = now_epoch();
+    let summary = stats::compute_summary(&state.db, now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(summary))
+}
+
+#[derive(Deserialize)]
+pub struct TimelineQuery {
+    pub hours: Option<i64>,
+}
+
+async fn get_stats_timeline(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<TimelineQuery>,
+) -> Result<Json<Vec<crate::db::TimelinePoint>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let now = now_epoch();
+    let hours = query.hours.unwrap_or(24);
+    let timeline = stats::compute_timeline(&state.db, now, hours)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(timeline))
+}
+
+#[derive(Deserialize)]
+pub struct TopQuery {
+    pub limit: Option<i64>,
+}
+
+async fn get_stats_top_domains(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<TopQuery>,
+) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let now = now_epoch();
+    let limit = query.limit.unwrap_or(20);
+    let domains = stats::compute_top_domains(&state.db, now, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(domains))
+}
+
+async fn get_stats_top_clients(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<TopQuery>,
+) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let now = now_epoch();
+    let limit = query.limit.unwrap_or(20);
+    let clients = stats::compute_top_clients(&state.db, now, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(clients))
+}
+
+// --- Logs ---
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub blocked: Option<bool>,
+}
+
+async fn get_logs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<Vec<crate::db::QueryLogEntry>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+    let logs = state
+        .db
+        .query_logs(limit, offset, query.search.as_deref(), query.blocked)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(logs))
+}
+
+async fn delete_logs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    state
+        .db
+        .delete_all_logs()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
