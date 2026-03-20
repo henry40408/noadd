@@ -17,9 +17,9 @@
   --bg-hover: #242938;
   --border: #2a3040;
   --border-focus: #4a90e2;
-  --text-primary: #e8ecf4;
-  --text-secondary: #8892a4;
-  --text-dim: #5a6478;
+  --text-primary: #f0f3f8;
+  --text-secondary: #a8b2c4;
+  --text-dim: #7a8498;
   --accent: #4a90e2;
   --accent-glow: rgba(74, 144, 226, 0.15);
   --green: #34d399;
@@ -283,6 +283,10 @@ tr:hover td { background: var(--bg-hover); }
 
 .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
 
+.btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+.btn-sm svg { width: 12px; height: 12px; }
+.btn { white-space: nowrap; }
+
 /* Inputs */
 input[type="text"], input[type="password"], input[type="url"], select {
   padding: 8px 12px;
@@ -310,10 +314,13 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
 /* Toggle */
 .toggle {
+  display: inline-block;
   position: relative;
   width: 36px;
   height: 20px;
   cursor: pointer;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 .toggle input { display: none; }
@@ -519,7 +526,9 @@ const api = {
       throw new Error('Unauthorized');
     }
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    return res.json();
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) return res.json();
+    return null;
   },
   get: (p) => api.request('GET', p),
   post: (p, b) => api.request('POST', p, b),
@@ -557,17 +566,38 @@ function formatNum(n) {
   return String(n);
 }
 
-function timeAgo(ts) {
+function normalizeTs(ts) {
+  return ts > 1e12 ? ts : ts * 1000;
+}
+
+function timeAgoText(ts) {
   if (!ts) return 'never';
-  const diff = Math.floor(Date.now() / 1000) - ts;
+  const diff = Math.floor((Date.now() - normalizeTs(ts)) / 1000);
+  if (diff < 0) return 'just now';
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+function absTime(ts) {
+  if (!ts) return '';
+  return new Date(normalizeTs(ts)).toLocaleString();
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'never';
+  return `<span title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
+}
+
 function formatTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 // ============================================================
@@ -587,6 +617,54 @@ const icons = {
 // ============================================================
 // Web Components
 // ============================================================
+
+// --- Setup Page (first-time password creation) ---
+class SetupPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="login-container">
+        <div class="login-box fade-in">
+          <h1>no<span>add</span></h1>
+          <p class="sub">Welcome! Set your admin password to get started.</p>
+          <div class="login-error" id="setup-error"></div>
+          <label for="setup-pw">Password</label>
+          <input type="password" id="setup-pw" placeholder="Choose a strong password" autofocus>
+          <label for="setup-pw2" style="margin-top:4px">Confirm Password</label>
+          <input type="password" id="setup-pw2" placeholder="Confirm password">
+          <button class="btn btn-primary" style="width:100%;justify-content:center" id="setup-btn">Create Account</button>
+        </div>
+      </div>`;
+    const pw = this.querySelector('#setup-pw');
+    const pw2 = this.querySelector('#setup-pw2');
+    const btn = this.querySelector('#setup-btn');
+    const err = this.querySelector('#setup-error');
+    const doSetup = async () => {
+      err.style.display = 'none';
+      if (!pw.value || pw.value.length < 4) {
+        err.textContent = 'Password must be at least 4 characters';
+        err.style.display = 'block';
+        return;
+      }
+      if (pw.value !== pw2.value) {
+        err.textContent = 'Passwords do not match';
+        err.style.display = 'block';
+        return;
+      }
+      try {
+        await api.post('/api/auth/setup', { password: pw.value });
+        // Auto-login after setup
+        await api.post('/api/auth/login', { password: pw.value });
+        this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
+      } catch (e) {
+        err.textContent = 'Setup failed. A password may already be set.';
+        err.style.display = 'block';
+      }
+    };
+    btn.onclick = doSetup;
+    pw2.onkeydown = (e) => { if (e.key === 'Enter') doSetup(); };
+  }
+}
+customElements.define('setup-page', SetupPage);
 
 // --- Login Page ---
 class LoginPage extends HTMLElement {
@@ -707,11 +785,11 @@ class DashboardPage extends HTMLElement {
     const max = Math.max(...data.map(d => d.total), 1);
     let html = '<div class="chart-bar-group">';
     for (const d of data) {
-      const totalH = (d.total / max * 100).toFixed(1);
+      const allowedH = ((d.total - d.blocked) / max * 100).toFixed(1);
       const blockedH = (d.blocked / max * 100).toFixed(1);
       html += `<div class="chart-bar-col" title="Total: ${d.total}, Blocked: ${d.blocked}">
-        <div class="chart-bar total" style="height:${totalH}%"></div>
-        <div class="chart-bar blocked" style="height:${blockedH}%;margin-top:-${blockedH}%"></div>
+        <div class="chart-bar total" style="height:${allowedH}%"></div>
+        <div class="chart-bar blocked" style="height:${blockedH}%"></div>
         <div class="chart-label">${formatTime(d.timestamp)}</div>
       </div>`;
     }
@@ -723,7 +801,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td>${d.domain}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td>${esc(d.domain)}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -733,7 +811,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td>${d.client_ip}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td>${esc(d.client_ip)}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -765,7 +843,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Upstream</th><th>ms</th>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
@@ -800,16 +878,15 @@ class LogsPage extends HTMLElement {
   renderLogs(logs) {
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td style="color:var(--text-primary)">${l.domain}</td>
-        <td>${l.query_type}</td>
-        <td>${l.client_ip}</td>
+        <td style="color:var(--text-primary)">${esc(l.domain)}</td>
+        <td>${esc(l.query_type)}</td>
+        <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
-        <td>${l.upstream || '-'}</td>
-        <td>${l.response_time_ms}</td>
+        <td>${l.response_ms}</td>
       </tr>`).join('');
     }
 
@@ -849,9 +926,12 @@ class ListsPage extends HTMLElement {
       </div>`;
 
     this.querySelector('#update-all').onclick = async () => {
-      this.querySelector('#update-all').disabled = true;
-      this.querySelector('#update-all').textContent = 'Updating...';
+      const btn = this.querySelector('#update-all');
+      btn.disabled = true;
+      btn.innerHTML = '${icons.refresh} Updating...';
       try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
+      btn.disabled = false;
+      btn.innerHTML = '${icons.refresh} Update All';
       this.load();
     };
 
@@ -885,10 +965,10 @@ class ListsPage extends HTMLElement {
           <div class="toggle-thumb"></div>
         </label>
       </td>
-      <td style="color:var(--text-primary)">${l.name}</td>
+      <td style="color:var(--text-primary)">${esc(l.name)}</td>
       <td>${formatNum(l.rule_count)}</td>
-      <td>${timeAgo(l.last_updated)}</td>
-      <td>${l.builtin ? '' : `<button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>`}</td>
+      <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
+      <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
     </tr>`).join('');
 
     body.querySelectorAll('input[type=checkbox]').forEach(cb => {
@@ -971,7 +1051,7 @@ class RulesPage extends HTMLElement {
     let html = '<table><tbody>';
     for (const r of rules) {
       html += `<tr>
-        <td style="color:var(--text-primary)">${r.rule}</td>
+        <td style="color:var(--text-primary)">${esc(r.rule)}</td>
         <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}" data-type="${type}">${icons.trash}</button></td>
       </tr>`;
     }
@@ -1041,6 +1121,12 @@ const app = document.getElementById('app');
 let shell = null;
 const router = new AppRouter();
 
+function showSetup() {
+  app.innerHTML = '';
+  const setup = document.createElement('setup-page');
+  app.appendChild(setup);
+}
+
 function showLogin() {
   app.innerHTML = '';
   const login = document.createElement('login-page');
@@ -1072,8 +1158,23 @@ router
 window.addEventListener('auth-required', showLogin);
 window.addEventListener('login-success', showApp);
 
-// Check auth by hitting a protected endpoint
-api.get('/api/settings').then(() => showApp()).catch(() => showLogin());
+// Bootstrap: check health for setup status, then check auth
+async function bootstrap() {
+  try {
+    const health = await api.get('/api/health');
+    if (health.needs_setup) {
+      showSetup();
+      return;
+    }
+    // Password is set — check if already authenticated
+    await api.get('/api/settings');
+    showApp();
+  } catch (e) {
+    showLogin();
+  }
+}
+
+bootstrap();
 </script>
 </body>
 </html>

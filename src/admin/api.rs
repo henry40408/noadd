@@ -221,11 +221,20 @@ async fn setup(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub needs_setup: bool,
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let needs_setup = state
+        .db
+        .get_setting("admin_password_hash")
+        .await
+        .ok()
+        .flatten()
+        .is_none();
     Json(HealthResponse {
         status: "ok".to_string(),
+        needs_setup,
     })
 }
 
@@ -373,9 +382,14 @@ async fn trigger_list_update(
 ) -> Result<Json<ListUpdateResponse>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    // Stub: in the future this will trigger an actual list download
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .update_all_lists()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(ListUpdateResponse {
-        message: "List update triggered".to_string(),
+        message: "All lists updated and filter rebuilt".to_string(),
     }))
 }
 
