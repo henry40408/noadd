@@ -10,6 +10,7 @@ axum-extra = { version = "0.12", default-features = false, features = ["cookie"]
 hickory-proto = "0.25"
 hickory-resolver = { version = "0.25", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio"] }
 tokio-rusqlite = { version = "0.7", features = ["bundled"] }
+rusqlite = "0.37"
 moka = { version = "0.12", default-features = false, features = ["future"] }
 arc-swap = "1"
 rustls = { version = "0.23", default-features = false }

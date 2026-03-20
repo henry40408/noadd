@@ -1519,6 +1519,7 @@ dependencies = [
  "moka",
  "rand",
  "reqwest",
+ "rusqlite",
  "rustls",
  "rustls-acme",
  "rustls-pemfile",
