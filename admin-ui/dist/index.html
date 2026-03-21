@@ -755,7 +755,7 @@ class DashboardPage extends HTMLElement {
           <div id="top-domains"></div>
         </div>
         <div class="card fade-in" style="animation-delay:0.2s">
-          <div class="card-title">Top Clients</div>
+          <div class="card-title">Top Sources</div>
           <div id="top-clients"></div>
         </div>
       </div>`;
@@ -814,9 +814,10 @@ class DashboardPage extends HTMLElement {
 
   renderTopClients(data) {
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Client</th><th>Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td>${esc(d.client_ip)}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      const token = d.doh_token ? '<span style="color:var(--accent)">' + esc(d.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>';
+      html += `<tr><td>${esc(d.client_ip)}</td><td>${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;

@@ -60,6 +60,7 @@ pub struct TopDomain {
 #[derive(Debug, Clone, Serialize)]
 pub struct TopClient {
     pub client_ip: String,
+    pub doh_token: Option<String>,
     pub count: i64,
 }
 
@@ -682,13 +683,14 @@ impl Database {
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT client_ip, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip ORDER BY cnt DESC LIMIT ?2",
+                    "SELECT client_ip, doh_token, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip, doh_token ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
                     .query_map(params![since, limit], |row| {
                         Ok(TopClient {
                             client_ip: row.get(0)?,
-                            count: row.get(1)?,
+                            doh_token: row.get(1)?,
+                            count: row.get(2)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
