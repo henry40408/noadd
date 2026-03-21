@@ -20,6 +20,7 @@ use crate::admin::stats;
 use crate::cache::DnsCache;
 use crate::db::Database;
 use crate::filter::engine::FilterEngine;
+use crate::upstream::forwarder::UpstreamForwarder;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +29,7 @@ pub struct AppState {
     pub filter: Arc<ArcSwap<FilterEngine>>,
     pub cache: DnsCache,
     pub rate_limiter: Arc<RateLimiter>,
+    pub forwarder: Arc<UpstreamForwarder>,
 }
 
 pub fn admin_router(
@@ -36,6 +38,7 @@ pub fn admin_router(
     filter: Arc<ArcSwap<FilterEngine>>,
     cache: DnsCache,
     rate_limiter: Arc<RateLimiter>,
+    forwarder: Arc<UpstreamForwarder>,
 ) -> Router {
     let state = AppState {
         db,
@@ -43,6 +46,7 @@ pub fn admin_router(
         filter,
         cache,
         rate_limiter,
+        forwarder,
     };
 
     Router::new()
@@ -72,6 +76,8 @@ pub fn admin_router(
             get(get_blocklist).post(add_blocklist_rule),
         )
         .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        // Upstream health
+        .route("/api/upstream/health", get(upstream_health))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -568,6 +574,27 @@ async fn delete_doh_token_endpoint(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+// --- Upstream Health ---
+
+async fn upstream_health(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let results = state.forwarder.health_check().await;
+    let json: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(server, ok, ms)| {
+            serde_json::json!({
+                "server": server,
+                "ok": ok,
+                "latency_ms": ms,
+            })
+        })
+        .collect();
+    Ok(Json(json))
 }
 
 // --- Stats ---

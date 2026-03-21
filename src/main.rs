@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let handler = Arc::new(DnsHandler::new(
         filter.clone(),
         cache.clone(),
-        forwarder,
+        forwarder.clone(),
         log_tx,
     ));
 
@@ -93,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         filter.clone(),
         cache.clone(),
         rate_limiter,
+        forwarder,
     );
     let app = doh_routes.merge(admin_routes);
 

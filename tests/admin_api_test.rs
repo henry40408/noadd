@@ -12,6 +12,7 @@ use noadd::admin::auth::{
 use noadd::cache::DnsCache;
 use noadd::db::Database;
 use noadd::filter::engine::FilterEngine;
+use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 async fn setup() -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
@@ -25,12 +26,13 @@ async fn setup() -> (axum::Router, String) {
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
     // Set admin password
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
-    let router = admin_router(db, sessions, filter, cache, rate_limiter);
+    let router = admin_router(db, sessions, filter, cache, rate_limiter, forwarder);
     (router, token)
 }
 
@@ -299,9 +301,10 @@ async fn test_setup_initial_password() {
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
     // No password set initially
-    let app = admin_router(db.clone(), sessions.clone(), filter.clone(), cache.clone(), rate_limiter.clone());
+    let app = admin_router(db.clone(), sessions.clone(), filter.clone(), cache.clone(), rate_limiter.clone(), forwarder.clone());
 
     // Setup should succeed
     let response = app
@@ -319,7 +322,7 @@ async fn test_setup_initial_password() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Setup again should fail (password already exists)
-    let app2 = admin_router(db, sessions, filter, cache, rate_limiter);
+    let app2 = admin_router(db, sessions, filter, cache, rate_limiter, forwarder);
     let response = app2
         .oneshot(
             Request::builder()

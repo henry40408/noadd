@@ -935,10 +935,10 @@ class ListsPage extends HTMLElement {
     this.querySelector('#update-all').onclick = async () => {
       const btn = this.querySelector('#update-all');
       btn.disabled = true;
-      btn.innerHTML = '${icons.refresh} Updating...';
+      btn.innerHTML = icons.refresh + ' Updating...';
       try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
       btn.disabled = false;
-      btn.innerHTML = '${icons.refresh} Update All';
+      btn.innerHTML = icons.refresh + ' Update All';
       this.load();
     };
 
@@ -1087,6 +1087,8 @@ class SettingsPage extends HTMLElement {
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
         <div class="input-row"><input type="text" id="s-upstream" placeholder="1.1.1.1:53, 9.9.9.9:53"></div>
+        <button class="btn btn-sm" id="check-upstream" style="margin-top:8px">${icons.refresh} Check Health</button>
+        <div id="upstream-health" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
@@ -1134,6 +1136,29 @@ class SettingsPage extends HTMLElement {
       await api.put('/api/settings', settings);
       this.querySelector('#save-settings').textContent = 'Saved!';
       setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
+    };
+
+    this.querySelector('#check-upstream').onclick = async () => {
+      const btn = this.querySelector('#check-upstream');
+      const el = this.querySelector('#upstream-health');
+      btn.disabled = true;
+      btn.innerHTML = icons.refresh + ' Checking...';
+      try {
+        const results = await api.get('/api/upstream/health');
+        let html = '<table><thead><tr><th>Server</th><th>Status</th><th>Latency</th></tr></thead><tbody>';
+        for (const r of results) {
+          const status = r.ok
+            ? '<span class="badge badge-allowed">OK</span>'
+            : '<span class="badge badge-blocked">FAIL</span>';
+          html += `<tr><td style="font-family:var(--font-mono)">${esc(r.server)}</td><td>${status}</td><td>${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
+        }
+        html += '</tbody></table>';
+        el.innerHTML = html;
+      } catch (e) {
+        el.innerHTML = '<p style="color:var(--red)">Failed to check upstream health</p>';
+      }
+      btn.disabled = false;
+      btn.innerHTML = icons.refresh + ' Check Health';
     };
 
     this.querySelector('#s-doh-policy').onchange = async (e) => {

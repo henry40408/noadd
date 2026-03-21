@@ -83,4 +83,33 @@ impl UpstreamForwarder {
 
         Ok(buf[..len].to_vec())
     }
+
+    /// Health check all configured upstream servers.
+    /// Returns a list of (server, status, latency_ms).
+    pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
+        // Minimal DNS query for "." A record (root)
+        let query: [u8; 17] = [
+            0x00, 0x01, // ID
+            0x01, 0x00, // Flags: standard query, recursion desired
+            0x00, 0x01, // QDCOUNT: 1
+            0x00, 0x00, // ANCOUNT: 0
+            0x00, 0x00, // NSCOUNT: 0
+            0x00, 0x00, // ARCOUNT: 0
+            0x00,       // root domain (empty label)
+            0x00, 0x01, // QTYPE: A
+            0x00, 0x01, // QCLASS: IN
+        ];
+
+        let timeout = Duration::from_millis(self.config.timeout_ms);
+        let mut results = Vec::new();
+
+        for server in &self.config.servers {
+            let start = std::time::Instant::now();
+            let ok = self.try_forward(server, &query, timeout).await.is_ok();
+            let ms = start.elapsed().as_millis() as u64;
+            results.push((server.clone(), ok, ms));
+        }
+
+        results
+    }
 }
