@@ -848,7 +848,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Cache</th><th>ms</th>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Cache</th><th>Token</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
@@ -883,7 +883,7 @@ class LogsPage extends HTMLElement {
   renderLogs(logs) {
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
@@ -892,6 +892,7 @@ class LogsPage extends HTMLElement {
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td>${l.cached ? '<span class="badge badge-cached">hit</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
     }
@@ -1093,6 +1094,28 @@ class SettingsPage extends HTMLElement {
       </div>
       <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
+        <div class="card-title">DoH Access Control</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+          Default policy for unauthenticated DoH requests (without a token in URL).
+        </p>
+        <div class="input-row">
+          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">Default Policy</label>
+          <select id="s-doh-policy">
+            <option value="allow">Allow (open access)</option>
+            <option value="deny">Deny (require token)</option>
+          </select>
+        </div>
+        <div class="card-title" style="margin-top:16px">DoH Tokens</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+          Each token becomes a DoH URL path: <code style="color:var(--accent);font-size:0.8rem">/dns-query/your-token</code>. Always works regardless of policy.
+        </p>
+        <div class="input-row">
+          <input type="text" id="token-value" placeholder="e.g. my-phone, home-network">
+          <button class="btn btn-primary btn-sm" id="add-token">${icons.plus} Add</button>
+        </div>
+        <div id="doh-tokens-list"></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.25s">
         <div class="card-title">Sessions</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Sessions expire after 7 days. Revoking logs out all devices.</p>
         <button class="btn btn-danger" id="revoke-sessions">${icons.trash} Revoke All Sessions</button>
@@ -1106,11 +1129,22 @@ class SettingsPage extends HTMLElement {
         http_port: this.querySelector('#s-http-port').value,
         upstream_servers: this.querySelector('#s-upstream').value,
         log_retention_days: this.querySelector('#s-retention').value,
+        doh_access_policy: this.querySelector('#s-doh-policy').value,
       };
       await api.put('/api/settings', settings);
       this.querySelector('#save-settings').textContent = 'Saved!';
       setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
     };
+
+    this.querySelector('#add-token').onclick = async () => {
+      const token = this.querySelector('#token-value').value.trim();
+      if (!token) return;
+      if (token.includes('/')) { alert('Token cannot contain /'); return; }
+      await api.post('/api/doh-tokens', { token });
+      this.querySelector('#token-value').value = '';
+      this.loadTokens();
+    };
+    this.querySelector('#token-value').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-token').click(); };
 
     this.querySelector('#revoke-sessions').onclick = async () => {
       if (confirm('Revoke all sessions? You will be logged out on all devices.')) {
@@ -1127,6 +1161,37 @@ class SettingsPage extends HTMLElement {
       if (s.http_port) this.querySelector('#s-http-port').value = s.http_port;
       if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
+      this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
+    } catch (e) { console.error(e); }
+    this.loadTokens();
+  }
+
+  async loadTokens() {
+    try {
+      const tokens = await api.get('/api/doh-tokens');
+      const el = this.querySelector('#doh-tokens-list');
+      if (!tokens || !tokens.length) {
+        el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No tokens configured</p>';
+        return;
+      }
+      let html = '<table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
+      for (const t of tokens) {
+        html += `<tr>
+          <td style="color:var(--text-primary);font-family:var(--font-mono)">${esc(t.token)}</td>
+          <td><code style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
+          <td><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+      el.querySelectorAll('.del-token').forEach(btn => {
+        btn.onclick = async () => {
+          if (confirm('Delete this token? Clients using it will lose DoH access.')) {
+            await api.del(`/api/doh-tokens/${btn.dataset.id}`);
+            this.loadTokens();
+          }
+        };
+      });
     } catch (e) { console.error(e); }
   }
 }

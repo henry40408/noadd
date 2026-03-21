@@ -72,6 +72,9 @@ pub fn admin_router(
             get(get_blocklist).post(add_blocklist_rule),
         )
         .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        // DoH tokens
+        .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
+        .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
         // Stats
         .route("/api/stats/summary", get(get_stats_summary))
         .route("/api/stats/timeline", get(get_stats_timeline))
@@ -269,7 +272,7 @@ async fn get_settings(
     require_auth(&state, &jar)?;
 
     // Return known settings
-    let keys = ["dns_port", "doh_enabled", "upstream_dns", "log_retention_days"];
+    let keys = ["dns_port", "http_port", "upstream_servers", "log_retention_days", "doh_access_policy"];
     let mut settings = std::collections::HashMap::new();
 
     for key in &keys {
@@ -512,6 +515,58 @@ async fn delete_blocklist_rule(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    Ok(StatusCode::OK)
+}
+
+// --- DoH Tokens ---
+
+async fn get_doh_tokens(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::DohTokenRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let tokens = state
+        .db
+        .get_doh_tokens()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(tokens))
+}
+
+#[derive(Deserialize)]
+pub struct AddDohTokenRequest {
+    pub token: String,
+}
+
+async fn add_doh_token(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<AddDohTokenRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let token = body.token.trim().to_string();
+    if token.is_empty() || token.contains('/') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let id = state
+        .db
+        .add_doh_token(&token)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "id": id, "token": token })))
+}
+
+async fn delete_doh_token_endpoint(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    state
+        .db
+        .delete_doh_token(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
 

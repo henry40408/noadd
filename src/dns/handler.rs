@@ -39,6 +39,7 @@ pub struct QueryContext {
     pub response_time_ms: i64,
     pub matched_rule: Option<String>,
     pub matched_list: Option<String>,
+    pub doh_token: Option<String>,
 }
 
 /// Core DNS query handler implementing the filter-cache-forward pipeline.
@@ -66,12 +67,13 @@ impl DnsHandler {
         }
     }
 
-    /// Handle a DNS query. Takes raw query bytes and client IP.
+    /// Handle a DNS query. Takes raw query bytes, client IP, and optional DoH token name.
     /// Returns raw response bytes.
     pub async fn handle(
         &self,
         query_bytes: &[u8],
         client_ip: IpAddr,
+        doh_token: Option<String>,
     ) -> Result<Vec<u8>, HandlerError> {
         let start = Instant::now();
 
@@ -137,6 +139,7 @@ impl DnsHandler {
             response_time_ms: elapsed,
             matched_rule,
             matched_list,
+            doh_token,
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
             warn!("failed to send log event: {e}");

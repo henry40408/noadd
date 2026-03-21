@@ -30,7 +30,7 @@ pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
         let socket = Arc::clone(&socket);
 
         tokio::spawn(async move {
-            match handler.handle(&buf, src.ip()).await {
+            match handler.handle(&buf, src.ip(), None).await {
                 Ok(response) => {
                     if let Err(e) = socket.send_to(&response, src).await {
                         debug!("UDP send_to error for {src}: {e}");

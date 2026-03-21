@@ -60,7 +60,7 @@ async fn test_full_query_pipeline_block() {
     let client_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
 
     // 6. Handle the query
-    let response_bytes = handler.handle(&query_bytes, client_ip).await.unwrap();
+    let response_bytes = handler.handle(&query_bytes, client_ip, None).await.unwrap();
 
     // 7. Parse response and verify answer is 0.0.0.0
     let response = Message::from_bytes(&response_bytes).unwrap();
@@ -109,7 +109,7 @@ async fn test_full_query_pipeline_allow() {
     let query_bytes = make_query_bytes("example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    let response_bytes = handler.handle(&query_bytes, client_ip).await.unwrap();
+    let response_bytes = handler.handle(&query_bytes, client_ip, None).await.unwrap();
 
     // 3. Verify response has non-empty answers (requires network to upstream)
     let response = Message::from_bytes(&response_bytes).unwrap();

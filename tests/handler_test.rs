@@ -56,7 +56,7 @@ async fn test_handler_blocks_domain() {
     let query = make_query_bytes("ads.example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    let result = handler.handle(&query, client_ip).await.unwrap();
+    let result = handler.handle(&query, client_ip, None).await.unwrap();
     let response = Message::from_bytes(&result).unwrap();
 
     assert!(response.message_type() == MessageType::Response);
@@ -87,7 +87,7 @@ async fn test_handler_blocks_aaaa_domain() {
     let query = make_query_bytes("ads.example.com", RecordType::AAAA);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    let result = handler.handle(&query, client_ip).await.unwrap();
+    let result = handler.handle(&query, client_ip, None).await.unwrap();
     let response = Message::from_bytes(&result).unwrap();
 
     assert!(!response.answers().is_empty(), "should have an answer");
@@ -110,7 +110,7 @@ async fn test_handler_forwards_allowed_domain() {
     let query = make_query_bytes("example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    let result = handler.handle(&query, client_ip).await.unwrap();
+    let result = handler.handle(&query, client_ip, None).await.unwrap();
     assert!(!result.is_empty(), "response should be non-empty");
 
     let response = Message::from_bytes(&result).unwrap();
@@ -132,7 +132,7 @@ async fn test_handler_sends_log_event() {
     let query = make_query_bytes("ads.example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    handler.handle(&query, client_ip).await.unwrap();
+    handler.handle(&query, client_ip, None).await.unwrap();
 
     let ctx = rx.try_recv().expect("should receive a log event");
     assert_eq!(ctx.action, "blocked");

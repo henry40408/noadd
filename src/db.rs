@@ -25,6 +25,13 @@ pub struct QueryLogEntry {
     pub blocked: bool,
     pub cached: bool,
     pub response_ms: i64,
+    pub doh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DohTokenRow {
+    pub id: i64,
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,7 +96,8 @@ impl Database {
                         client_ip TEXT NOT NULL,
                         blocked INTEGER NOT NULL DEFAULT 0,
                         cached INTEGER NOT NULL DEFAULT 0,
-                        response_ms INTEGER NOT NULL DEFAULT 0
+                        response_ms INTEGER NOT NULL DEFAULT 0,
+                        doh_token TEXT
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain ON query_logs(domain);
@@ -112,6 +120,11 @@ impl Database {
                     CREATE TABLE IF NOT EXISTS filter_list_content (
                         list_id INTEGER PRIMARY KEY,
                         content TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS doh_tokens (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        token TEXT NOT NULL UNIQUE
                     );
                     ",
                 )?;
@@ -144,8 +157,28 @@ impl Database {
             }
         }
 
+        // Migration 2: add `doh_token` column to query_logs, create doh_tokens table
+        if version < 2 {
+            let has_col: bool = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='doh_token'")?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if !has_col {
+                conn.execute(
+                    "ALTER TABLE query_logs ADD COLUMN doh_token TEXT",
+                    [],
+                )?;
+            }
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS doh_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT NOT NULL UNIQUE
+                )",
+            )?;
+        }
+
         // Set to latest version
-        const LATEST_VERSION: i64 = 1;
+        const LATEST_VERSION: i64 = 2;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -212,7 +245,7 @@ impl Database {
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare(
-                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, doh_token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     )?;
                     for e in &entries {
                         stmt.execute(params![
@@ -223,6 +256,7 @@ impl Database {
                             e.blocked as i64,
                             e.cached as i64,
                             e.response_ms,
+                            e.doh_token,
                         ])?;
                     }
                 }
@@ -245,7 +279,7 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms FROM query_logs WHERE 1=1".to_string();
+                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, doh_token FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
                 if let Some(ref s) = search {
@@ -274,6 +308,7 @@ impl Database {
                             blocked: row.get::<_, i64>(4)? != 0,
                             cached: row.get::<_, i64>(5)? != 0,
                             response_ms: row.get(6)?,
+                            doh_token: row.get(7)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -492,6 +527,86 @@ impl Database {
             })
             .await?;
         Ok(())
+    }
+
+    // --- DoH Tokens ---
+
+    pub async fn get_doh_tokens(&self) -> Result<Vec<DohTokenRow>, DbError> {
+        let rows = self
+            .conn
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, token FROM doh_tokens ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(DohTokenRow {
+                            id: row.get(0)?,
+                            token: row.get(1)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn add_doh_token(&self, token: &str) -> Result<i64, DbError> {
+        let token = token.to_string();
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO doh_tokens (token) VALUES (?1)",
+                    params![token],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn delete_doh_token(&self, id: i64) -> Result<(), DbError> {
+        self.conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM doh_tokens WHERE id = ?1", params![id])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Validate a DoH token. Returns the token string if valid.
+    pub async fn validate_doh_token(&self, token: &str) -> Result<Option<String>, DbError> {
+        let token = token.to_string();
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT token FROM doh_tokens WHERE token = ?1")?;
+                let found: Option<String> = stmt
+                    .query_row(params![token], |row| row.get(0))
+                    .ok();
+                Ok(found)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn has_doh_tokens(&self) -> Result<bool, DbError> {
+        let count = self
+            .conn
+            .call(|conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM doh_tokens",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok(count)
+            })
+            .await?;
+        Ok(count > 0)
     }
 
     // --- Stats ---

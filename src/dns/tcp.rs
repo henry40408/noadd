@@ -47,7 +47,7 @@ pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
                 }
 
                 // 3. Handle the query
-                match handler.handle(&buf, client_ip).await {
+                match handler.handle(&buf, client_ip, None).await {
                     Ok(response) => {
                         // 4. Write 2-byte length prefix + response
                         let resp_len = response.len() as u16;
