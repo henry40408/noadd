@@ -98,8 +98,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 14. Start HTTP server
     let http_addr: SocketAddr = args.http_addr.parse()?;
-    let listener = tokio::net::TcpListener::bind(http_addr).await?;
-    tracing::info!(%http_addr, "HTTP server started (DoH + Admin)");
+    let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
 
     // 15. Background list update scheduler (every 24h)
     let update_db = db.clone();
@@ -153,9 +152,30 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 17. Serve HTTP with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    if use_tls {
+        let tls_config = noadd::tls::load_tls_config(
+            args.tls_cert.as_ref().unwrap(),
+            args.tls_key.as_ref().unwrap(),
+        )?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
+        tracing::info!(%http_addr, "HTTPS server started (DoH + Admin)");
+        let handle = axum_server::Handle::new();
+        let server_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+        });
+        axum_server::bind_rustls(http_addr, rustls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(http_addr).await?;
+        tracing::info!(%http_addr, "HTTP server started (DoH + Admin)");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal)
+            .await?;
+    }
 
     // 18. Cleanup
     tracing::info!("shutting down...");

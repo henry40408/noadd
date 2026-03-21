@@ -1136,6 +1136,10 @@ class SettingsPage extends HTMLElement {
       setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
     };
 
+    this.querySelector('#s-doh-policy').onchange = async (e) => {
+      await api.put('/api/settings', { doh_access_policy: e.target.value });
+    };
+
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;

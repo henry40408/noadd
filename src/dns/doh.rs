@@ -67,14 +67,13 @@ fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
 }
 
 /// Determine if unauthenticated access is allowed.
-/// Returns true if policy is "allow" OR no tokens are configured.
+/// Returns true unless policy is explicitly set to "deny".
 async fn is_open_access(db: &Database) -> bool {
-    // Explicit policy overrides
     if let Ok(Some(policy)) = db.get_setting("doh_access_policy").await {
-        return policy == "allow";
+        return policy.trim() != "deny";
     }
-    // Default: open if no tokens configured, deny if tokens exist
-    !db.has_doh_tokens().await.unwrap_or(false)
+    // Default: allow
+    true
 }
 
 /// Validate token and return the token name if valid.
