@@ -20,7 +20,7 @@ impl argon2::password_hash::rand_core::RngCore for OsRngCompat {
         rand::random()
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        dest.fill_with(|| rand::random());
+        dest.fill_with(rand::random);
     }
     fn try_fill_bytes(
         &mut self,
@@ -66,12 +66,11 @@ pub async fn load_sessions_from_db(
                 continue;
             }
             // Format: "token:created_at"
-            if let Some((token, ts_str)) = entry.split_once(':') {
-                if let Ok(ts) = ts_str.parse::<i64>() {
-                    if now - ts < SESSION_MAX_AGE_SECS {
-                        map.insert(token.to_string(), ts);
-                    }
-                }
+            if let Some((token, ts_str)) = entry.split_once(':')
+                && let Ok(ts) = ts_str.parse::<i64>()
+                && now - ts < SESSION_MAX_AGE_SECS
+            {
+                map.insert(token.to_string(), ts);
             }
         }
     }

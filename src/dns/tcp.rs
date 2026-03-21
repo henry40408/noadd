@@ -28,13 +28,8 @@ pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
             let (mut reader, mut writer) = stream.into_split();
             let client_ip = peer_addr.ip();
 
-            loop {
-                // 1. Read 2-byte big-endian length prefix
-                let len = match reader.read_u16().await {
-                    Ok(len) => len as usize,
-                    Err(_) => break, // EOF or error — close connection
-                };
-
+            while let Ok(len) = reader.read_u16().await {
+                let len = len as usize;
                 if len == 0 {
                     break;
                 }

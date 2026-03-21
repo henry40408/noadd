@@ -276,7 +276,6 @@ impl Database {
         blocked: Option<bool>,
     ) -> Result<Vec<QueryLogEntry>, DbError> {
         let search = search.map(|s| s.to_string());
-        let blocked = blocked;
         let rows = self
             .conn
             .call(move |conn| {

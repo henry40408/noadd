@@ -47,21 +47,18 @@ pub fn doh_router(handler: Arc<DnsHandler>, db: Database) -> Router {
 
 /// Extract client IP from headers or fall back to localhost.
 fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(val) = forwarded.to_str() {
-            if let Some(first) = val.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
-                }
-            }
-        }
+    if let Some(forwarded) = headers.get("x-forwarded-for")
+        && let Ok(val) = forwarded.to_str()
+        && let Some(first) = val.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return ip;
     }
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(val) = real_ip.to_str() {
-            if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
+    if let Some(real_ip) = headers.get("x-real-ip")
+        && let Ok(val) = real_ip.to_str()
+        && let Ok(ip) = val.trim().parse::<IpAddr>()
+    {
+        return ip;
     }
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
