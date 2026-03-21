@@ -84,6 +84,7 @@ fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
         query_type: ctx.query_type,
         client_ip: ctx.client_ip,
         blocked: ctx.action == "blocked",
+        cached: ctx.cached,
         response_ms: ctx.response_time_ms,
     }
 }

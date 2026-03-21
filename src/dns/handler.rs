@@ -34,6 +34,7 @@ pub struct QueryContext {
     pub domain: String,
     pub query_type: String,
     pub action: String,
+    pub cached: bool,
     pub upstream: Option<String>,
     pub response_time_ms: i64,
     pub matched_rule: Option<String>,
@@ -87,38 +88,40 @@ impl DnsHandler {
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
-        let (response_bytes, action, upstream, matched_rule, matched_list) = match filter_result {
-            FilterResult::Blocked { rule, list } => {
-                let response = build_blocked_response(&message, query_type)?;
-                (response, "blocked".to_string(), None, Some(rule), Some(list))
-            }
-            FilterResult::Allowed => {
-                let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
-
-                // 3. Check cache
-                if let Some(mut cached) = self.cache.get(&cache_key).await {
-                    // Patch DNS ID to match the query
-                    let id_bytes = query_id.to_be_bytes();
-                    if cached.len() >= 2 {
-                        cached[0] = id_bytes[0];
-                        cached[1] = id_bytes[1];
-                    }
-                    (cached, "allowed".to_string(), None, None, None)
-                } else {
-                    // 4. Forward upstream
-                    let (response, upstream_addr) =
-                        self.forwarder.forward(query_bytes).await?;
-                    self.cache.insert(cache_key, response.clone()).await;
-                    (
-                        response,
-                        "allowed".to_string(),
-                        Some(upstream_addr),
-                        None,
-                        None,
-                    )
+        let (response_bytes, action, was_cached, upstream, matched_rule, matched_list) =
+            match filter_result {
+                FilterResult::Blocked { rule, list } => {
+                    let response = build_blocked_response(&message, query_type)?;
+                    (response, "blocked".to_string(), false, None, Some(rule), Some(list))
                 }
-            }
-        };
+                FilterResult::Allowed => {
+                    let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
+
+                    // 3. Check cache
+                    if let Some(mut cached) = self.cache.get(&cache_key).await {
+                        // Patch DNS ID to match the query
+                        let id_bytes = query_id.to_be_bytes();
+                        if cached.len() >= 2 {
+                            cached[0] = id_bytes[0];
+                            cached[1] = id_bytes[1];
+                        }
+                        (cached, "allowed".to_string(), true, None, None, None)
+                    } else {
+                        // 4. Forward upstream
+                        let (response, upstream_addr) =
+                            self.forwarder.forward(query_bytes).await?;
+                        self.cache.insert(cache_key, response.clone()).await;
+                        (
+                            response,
+                            "allowed".to_string(),
+                            false,
+                            Some(upstream_addr),
+                            None,
+                            None,
+                        )
+                    }
+                }
+            };
 
         let elapsed = start.elapsed().as_millis() as i64;
 
@@ -129,6 +132,7 @@ impl DnsHandler {
             domain: domain_clean.to_string(),
             query_type: format!("{query_type}"),
             action,
+            cached: was_cached,
             upstream,
             response_time_ms: elapsed,
             matched_rule,

@@ -23,6 +23,7 @@ pub struct QueryLogEntry {
     pub query_type: String,
     pub client_ip: String,
     pub blocked: bool,
+    pub cached: bool,
     pub response_ms: i64,
 }
 
@@ -87,6 +88,7 @@ impl Database {
                         query_type TEXT NOT NULL,
                         client_ip TEXT NOT NULL,
                         blocked INTEGER NOT NULL DEFAULT 0,
+                        cached INTEGER NOT NULL DEFAULT 0,
                         response_ms INTEGER NOT NULL DEFAULT 0
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
@@ -178,7 +180,7 @@ impl Database {
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare(
-                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, response_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     )?;
                     for e in &entries {
                         stmt.execute(params![
@@ -187,6 +189,7 @@ impl Database {
                             e.query_type,
                             e.client_ip,
                             e.blocked as i64,
+                            e.cached as i64,
                             e.response_ms,
                         ])?;
                     }
@@ -210,7 +213,7 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, response_ms FROM query_logs WHERE 1=1".to_string();
+                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
                 if let Some(ref s) = search {
@@ -237,7 +240,8 @@ impl Database {
                             query_type: row.get(2)?,
                             client_ip: row.get(3)?,
                             blocked: row.get::<_, i64>(4)? != 0,
-                            response_ms: row.get(5)?,
+                            cached: row.get::<_, i64>(5)? != 0,
+                            response_ms: row.get(6)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -471,6 +475,27 @@ impl Database {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
                 })?;
                 Ok((total, blocked))
+            })
+            .await?;
+        Ok(result)
+    }
+
+    /// Returns (cache_hits, total_allowed, avg_response_ms) since the given timestamp.
+    pub async fn cache_stats_since(&self, since: i64) -> Result<(i64, i64, f64), DbError> {
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT COALESCE(SUM(cached), 0), COUNT(*), COALESCE(AVG(response_ms), 0) FROM query_logs WHERE timestamp >= ?1 AND blocked = 0",
+                )?;
+                let row = stmt.query_row(params![since], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                })?;
+                Ok(row)
             })
             .await?;
         Ok(result)

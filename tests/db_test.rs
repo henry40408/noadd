@@ -63,6 +63,7 @@ async fn test_insert_and_query_logs() {
             query_type: "A".to_string(),
             client_ip: "192.168.1.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 5,
         },
         QueryLogEntry {
@@ -71,6 +72,7 @@ async fn test_insert_and_query_logs() {
             query_type: "AAAA".to_string(),
             client_ip: "192.168.1.2".to_string(),
             blocked: true,
+            cached: false,
             response_ms: 1,
         },
     ];
@@ -108,6 +110,7 @@ async fn test_query_logs_pagination() {
             query_type: "A".to_string(),
             client_ip: "192.168.1.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 1,
         });
     }
@@ -240,6 +243,7 @@ async fn test_count_queries_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 5,
         },
         QueryLogEntry {
@@ -248,6 +252,7 @@ async fn test_count_queries_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 3,
         },
         QueryLogEntry {
@@ -256,6 +261,7 @@ async fn test_count_queries_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.2".to_string(),
             blocked: true,
+            cached: false,
             response_ms: 1,
         },
     ];
@@ -280,6 +286,7 @@ async fn test_top_domains_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 1,
         },
         QueryLogEntry {
@@ -288,6 +295,7 @@ async fn test_top_domains_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 1,
         },
         QueryLogEntry {
@@ -296,6 +304,7 @@ async fn test_top_domains_since() {
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
             blocked: false,
+            cached: false,
             response_ms: 1,
         },
     ];

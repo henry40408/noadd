@@ -243,6 +243,7 @@ tr:hover td { background: var(--bg-hover); }
 
 .badge-blocked { background: var(--red-dim); color: var(--red); }
 .badge-allowed { background: var(--green-dim); color: var(--green); }
+.badge-cached { background: var(--accent-glow); color: var(--accent); }
 .badge-on { background: var(--green-dim); color: var(--green); }
 .badge-off { background: var(--bg-hover); color: var(--text-dim); }
 
@@ -774,10 +775,14 @@ class DashboardPage extends HTMLElement {
 
   renderStats(s) {
     const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
+    const cacheRate = ((s.cache_hit_rate_today || 0) * 100).toFixed(1);
+    const avgMs = (s.avg_response_ms_today || 0).toFixed(1);
     this.querySelector('#stats').innerHTML = `
       <div class="stat-card"><div class="stat-label">Queries Today</div><div class="stat-value accent">${formatNum(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
       <div class="stat-card"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
-      <div class="stat-card"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>`;
+      <div class="stat-card"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
+      <div class="stat-card"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
+      <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>`;
   }
 
   renderChart(data) {
@@ -843,7 +848,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>ms</th>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Cache</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
@@ -878,7 +883,7 @@ class LogsPage extends HTMLElement {
   renderLogs(logs) {
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
@@ -886,6 +891,7 @@ class LogsPage extends HTMLElement {
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
+        <td>${l.cached ? '<span class="badge badge-cached">hit</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
     }
