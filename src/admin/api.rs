@@ -49,6 +49,7 @@ pub fn admin_router(
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
+        .route("/api/auth/revoke-all", post(revoke_all))
         // Health (no auth required)
         .route("/api/health", get(health))
         // Settings
@@ -218,6 +219,17 @@ async fn setup(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(SetupResponse { success: true }))
+}
+
+async fn revoke_all(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    crate::admin::auth::revoke_all_sessions(&state.sessions, &state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
 }
 
 // --- Health ---

@@ -1085,7 +1085,12 @@ class SettingsPage extends HTMLElement {
         <div class="card-title">Log Retention</div>
         <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
       </div>
-      <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>`;
+      <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>
+      <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
+        <div class="card-title">Sessions</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Sessions expire after 7 days. Revoking logs out all devices.</p>
+        <button class="btn btn-danger" id="revoke-sessions">${icons.trash} Revoke All Sessions</button>
+      </div>`;
 
     this.load();
 
@@ -1099,6 +1104,13 @@ class SettingsPage extends HTMLElement {
       await api.put('/api/settings', settings);
       this.querySelector('#save-settings').textContent = 'Saved!';
       setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
+    };
+
+    this.querySelector('#revoke-sessions').onclick = async () => {
+      if (confirm('Revoke all sessions? You will be logged out on all devices.')) {
+        await api.post('/api/auth/revoke-all');
+        window.dispatchEvent(new CustomEvent('auth-required'));
+      }
     };
   }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,25 +33,45 @@ impl argon2::password_hash::rand_core::RngCore for OsRngCompat {
 
 impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 
-/// Thread-safe session store backed by a `HashSet` of session tokens.
-pub type SessionStore = Arc<Mutex<HashSet<String>>>;
+/// Session expiry in seconds (7 days).
+const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
+
+/// Thread-safe session store. Maps token -> created_at (unix seconds).
+pub type SessionStore = Arc<Mutex<HashMap<String, i64>>>;
 
 /// Create a new, empty session store.
 pub fn new_session_store() -> SessionStore {
-    Arc::new(Mutex::new(HashSet::new()))
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 /// Load persisted sessions from the database into the session store.
+/// Expired sessions are discarded during load.
 pub async fn load_sessions_from_db(
     store: &SessionStore,
     db: &crate::db::Database,
 ) -> Result<(), crate::db::DbError> {
-    if let Some(tokens) = db.get_setting("sessions").await? {
-        let mut set = store.lock().unwrap();
-        for token in tokens.split(',') {
-            let token = token.trim();
-            if !token.is_empty() {
-                set.insert(token.to_string());
+    if let Some(data) = db.get_setting("sessions").await? {
+        let now = now_secs();
+        let mut map = store.lock().unwrap();
+        for entry in data.split(';') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            // Format: "token:created_at"
+            if let Some((token, ts_str)) = entry.split_once(':') {
+                if let Ok(ts) = ts_str.parse::<i64>() {
+                    if now - ts < SESSION_MAX_AGE_SECS {
+                        map.insert(token.to_string(), ts);
+                    }
+                }
             }
         }
     }
@@ -63,8 +83,22 @@ pub async fn save_sessions_to_db(
     store: &SessionStore,
     db: &crate::db::Database,
 ) -> Result<(), crate::db::DbError> {
-    let tokens: Vec<String> = store.lock().unwrap().iter().cloned().collect();
-    db.set_setting("sessions", &tokens.join(",")).await
+    let entries: Vec<String> = store
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(token, ts)| format!("{token}:{ts}"))
+        .collect();
+    db.set_setting("sessions", &entries.join(";")).await
+}
+
+/// Revoke all sessions (logout everywhere).
+pub async fn revoke_all_sessions(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    store.lock().unwrap().clear();
+    db.set_setting("sessions", "").await
 }
 
 /// Hash a password using Argon2 with a random salt.
@@ -97,13 +131,21 @@ pub fn create_session(store: &SessionStore) -> String {
         .take(64)
         .map(char::from)
         .collect();
-    store.lock().unwrap().insert(token.clone());
+    store.lock().unwrap().insert(token.clone(), now_secs());
     token
 }
 
-/// Validate whether a session token exists in the store.
+/// Validate whether a session token exists and is not expired.
 pub fn validate_session(store: &SessionStore, token: &str) -> bool {
-    store.lock().unwrap().contains(token)
+    let mut map = store.lock().unwrap();
+    if let Some(&created_at) = map.get(token) {
+        if now_secs() - created_at < SESSION_MAX_AGE_SECS {
+            return true;
+        }
+        // Expired — remove it
+        map.remove(token);
+    }
+    false
 }
 
 /// Simple IP-based rate limiter for login attempts.
