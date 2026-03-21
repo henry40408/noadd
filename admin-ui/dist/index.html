@@ -363,47 +363,68 @@ input:focus, select:focus { border-color: var(--border-focus); }
   margin-top: 12px;
 }
 
-.chart-bar-group {
+.chart-area {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  height: 100%;
-  padding-bottom: 24px;
+  gap: 1px;
+  height: calc(100% - 20px);
 }
 
-.chart-bar-col {
+.chart-col {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  min-width: 0;
   height: 100%;
-  justify-content: flex-end;
-}
-
-.chart-bar {
-  width: 100%;
-  min-height: 1px;
-  border-radius: 2px 2px 0 0;
-  transition: height 0.4s ease;
-}
-
-.chart-bar.total { background: var(--accent); opacity: 0.3; }
-.chart-bar.blocked { background: var(--red); opacity: 0.8; }
-
-.chart-bar-stack {
-  width: 100%;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   position: relative;
 }
 
+.chart-bar {
+  width: 100%;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
+.chart-bar.total { background: var(--accent); opacity: 0.3; border-radius: 1px 1px 0 0; }
+.chart-bar.blocked { background: var(--red); opacity: 0.8; }
+
+.chart-col:hover .chart-bar.total { opacity: 0.5; }
+.chart-col:hover .chart-bar.blocked { opacity: 1; }
+
+.chart-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: 20;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.chart-col:hover .chart-tooltip { display: block; }
+
+.chart-labels {
+  display: flex;
+  justify-content: space-between;
+  height: 20px;
+  align-items: center;
+  margin-top: 4px;
+}
+
 .chart-label {
   font-family: var(--font-mono);
-  font-size: 0.55rem;
+  font-size: 0.65rem;
   color: var(--text-dim);
-  margin-top: 4px;
-  text-align: center;
 }
 
 /* Filters row */
@@ -592,7 +613,7 @@ function timeAgo(ts) {
 }
 
 function formatTime(ts) {
-  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return new Date(normalizeTs(ts)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function esc(s) {
@@ -788,18 +809,29 @@ class DashboardPage extends HTMLElement {
   renderChart(data) {
     if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; return; }
     const max = Math.max(...data.map(d => d.total), 1);
-    let html = '<div class="chart-bar-group">';
-    for (const d of data) {
+    const len = data.length;
+    // Show ~6 labels evenly spaced
+    const labelEvery = Math.max(1, Math.floor(len / 6));
+
+    let bars = '<div class="chart-area">';
+    for (let i = 0; i < len; i++) {
+      const d = data[i];
       const allowedH = ((d.total - d.blocked) / max * 100).toFixed(1);
       const blockedH = (d.blocked / max * 100).toFixed(1);
-      html += `<div class="chart-bar-col" title="Total: ${d.total}, Blocked: ${d.blocked}">
+      const pct = d.total > 0 ? ((d.blocked / d.total) * 100).toFixed(0) : '0';
+      bars += `<div class="chart-col">
+        <div class="chart-tooltip">${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${d.total} total</span> · <span style="color:var(--red)">${d.blocked} blocked</span> (${pct}%)</div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
-        <div class="chart-label">${formatTime(d.timestamp)}</div>
       </div>`;
     }
-    html += '</div>';
-    this.querySelector('#chart').innerHTML = html;
+    bars += '</div>';
+    let labels = '<div class="chart-labels">';
+    for (let i = 0; i < len; i += labelEvery) {
+      labels += `<div class="chart-label">${formatTime(data[i].timestamp)}</div>`;
+    }
+    labels += '</div>';
+    this.querySelector('#chart').innerHTML = bars + labels;
   }
 
   renderTopDomains(data) {

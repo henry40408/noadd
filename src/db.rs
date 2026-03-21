@@ -329,13 +329,15 @@ impl Database {
         Ok(())
     }
 
+    /// `timestamp` is in seconds (epoch). Converts to ms internally.
     pub async fn prune_logs_before(&self, timestamp: i64) -> Result<u64, DbError> {
+        let timestamp_ms = timestamp * 1000;
         let count = self
             .conn
             .call(move |conn| {
                 let deleted = conn.execute(
                     "DELETE FROM query_logs WHERE timestamp < ?1",
-                    params![timestamp],
+                    params![timestamp_ms],
                 )?;
                 Ok(deleted as u64)
             })
@@ -612,14 +614,30 @@ impl Database {
 
     // --- Stats ---
 
+    /// Returns the earliest log timestamp in milliseconds, or None if no logs.
+    pub async fn earliest_log_timestamp(&self) -> Result<Option<i64>, DbError> {
+        let result = self
+            .conn
+            .call(|conn| {
+                let ts: Option<i64> = conn
+                    .query_row("SELECT MIN(timestamp) FROM query_logs", [], |row| row.get(0))
+                    .ok();
+                Ok(ts)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    /// `since` is in seconds (epoch). Internally converts to ms to match stored timestamps.
     pub async fn count_queries_since(&self, since: i64) -> Result<(i64, i64), DbError> {
+        let since_ms = since * 1000;
         let result = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT COUNT(*), COALESCE(SUM(blocked), 0) FROM query_logs WHERE timestamp >= ?1",
                 )?;
-                let (total, blocked) = stmt.query_row(params![since], |row| {
+                let (total, blocked) = stmt.query_row(params![since_ms], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
                 })?;
                 Ok((total, blocked))
@@ -629,14 +647,16 @@ impl Database {
     }
 
     /// Returns (cache_hits, total_allowed, avg_response_ms) since the given timestamp.
+    /// `since` is in seconds (epoch).
     pub async fn cache_stats_since(&self, since: i64) -> Result<(i64, i64, f64), DbError> {
+        let since_ms = since * 1000;
         let result = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT COALESCE(SUM(cached), 0), COUNT(*), COALESCE(AVG(response_ms), 0) FROM query_logs WHERE timestamp >= ?1 AND blocked = 0",
                 )?;
-                let row = stmt.query_row(params![since], |row| {
+                let row = stmt.query_row(params![since_ms], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, i64>(1)?,
@@ -654,6 +674,7 @@ impl Database {
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopDomain>, DbError> {
+        let since_ms = since * 1000;
         let rows = self
             .conn
             .call(move |conn| {
@@ -661,7 +682,7 @@ impl Database {
                     "SELECT domain, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY domain ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
-                    .query_map(params![since, limit], |row| {
+                    .query_map(params![since_ms, limit], |row| {
                         Ok(TopDomain {
                             domain: row.get(0)?,
                             count: row.get(1)?,
@@ -679,6 +700,7 @@ impl Database {
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopClient>, DbError> {
+        let since_ms = since * 1000;
         let rows = self
             .conn
             .call(move |conn| {
@@ -686,7 +708,7 @@ impl Database {
                     "SELECT client_ip, doh_token, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip, doh_token ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
-                    .query_map(params![since, limit], |row| {
+                    .query_map(params![since_ms, limit], |row| {
                         Ok(TopClient {
                             client_ip: row.get(0)?,
                             doh_token: row.get(1)?,
@@ -708,9 +730,14 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
+                // Convert seconds to milliseconds to match timestamp storage
+                let since_ms = since * 1000;
+                let bucket_ms = bucket_secs * 1000;
                 let mut stmt = conn.prepare(
                     "SELECT (timestamp / ?1) * ?1 as bucket, COUNT(*) as total, COALESCE(SUM(blocked), 0) as blocked FROM query_logs WHERE timestamp >= ?2 GROUP BY bucket ORDER BY bucket",
                 )?;
+                let since = since_ms;
+                let bucket_secs = bucket_ms;
                 let rows = stmt
                     .query_map(params![bucket_secs, since], |row| {
                         Ok(TimelinePoint {

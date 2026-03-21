@@ -70,13 +70,41 @@ pub async fn compute_top_clients(
     db.top_clients_since(since, limit).await
 }
 
+const TARGET_BARS: i64 = 48;
+
 pub async fn compute_timeline(
     db: &Database,
     now: i64,
     hours: i64,
 ) -> Result<Vec<TimelinePoint>, DbError> {
-    let since = now - hours * 3600;
-    // Use 10-minute buckets
-    let bucket_secs = 600;
+    let max_since = now - hours * 3600;
+
+    // Find the earliest log timestamp to determine actual data range
+    let earliest = db.earliest_log_timestamp().await?;
+    let since = match earliest {
+        Some(ts_ms) => {
+            let ts_secs = ts_ms / 1000;
+            // Use the later of: earliest log or max lookback
+            ts_secs.max(max_since)
+        }
+        None => max_since,
+    };
+
+    // Dynamic bucket: divide actual range by target bar count
+    let range = (now - since).max(1);
+    // Round bucket to a clean interval (minimum 60s)
+    let raw_bucket = range / TARGET_BARS;
+    let bucket_secs = if raw_bucket <= 60 {
+        60
+    } else if raw_bucket <= 300 {
+        300 // 5 min
+    } else if raw_bucket <= 600 {
+        600 // 10 min
+    } else if raw_bucket <= 1800 {
+        1800 // 30 min
+    } else {
+        3600 // 1 hour
+    };
+
     db.timeline_since(since, bucket_secs).await
 }

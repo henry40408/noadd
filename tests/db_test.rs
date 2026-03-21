@@ -58,7 +58,7 @@ async fn test_insert_and_query_logs() {
     let db = test_db().await;
     let entries = vec![
         QueryLogEntry {
-            timestamp: 1000,
+            timestamp: 1000000,
             domain: "example.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "192.168.1.1".to_string(),
@@ -68,7 +68,7 @@ async fn test_insert_and_query_logs() {
             response_ms: 5,
         },
         QueryLogEntry {
-            timestamp: 2000,
+            timestamp: 2000000,
             domain: "ads.tracker.com".to_string(),
             query_type: "AAAA".to_string(),
             client_ip: "192.168.1.2".to_string(),
@@ -107,7 +107,7 @@ async fn test_query_logs_pagination() {
     let mut entries = Vec::new();
     for i in 0..25 {
         entries.push(QueryLogEntry {
-            timestamp: 1000 + i,
+            timestamp: 1000000 + i * 1000,
             domain: format!("domain{}.com", i),
             query_type: "A".to_string(),
             client_ip: "192.168.1.1".to_string(),
@@ -241,7 +241,7 @@ async fn test_count_queries_since() {
     let db = test_db().await;
     let entries = vec![
         QueryLogEntry {
-            timestamp: 1000,
+            timestamp: 1000000,
             domain: "old.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
@@ -251,7 +251,7 @@ async fn test_count_queries_since() {
             response_ms: 5,
         },
         QueryLogEntry {
-            timestamp: 2000,
+            timestamp: 2000000,
             domain: "recent.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
@@ -261,7 +261,7 @@ async fn test_count_queries_since() {
             response_ms: 3,
         },
         QueryLogEntry {
-            timestamp: 3000,
+            timestamp: 3000000,
             domain: "blocked.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.2".to_string(),
@@ -287,7 +287,7 @@ async fn test_top_domains_since() {
     let db = test_db().await;
     let entries = vec![
         QueryLogEntry {
-            timestamp: 1000,
+            timestamp: 1000000,
             domain: "popular.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
@@ -297,7 +297,7 @@ async fn test_top_domains_since() {
             response_ms: 1,
         },
         QueryLogEntry {
-            timestamp: 2000,
+            timestamp: 2000000,
             domain: "popular.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
@@ -307,7 +307,7 @@ async fn test_top_domains_since() {
             response_ms: 1,
         },
         QueryLogEntry {
-            timestamp: 3000,
+            timestamp: 3000000,
             domain: "rare.com".to_string(),
             query_type: "A".to_string(),
             client_ip: "10.0.0.1".to_string(),
