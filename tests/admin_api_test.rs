@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use noadd::admin::api::admin_router;
+use noadd::admin::api::{admin_router, ServerInfo};
 use noadd::admin::auth::{
     create_session, hash_password, new_session_store, RateLimiter,
 };
@@ -32,7 +32,7 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
-    let router = admin_router(db, sessions, filter, cache, rate_limiter, forwarder);
+    let router = admin_router(db, sessions, filter, cache, rate_limiter, forwarder, ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
     (router, token)
 }
 
@@ -304,7 +304,7 @@ async fn test_setup_initial_password() {
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
     // No password set initially
-    let app = admin_router(db.clone(), sessions.clone(), filter.clone(), cache.clone(), rate_limiter.clone(), forwarder.clone());
+    let app = admin_router(db.clone(), sessions.clone(), filter.clone(), cache.clone(), rate_limiter.clone(), forwarder.clone(), ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
 
     // Setup should succeed
     let response = app
@@ -322,7 +322,7 @@ async fn test_setup_initial_password() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Setup again should fail (password already exists)
-    let app2 = admin_router(db, sessions, filter, cache, rate_limiter, forwarder);
+    let app2 = admin_router(db, sessions, filter, cache, rate_limiter, forwarder, ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
     let response = app2
         .oneshot(
             Request::builder()

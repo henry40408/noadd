@@ -1080,9 +1080,9 @@ class SettingsPage extends HTMLElement {
     this.innerHTML = `
       <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>
       <div class="card fade-in">
-        <div class="card-title">DNS Settings</div>
-        <div class="input-row"><label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">DNS Port</label><input type="text" id="s-dns-port" placeholder="53"></div>
-        <div class="input-row"><label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">HTTP/DoH Port</label><input type="text" id="s-http-port" placeholder="3000"></div>
+        <div class="card-title">Server Info</div>
+        <p style="color:var(--text-dim);font-size:0.8rem;margin-bottom:12px">These values are set via CLI arguments and cannot be changed at runtime.</p>
+        <div id="server-info" style="font-family:var(--font-mono);font-size:0.85rem;color:var(--text-secondary)">Loading...</div>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
@@ -1127,8 +1127,6 @@ class SettingsPage extends HTMLElement {
 
     this.querySelector('#save-settings').onclick = async () => {
       const settings = {
-        dns_port: this.querySelector('#s-dns-port').value,
-        http_port: this.querySelector('#s-http-port').value,
         upstream_servers: this.querySelector('#s-upstream').value,
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
@@ -1185,12 +1183,21 @@ class SettingsPage extends HTMLElement {
 
   async load() {
     try {
-      const s = await api.get('/api/settings');
-      if (s.dns_port) this.querySelector('#s-dns-port').value = s.dns_port;
-      if (s.http_port) this.querySelector('#s-http-port').value = s.http_port;
+      const [s, info] = await Promise.all([
+        api.get('/api/settings'),
+        api.get('/api/server-info'),
+      ]);
       if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
+      if (info) {
+        const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
+        this.querySelector('#server-info').innerHTML = `
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px">
+            <span style="color:var(--text-dim)">DNS</span><span>${esc(info.dns_addr)}</span>
+            <span style="color:var(--text-dim)">HTTP</span><span>${esc(info.http_addr)} ${tls}</span>
+          </div>`;
+      }
     } catch (e) { console.error(e); }
     this.loadTokens();
   }

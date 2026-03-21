@@ -30,6 +30,14 @@ pub struct AppState {
     pub cache: DnsCache,
     pub rate_limiter: Arc<RateLimiter>,
     pub forwarder: Arc<UpstreamForwarder>,
+    pub server_info: ServerInfo,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ServerInfo {
+    pub dns_addr: String,
+    pub http_addr: String,
+    pub tls_enabled: bool,
 }
 
 pub fn admin_router(
@@ -39,6 +47,7 @@ pub fn admin_router(
     cache: DnsCache,
     rate_limiter: Arc<RateLimiter>,
     forwarder: Arc<UpstreamForwarder>,
+    server_info: ServerInfo,
 ) -> Router {
     let state = AppState {
         db,
@@ -47,6 +56,7 @@ pub fn admin_router(
         cache,
         rate_limiter,
         forwarder,
+        server_info,
     };
 
     Router::new()
@@ -54,8 +64,9 @@ pub fn admin_router(
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/revoke-all", post(revoke_all))
-        // Health (no auth required)
+        // Health + server info (no auth required for health)
         .route("/api/health", get(health))
+        .route("/api/server-info", get(get_server_info))
         // Settings
         .route("/api/settings", get(get_settings).put(put_settings))
         // Lists
@@ -263,6 +274,14 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn get_server_info(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<ServerInfo>, StatusCode> {
+    require_auth(&state, &jar)?;
+    Ok(Json(state.server_info.clone()))
+}
+
 // --- Settings ---
 
 #[derive(Serialize, Deserialize)]
@@ -278,7 +297,7 @@ async fn get_settings(
     require_auth(&state, &jar)?;
 
     // Return known settings
-    let keys = ["dns_port", "http_port", "upstream_servers", "log_retention_days", "doh_access_policy"];
+    let keys = ["upstream_servers", "log_retention_days", "doh_access_policy"];
     let mut settings = std::collections::HashMap::new();
 
     for key in &keys {

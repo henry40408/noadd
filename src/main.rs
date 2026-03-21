@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use clap::Parser;
 
-use noadd::admin::api::admin_router;
+use noadd::admin::api::{admin_router, ServerInfo};
 use noadd::admin::auth::{load_sessions_from_db, new_session_store, RateLimiter};
 use noadd::cache::DnsCache;
 use noadd::config::CliArgs;
@@ -87,6 +87,11 @@ async fn main() -> anyhow::Result<()> {
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let server_info = ServerInfo {
+        dns_addr: args.dns_addr.clone(),
+        http_addr: args.http_addr.clone(),
+        tls_enabled: args.tls_cert.is_some() && args.tls_key.is_some(),
+    };
     let admin_routes = admin_router(
         db.clone(),
         session_store,
@@ -94,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         cache.clone(),
         rate_limiter,
         forwarder,
+        server_info,
     );
     let app = doh_routes.merge(admin_routes);
 
