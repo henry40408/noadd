@@ -170,6 +170,10 @@ async fn login(
     }
 
     let token = create_session(&state.sessions);
+
+    // Persist sessions to DB so they survive restarts
+    let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+
     let cookie = Cookie::build(("session", token))
         .path("/")
         .http_only(true)

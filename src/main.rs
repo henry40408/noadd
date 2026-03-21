@@ -5,7 +5,7 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 
 use noadd::admin::api::admin_router;
-use noadd::admin::auth::{new_session_store, RateLimiter};
+use noadd::admin::auth::{load_sessions_from_db, new_session_store, RateLimiter};
 use noadd::cache::DnsCache;
 use noadd::config::CliArgs;
 use noadd::db::Database;
@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     // 13. Build HTTP app (DoH + Admin)
     let doh_routes = doh_router(handler.clone());
     let session_store = new_session_store();
+    load_sessions_from_db(&session_store, &db).await?;
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let admin_routes = admin_router(
         db.clone(),

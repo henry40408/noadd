@@ -41,6 +41,32 @@ pub fn new_session_store() -> SessionStore {
     Arc::new(Mutex::new(HashSet::new()))
 }
 
+/// Load persisted sessions from the database into the session store.
+pub async fn load_sessions_from_db(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    if let Some(tokens) = db.get_setting("sessions").await? {
+        let mut set = store.lock().unwrap();
+        for token in tokens.split(',') {
+            let token = token.trim();
+            if !token.is_empty() {
+                set.insert(token.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Persist all sessions from the store to the database.
+pub async fn save_sessions_to_db(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    let tokens: Vec<String> = store.lock().unwrap().iter().cloned().collect();
+    db.set_setting("sessions", &tokens.join(",")).await
+}
+
 /// Hash a password using Argon2 with a random salt.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRngCompat);
