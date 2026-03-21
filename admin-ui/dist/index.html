@@ -508,6 +508,54 @@ input:focus, select:focus { border-color: var(--border-focus); }
   color: var(--text-dim);
 }
 
+/* Live indicator */
+.live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--green);
+  background: var(--green-dim);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  transition: all var(--transition);
+  user-select: none;
+}
+
+.live-toggle:hover { border-color: var(--green); }
+.live-toggle.paused { color: var(--text-dim); background: var(--bg-hover); }
+.live-toggle.paused .live-dot { animation: none; background: var(--text-dim); }
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: breathe 2s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  50% { opacity: 1; box-shadow: 0 0 8px 2px rgba(52, 211, 153, 0.4); }
+}
+
+/* Update flash — uses transition instead of animation to avoid overriding fade-in */
+.stat-card, .card {
+  transition: border-color 1.2s ease-out, background-color 1.2s ease-out;
+}
+
+.stat-card.flash, .card.flash {
+  border-color: var(--accent);
+  background-color: #1a2540;
+  transition: none;
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -762,24 +810,67 @@ customElements.define('app-shell', AppShell);
 
 // --- Dashboard Page ---
 class DashboardPage extends HTMLElement {
+  constructor() {
+    super();
+    this._pollTimer = null;
+    this._live = true;
+    this._prevStats = null;
+    this._prevChart = null;
+    this._prevDomains = null;
+    this._prevClients = null;
+  }
+
   async connectedCallback() {
     this.innerHTML = `
-      <div class="page-header fade-in"><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
+        <div><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
+        <button class="live-toggle" id="live-btn" title="Auto-refresh every 10s. Click to toggle."><span class="live-dot"></span> LIVE</button>
+      </div>
       <div class="stat-grid fade-in" id="stats"></div>
-      <div class="card fade-in" style="animation-delay:0.1s">
+      <div class="card fade-in" style="animation-delay:0.1s" id="chart-card">
         <div class="card-title">Queries (24h)</div>
         <div class="chart-container" id="chart"></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div class="card fade-in" style="animation-delay:0.15s">
+        <div class="card fade-in" style="animation-delay:0.15s" id="domains-card">
           <div class="card-title">Top Queried Domains</div>
           <div id="top-domains"></div>
         </div>
-        <div class="card fade-in" style="animation-delay:0.2s">
+        <div class="card fade-in" style="animation-delay:0.2s" id="clients-card">
           <div class="card-title">Top Sources</div>
           <div id="top-clients"></div>
         </div>
       </div>`;
+
+    this.querySelector('#live-btn').onclick = () => {
+      this._live = !this._live;
+      const btn = this.querySelector('#live-btn');
+      btn.classList.toggle('paused', !this._live);
+      btn.innerHTML = this._live
+        ? '<span class="live-dot"></span> LIVE'
+        : '<span class="live-dot"></span> PAUSED';
+      if (this._live) this._startPolling();
+      else this._stopPolling();
+    };
+
+    await this._fetchAll();
+    this._startPolling();
+  }
+
+  disconnectedCallback() {
+    this._stopPolling();
+  }
+
+  _startPolling() {
+    this._stopPolling();
+    this._pollTimer = setInterval(() => this._fetchAll(), 10000);
+  }
+
+  _stopPolling() {
+    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+  }
+
+  async _fetchAll() {
     try {
       const [summary, timeline, domains, clients] = await Promise.all([
         api.get('/api/stats/summary'),
@@ -794,20 +885,57 @@ class DashboardPage extends HTMLElement {
     } catch (e) { console.error(e); }
   }
 
+  _flashCard(id) {
+    const card = this.querySelector(id);
+    if (!card) return;
+    // Add flash class (no transition) to snap to highlight
+    card.classList.add('flash');
+    // Next frame: remove flash class, letting the transition fade it out
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        card.classList.remove('flash');
+      });
+    });
+  }
+
   renderStats(s) {
     const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
     const cacheRate = ((s.cache_hit_rate_today || 0) * 100).toFixed(1);
     const avgMs = (s.avg_response_ms_today || 0).toFixed(1);
-    this.querySelector('#stats').innerHTML = `
-      <div class="stat-card"><div class="stat-label">Queries Today</div><div class="stat-value accent">${formatNum(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
-      <div class="stat-card"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
-      <div class="stat-card"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
-      <div class="stat-card"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
-      <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>`;
+
+    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs];
+    const prevVals = this._prevStats;
+    this._prevStats = vals;
+
+    const statsEl = this.querySelector('#stats');
+    statsEl.innerHTML = `
+      <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent">${formatNum(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
+      <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
+      <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
+      <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
+      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>`;
+
+    // Flash cards that changed (skip on first render)
+    if (prevVals) {
+      statsEl.querySelectorAll('.stat-card').forEach(card => {
+        const i = parseInt(card.dataset.i);
+        if (String(vals[i]) !== String(prevVals[i])) {
+          card.classList.add('flash');
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              card.classList.remove('flash');
+            });
+          });
+        }
+      });
+    }
   }
 
   renderChart(data) {
-    if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; return; }
+    if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
+    const sig = data.map(d => d.total + ',' + d.blocked).join(';');
+    if (this._prevChart && sig !== this._prevChart) this._flashCard('#chart-card');
+    this._prevChart = sig;
     const max = Math.max(...data.map(d => d.total), 1);
     const len = data.length;
     // Show ~6 labels evenly spaced
@@ -835,6 +963,9 @@ class DashboardPage extends HTMLElement {
   }
 
   renderTopDomains(data) {
+    const sig = data.map(d => d.domain + d.count).join(';');
+    if (this._prevDomains && sig !== this._prevDomains) this._flashCard('#domains-card');
+    this._prevDomains = sig;
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
@@ -845,6 +976,9 @@ class DashboardPage extends HTMLElement {
   }
 
   renderTopClients(data) {
+    const sig = data.map(d => d.client_ip + (d.doh_token||'') + d.count).join(';');
+    if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
+    this._prevClients = sig;
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Client</th><th>Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
