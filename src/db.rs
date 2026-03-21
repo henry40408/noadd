@@ -115,9 +115,41 @@ impl Database {
                     );
                     ",
                 )?;
+                Self::run_migrations(conn)?;
                 Ok(())
             })
             .await?;
+        Ok(())
+    }
+
+    /// Run forward-only migrations using PRAGMA user_version to track schema version.
+    /// New databases start at the latest version (tables already have all columns).
+    /// Existing databases get migrated incrementally.
+    fn run_migrations(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+
+        // Migration 1: add `cached` column to query_logs
+        if version < 1 {
+            // Only run ALTER if table existed before (i.e. not a fresh DB).
+            // For fresh DBs the column already exists in CREATE TABLE.
+            let has_cached: bool = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='cached'")?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if !has_cached {
+                conn.execute(
+                    "ALTER TABLE query_logs ADD COLUMN cached INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+        }
+
+        // Set to latest version
+        const LATEST_VERSION: i64 = 1;
+        if version < LATEST_VERSION {
+            conn.pragma_update(None, "user_version", LATEST_VERSION)?;
+        }
+
         Ok(())
     }
 
