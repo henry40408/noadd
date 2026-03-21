@@ -4,7 +4,7 @@ use arc_swap::ArcSwap;
 
 use noadd::db::Database;
 use noadd::filter::engine::{FilterEngine, FilterResult};
-use noadd::filter::lists::{ListManager, DEFAULT_LISTS};
+use noadd::filter::lists::{DEFAULT_LISTS, ListManager};
 
 async fn setup() -> (Database, ListManager) {
     let db = Database::open(":memory:").await.unwrap();
@@ -87,8 +87,5 @@ async fn test_rebuild_filter_from_custom_rules() {
     ));
 
     // unrelated domain should be allowed
-    assert!(matches!(
-        engine.check("example.org"),
-        FilterResult::Allowed
-    ));
+    assert!(matches!(engine.check("example.org"), FilterResult::Allowed));
 }

@@ -95,7 +95,7 @@ impl UpstreamForwarder {
             0x00, 0x00, // ANCOUNT: 0
             0x00, 0x00, // NSCOUNT: 0
             0x00, 0x00, // ARCOUNT: 0
-            0x00,       // root domain (empty label)
+            0x00, // root domain (empty label)
             0x00, 0x01, // QTYPE: A
             0x00, 0x01, // QCLASS: IN
         ];

@@ -1,4 +1,4 @@
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use thiserror::Error;
 use tokio_rusqlite::Connection;
@@ -147,7 +147,9 @@ impl Database {
             // Only run ALTER if table existed before (i.e. not a fresh DB).
             // For fresh DBs the column already exists in CREATE TABLE.
             let has_cached: bool = conn
-                .prepare("SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='cached'")?
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='cached'",
+                )?
                 .query_row([], |row| row.get::<_, i64>(0))
                 .map(|c| c > 0)?;
             if !has_cached {
@@ -161,14 +163,13 @@ impl Database {
         // Migration 2: add `doh_token` column to query_logs, create doh_tokens table
         if version < 2 {
             let has_col: bool = conn
-                .prepare("SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='doh_token'")?
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='doh_token'",
+                )?
                 .query_row([], |row| row.get::<_, i64>(0))
                 .map(|c| c > 0)?;
             if !has_col {
-                conn.execute(
-                    "ALTER TABLE query_logs ADD COLUMN doh_token TEXT",
-                    [],
-                )?;
+                conn.execute("ALTER TABLE query_logs ADD COLUMN doh_token TEXT", [])?;
             }
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS doh_tokens (
@@ -211,8 +212,7 @@ impl Database {
         let val = self
             .conn
             .call(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+                let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
                 let result = stmt
                     .query_row(params![key], |row| row.get::<_, String>(0))
                     .optional()?;
@@ -392,11 +392,7 @@ impl Database {
         Ok(rows)
     }
 
-    pub async fn update_filter_list_enabled(
-        &self,
-        id: i64,
-        enabled: bool,
-    ) -> Result<(), DbError> {
+    pub async fn update_filter_list_enabled(&self, id: i64, enabled: bool) -> Result<(), DbError> {
         self.conn
             .call(move |conn| {
                 conn.execute(
@@ -501,9 +497,8 @@ impl Database {
         let val = self
             .conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT content FROM filter_list_content WHERE list_id = ?1",
-                )?;
+                let mut stmt =
+                    conn.prepare("SELECT content FROM filter_list_content WHERE list_id = ?1")?;
                 let result = stmt
                     .query_row(params![list_id], |row| row.get::<_, String>(0))
                     .optional()?;
@@ -537,9 +532,7 @@ impl Database {
         let rows = self
             .conn
             .call(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, token FROM doh_tokens ORDER BY id",
-                )?;
+                let mut stmt = conn.prepare("SELECT id, token FROM doh_tokens ORDER BY id")?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok(DohTokenRow {
@@ -559,10 +552,7 @@ impl Database {
         let id = self
             .conn
             .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO doh_tokens (token) VALUES (?1)",
-                    params![token],
-                )?;
+                conn.execute("INSERT INTO doh_tokens (token) VALUES (?1)", params![token])?;
                 Ok(conn.last_insert_rowid())
             })
             .await?;
@@ -585,11 +575,8 @@ impl Database {
         let result = self
             .conn
             .call(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT token FROM doh_tokens WHERE token = ?1")?;
-                let found: Option<String> = stmt
-                    .query_row(params![token], |row| row.get(0))
-                    .ok();
+                let mut stmt = conn.prepare("SELECT token FROM doh_tokens WHERE token = ?1")?;
+                let found: Option<String> = stmt.query_row(params![token], |row| row.get(0)).ok();
                 Ok(found)
             })
             .await?;
@@ -600,11 +587,8 @@ impl Database {
         let count = self
             .conn
             .call(|conn| {
-                let count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM doh_tokens",
-                    [],
-                    |row| row.get(0),
-                )?;
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM doh_tokens", [], |row| row.get(0))?;
                 Ok(count)
             })
             .await?;
@@ -619,7 +603,9 @@ impl Database {
             .conn
             .call(|conn| {
                 let ts: Option<i64> = conn
-                    .query_row("SELECT MIN(timestamp) FROM query_logs", [], |row| row.get(0))
+                    .query_row("SELECT MIN(timestamp) FROM query_logs", [], |row| {
+                        row.get(0)
+                    })
                     .ok();
                 Ok(ts)
             })

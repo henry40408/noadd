@@ -71,10 +71,7 @@ pub fn admin_router(
         .route("/api/settings", get(get_settings).put(put_settings))
         // Lists
         .route("/api/lists", get(get_lists).post(add_list))
-        .route(
-            "/api/lists/{id}",
-            put(update_list).delete(delete_list),
-        )
+        .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/update", post(trigger_list_update))
         // Rules
         .route(
@@ -183,8 +180,8 @@ async fn login(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let valid = verify_password(&body.password, &hash)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let valid =
+        verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !valid {
         return Err(StatusCode::UNAUTHORIZED);
@@ -229,8 +226,7 @@ async fn setup(
         return Err(StatusCode::CONFLICT);
     }
 
-    let hash = hash_password(&body.password)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&body.password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state
         .db
@@ -297,7 +293,11 @@ async fn get_settings(
     require_auth(&state, &jar)?;
 
     // Return known settings
-    let keys = ["upstream_servers", "log_retention_days", "doh_access_policy"];
+    let keys = [
+        "upstream_servers",
+        "log_retention_days",
+        "doh_access_policy",
+    ];
     let mut settings = std::collections::HashMap::new();
 
     for key in &keys {

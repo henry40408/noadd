@@ -34,10 +34,7 @@ impl TrieNode {
     fn insert(&mut self, labels: &[&str], rule: Option<String>, list: Option<String>) {
         let mut node = self;
         for &label in labels {
-            node = node
-                .children
-                .entry(label.to_owned())
-                .or_default();
+            node = node.children.entry(label.to_owned()).or_default();
         }
         node.is_terminal = true;
         node.rule = rule;

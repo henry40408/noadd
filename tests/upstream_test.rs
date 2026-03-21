@@ -30,7 +30,11 @@ async fn test_forward_resolves_known_domain() {
         .expect("forward should succeed");
 
     // Response should be non-empty and contain at least a DNS header (12 bytes).
-    assert!(response.len() >= 12, "response too short: {} bytes", response.len());
+    assert!(
+        response.len() >= 12,
+        "response too short: {} bytes",
+        response.len()
+    );
 
     // The upstream address should be one of the configured servers.
     assert!(!upstream.is_empty(), "upstream address should not be empty");
@@ -55,6 +59,13 @@ async fn test_forward_failover_on_bad_primary() {
         .await
         .expect("forward should succeed after failover");
 
-    assert!(response.len() >= 12, "response too short: {} bytes", response.len());
-    assert_eq!(upstream, "1.1.1.1:53", "should have failed over to the second server");
+    assert!(
+        response.len() >= 12,
+        "response too short: {} bytes",
+        response.len()
+    );
+    assert_eq!(
+        upstream, "1.1.1.1:53",
+        "should have failed over to the second server"
+    );
 }

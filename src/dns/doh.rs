@@ -1,14 +1,14 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 
 use super::handler::DnsHandler;
@@ -133,11 +133,7 @@ async fn handle_get(
     handle_dns_query(&state.handler, &query_bytes, ip, None).await
 }
 
-async fn handle_post(
-    State(state): State<DohState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn handle_post(State(state): State<DohState>, headers: HeaderMap, body: Bytes) -> Response {
     if !is_open_access(&state.db).await {
         return StatusCode::FORBIDDEN.into_response();
     }

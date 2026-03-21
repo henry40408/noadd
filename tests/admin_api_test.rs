@@ -5,10 +5,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use noadd::admin::api::{admin_router, ServerInfo};
-use noadd::admin::auth::{
-    create_session, hash_password, new_session_store, RateLimiter,
-};
+use noadd::admin::api::{ServerInfo, admin_router};
+use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
 use noadd::filter::engine::FilterEngine;
@@ -32,7 +30,19 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
-    let router = admin_router(db, sessions, filter, cache, rate_limiter, forwarder, ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
+    let router = admin_router(
+        db,
+        sessions,
+        filter,
+        cache,
+        rate_limiter,
+        forwarder,
+        ServerInfo {
+            dns_addr: "127.0.0.1:53".into(),
+            http_addr: "127.0.0.1:3000".into(),
+            tls_enabled: false,
+        },
+    );
     (router, token)
 }
 
@@ -110,7 +120,10 @@ async fn test_login_success() {
     let set_cookie = response.headers().get("set-cookie");
     assert!(set_cookie.is_some(), "Expected Set-Cookie header");
     let cookie_str = set_cookie.unwrap().to_str().unwrap();
-    assert!(cookie_str.contains("session="), "Cookie should contain session token");
+    assert!(
+        cookie_str.contains("session="),
+        "Cookie should contain session token"
+    );
 }
 
 #[tokio::test]
@@ -304,7 +317,19 @@ async fn test_setup_initial_password() {
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
     // No password set initially
-    let app = admin_router(db.clone(), sessions.clone(), filter.clone(), cache.clone(), rate_limiter.clone(), forwarder.clone(), ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
+    let app = admin_router(
+        db.clone(),
+        sessions.clone(),
+        filter.clone(),
+        cache.clone(),
+        rate_limiter.clone(),
+        forwarder.clone(),
+        ServerInfo {
+            dns_addr: "127.0.0.1:53".into(),
+            http_addr: "127.0.0.1:3000".into(),
+            tls_enabled: false,
+        },
+    );
 
     // Setup should succeed
     let response = app
@@ -322,7 +347,19 @@ async fn test_setup_initial_password() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Setup again should fail (password already exists)
-    let app2 = admin_router(db, sessions, filter, cache, rate_limiter, forwarder, ServerInfo { dns_addr: "127.0.0.1:53".into(), http_addr: "127.0.0.1:3000".into(), tls_enabled: false });
+    let app2 = admin_router(
+        db,
+        sessions,
+        filter,
+        cache,
+        rate_limiter,
+        forwarder,
+        ServerInfo {
+            dns_addr: "127.0.0.1:53".into(),
+            http_addr: "127.0.0.1:3000".into(),
+            tls_enabled: false,
+        },
+    );
     let response = app2
         .oneshot(
             Request::builder()

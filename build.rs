@@ -15,10 +15,7 @@ const LISTS: &[(&str, &str)] = &[
         "steven_black",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
     ),
-    (
-        "urlhaus",
-        "https://urlhaus.abuse.ch/downloads/hostfile/",
-    ),
+    ("urlhaus", "https://urlhaus.abuse.ch/downloads/hostfile/"),
 ];
 
 fn main() {

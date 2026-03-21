@@ -4,8 +4,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hickory_proto::op::{Message, MessageType, OpCode};
 use hickory_proto::rr::{Name, RecordType};
 use tokio::sync::mpsc;
@@ -78,7 +78,12 @@ async fn test_doh_get_no_token() {
     // No tokens configured — should allow open access
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/dns-message"
     );
 }

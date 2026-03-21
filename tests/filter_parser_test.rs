@@ -1,4 +1,4 @@
-use noadd::filter::parser::{parse_list, parse_rule, ParsedRule, RuleAction};
+use noadd::filter::parser::{ParsedRule, RuleAction, parse_list, parse_rule};
 
 #[test]
 fn test_parse_adblock_block_rule() {

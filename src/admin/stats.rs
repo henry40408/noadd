@@ -24,8 +24,7 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     let (total_today, blocked_today) = db.count_queries_since(since_today).await?;
     let (total_7d, blocked_7d) = db.count_queries_since(since_7d).await?;
     let (total_30d, blocked_30d) = db.count_queries_since(since_30d).await?;
-    let (cache_hits, allowed_total, avg_response_ms) =
-        db.cache_stats_since(since_today).await?;
+    let (cache_hits, allowed_total, avg_response_ms) = db.cache_stats_since(since_today).await?;
 
     let block_ratio_today = if total_today > 0 {
         blocked_today as f64 / total_today as f64

@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::db::Database;
 use crate::filter::engine::FilterEngine;
-use crate::filter::parser::{parse_list, parse_rule, RuleAction};
+use crate::filter::parser::{RuleAction, parse_list, parse_rule};
 
 #[derive(Debug, Error)]
 pub enum ListError {

@@ -14,7 +14,12 @@ pub fn load_tls_config(cert_path: &Path, key_path: &Path) -> io::Result<Arc<Serv
 
     let key = rustls_pemfile::private_key(&mut &key_pem[..])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key found in PEM file"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no private key found in PEM file",
+            )
+        })?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()

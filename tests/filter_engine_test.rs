@@ -65,9 +65,7 @@ fn test_allowed_domain() {
 #[test]
 fn test_allowlist_overrides_blocklist() {
     let engine = FilterEngine::new(
-        vec![
-            (block_rule("ads.example.com", true), "blocklist".into()),
-        ],
+        vec![(block_rule("ads.example.com", true), "blocklist".into())],
         vec![allow_rule("ads.example.com", true)],
     );
 

@@ -94,7 +94,14 @@ impl DnsHandler {
             match filter_result {
                 FilterResult::Blocked { rule, list } => {
                     let response = build_blocked_response(&message, query_type)?;
-                    (response, "blocked".to_string(), false, None, Some(rule), Some(list))
+                    (
+                        response,
+                        "blocked".to_string(),
+                        false,
+                        None,
+                        Some(rule),
+                        Some(list),
+                    )
                 }
                 FilterResult::Allowed => {
                     let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
@@ -110,8 +117,7 @@ impl DnsHandler {
                         (cached, "allowed".to_string(), true, None, None, None)
                     } else {
                         // 4. Forward upstream
-                        let (response, upstream_addr) =
-                            self.forwarder.forward(query_bytes).await?;
+                        let (response, upstream_addr) = self.forwarder.forward(query_bytes).await?;
                         self.cache.insert(cache_key, response.clone()).await;
                         (
                             response,
@@ -172,19 +178,12 @@ fn build_blocked_response(
         let name = first_query.name().clone();
         match query_type {
             RecordType::A => {
-                let record = Record::from_rdata(
-                    name,
-                    300,
-                    RData::A(A(Ipv4Addr::UNSPECIFIED)),
-                );
+                let record = Record::from_rdata(name, 300, RData::A(A(Ipv4Addr::UNSPECIFIED)));
                 response.add_answer(record);
             }
             RecordType::AAAA => {
-                let record = Record::from_rdata(
-                    name,
-                    300,
-                    RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)),
-                );
+                let record =
+                    Record::from_rdata(name, 300, RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)));
                 response.add_answer(record);
             }
             _ => {

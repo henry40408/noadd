@@ -1,8 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
-    create_session, hash_password, new_session_store, validate_session, verify_password,
-    RateLimiter,
+    RateLimiter, create_session, hash_password, new_session_store, validate_session,
+    verify_password,
 };
 
 #[test]
