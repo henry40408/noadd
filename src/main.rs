@@ -105,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 14. Start HTTP server
     let http_addr: SocketAddr = args.http_addr.parse()?;
-    let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
 
     // 15. Background list update scheduler (every 24h)
     let update_db = db.clone();
@@ -159,7 +158,51 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 17. Serve HTTP with graceful shutdown
-    if use_tls {
+    let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
+    let use_acme = !args.acme_domain.is_empty();
+
+    if use_acme {
+        // Let's Encrypt automatic TLS via rustls-acme
+        use rustls_acme::AcmeConfig;
+        use rustls_acme::caches::DirCache;
+        use tokio_stream::StreamExt;
+
+        let acme_cache = args.acme_cache.clone();
+        let mut acme_config = AcmeConfig::new(args.acme_domain)
+            .cache(DirCache::new(acme_cache))
+            .directory_lets_encrypt(args.acme_prod);
+
+        if let Some(ref email) = args.acme_email {
+            acme_config = acme_config.contact([format!("mailto:{email}")]);
+        }
+
+        let mut state = acme_config.state();
+        let acceptor = state.axum_acceptor(state.default_rustls_config());
+
+        tokio::spawn(async move {
+            loop {
+                match state.next().await {
+                    Some(Ok(ok)) => tracing::info!("ACME event: {:?}", ok),
+                    Some(Err(err)) => tracing::error!("ACME error: {:?}", err),
+                    None => break,
+                }
+            }
+        });
+
+        tracing::info!(%http_addr, "HTTPS server started with Let's Encrypt (DoH + Admin)");
+        let handle = axum_server::Handle::new();
+        let server_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+        });
+        axum_server::bind(http_addr)
+            .acceptor(acceptor)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+    } else if use_tls {
+        // Manual TLS with provided cert/key
         let tls_config = noadd::tls::load_tls_config(
             args.tls_cert.as_ref().unwrap(),
             args.tls_key.as_ref().unwrap(),
@@ -177,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
             .serve(app.into_make_service())
             .await?;
     } else {
+        // Plain HTTP
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
         tracing::info!(%http_addr, "HTTP server started (DoH + Admin)");
         axum::serve(listener, app)
