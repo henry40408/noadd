@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::db::{Database, DbError, TimelinePoint, TopClient, TopDomain};
+use crate::db::{Database, DbError, TimelinePoint, TopClient, TopDomain, TopUpstream};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
@@ -67,6 +67,15 @@ pub async fn compute_top_clients(
 ) -> Result<Vec<TopClient>, DbError> {
     let since = now - 86400;
     db.top_clients_since(since, limit).await
+}
+
+pub async fn compute_top_upstreams(
+    db: &Database,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<TopUpstream>, DbError> {
+    let since = now - 86400;
+    db.top_upstreams_since(since, limit).await
 }
 
 const TARGET_BARS: i64 = 48;
