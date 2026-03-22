@@ -82,6 +82,18 @@ impl Database {
     async fn init_schema(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
+                // Performance pragmas
+                conn.execute_batch(
+                    "
+                    PRAGMA journal_mode = WAL;
+                    PRAGMA synchronous = NORMAL;
+                    PRAGMA foreign_keys = ON;
+                    PRAGMA busy_timeout = 5000;
+                    PRAGMA cache_size = -20000;
+                    PRAGMA temp_store = MEMORY;
+                    ",
+                )?;
+
                 conn.execute_batch(
                     "
                     CREATE TABLE IF NOT EXISTS settings (
