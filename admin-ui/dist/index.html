@@ -20,7 +20,7 @@
   --text-primary: #f0f3f8;
   --text-secondary: #a8b2c4;
   --text-dim: #7a8498;
-  --accent: #4a90e2;
+  --accent: #2e7ad1;
   --accent-glow: rgba(74, 144, 226, 0.15);
   --green: #34d399;
   --green-dim: rgba(52, 211, 153, 0.12);
@@ -28,10 +28,35 @@
   --red-dim: rgba(248, 113, 113, 0.12);
   --orange: #fbbf24;
   --orange-dim: rgba(251, 191, 36, 0.12);
+  --flash-bg: #1a2540;
   --font-mono: 'JetBrains Mono', monospace;
   --font-sans: 'DM Sans', sans-serif;
   --radius: 6px;
   --transition: 150ms ease;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-root: #f4f5f7;
+    --bg-panel: #ffffff;
+    --bg-card: #ffffff;
+    --bg-input: #f0f1f4;
+    --bg-hover: #e8eaef;
+    --border: #d4d8e0;
+    --border-focus: #2e7ad1;
+    --text-primary: #1a1e28;
+    --text-secondary: #525a6a;
+    --text-dim: #8890a0;
+    --accent: #2e7ad1;
+    --accent-glow: rgba(46, 122, 209, 0.1);
+    --green: #16a370;
+    --green-dim: rgba(22, 163, 112, 0.1);
+    --red: #dc3545;
+    --red-dim: rgba(220, 53, 69, 0.08);
+    --orange: #d97706;
+    --orange-dim: rgba(217, 119, 6, 0.08);
+    --flash-bg: #dce8f5;
+  }
 }
 
 html { font-size: 14px; }
@@ -272,7 +297,7 @@ tr:hover td { background: var(--bg-hover); }
   color: #fff;
 }
 
-.btn-primary:hover { background: #3d7fcf; }
+.btn-primary:hover { background: #2568b5; }
 
 .btn-danger {
   background: transparent;
@@ -408,7 +433,11 @@ input:focus, select:focus { border-color: var(--border-focus); }
   white-space: nowrap;
   z-index: 20;
   pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+@media (prefers-color-scheme: light) {
+  .chart-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 }
 
 .chart-col:hover .chart-tooltip { display: block; }
@@ -552,7 +581,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
 .stat-card.flash, .card.flash {
   border-color: var(--accent);
-  background-color: #1a2540;
+  background-color: var(--flash-bg);
   transition: none;
 }
 
@@ -563,6 +592,14 @@ input:focus, select:focus { border-color: var(--border-focus); }
 }
 
 .fade-in { animation: fadeIn 0.3s ease both; }
+
+/* Light mode card depth */
+@media (prefers-color-scheme: light) {
+  .card, .stat-card { box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .login-box { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+  ::-webkit-scrollbar-thumb { background: #c4c8d0; }
+  ::-webkit-scrollbar-thumb:hover { background: #a0a4ac; }
+}
 
 /* Responsive */
 @media (max-width: 768px) {
