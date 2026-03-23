@@ -1319,6 +1319,11 @@ class SettingsPage extends HTMLElement {
         <div class="card-title">Log Retention</div>
         <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
       </div>
+      <div class="card fade-in" style="animation-delay:0.12s">
+        <div class="card-title">Public URL</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
+        <div class="input-row"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
+      </div>
       <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
         <div class="card-title">DoH Access Control</div>
@@ -1355,6 +1360,7 @@ class SettingsPage extends HTMLElement {
         upstream_servers: this.querySelector('#s-upstream').value,
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
+        public_url: this.querySelector('#s-public-url').value,
       };
       await api.put('/api/settings', settings);
       this.querySelector('#save-settings').textContent = 'Saved!';
@@ -1413,6 +1419,7 @@ class SettingsPage extends HTMLElement {
         api.get('/api/server-info'),
       ]);
       if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers;
+      if (s.public_url) this.querySelector('#s-public-url').value = s.public_url;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
       if (info) {
@@ -1440,7 +1447,7 @@ class SettingsPage extends HTMLElement {
         html += `<tr>
           <td style="color:var(--text-primary);font-family:var(--font-mono)">${esc(t.token)}</td>
           <td><code style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
-          <td><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
+          <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${esc(t.token)}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
       }
       html += '</tbody></table>';
