@@ -97,6 +97,8 @@ pub fn admin_router(
         .route("/api/stats/top-upstreams", get(get_stats_top_upstreams))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
+        // Apple mobileconfig (no auth — token in URL is the credential)
+        .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         .fallback(serve_static)
         .with_state(state)
 }
@@ -298,6 +300,7 @@ async fn get_settings(
         "upstream_servers",
         "log_retention_days",
         "doh_access_policy",
+        "public_url",
     ];
     let mut settings = std::collections::HashMap::new();
 
@@ -705,6 +708,128 @@ async fn get_stats_top_upstreams(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(upstreams))
+}
+
+// --- Apple mobileconfig ---
+
+async fn get_mobileconfig(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Validate token exists
+    state
+        .db
+        .validate_doh_token(&token)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Read public URL from server-side settings
+    let public_url = state
+        .db
+        .get_setting("public_url")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    if public_url.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let base = public_url.trim_end_matches('/');
+    let server_url = format!("{base}/dns-query/{token}");
+    let profile_id = format!("com.noadd.dns.{token}");
+    let payload_uuid = format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        crc32(&format!("{token}-payload")),
+        0x4e6f,
+        0x4164,
+        0x6444,
+        crc32(&token) as u64
+    );
+    let profile_uuid = format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        crc32(&format!("{token}-profile")),
+        0x6e6f,
+        0x6164,
+        0x6400,
+        crc32(&format!("{token}-root")) as u64
+    );
+
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>DNSSettings</key>
+            <dict>
+                <key>DNSProtocol</key>
+                <string>HTTPS</string>
+                <key>ServerURL</key>
+                <string>{server_url}</string>
+            </dict>
+            <key>PayloadDisplayName</key>
+            <string>noadd DNS ({token})</string>
+            <key>PayloadIdentifier</key>
+            <string>{profile_id}.dns</string>
+            <key>PayloadType</key>
+            <string>com.apple.dnsSettings.managed</string>
+            <key>PayloadUUID</key>
+            <string>{payload_uuid}</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+    </array>
+    <key>PayloadDisplayName</key>
+    <string>noadd DNS ({token})</string>
+    <key>PayloadIdentifier</key>
+    <string>{profile_id}</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>{profile_uuid}</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadDescription</key>
+    <string>Configures DNS-over-HTTPS to use noadd ad-blocking DNS server.</string>
+</dict>
+</plist>"#
+    );
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "content-type",
+        "application/x-apple-aspen-config; charset=utf-8"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        "content-disposition",
+        format!("attachment; filename=\"noadd-{token}.mobileconfig\"")
+            .parse()
+            .unwrap(),
+    );
+
+    Ok((StatusCode::OK, headers, xml))
+}
+
+/// Simple CRC32 for deterministic UUID generation from token strings.
+fn crc32(s: &str) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for byte in s.bytes() {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
 }
 
 // --- Logs ---

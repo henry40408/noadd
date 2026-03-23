@@ -36,6 +36,13 @@ async fn main() -> anyhow::Result<()> {
     let db_path = args.db_path.to_str().unwrap_or("noadd.db");
     let db = Database::open(db_path).await?;
 
+    // Auto-set public_url from ACME domain if not already configured
+    if !args.acme_domain.is_empty() && db.get_setting("public_url").await?.is_none() {
+        let url = format!("https://{}", args.acme_domain[0]);
+        db.set_setting("public_url", &url).await?;
+        tracing::info!(%url, "auto-set public_url from ACME domain");
+    }
+
     // 4. Create filter engine (empty initially)
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
 
