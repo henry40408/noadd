@@ -94,6 +94,7 @@ pub fn admin_router(
         .route("/api/stats/timeline", get(get_stats_timeline))
         .route("/api/stats/top-domains", get(get_stats_top_domains))
         .route("/api/stats/top-clients", get(get_stats_top_clients))
+        .route("/api/stats/top-upstreams", get(get_stats_top_upstreams))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
         .fallback(serve_static)
@@ -688,6 +689,22 @@ async fn get_stats_top_clients(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(clients))
+}
+
+async fn get_stats_top_upstreams(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<TopQuery>,
+) -> Result<Json<Vec<crate::db::TopUpstream>>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    let now = now_epoch();
+    let limit = query.limit.unwrap_or(10);
+    let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(upstreams))
 }
 
 // --- Logs ---

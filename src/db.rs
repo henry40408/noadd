@@ -25,7 +25,15 @@ pub struct QueryLogEntry {
     pub blocked: bool,
     pub cached: bool,
     pub response_ms: i64,
+    pub upstream: Option<String>,
     pub doh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TopUpstream {
+    pub upstream: String,
+    pub count: i64,
+    pub avg_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +118,7 @@ impl Database {
                         blocked INTEGER NOT NULL DEFAULT 0,
                         cached INTEGER NOT NULL DEFAULT 0,
                         response_ms INTEGER NOT NULL DEFAULT 0,
+                        upstream TEXT,
                         doh_token TEXT
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
@@ -191,8 +200,21 @@ impl Database {
             )?;
         }
 
+        // Migration 3: add `upstream` column to query_logs
+        if version < 3 {
+            let has_col: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='upstream'",
+                )?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if !has_col {
+                conn.execute("ALTER TABLE query_logs ADD COLUMN upstream TEXT", [])?;
+            }
+        }
+
         // Set to latest version
-        const LATEST_VERSION: i64 = 2;
+        const LATEST_VERSION: i64 = 3;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -258,7 +280,7 @@ impl Database {
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare(
-                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, doh_token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     )?;
                     for e in &entries {
                         stmt.execute(params![
@@ -269,6 +291,7 @@ impl Database {
                             e.blocked as i64,
                             e.cached as i64,
                             e.response_ms,
+                            e.upstream,
                             e.doh_token,
                         ])?;
                     }
@@ -291,7 +314,7 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, doh_token FROM query_logs WHERE 1=1".to_string();
+                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
                 if let Some(ref s) = search {
@@ -320,7 +343,8 @@ impl Database {
                             blocked: row.get::<_, i64>(4)? != 0,
                             cached: row.get::<_, i64>(5)? != 0,
                             response_ms: row.get(6)?,
-                            doh_token: row.get(7)?,
+                            upstream: row.get(7)?,
+                            doh_token: row.get(8)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -710,6 +734,33 @@ impl Database {
                             client_ip: row.get(0)?,
                             doh_token: row.get(1)?,
                             count: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn top_upstreams_since(
+        &self,
+        since: i64,
+        limit: i64,
+    ) -> Result<Vec<TopUpstream>, DbError> {
+        let since_ms = since * 1000;
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms FROM query_logs WHERE timestamp >= ?1 AND upstream IS NOT NULL GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms, limit], |row| {
+                        Ok(TopUpstream {
+                            upstream: row.get(0)?,
+                            count: row.get(1)?,
+                            avg_ms: row.get(2)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
