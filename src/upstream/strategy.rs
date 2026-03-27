@@ -1,18 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Upstream DNS server selection strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpstreamStrategy {
+    #[default]
     Sequential,
     RoundRobin,
     LowestLatency,
-}
-
-impl Default for UpstreamStrategy {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 impl std::fmt::Display for UpstreamStrategy {

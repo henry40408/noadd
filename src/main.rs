@@ -55,11 +55,11 @@ async fn main() -> anyhow::Result<()> {
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
     // Load upstream strategy from DB
-    if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await {
-        if let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>() {
-            forwarder.set_strategy(strategy);
-            tracing::info!(%strategy_str, "loaded upstream strategy from DB");
-        }
+    if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
+        && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
+    {
+        forwarder.set_strategy(strategy);
+        tracing::info!(%strategy_str, "loaded upstream strategy from DB");
     }
 
     // 7. Create DNS cache

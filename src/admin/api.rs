@@ -340,10 +340,10 @@ async fn put_settings(
     }
 
     // Apply strategy change immediately if present
-    if let Some(strategy_str) = body.settings.get("upstream_strategy") {
-        if let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>() {
-            state.forwarder.set_strategy(strategy);
-        }
+    if let Some(strategy_str) = body.settings.get("upstream_strategy")
+        && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
+    {
+        state.forwarder.set_strategy(strategy);
     }
 
     Ok(StatusCode::OK)
