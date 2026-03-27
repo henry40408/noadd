@@ -306,6 +306,14 @@ tr:hover td { background: var(--bg-hover); }
 
 .btn-danger:hover { background: var(--red-dim); border-color: var(--red); }
 
+.btn-allow {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--green);
+}
+
+.btn-allow:hover { background: var(--green-dim); border-color: var(--green); }
+
 .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
 
 .btn svg { width: 14px; height: 14px; flex-shrink: 0; }
@@ -1114,7 +1122,7 @@ class LogsPage extends HTMLElement {
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
-        <td><button class="btn btn-sm log-action" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="font-size:0.7rem;padding:2px 6px">${l.blocked ? 'Allow' : 'Block'}</button></td>
+        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
         <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
