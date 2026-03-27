@@ -7,10 +7,12 @@ const LISTS: &[(&str, &str)] = &[
         "adguard_dns",
         "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt",
     ),
+    ("easylist", "https://easylist.to/easylist/easylist.txt"),
     (
         "peter_lowe",
         "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
     ),
+    ("oisd_basic", "https://basic.oisd.nl/"),
     (
         "steven_black",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
