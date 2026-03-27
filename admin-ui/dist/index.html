@@ -666,6 +666,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   .login-box { margin: 20px; padding: 24px; }
 
   .hide-mobile { display: none; }
+  .truncate-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Dashboard: stack top domains / clients */
   .dashboard-grid-2col { grid-template-columns: 1fr !important; }
@@ -1077,7 +1078,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td><div style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
