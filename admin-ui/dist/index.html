@@ -1071,7 +1071,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Cache</th><th>Upstream</th><th>Token</th><th>ms</th>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Source</th><th>Token</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
@@ -1106,7 +1106,7 @@ class LogsPage extends HTMLElement {
   renderLogs(logs) {
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
@@ -1114,8 +1114,7 @@ class LogsPage extends HTMLElement {
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
-        <td>${l.cached ? '<span class="badge badge-cached">hit</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td>${l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
