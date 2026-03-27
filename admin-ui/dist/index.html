@@ -1314,6 +1314,18 @@ class SettingsPage extends HTMLElement {
         <div class="input-row"><input type="text" id="s-upstream" placeholder="1.1.1.1:53, 9.9.9.9:53"></div>
         <button class="btn btn-sm" id="check-upstream" style="margin-top:8px">${icons.refresh} Check Health</button>
         <div id="upstream-health" style="margin-top:12px"></div>
+        <div class="card-title" style="margin-top:16px">Strategy</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
+          How upstream servers are selected for each DNS query.
+        </p>
+        <div class="input-row">
+          <select id="s-strategy">
+            <option value="sequential">Sequential (try in order)</option>
+            <option value="round-robin">Round Robin (rotate)</option>
+            <option value="lowest-latency">Lowest Latency (fastest first)</option>
+          </select>
+        </div>
+        <div id="ema-latency" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
@@ -1358,6 +1370,7 @@ class SettingsPage extends HTMLElement {
     this.querySelector('#save-settings').onclick = async () => {
       const settings = {
         upstream_servers: this.querySelector('#s-upstream').value,
+        upstream_strategy: this.querySelector('#s-strategy').value,
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
         public_url: this.querySelector('#s-public-url').value,
@@ -1394,6 +1407,11 @@ class SettingsPage extends HTMLElement {
       await api.put('/api/settings', { doh_access_policy: e.target.value });
     };
 
+    this.querySelector('#s-strategy').onchange = async (e) => {
+      await api.put('/api/settings', { upstream_strategy: e.target.value });
+      this.loadEma();
+    };
+
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
@@ -1422,6 +1440,8 @@ class SettingsPage extends HTMLElement {
       if (s.public_url) this.querySelector('#s-public-url').value = s.public_url;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
+      this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
+      this.loadEma();
       if (info) {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
         this.querySelector('#server-info').innerHTML = `
@@ -1461,6 +1481,31 @@ class SettingsPage extends HTMLElement {
         };
       });
     } catch (e) { console.error(e); }
+  }
+
+  async loadEma() {
+    const el = this.querySelector('#ema-latency');
+    const strategy = this.querySelector('#s-strategy').value;
+    if (strategy !== 'lowest-latency') {
+      el.innerHTML = '';
+      return;
+    }
+    try {
+      const data = await api.get('/api/upstream/latency');
+      if (!data || !data.length) {
+        el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No latency data yet. Data will appear after queries are processed.</p>';
+        return;
+      }
+      let html = '<table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
+      for (const d of data) {
+        const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
+        html += `<tr><td style="font-family:var(--font-mono)">${esc(d.server)}</td><td>${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    } catch (e) {
+      el.innerHTML = '';
+    }
   }
 }
 customElements.define('settings-page', SettingsPage);
