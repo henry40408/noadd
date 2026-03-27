@@ -74,18 +74,13 @@ pub fn admin_router(
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/update", post(trigger_list_update))
         // Rules
-        .route(
-            "/api/rules/allowlist",
-            get(get_allowlist).post(add_allowlist_rule),
-        )
-        .route("/api/rules/allowlist/{id}", delete(delete_allowlist_rule))
-        .route(
-            "/api/rules/blocklist",
-            get(get_blocklist).post(add_blocklist_rule),
-        )
-        .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        .route("/api/rules", get(get_rules).post(add_rule))
+        .route("/api/rules/{id}", delete(delete_rule))
+        // Filter check
+        .route("/api/filter/check", post(filter_check))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
+        .route("/api/upstream/latency", get(upstream_latency))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -260,6 +255,7 @@ async fn revoke_all(
 pub struct HealthResponse {
     pub status: String,
     pub needs_setup: bool,
+    pub version: &'static str,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -273,6 +269,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,
+        version: env!("GIT_VERSION"),
     })
 }
 
@@ -301,6 +298,7 @@ async fn get_settings(
     // Return known settings
     let keys = [
         "upstream_servers",
+        "upstream_strategy",
         "log_retention_days",
         "doh_access_policy",
         "public_url",
@@ -335,6 +333,13 @@ async fn put_settings(
             .set_setting(key, value)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    // Apply strategy change immediately if present
+    if let Some(strategy_str) = body.settings.get("upstream_strategy")
+        && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
+    {
+        state.forwarder.set_strategy(strategy);
     }
 
     Ok(StatusCode::OK)
@@ -403,6 +408,12 @@ async fn update_list(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(StatusCode::OK)
 }
 
@@ -416,6 +427,12 @@ async fn delete_list(
     state
         .db
         .delete_filter_list(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -446,21 +463,6 @@ async fn trigger_list_update(
 
 // --- Rules ---
 
-async fn get_allowlist(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
-    let rules = state
-        .db
-        .get_custom_rules_by_type("allow")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(rules))
-}
-
 #[derive(Deserialize)]
 pub struct AddRuleRequest {
     pub rule: String,
@@ -471,39 +473,7 @@ pub struct AddRuleResponse {
     pub id: i64,
 }
 
-async fn add_allowlist_rule(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Json(body): Json<AddRuleRequest>,
-) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
-    let id = state
-        .db
-        .add_custom_rule(&body.rule, "allow")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
-}
-
-async fn delete_allowlist_rule(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
-    state
-        .db
-        .delete_custom_rule(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(StatusCode::OK)
-}
-
-async fn get_blocklist(
+async fn get_rules(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
@@ -511,30 +481,55 @@ async fn get_blocklist(
 
     let rules = state
         .db
-        .get_custom_rules_by_type("block")
+        .get_all_custom_rules()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(rules))
 }
 
-async fn add_blocklist_rule(
+async fn add_rule(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(body): Json<AddRuleRequest>,
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
     require_auth(&state, &jar)?;
 
+    let rule_type = match crate::filter::parser::parse_rule(&body.rule) {
+        Some(parsed) => match parsed.action {
+            crate::filter::parser::RuleAction::Allow => "allow",
+            crate::filter::parser::RuleAction::Block => "block",
+        },
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    // No-op if rule already exists
+    if state
+        .db
+        .has_custom_rule(&body.rule)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 })));
+    }
+
     let id = state
         .db
-        .add_custom_rule(&body.rule, "block")
+        .add_custom_rule(&body.rule, rule_type)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Rebuild filter engine so the new rule takes effect immediately
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
-async fn delete_blocklist_rule(
+async fn delete_rule(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(id): Path<i64>,
@@ -544,6 +539,13 @@ async fn delete_blocklist_rule(
     state
         .db
         .delete_custom_rule(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Rebuild filter engine so the deletion takes effect immediately
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -602,6 +604,40 @@ async fn delete_doh_token_endpoint(
     Ok(StatusCode::OK)
 }
 
+// --- Filter Check ---
+
+#[derive(Deserialize)]
+struct FilterCheckRequest {
+    domain: String,
+}
+
+async fn filter_check(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<FilterCheckRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let domain = body.domain.trim().trim_end_matches('.');
+    let filter = state.filter.load();
+    let result = filter.check(domain);
+    match result {
+        crate::filter::engine::FilterResult::Blocked { rule, list } => {
+            Ok(Json(serde_json::json!({
+                "action": "blocked",
+                "rule": rule,
+                "list": list,
+            })))
+        }
+        crate::filter::engine::FilterResult::Allowed { rule } => {
+            let mut json = serde_json::json!({ "action": "allowed" });
+            if let Some(r) = rule {
+                json["rule"] = serde_json::Value::String(r);
+            }
+            Ok(Json(json))
+        }
+    }
+}
+
 // --- Upstream Health ---
 
 async fn upstream_health(
@@ -617,6 +653,39 @@ async fn upstream_health(
                 "server": server,
                 "ok": ok,
                 "latency_ms": ms,
+            })
+        })
+        .collect();
+    Ok(Json(json))
+}
+
+// --- Upstream Latency ---
+
+async fn upstream_latency(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let latencies = state.forwarder.latencies();
+    let strategy = state.forwarder.strategy();
+
+    // Find the preferred server (lowest EMA)
+    let preferred = if strategy == crate::upstream::strategy::UpstreamStrategy::LowestLatency {
+        latencies
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(k, _)| k.clone())
+    } else {
+        None
+    };
+
+    let json: Vec<serde_json::Value> = latencies
+        .iter()
+        .map(|(server, ema)| {
+            serde_json::json!({
+                "server": server,
+                "ema_ms": (*ema * 10.0).round() / 10.0,
+                "preferred": preferred.as_ref() == Some(server),
             })
         })
         .collect();
@@ -849,7 +918,7 @@ async fn get_logs(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<LogsQuery>,
-) -> Result<Json<Vec<crate::db::QueryLogEntry>>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     require_auth(&state, &jar)?;
 
     let limit = query.limit.unwrap_or(100);
@@ -859,8 +928,16 @@ async fn get_logs(
         .query_logs(limit, offset, query.search.as_deref(), query.blocked)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total = state
+        .db
+        .count_logs(query.search.as_deref(), query.blocked)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(logs))
+    Ok(Json(serde_json::json!({
+        "logs": logs,
+        "total": total,
+    })))
 }
 
 async fn delete_logs(

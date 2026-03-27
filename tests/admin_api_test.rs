@@ -195,32 +195,48 @@ async fn test_lists_crud() {
 }
 
 #[tokio::test]
-async fn test_rules_allowlist() {
+async fn test_rules_unified_api() {
     let (app, token) = setup().await;
     let cookie = format!("session={}", token);
 
-    // Add allowlist rule
+    // Add allow rule (@@|| prefix → auto-detected as allow)
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/rules/allowlist")
+                .uri("/api/rules")
                 .header("content-type", "application/json")
                 .header("cookie", &cookie)
-                .body(Body::from(r#"{"rule":"example.com"}"#))
+                .body(Body::from(r#"{"rule":"@@||safe.example.com^"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Get allowlist
+    // Add block rule (|| prefix → auto-detected as block)
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/rules/allowlist")
+                .method("POST")
+                .uri("/api/rules")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(r#"{"rule":"||ads.example.com^"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Get all rules
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/rules")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -233,9 +249,26 @@ async fn test_rules_allowlist() {
         .await
         .unwrap();
     let rules: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0]["rule"], "example.com");
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0]["rule"], "@@||safe.example.com^");
     assert_eq!(rules[0]["rule_type"], "allow");
+    assert_eq!(rules[1]["rule"], "||ads.example.com^");
+    assert_eq!(rules[1]["rule_type"], "block");
+
+    // Delete first rule
+    let id = rules[0]["id"].as_i64().unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/rules/{id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -302,8 +335,9 @@ async fn test_logs_endpoint() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let logs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(logs.len(), 0);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"], 0);
+    assert!(json["logs"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -376,4 +410,107 @@ async fn test_setup_initial_password() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn test_upstream_strategy_setting() {
+    let (app, token) = setup().await;
+
+    // Set strategy to round-robin
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"upstream_strategy":"round-robin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read it back
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/settings")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["upstream_strategy"], "round-robin");
+}
+
+#[tokio::test]
+async fn test_filter_check_allowed() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/filter/check")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"domain":"example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["action"], "allowed");
+}
+
+#[tokio::test]
+async fn test_filter_check_requires_auth() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/filter/check")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"domain":"example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_upstream_latency_endpoint() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/upstream/latency")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array());
 }

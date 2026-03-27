@@ -354,6 +354,36 @@ impl Database {
         Ok(rows)
     }
 
+    pub async fn count_logs(
+        &self,
+        search: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<i64, DbError> {
+        let search = search.map(|s| s.to_string());
+        let count = self
+            .conn
+            .call(move |conn| {
+                let mut sql = "SELECT COUNT(*) FROM query_logs WHERE 1=1".to_string();
+                let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+                if let Some(ref s) = search {
+                    sql.push_str(" AND domain LIKE ?");
+                    param_values.push(Box::new(format!("%{s}%")));
+                }
+                if let Some(b) = blocked {
+                    sql.push_str(" AND blocked = ?");
+                    param_values.push(Box::new(b as i64));
+                }
+
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    param_values.iter().map(|p| p.as_ref()).collect();
+
+                conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))
+            })
+            .await?;
+        Ok(count)
+    }
+
     pub async fn delete_all_logs(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
@@ -475,6 +505,21 @@ impl Database {
 
     // --- Custom Rules ---
 
+    pub async fn has_custom_rule(&self, rule: &str) -> Result<bool, DbError> {
+        let rule = rule.to_string();
+        let exists = self
+            .conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM custom_rules WHERE rule = ?1",
+                    params![rule],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .await?;
+        Ok(exists > 0)
+    }
+
     pub async fn add_custom_rule(&self, rule: &str, rule_type: &str) -> Result<i64, DbError> {
         let rule = rule.to_string();
         let rule_type = rule_type.to_string();
@@ -489,6 +534,27 @@ impl Database {
             })
             .await?;
         Ok(id)
+    }
+
+    pub async fn get_all_custom_rules(&self) -> Result<Vec<CustomRuleRow>, DbError> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, rule, rule_type FROM custom_rules ORDER BY id")?;
+                let rows = stmt
+                    .query_map(params![], |row| {
+                        Ok(CustomRuleRow {
+                            id: row.get(0)?,
+                            rule: row.get(1)?,
+                            rule_type: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
     }
 
     pub async fn get_custom_rules_by_type(

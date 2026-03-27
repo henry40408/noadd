@@ -2,14 +2,14 @@
 /// trie for subdomain matching.
 ///
 /// Designed for concurrent read access behind `ArcSwap<FilterEngine>`.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::filter::parser::{ParsedRule, RuleAction};
 
 /// Result of checking a domain against the filter engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterResult {
-    Allowed,
+    Allowed { rule: Option<String> },
     Blocked { rule: String, list: String },
 }
 
@@ -80,8 +80,8 @@ pub struct FilterEngine {
     exact_block: HashMap<String, (String, String)>,
     /// Subdomain blocklist trie (reversed labels).
     block_trie: TrieNode,
-    /// Exact-match allowlist.
-    exact_allow: HashSet<String>,
+    /// Exact-match allowlist: domain → original rule text.
+    exact_allow: HashMap<String, String>,
     /// Subdomain allowlist trie (reversed labels).
     allow_trie: TrieNode,
 }
@@ -99,7 +99,7 @@ impl FilterEngine {
     pub fn new(block_rules: Vec<(ParsedRule, String)>, allow_rules: Vec<ParsedRule>) -> Self {
         let mut exact_block = HashMap::new();
         let mut block_trie = TrieNode::default();
-        let mut exact_allow = HashSet::new();
+        let mut exact_allow = HashMap::new();
         let mut allow_trie = TrieNode::default();
 
         for (rule, list_name) in block_rules {
@@ -118,9 +118,9 @@ impl FilterEngine {
             let domain = rule.domain.to_lowercase();
             if rule.is_subdomain {
                 let labels = reversed_labels(&domain);
-                allow_trie.insert(&labels, None, None);
+                allow_trie.insert(&labels, Some(domain.clone()), None);
             } else {
-                exact_allow.insert(domain);
+                exact_allow.insert(domain.clone(), domain);
             }
         }
 
@@ -144,14 +144,18 @@ impl FilterEngine {
         let lower = domain.to_lowercase();
 
         // 1. Exact allow
-        if self.exact_allow.contains(&lower) {
-            return FilterResult::Allowed;
+        if let Some(rule) = self.exact_allow.get(&lower) {
+            return FilterResult::Allowed {
+                rule: Some(rule.clone()),
+            };
         }
 
         // 2. Subdomain allow (trie)
         let labels = reversed_labels(&lower);
-        if self.allow_trie.lookup(&labels).is_some() {
-            return FilterResult::Allowed;
+        if let Some((node, _)) = self.allow_trie.lookup(&labels) {
+            return FilterResult::Allowed {
+                rule: node.rule.clone(),
+            };
         }
 
         // 3. Exact block
@@ -171,7 +175,7 @@ impl FilterEngine {
         }
 
         // 5. Default
-        FilterResult::Allowed
+        FilterResult::Allowed { rule: None }
     }
 
     /// Approximate count of blocked domains (exact entries + trie terminals).

@@ -65,6 +65,7 @@ body {
   background: var(--bg-root);
   color: var(--text-primary);
   min-height: 100vh;
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -112,6 +113,15 @@ body {
 
 .sidebar-nav { flex: 1; padding: 12px 8px; }
 
+.sidebar-version {
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -138,7 +148,8 @@ body {
   flex: 1;
   margin-left: 220px;
   padding: 24px 32px;
-  max-width: 1200px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .page-header {
@@ -164,6 +175,8 @@ body {
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .card-title {
@@ -228,6 +241,8 @@ table {
   border-collapse: collapse;
   font-size: 0.85rem;
 }
+
+td, th { white-space: nowrap; }
 
 th {
   text-align: left;
@@ -306,6 +321,14 @@ tr:hover td { background: var(--bg-hover); }
 }
 
 .btn-danger:hover { background: var(--red-dim); border-color: var(--red); }
+
+.btn-allow {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--green);
+}
+
+.btn-allow:hover { background: var(--green-dim); border-color: var(--green); }
 
 .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
 
@@ -585,6 +608,37 @@ input:focus, select:focus { border-color: var(--border-focus); }
   transition: none;
 }
 
+.show-mobile { display: none; }
+
+.log-card {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.log-card:last-child { border-bottom: none; }
+.log-card-row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.log-card-domain {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-card-row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -603,12 +657,63 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
 /* Responsive */
 @media (max-width: 768px) {
-  .sidebar { width: 60px; }
-  .sidebar-brand h1, .sidebar-brand .tagline, .nav-item span { display: none; }
-  .sidebar-nav { padding: 12px 4px; }
-  .nav-item { justify-content: center; padding: 10px; }
-  .main-content { margin-left: 60px; padding: 16px; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: fixed;
+    top: auto; bottom: 0; left: 0; right: 0;
+    flex-direction: row;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    z-index: 100;
+  }
+  .sidebar-brand, .sidebar-version { display: none; }
+  .sidebar-nav {
+    display: flex;
+    flex-direction: row;
+    padding: 0;
+    width: 100%;
+    justify-content: space-around;
+  }
+  .nav-item {
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 4px;
+    font-size: 0.65rem;
+    flex: 1;
+  }
+  .nav-item span { display: block; }
+  .nav-item svg { width: 20px; height: 20px; }
+  .main-content {
+    margin-left: 0;
+    padding: 16px;
+    padding-bottom: 72px;
+  }
+  .page-header h2 { font-size: 1.2rem; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .stat-card { padding: 12px; }
+  .stat-value { font-size: 1.3rem; }
+  .stat-label { font-size: 0.65rem; }
+  .card { padding: 14px; }
+  .input-row { flex-wrap: wrap; }
+  .input-row input { min-width: 0; }
+  .table-wrap { margin: 0 -14px; padding: 0 14px; }
+  table { font-size: 0.75rem; }
+  th, td { padding: 6px 8px; }
+  .pagination { flex-wrap: wrap; justify-content: center; }
+  .login-box { margin: 20px; padding: 24px; }
+
+  .hide-mobile, .hide-mobile-block { display: none !important; }
+  .show-mobile { display: block !important; }
+  .truncate-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Dashboard: stack top domains / clients */
+  .dashboard-grid-2col { grid-template-columns: 1fr !important; }
+
+  /* Filters: stack block/allow columns */
+  .rules-grid { grid-template-columns: 1fr !important; }
 }
 </style>
 </head>
@@ -819,10 +924,10 @@ class AppShell extends HTMLElement {
           <div class="sidebar-nav">
             <button class="nav-item" data-route="#dashboard">${icons.dashboard}<span>Dashboard</span></button>
             <button class="nav-item" data-route="#logs">${icons.logs}<span>Query Log</span></button>
-            <button class="nav-item" data-route="#lists">${icons.filter}<span>Filter Lists</span></button>
-            <button class="nav-item" data-route="#rules">${icons.rules}<span>Custom Rules</span></button>
+            <button class="nav-item" data-route="#filters">${icons.filter}<span>Filters</span></button>
             <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
           </div>
+          <div class="sidebar-version">${window.__noadd_version || ''}</div>
         </nav>
         <main class="main-content" id="page-content"></main>
       </div>`;
@@ -869,7 +974,7 @@ class DashboardPage extends HTMLElement {
         <div class="card-title">Queries (24h)</div>
         <div class="chart-container" id="chart"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="dashboard-grid-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div class="card fade-in" style="animation-delay:0.15s" id="domains-card">
           <div class="card-title">Top Queried Domains</div>
           <div id="top-domains"></div>
@@ -946,8 +1051,9 @@ class DashboardPage extends HTMLElement {
     const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
     const cacheRate = ((s.cache_hit_rate_today || 0) * 100).toFixed(1);
     const avgMs = (s.avg_response_ms_today || 0).toFixed(1);
+    const qps = ((s.queries_1m || 0) / 60).toFixed(1);
 
-    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs];
+    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs, qps];
     const prevVals = this._prevStats;
     this._prevStats = vals;
 
@@ -957,7 +1063,8 @@ class DashboardPage extends HTMLElement {
       <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
       <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
-      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>`;
+      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>
+      <div class="stat-card" data-i="5"><div class="stat-label">Throughput (1m)</div><div class="stat-value accent">${qps}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div></div>`;
 
     // Flash cards that changed (skip on first render)
     if (prevVals) {
@@ -975,11 +1082,27 @@ class DashboardPage extends HTMLElement {
     }
   }
 
-  renderChart(data) {
-    if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
-    const sig = data.map(d => d.total + ',' + d.blocked).join(';');
+  renderChart(rawData) {
+    if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
+    const sig = rawData.map(d => d.total + ',' + d.blocked).join(';');
     if (this._prevChart && sig !== this._prevChart) this._flashCard('#chart-card');
     this._prevChart = sig;
+
+    // On mobile, merge every 2 bars into 1 to reduce density
+    let data = rawData;
+    if (window.innerWidth <= 768 && rawData.length > 12) {
+      data = [];
+      for (let i = 0; i < rawData.length; i += 2) {
+        const a = rawData[i];
+        const b = rawData[i + 1];
+        if (b) {
+          data.push({ timestamp: a.timestamp, total: a.total + b.total, blocked: a.blocked + b.blocked });
+        } else {
+          data.push(a);
+        }
+      }
+    }
+
     const max = Math.max(...data.map(d => d.total), 1);
     const len = data.length;
     // Show ~6 labels evenly spaced
@@ -1013,7 +1136,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td>${esc(d.domain)}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -1024,10 +1147,10 @@ class DashboardPage extends HTMLElement {
     if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
     this._prevClients = sig;
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Client</th><th>Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Client</th><th class="hide-mobile">Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
       const token = d.doh_token ? '<span style="color:var(--accent)">' + esc(d.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>';
-      html += `<tr><td>${esc(d.client_ip)}</td><td>${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td>${esc(d.client_ip)}</td><td class="hide-mobile">${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -1038,9 +1161,9 @@ class DashboardPage extends HTMLElement {
     if (this._prevUpstreams && sig !== this._prevUpstreams) this._flashCard('#upstreams-card');
     this._prevUpstreams = sig;
     if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th style="text-align:right">Avg Latency</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th class="hide-mobile" style="text-align:right">Avg Latency</th></tr></thead><tbody>';
     for (const d of data) {
-      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatNum(d.count)}</td><td style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatNum(d.count)}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
@@ -1071,9 +1194,10 @@ class LogsPage extends HTMLElement {
         <button class="btn btn-danger btn-sm" id="clear-logs">${icons.trash} Clear All</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th>Cache</th><th>Upstream</th><th>Token</th><th>ms</th>
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>Token</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
+        <div id="log-cards" class="show-mobile"></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
 
@@ -1099,35 +1223,70 @@ class LogsPage extends HTMLElement {
       let url = `/api/logs?limit=${this.limit}&offset=${this.offset}`;
       if (this.search) url += `&search=${encodeURIComponent(this.search)}`;
       if (this.actionFilter) url += `&blocked=${this.actionFilter === 'blocked'}`;
-      const logs = await api.get(url);
-      this.renderLogs(logs);
+      const data = await api.get(url);
+      this.total = data.total || 0;
+      this.renderLogs(data.logs || []);
     } catch (e) { console.error(e); }
   }
 
   renderLogs(logs) {
+    // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
       body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td style="color:var(--text-primary)">${esc(l.domain)}</td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div></td>
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
-        <td>${l.cached ? '<span class="badge badge-cached">hit</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td>${l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
     }
 
+    // Mobile card list
+    const cards = this.querySelector('#log-cards');
+    if (!logs.length) {
+      cards.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>';
+    } else {
+      cards.innerHTML = logs.map(l => `<div class="log-card">
+        <div class="log-card-row1">
+          <span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span>
+          <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
+          <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
+        </div>
+        <div class="log-card-row2">
+          <span>${timeAgo(l.timestamp)}</span>
+          <span>${esc(l.query_type)}</span>
+          <span>${l.cached ? 'cached' : l.upstream ? esc(l.upstream) : ''}</span>
+          <span>${l.response_ms}ms</span>
+        </div>
+      </div>`).join('');
+    }
+
+    // Bind action buttons (both table and cards)
+    this.querySelectorAll('.log-action').forEach(btn => {
+      btn.onclick = async () => {
+        const domain = btn.dataset.domain;
+        const rule = btn.dataset.blocked === 'true' ? `@@||${domain}^` : `||${domain}^`;
+        await api.post('/api/rules', { rule });
+        btn.textContent = 'Done';
+        btn.disabled = true;
+      };
+    });
+
     const pag = this.querySelector('#log-pagination');
+    const currentPage = Math.floor(this.offset / this.limit) + 1;
+    const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
     const hasPrev = this.offset > 0;
-    const hasNext = logs.length === this.limit;
+    const hasNext = currentPage < totalPages;
     pag.innerHTML = `
       <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
-      <span>Page ${Math.floor(this.offset / this.limit) + 1}</span>
+      <span>Page ${currentPage} / ${totalPages}</span>
       <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
     pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
     pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
@@ -1135,28 +1294,59 @@ class LogsPage extends HTMLElement {
 }
 customElements.define('logs-page', LogsPage);
 
-// --- Filter Lists Page ---
-class ListsPage extends HTMLElement {
+// --- Filters Page (merged Lists + Rules + Domain Test) ---
+class FiltersPage extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
-      <div class="page-header fade-in"><h2>Filter Lists</h2><p>Manage adblock filter lists</p></div>
-      <div class="filters-row fade-in">
-        <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+      <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
+      <div class="card fade-in">
+        <div class="card-title">Domain Test</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
+        <div class="input-row">
+          <input type="text" id="test-domain" placeholder="ads.example.com">
+          <button class="btn btn-primary btn-sm" id="test-btn">${icons.refresh} Test</button>
+        </div>
+        <div id="test-result" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="table-wrap"><table><thead><tr>
+        <div class="card-title">Filter Lists</div>
+        <div class="filters-row" style="margin-bottom:12px">
+          <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+        </div>
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
           <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
         </tr></thead><tbody id="lists-body"></tbody></table></div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.1s">
-        <div class="card-title">Add Custom List</div>
+        <div id="lists-cards" class="show-mobile"></div>
+        <div class="card-title" style="margin-top:16px">Add Custom List</div>
         <div class="input-row">
           <input type="text" id="list-name" placeholder="List name">
           <input type="url" id="list-url" placeholder="https://...">
           <button class="btn btn-primary btn-sm" id="add-list">${icons.plus} Add</button>
         </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Custom Rules</div>
+        <div class="input-row">
+          <input type="text" id="add-rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^">
+          <button class="btn btn-primary btn-sm" id="add-rule-btn">${icons.plus} Add</button>
+        </div>
+        <div id="rules-list" style="margin-top:12px"></div>
+        <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
+          <strong style="color:var(--text-secondary)">Syntax Reference</strong>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">||ads.example.com^</code><br>Block domain and all subdomains</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">example.com</code><br>Block exact domain only</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
+          </div>
+        </div>
       </div>`;
 
+    // --- Domain Test ---
+    this.querySelector('#test-btn').onclick = () => this.testDomain();
+    this.querySelector('#test-domain').onkeydown = (e) => { if (e.key === 'Enter') this.testDomain(); };
+
+    // --- Filter Lists ---
     this.querySelector('#update-all').onclick = async () => {
       const btn = this.querySelector('#update-all');
       btn.disabled = true;
@@ -1164,7 +1354,7 @@ class ListsPage extends HTMLElement {
       try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
       btn.disabled = false;
       btn.innerHTML = icons.refresh + ' Update All';
-      this.load();
+      this.loadLists();
     };
 
     this.querySelector('#add-list').onclick = async () => {
@@ -1174,130 +1364,134 @@ class ListsPage extends HTMLElement {
       await api.post('/api/lists', { name, url });
       this.querySelector('#list-name').value = '';
       this.querySelector('#list-url').value = '';
-      this.load();
+      this.loadLists();
     };
 
-    this.load();
+    // --- Custom Rules ---
+    this.querySelector('#add-rule-btn').onclick = async () => {
+      const v = this.querySelector('#add-rule-input').value.trim();
+      if (!v) return;
+      try {
+        await api.post('/api/rules', { rule: v });
+        this.querySelector('#add-rule-input').value = '';
+        this.loadRules();
+      } catch (e) {
+        alert('Invalid rule syntax');
+      }
+    };
+    this.querySelector('#add-rule-input').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-rule-btn').click(); };
+
+    this.loadLists();
+    this.loadRules();
   }
 
-  async load() {
+  async testDomain() {
+    const domain = this.querySelector('#test-domain').value.trim();
+    if (!domain) return;
+    const el = this.querySelector('#test-result');
+    try {
+      const res = await api.post('/api/filter/check', { domain });
+      if (res.action === 'blocked') {
+        el.innerHTML = `<span class="badge badge-blocked">Blocked</span>
+          <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">
+            Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code>
+            &middot; List: <code style="color:var(--text-primary)">${esc(res.list)}</code>
+          </span>`;
+      } else {
+        let detail = res.rule
+          ? ` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code></span>`
+          : '';
+        el.innerHTML = '<span class="badge badge-allowed">Allowed</span>' + detail;
+      }
+    } catch (e) {
+      el.innerHTML = '<span style="color:var(--red)">Error checking domain</span>';
+    }
+  }
+
+  async loadLists() {
     try {
       const lists = await api.get('/api/lists');
-      this.renderLists(lists);
+
+      // Desktop table
+      const body = this.querySelector('#lists-body');
+      body.innerHTML = lists.map(l => `<tr>
+        <td>
+          <label class="toggle">
+            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </td>
+        <td style="color:var(--text-primary)">${esc(l.name)}</td>
+        <td>${formatNum(l.rule_count)}</td>
+        <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
+        <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
+      </tr>`).join('');
+
+      // Mobile cards
+      const cards = this.querySelector('#lists-cards');
+      cards.innerHTML = lists.map(l => `<div class="log-card">
+        <div class="log-card-row1">
+          <label class="toggle">
+            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+          <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${esc(l.name)}</span>
+          <button class="btn btn-danger btn-sm del-list" data-id="${l.id}" style="flex-shrink:0">${icons.trash}</button>
+        </div>
+        <div class="log-card-row2">
+          <span>${formatNum(l.rule_count)} rules</span>
+          <span>${l.last_updated ? timeAgo(l.last_updated) : 'never updated'}</span>
+        </div>
+      </div>`).join('');
+
+      // Bind toggles and delete buttons (both table and cards)
+      this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
+        cb.onchange = async () => {
+          await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+        };
+      });
+
+      this.querySelectorAll('.del-list').forEach(btn => {
+        btn.onclick = async () => {
+          if (confirm('Delete this list?')) {
+            await api.del(`/api/lists/${btn.dataset.id}`);
+            this.loadLists();
+          }
+        };
+      });
     } catch (e) { console.error(e); }
   }
 
-  renderLists(lists) {
-    const body = this.querySelector('#lists-body');
-    body.innerHTML = lists.map(l => `<tr>
-      <td>
-        <label class="toggle">
-          <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
-          <div class="toggle-track"></div>
-          <div class="toggle-thumb"></div>
-        </label>
-      </td>
-      <td style="color:var(--text-primary)">${esc(l.name)}</td>
-      <td>${formatNum(l.rule_count)}</td>
-      <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
-      <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
-    </tr>`).join('');
-
-    body.querySelectorAll('input[type=checkbox]').forEach(cb => {
-      cb.onchange = async () => {
-        await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
-      };
-    });
-
-    body.querySelectorAll('.del-list').forEach(btn => {
-      btn.onclick = async () => {
-        if (confirm('Delete this list?')) {
-          await api.del(`/api/lists/${btn.dataset.id}`);
-          this.load();
-        }
-      };
-    });
-  }
-}
-customElements.define('lists-page', ListsPage);
-
-// --- Custom Rules Page ---
-class RulesPage extends HTMLElement {
-  connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in"><h2>Custom Rules</h2><p>Allowlist and blocklist overrides</p></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div class="card fade-in">
-          <div class="card-title">Blocklist</div>
-          <div class="input-row">
-            <input type="text" id="block-rule" placeholder="||ads.example.com^">
-            <button class="btn btn-primary btn-sm" id="add-block">${icons.plus}</button>
-          </div>
-          <div id="blocklist"></div>
-        </div>
-        <div class="card fade-in" style="animation-delay:0.05s">
-          <div class="card-title">Allowlist</div>
-          <div class="input-row">
-            <input type="text" id="allow-rule" placeholder="@@||safe.example.com^">
-            <button class="btn btn-primary btn-sm" id="add-allow">${icons.plus}</button>
-          </div>
-          <div id="allowlist"></div>
-        </div>
-      </div>`;
-
-    this.querySelector('#add-block').onclick = async () => {
-      const v = this.querySelector('#block-rule').value.trim();
-      if (!v) return;
-      await api.post('/api/rules/blocklist', { rule: v });
-      this.querySelector('#block-rule').value = '';
-      this.load();
-    };
-    this.querySelector('#block-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-block').click(); };
-
-    this.querySelector('#add-allow').onclick = async () => {
-      const v = this.querySelector('#allow-rule').value.trim();
-      if (!v) return;
-      await api.post('/api/rules/allowlist', { rule: v });
-      this.querySelector('#allow-rule').value = '';
-      this.load();
-    };
-    this.querySelector('#allow-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-allow').click(); };
-
-    this.load();
-  }
-
-  async load() {
+  async loadRules() {
     try {
-      const [block, allow] = await Promise.all([
-        api.get('/api/rules/blocklist'),
-        api.get('/api/rules/allowlist'),
-      ]);
-      this.renderRules('#blocklist', block, 'blocklist');
-      this.renderRules('#allowlist', allow, 'allowlist');
+      const rules = await api.get('/api/rules');
+      const el = this.querySelector('#rules-list');
+      if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
+      let html = '<table><tbody>';
+      for (const r of rules) {
+        const badge = r.rule_type === 'allow'
+          ? '<span class="badge badge-allowed">allow</span>'
+          : '<span class="badge badge-blocked">block</span>';
+        html += `<tr>
+          <td style="width:70px">${badge}</td>
+          <td style="color:var(--text-primary);font-family:var(--font-mono);font-size:0.85rem">${esc(r.rule)}</td>
+          <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}">${icons.trash}</button></td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+      el.querySelectorAll('.del-rule').forEach(btn => {
+        btn.onclick = async () => {
+          await api.del(`/api/rules/${btn.dataset.id}`);
+          this.loadRules();
+        };
+      });
     } catch (e) { console.error(e); }
   }
-
-  renderRules(sel, rules, type) {
-    const el = this.querySelector(sel);
-    if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
-    let html = '<table><tbody>';
-    for (const r of rules) {
-      html += `<tr>
-        <td style="color:var(--text-primary)">${esc(r.rule)}</td>
-        <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}" data-type="${type}">${icons.trash}</button></td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    el.innerHTML = html;
-    el.querySelectorAll('.del-rule').forEach(btn => {
-      btn.onclick = async () => {
-        await api.del(`/api/rules/${btn.dataset.type}/${btn.dataset.id}`);
-        this.load();
-      };
-    });
-  }
 }
-customElements.define('rules-page', RulesPage);
+customElements.define('filters-page', FiltersPage);
 
 // --- Settings Page ---
 class SettingsPage extends HTMLElement {
@@ -1314,6 +1508,18 @@ class SettingsPage extends HTMLElement {
         <div class="input-row"><input type="text" id="s-upstream" placeholder="1.1.1.1:53, 9.9.9.9:53"></div>
         <button class="btn btn-sm" id="check-upstream" style="margin-top:8px">${icons.refresh} Check Health</button>
         <div id="upstream-health" style="margin-top:12px"></div>
+        <div class="card-title" style="margin-top:16px">Strategy</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
+          How upstream servers are selected for each DNS query.
+        </p>
+        <div class="input-row">
+          <select id="s-strategy">
+            <option value="sequential">Sequential (try in order)</option>
+            <option value="round-robin">Round Robin (rotate)</option>
+            <option value="lowest-latency">Lowest Latency (fastest first)</option>
+          </select>
+        </div>
+        <div id="ema-latency" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
@@ -1358,6 +1564,7 @@ class SettingsPage extends HTMLElement {
     this.querySelector('#save-settings').onclick = async () => {
       const settings = {
         upstream_servers: this.querySelector('#s-upstream').value,
+        upstream_strategy: this.querySelector('#s-strategy').value,
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
         public_url: this.querySelector('#s-public-url').value,
@@ -1394,6 +1601,11 @@ class SettingsPage extends HTMLElement {
       await api.put('/api/settings', { doh_access_policy: e.target.value });
     };
 
+    this.querySelector('#s-strategy').onchange = async (e) => {
+      await api.put('/api/settings', { upstream_strategy: e.target.value });
+      this.loadEma();
+    };
+
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
@@ -1422,6 +1634,8 @@ class SettingsPage extends HTMLElement {
       if (s.public_url) this.querySelector('#s-public-url').value = s.public_url;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
+      this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
+      this.loadEma();
       if (info) {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
         this.querySelector('#server-info').innerHTML = `
@@ -1461,6 +1675,31 @@ class SettingsPage extends HTMLElement {
         };
       });
     } catch (e) { console.error(e); }
+  }
+
+  async loadEma() {
+    const el = this.querySelector('#ema-latency');
+    const strategy = this.querySelector('#s-strategy').value;
+    if (strategy !== 'lowest-latency') {
+      el.innerHTML = '';
+      return;
+    }
+    try {
+      const data = await api.get('/api/upstream/latency');
+      if (!data || !data.length) {
+        el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No latency data yet. Data will appear after queries are processed.</p>';
+        return;
+      }
+      let html = '<table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
+      for (const d of data) {
+        const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
+        html += `<tr><td style="font-family:var(--font-mono)">${esc(d.server)}</td><td>${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    } catch (e) {
+      el.innerHTML = '';
+    }
   }
 }
 customElements.define('settings-page', SettingsPage);
@@ -1502,8 +1741,7 @@ function setPage(tag) {
 router
   .on('#dashboard', () => setPage('dashboard-page'))
   .on('#logs', () => setPage('logs-page'))
-  .on('#lists', () => setPage('lists-page'))
-  .on('#rules', () => setPage('rules-page'))
+  .on('#filters', () => setPage('filters-page'))
   .on('#settings', () => setPage('settings-page'));
 
 window.addEventListener('auth-required', showLogin);
@@ -1513,6 +1751,7 @@ window.addEventListener('login-success', showApp);
 async function bootstrap() {
   try {
     const health = await api.get('/api/health');
+    window.__noadd_version = health.version || '';
     if (health.needs_setup) {
       showSetup();
       return;

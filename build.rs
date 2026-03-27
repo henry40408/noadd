@@ -20,6 +20,11 @@ const LISTS: &[(&str, &str)] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+
+    let git_version = get_git_version();
+    println!("cargo:rustc-env=GIT_VERSION={git_version}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let out_lists_dir = out_dir.join("lists");
@@ -34,6 +39,23 @@ fn main() {
                 .unwrap_or_else(|e| panic!("failed to write empty file for {name}: {e}"));
         }
     }
+}
+
+fn get_git_version() -> String {
+    if let Ok(version) = std::env::var("GIT_VERSION")
+        && !version.is_empty()
+        && version != "dev"
+    {
+        return version;
+    }
+
+    Command::new("git")
+        .args(["describe", "--tags", "--always", "--dirty"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "dev".to_string())
 }
 
 fn download(url: &str, dest: &Path) -> bool {

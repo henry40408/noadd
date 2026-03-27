@@ -83,9 +83,12 @@ async fn test_rebuild_filter_from_custom_rules() {
     // safe.ads.example.com should be allowed (allow rule takes precedence)
     assert!(matches!(
         engine.check("safe.ads.example.com"),
-        FilterResult::Allowed
+        FilterResult::Allowed { .. }
     ));
 
     // unrelated domain should be allowed
-    assert!(matches!(engine.check("example.org"), FilterResult::Allowed));
+    assert!(matches!(
+        engine.check("example.org"),
+        FilterResult::Allowed { .. }
+    ));
 }

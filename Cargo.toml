@@ -32,7 +32,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 tokio-rusqlite = { version = "0.7", features = ["bundled"] }
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 time = "0.3.47"
 
 [dev-dependencies]

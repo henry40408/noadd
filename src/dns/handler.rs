@@ -103,7 +103,7 @@ impl DnsHandler {
                         Some(list),
                     )
                 }
-                FilterResult::Allowed => {
+                FilterResult::Allowed { .. } => {
                     let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
 
                     // 3. Check cache
