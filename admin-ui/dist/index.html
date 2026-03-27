@@ -113,6 +113,15 @@ body {
 
 .sidebar-nav { flex: 1; padding: 12px 8px; }
 
+.sidebar-version {
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -658,7 +667,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
     border-top: 1px solid var(--border);
     z-index: 100;
   }
-  .sidebar-brand { display: none; }
+  .sidebar-brand, .sidebar-version { display: none; }
   .sidebar-nav {
     display: flex;
     flex-direction: row;
@@ -918,6 +927,7 @@ class AppShell extends HTMLElement {
             <button class="nav-item" data-route="#filters">${icons.filter}<span>Filters</span></button>
             <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
           </div>
+          <div class="sidebar-version">${window.__noadd_version || ''}</div>
         </nav>
         <main class="main-content" id="page-content"></main>
       </div>`;
@@ -1741,6 +1751,7 @@ window.addEventListener('login-success', showApp);
 async function bootstrap() {
   try {
     const health = await api.get('/api/health');
+    window.__noadd_version = health.version || '';
     if (health.needs_setup) {
       showSetup();
       return;

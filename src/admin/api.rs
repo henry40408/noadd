@@ -255,6 +255,7 @@ async fn revoke_all(
 pub struct HealthResponse {
     pub status: String,
     pub needs_setup: bool,
+    pub version: &'static str,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -268,6 +269,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,
+        version: env!("GIT_VERSION"),
     })
 }
 
