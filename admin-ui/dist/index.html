@@ -1110,7 +1110,7 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td style="color:var(--text-primary)">${esc(l.domain)}</td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div></td>
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
