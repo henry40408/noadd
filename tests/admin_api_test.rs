@@ -124,6 +124,10 @@ async fn test_login_success() {
         cookie_str.contains("session="),
         "Cookie should contain session token"
     );
+    assert!(
+        cookie_str.contains("Max-Age="),
+        "Cookie should have Max-Age set for persistent sessions"
+    );
 }
 
 #[tokio::test]
