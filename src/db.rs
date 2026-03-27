@@ -354,6 +354,36 @@ impl Database {
         Ok(rows)
     }
 
+    pub async fn count_logs(
+        &self,
+        search: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<i64, DbError> {
+        let search = search.map(|s| s.to_string());
+        let count = self
+            .conn
+            .call(move |conn| {
+                let mut sql = "SELECT COUNT(*) FROM query_logs WHERE 1=1".to_string();
+                let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+                if let Some(ref s) = search {
+                    sql.push_str(" AND domain LIKE ?");
+                    param_values.push(Box::new(format!("%{s}%")));
+                }
+                if let Some(b) = blocked {
+                    sql.push_str(" AND blocked = ?");
+                    param_values.push(Box::new(b as i64));
+                }
+
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    param_values.iter().map(|p| p.as_ref()).collect();
+
+                conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))
+            })
+            .await?;
+        Ok(count)
+    }
+
     pub async fn delete_all_logs(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {

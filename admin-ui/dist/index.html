@@ -1097,8 +1097,9 @@ class LogsPage extends HTMLElement {
       let url = `/api/logs?limit=${this.limit}&offset=${this.offset}`;
       if (this.search) url += `&search=${encodeURIComponent(this.search)}`;
       if (this.actionFilter) url += `&blocked=${this.actionFilter === 'blocked'}`;
-      const logs = await api.get(url);
-      this.renderLogs(logs);
+      const data = await api.get(url);
+      this.total = data.total || 0;
+      this.renderLogs(data.logs || []);
     } catch (e) { console.error(e); }
   }
 
@@ -1120,11 +1121,13 @@ class LogsPage extends HTMLElement {
     }
 
     const pag = this.querySelector('#log-pagination');
+    const currentPage = Math.floor(this.offset / this.limit) + 1;
+    const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
     const hasPrev = this.offset > 0;
-    const hasNext = logs.length === this.limit;
+    const hasNext = currentPage < totalPages;
     pag.innerHTML = `
       <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
-      <span>Page ${Math.floor(this.offset / this.limit) + 1}</span>
+      <span>Page ${currentPage} / ${totalPages}</span>
       <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
     pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
     pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };

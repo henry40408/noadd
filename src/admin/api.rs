@@ -906,7 +906,7 @@ async fn get_logs(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<LogsQuery>,
-) -> Result<Json<Vec<crate::db::QueryLogEntry>>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     require_auth(&state, &jar)?;
 
     let limit = query.limit.unwrap_or(100);
@@ -916,8 +916,16 @@ async fn get_logs(
         .query_logs(limit, offset, query.search.as_deref(), query.blocked)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total = state
+        .db
+        .count_logs(query.search.as_deref(), query.blocked)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(logs))
+    Ok(Json(serde_json::json!({
+        "logs": logs,
+        "total": total,
+    })))
 }
 
 async fn delete_logs(

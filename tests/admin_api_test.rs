@@ -335,8 +335,9 @@ async fn test_logs_endpoint() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let logs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(logs.len(), 0);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"], 0);
+    assert!(json["logs"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
