@@ -406,6 +406,12 @@ async fn update_list(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(StatusCode::OK)
 }
 
@@ -419,6 +425,12 @@ async fn delete_list(
     state
         .db
         .delete_filter_list(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
