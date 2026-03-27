@@ -1,5 +1,11 @@
 # noadd
 
+[![CI](https://github.com/henry40408/noadd/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/noadd/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/henry40408/noadd)](LICENSE.txt)
+[![Rust](https://img.shields.io/badge/rust-2024_edition-blue.svg)](https://www.rust-lang.org/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/henry40408/noadd)
+[![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
+
 A self-hosted DNS ad-blocker with DNS-over-HTTPS support, built in Rust.
 
 Blocks ads and trackers at the DNS level using community-maintained filter lists. Ships as a single binary with an embedded web admin UI.
