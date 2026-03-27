@@ -1323,12 +1323,12 @@ class FiltersPage extends HTMLElement {
         <div id="rules-list" style="margin-top:12px"></div>
         <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
           <strong style="color:var(--text-secondary)">Syntax Reference</strong>
-          <table style="margin-top:8px;width:100%">
-            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">||ads.example.com^</td><td>Block domain and all subdomains</td></tr>
-            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">@@||safe.example.com^</td><td>Allow domain and all subdomains</td></tr>
-            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">example.com</td><td>Block exact domain only</td></tr>
-            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">0.0.0.0 example.com</td><td>Block exact domain (hosts format)</td></tr>
-          </table>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">||ads.example.com^</code><br>Block domain and all subdomains</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">example.com</code><br>Block exact domain only</div>
+            <div><code style="color:var(--text-secondary);font-size:0.75rem">0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
+          </div>
         </div>
       </div>`;
 
