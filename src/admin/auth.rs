@@ -34,7 +34,7 @@ impl argon2::password_hash::rand_core::RngCore for OsRngCompat {
 impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 
 /// Session expiry in seconds (7 days).
-const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
+pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 
 /// Thread-safe session store. Maps token -> created_at (unix seconds).
 pub type SessionStore = Arc<Mutex<HashMap<String, i64>>>;

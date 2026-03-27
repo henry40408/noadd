@@ -199,6 +199,9 @@ async fn login(
         .path("/")
         .http_only(true)
         .same_site(axum_extra::extract::cookie::SameSite::Strict)
+        .max_age(time::Duration::seconds(
+            crate::admin::auth::SESSION_MAX_AGE_SECS,
+        ))
         .build();
 
     Ok((jar.add(cookie), Json(LoginResponse { success: true })))
