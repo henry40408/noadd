@@ -819,8 +819,7 @@ class AppShell extends HTMLElement {
           <div class="sidebar-nav">
             <button class="nav-item" data-route="#dashboard">${icons.dashboard}<span>Dashboard</span></button>
             <button class="nav-item" data-route="#logs">${icons.logs}<span>Query Log</span></button>
-            <button class="nav-item" data-route="#lists">${icons.filter}<span>Filter Lists</span></button>
-            <button class="nav-item" data-route="#rules">${icons.rules}<span>Custom Rules</span></button>
+            <button class="nav-item" data-route="#filters">${icons.filter}<span>Filters</span></button>
             <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
           </div>
         </nav>
@@ -1135,28 +1134,71 @@ class LogsPage extends HTMLElement {
 }
 customElements.define('logs-page', LogsPage);
 
-// --- Filter Lists Page ---
-class ListsPage extends HTMLElement {
+// --- Filters Page (merged Lists + Rules + Domain Test) ---
+class FiltersPage extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
-      <div class="page-header fade-in"><h2>Filter Lists</h2><p>Manage adblock filter lists</p></div>
-      <div class="filters-row fade-in">
-        <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+      <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
+      <div class="card fade-in">
+        <div class="card-title">Domain Test</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
+        <div class="input-row">
+          <input type="text" id="test-domain" placeholder="ads.example.com">
+          <button class="btn btn-primary btn-sm" id="test-btn">${icons.refresh} Test</button>
+        </div>
+        <div id="test-result" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="card-title">Filter Lists</div>
+        <div class="filters-row" style="margin-bottom:12px">
+          <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+        </div>
         <div class="table-wrap"><table><thead><tr>
           <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
         </tr></thead><tbody id="lists-body"></tbody></table></div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.1s">
-        <div class="card-title">Add Custom List</div>
+        <div class="card-title" style="margin-top:16px">Add Custom List</div>
         <div class="input-row">
           <input type="text" id="list-name" placeholder="List name">
           <input type="url" id="list-url" placeholder="https://...">
           <button class="btn btn-primary btn-sm" id="add-list">${icons.plus} Add</button>
         </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Custom Rules</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <div class="card-title" style="font-size:0.85rem">Blocklist</div>
+            <div class="input-row">
+              <input type="text" id="block-rule" placeholder="||ads.example.com^">
+              <button class="btn btn-primary btn-sm" id="add-block">${icons.plus}</button>
+            </div>
+            <div id="blocklist"></div>
+          </div>
+          <div>
+            <div class="card-title" style="font-size:0.85rem">Allowlist</div>
+            <div class="input-row">
+              <input type="text" id="allow-rule" placeholder="@@||safe.example.com^">
+              <button class="btn btn-primary btn-sm" id="add-allow">${icons.plus}</button>
+            </div>
+            <div id="allowlist"></div>
+          </div>
+        </div>
+        <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
+          <strong style="color:var(--text-secondary)">Syntax Reference</strong>
+          <table style="margin-top:8px;width:100%">
+            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">||ads.example.com^</td><td>Block domain and all subdomains</td></tr>
+            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">@@||safe.example.com^</td><td>Allow domain and all subdomains</td></tr>
+            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">example.com</td><td>Block exact domain only</td></tr>
+            <tr><td style="font-family:var(--font-mono);color:var(--text-secondary);padding:2px 12px 2px 0">0.0.0.0 example.com</td><td>Block exact domain (hosts format)</td></tr>
+          </table>
+        </div>
       </div>`;
 
+    // --- Domain Test ---
+    this.querySelector('#test-btn').onclick = () => this.testDomain();
+    this.querySelector('#test-domain').onkeydown = (e) => { if (e.key === 'Enter') this.testDomain(); };
+
+    // --- Filter Lists ---
     this.querySelector('#update-all').onclick = async () => {
       const btn = this.querySelector('#update-all');
       btn.disabled = true;
@@ -1164,7 +1206,7 @@ class ListsPage extends HTMLElement {
       try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
       btn.disabled = false;
       btn.innerHTML = icons.refresh + ' Update All';
-      this.load();
+      this.loadLists();
     };
 
     this.querySelector('#add-list').onclick = async () => {
@@ -1174,83 +1216,16 @@ class ListsPage extends HTMLElement {
       await api.post('/api/lists', { name, url });
       this.querySelector('#list-name').value = '';
       this.querySelector('#list-url').value = '';
-      this.load();
+      this.loadLists();
     };
 
-    this.load();
-  }
-
-  async load() {
-    try {
-      const lists = await api.get('/api/lists');
-      this.renderLists(lists);
-    } catch (e) { console.error(e); }
-  }
-
-  renderLists(lists) {
-    const body = this.querySelector('#lists-body');
-    body.innerHTML = lists.map(l => `<tr>
-      <td>
-        <label class="toggle">
-          <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
-          <div class="toggle-track"></div>
-          <div class="toggle-thumb"></div>
-        </label>
-      </td>
-      <td style="color:var(--text-primary)">${esc(l.name)}</td>
-      <td>${formatNum(l.rule_count)}</td>
-      <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
-      <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
-    </tr>`).join('');
-
-    body.querySelectorAll('input[type=checkbox]').forEach(cb => {
-      cb.onchange = async () => {
-        await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
-      };
-    });
-
-    body.querySelectorAll('.del-list').forEach(btn => {
-      btn.onclick = async () => {
-        if (confirm('Delete this list?')) {
-          await api.del(`/api/lists/${btn.dataset.id}`);
-          this.load();
-        }
-      };
-    });
-  }
-}
-customElements.define('lists-page', ListsPage);
-
-// --- Custom Rules Page ---
-class RulesPage extends HTMLElement {
-  connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in"><h2>Custom Rules</h2><p>Allowlist and blocklist overrides</p></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div class="card fade-in">
-          <div class="card-title">Blocklist</div>
-          <div class="input-row">
-            <input type="text" id="block-rule" placeholder="||ads.example.com^">
-            <button class="btn btn-primary btn-sm" id="add-block">${icons.plus}</button>
-          </div>
-          <div id="blocklist"></div>
-        </div>
-        <div class="card fade-in" style="animation-delay:0.05s">
-          <div class="card-title">Allowlist</div>
-          <div class="input-row">
-            <input type="text" id="allow-rule" placeholder="@@||safe.example.com^">
-            <button class="btn btn-primary btn-sm" id="add-allow">${icons.plus}</button>
-          </div>
-          <div id="allowlist"></div>
-        </div>
-      </div>`;
-
+    // --- Custom Rules ---
     this.querySelector('#add-block').onclick = async () => {
       const v = this.querySelector('#block-rule').value.trim();
       if (!v) return;
       await api.post('/api/rules/blocklist', { rule: v });
       this.querySelector('#block-rule').value = '';
-      this.load();
+      this.loadRules();
     };
     this.querySelector('#block-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-block').click(); };
 
@@ -1259,14 +1234,70 @@ class RulesPage extends HTMLElement {
       if (!v) return;
       await api.post('/api/rules/allowlist', { rule: v });
       this.querySelector('#allow-rule').value = '';
-      this.load();
+      this.loadRules();
     };
     this.querySelector('#allow-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-allow').click(); };
 
-    this.load();
+    this.loadLists();
+    this.loadRules();
   }
 
-  async load() {
+  async testDomain() {
+    const domain = this.querySelector('#test-domain').value.trim();
+    if (!domain) return;
+    const el = this.querySelector('#test-result');
+    try {
+      const res = await api.post('/api/filter/check', { domain });
+      if (res.action === 'blocked') {
+        el.innerHTML = `<span class="badge badge-blocked">Blocked</span>
+          <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">
+            Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code>
+            &middot; List: <code style="color:var(--text-primary)">${esc(res.list)}</code>
+          </span>`;
+      } else {
+        el.innerHTML = '<span class="badge badge-allowed">Allowed</span>';
+      }
+    } catch (e) {
+      el.innerHTML = '<span style="color:var(--red)">Error checking domain</span>';
+    }
+  }
+
+  async loadLists() {
+    try {
+      const lists = await api.get('/api/lists');
+      const body = this.querySelector('#lists-body');
+      body.innerHTML = lists.map(l => `<tr>
+        <td>
+          <label class="toggle">
+            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </td>
+        <td style="color:var(--text-primary)">${esc(l.name)}</td>
+        <td>${formatNum(l.rule_count)}</td>
+        <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
+        <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
+      </tr>`).join('');
+
+      body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.onchange = async () => {
+          await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+        };
+      });
+
+      body.querySelectorAll('.del-list').forEach(btn => {
+        btn.onclick = async () => {
+          if (confirm('Delete this list?')) {
+            await api.del(`/api/lists/${btn.dataset.id}`);
+            this.loadLists();
+          }
+        };
+      });
+    } catch (e) { console.error(e); }
+  }
+
+  async loadRules() {
     try {
       const [block, allow] = await Promise.all([
         api.get('/api/rules/blocklist'),
@@ -1292,12 +1323,12 @@ class RulesPage extends HTMLElement {
     el.querySelectorAll('.del-rule').forEach(btn => {
       btn.onclick = async () => {
         await api.del(`/api/rules/${btn.dataset.type}/${btn.dataset.id}`);
-        this.load();
+        this.loadRules();
       };
     });
   }
 }
-customElements.define('rules-page', RulesPage);
+customElements.define('filters-page', FiltersPage);
 
 // --- Settings Page ---
 class SettingsPage extends HTMLElement {
@@ -1547,8 +1578,7 @@ function setPage(tag) {
 router
   .on('#dashboard', () => setPage('dashboard-page'))
   .on('#logs', () => setPage('logs-page'))
-  .on('#lists', () => setPage('lists-page'))
-  .on('#rules', () => setPage('rules-page'))
+  .on('#filters', () => setPage('filters-page'))
   .on('#settings', () => setPage('settings-page'));
 
 window.addEventListener('auth-required', showLogin);
