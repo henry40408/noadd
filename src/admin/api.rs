@@ -495,6 +495,13 @@ async fn add_rule(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Rebuild filter engine so the new rule takes effect immediately
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
@@ -508,6 +515,13 @@ async fn delete_rule(
     state
         .db
         .delete_custom_rule(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Rebuild filter engine so the deletion takes effect immediately
+    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
+    manager
+        .rebuild_filter()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
