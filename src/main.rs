@@ -22,7 +22,9 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 1. Init tracing
+    let use_color = std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::fmt()
+        .with_ansi(use_color)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "noadd=info".into()),
