@@ -377,3 +377,64 @@ async fn test_setup_initial_password() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn test_upstream_strategy_setting() {
+    let (app, token) = setup().await;
+
+    // Set strategy to round-robin
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"upstream_strategy":"round-robin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read it back
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/settings")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["upstream_strategy"], "round-robin");
+}
+
+#[tokio::test]
+async fn test_upstream_latency_endpoint() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/upstream/latency")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array());
+}
