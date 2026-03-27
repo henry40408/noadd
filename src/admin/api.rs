@@ -86,6 +86,7 @@ pub fn admin_router(
         .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
+        .route("/api/upstream/latency", get(upstream_latency))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -301,6 +302,7 @@ async fn get_settings(
     // Return known settings
     let keys = [
         "upstream_servers",
+        "upstream_strategy",
         "log_retention_days",
         "doh_access_policy",
         "public_url",
@@ -335,6 +337,13 @@ async fn put_settings(
             .set_setting(key, value)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    // Apply strategy change immediately if present
+    if let Some(strategy_str) = body.settings.get("upstream_strategy") {
+        if let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>() {
+            state.forwarder.set_strategy(strategy);
+        }
     }
 
     Ok(StatusCode::OK)
@@ -617,6 +626,39 @@ async fn upstream_health(
                 "server": server,
                 "ok": ok,
                 "latency_ms": ms,
+            })
+        })
+        .collect();
+    Ok(Json(json))
+}
+
+// --- Upstream Latency ---
+
+async fn upstream_latency(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let latencies = state.forwarder.latencies();
+    let strategy = state.forwarder.strategy();
+
+    // Find the preferred server (lowest EMA)
+    let preferred = if strategy == crate::upstream::strategy::UpstreamStrategy::LowestLatency {
+        latencies
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(k, _)| k.clone())
+    } else {
+        None
+    };
+
+    let json: Vec<serde_json::Value> = latencies
+        .iter()
+        .map(|(server, ema)| {
+            serde_json::json!({
+                "server": server,
+                "ema_ms": (*ema * 10.0).round() / 10.0,
+                "preferred": preferred.as_ref() == Some(server),
             })
         })
         .collect();
