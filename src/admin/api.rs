@@ -84,6 +84,8 @@ pub fn admin_router(
             get(get_blocklist).post(add_blocklist_rule),
         )
         .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        // Filter check
+        .route("/api/filter/check", post(filter_check))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
@@ -609,6 +611,38 @@ async fn delete_doh_token_endpoint(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+// --- Filter Check ---
+
+#[derive(Deserialize)]
+struct FilterCheckRequest {
+    domain: String,
+}
+
+async fn filter_check(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<FilterCheckRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let domain = body.domain.trim().trim_end_matches('.');
+    let filter = state.filter.load();
+    let result = filter.check(domain);
+    match result {
+        crate::filter::engine::FilterResult::Blocked { rule, list } => {
+            Ok(Json(serde_json::json!({
+                "action": "blocked",
+                "rule": rule,
+                "list": list,
+            })))
+        }
+        crate::filter::engine::FilterResult::Allowed => {
+            Ok(Json(serde_json::json!({
+                "action": "allowed",
+            })))
+        }
+    }
 }
 
 // --- Upstream Health ---
