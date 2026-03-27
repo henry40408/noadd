@@ -1088,10 +1088,10 @@ class DashboardPage extends HTMLElement {
     if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
     this._prevClients = sig;
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Client</th><th>Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Client</th><th class="hide-mobile">Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
       const token = d.doh_token ? '<span style="color:var(--accent)">' + esc(d.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>';
-      html += `<tr><td>${esc(d.client_ip)}</td><td>${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td>${esc(d.client_ip)}</td><td class="hide-mobile">${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -1102,9 +1102,9 @@ class DashboardPage extends HTMLElement {
     if (this._prevUpstreams && sig !== this._prevUpstreams) this._flashCard('#upstreams-card');
     this._prevUpstreams = sig;
     if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th style="text-align:right">Avg Latency</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th class="hide-mobile" style="text-align:right">Avg Latency</th></tr></thead><tbody>';
     for (const d of data) {
-      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatNum(d.count)}</td><td style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatNum(d.count)}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
