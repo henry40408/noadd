@@ -1040,11 +1040,27 @@ class DashboardPage extends HTMLElement {
     }
   }
 
-  renderChart(data) {
-    if (!data || !data.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
-    const sig = data.map(d => d.total + ',' + d.blocked).join(';');
+  renderChart(rawData) {
+    if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
+    const sig = rawData.map(d => d.total + ',' + d.blocked).join(';');
     if (this._prevChart && sig !== this._prevChart) this._flashCard('#chart-card');
     this._prevChart = sig;
+
+    // On mobile, merge every 2 bars into 1 to reduce density
+    let data = rawData;
+    if (window.innerWidth <= 768 && rawData.length > 12) {
+      data = [];
+      for (let i = 0; i < rawData.length; i += 2) {
+        const a = rawData[i];
+        const b = rawData[i + 1];
+        if (b) {
+          data.push({ timestamp: a.timestamp, total: a.total + b.total, blocked: a.blocked + b.blocked });
+        } else {
+          data.push(a);
+        }
+      }
+    }
+
     const max = Math.max(...data.map(d => d.total), 1);
     const len = data.length;
     // Show ~6 labels evenly spaced
