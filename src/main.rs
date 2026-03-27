@@ -54,6 +54,14 @@ async fn main() -> anyhow::Result<()> {
     // 6. Create upstream forwarder
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
 
+    // Load upstream strategy from DB
+    if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await {
+        if let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>() {
+            forwarder.set_strategy(strategy);
+            tracing::info!(%strategy_str, "loaded upstream strategy from DB");
+        }
+    }
+
     // 7. Create DNS cache
     let cache = DnsCache::new(10_000);
 
@@ -105,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         filter.clone(),
         cache.clone(),
         rate_limiter,
-        forwarder,
+        forwarder.clone(),
         server_info,
     );
     let app = doh_routes.merge(admin_routes);
@@ -164,7 +172,28 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 17. Serve HTTP with graceful shutdown
+    // 17. Background upstream latency probe (every 60s, only for lowest-latency strategy)
+    let probe_forwarder = forwarder.clone();
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if probe_forwarder.strategy()
+                        == noadd::upstream::strategy::UpstreamStrategy::LowestLatency
+                    {
+                        probe_forwarder.probe_all().await;
+                        tracing::debug!("upstream latency probe complete");
+                    }
+                }
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+
+    // 18. Serve HTTP with graceful shutdown
     let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
     let use_acme = !args.acme_domain.is_empty();
 
@@ -235,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     }
 
-    // 18. Cleanup
+    // 19. Cleanup
     tracing::info!("shutting down...");
     udp_handle.abort();
     tcp_handle.abort();
