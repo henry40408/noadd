@@ -43,7 +43,8 @@ fn main() {
 
 fn get_git_version() -> String {
     if let Ok(version) = std::env::var("GIT_VERSION")
-        && !version.is_empty() && version != "dev"
+        && !version.is_empty()
+        && version != "dev"
     {
         return version;
     }

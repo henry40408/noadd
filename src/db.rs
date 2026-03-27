@@ -540,9 +540,8 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, rule, rule_type FROM custom_rules ORDER BY id",
-                )?;
+                let mut stmt =
+                    conn.prepare("SELECT id, rule, rule_type FROM custom_rules ORDER BY id")?;
                 let rows = stmt
                     .query_map(params![], |row| {
                         Ok(CustomRuleRow {

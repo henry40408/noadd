@@ -29,9 +29,15 @@ fn test_exact_block() {
         FilterResult::Blocked { .. }
     ));
     // Exact-only rule must NOT match subdomains
-    assert!(matches!(engine.check("sub.ads.example.com"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("sub.ads.example.com"),
+        FilterResult::Allowed { .. }
+    ));
     // Unrelated domain
-    assert!(matches!(engine.check("example.com"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("example.com"),
+        FilterResult::Allowed { .. }
+    ));
 }
 
 #[test]
@@ -52,14 +58,23 @@ fn test_subdomain_block() {
         FilterResult::Blocked { .. }
     ));
     // Parent domain must NOT be blocked
-    assert!(matches!(engine.check("example.com"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("example.com"),
+        FilterResult::Allowed { .. }
+    ));
 }
 
 #[test]
 fn test_allowed_domain() {
     let engine = FilterEngine::new(vec![], vec![]);
-    assert!(matches!(engine.check("anything.com"), FilterResult::Allowed { .. }));
-    assert!(matches!(engine.check("safe.example.com"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("anything.com"),
+        FilterResult::Allowed { .. }
+    ));
+    assert!(matches!(
+        engine.check("safe.example.com"),
+        FilterResult::Allowed { .. }
+    ));
 }
 
 #[test]
@@ -70,8 +85,14 @@ fn test_allowlist_overrides_blocklist() {
     );
 
     // The allowlist should take priority
-    assert!(matches!(engine.check("ads.example.com"), FilterResult::Allowed { .. }));
-    assert!(matches!(engine.check("sub.ads.example.com"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("ads.example.com"),
+        FilterResult::Allowed { .. }
+    ));
+    assert!(matches!(
+        engine.check("sub.ads.example.com"),
+        FilterResult::Allowed { .. }
+    ));
 }
 
 #[test]
@@ -106,7 +127,13 @@ fn test_provenance_tracking() {
 #[test]
 fn test_empty_engine_allows_everything() {
     let engine = FilterEngine::new(vec![], vec![]);
-    assert!(matches!(engine.check("anything.example.com"), FilterResult::Allowed { .. }));
-    assert!(matches!(engine.check("a.b.c.d.e.f.g"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("anything.example.com"),
+        FilterResult::Allowed { .. }
+    ));
+    assert!(matches!(
+        engine.check("a.b.c.d.e.f.g"),
+        FilterResult::Allowed { .. }
+    ));
     assert_eq!(engine.blocked_domain_count(), 0);
 }

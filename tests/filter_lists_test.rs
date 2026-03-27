@@ -87,5 +87,8 @@ async fn test_rebuild_filter_from_custom_rules() {
     ));
 
     // unrelated domain should be allowed
-    assert!(matches!(engine.check("example.org"), FilterResult::Allowed { .. }));
+    assert!(matches!(
+        engine.check("example.org"),
+        FilterResult::Allowed { .. }
+    ));
 }
