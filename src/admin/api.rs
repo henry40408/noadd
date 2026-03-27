@@ -501,6 +501,16 @@ async fn add_rule(
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
+    // No-op if rule already exists
+    if state
+        .db
+        .has_custom_rule(&body.rule)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 })));
+    }
+
     let id = state
         .db
         .add_custom_rule(&body.rule, rule_type)

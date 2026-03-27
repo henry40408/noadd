@@ -505,6 +505,21 @@ impl Database {
 
     // --- Custom Rules ---
 
+    pub async fn has_custom_rule(&self, rule: &str) -> Result<bool, DbError> {
+        let rule = rule.to_string();
+        let exists = self
+            .conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM custom_rules WHERE rule = ?1",
+                    params![rule],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .await?;
+        Ok(exists > 0)
+    }
+
     pub async fn add_custom_rule(&self, rule: &str, rule_type: &str) -> Result<i64, DbError> {
         let rule = rule.to_string();
         let rule_type = rule_type.to_string();
