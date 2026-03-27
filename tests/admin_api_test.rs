@@ -418,6 +418,48 @@ async fn test_upstream_strategy_setting() {
 }
 
 #[tokio::test]
+async fn test_filter_check_allowed() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/filter/check")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"domain":"example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["action"], "allowed");
+}
+
+#[tokio::test]
+async fn test_filter_check_requires_auth() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/filter/check")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"domain":"example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_upstream_latency_endpoint() {
     let (app, token) = setup().await;
 
