@@ -1303,9 +1303,10 @@ class FiltersPage extends HTMLElement {
         <div class="filters-row" style="margin-bottom:12px">
           <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
         </div>
-        <div class="table-wrap"><table><thead><tr>
-          <th>Enabled</th><th>Name</th><th class="hide-mobile">Rules</th><th class="hide-mobile">Updated</th><th></th>
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
+          <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
         </tr></thead><tbody id="lists-body"></tbody></table></div>
+        <div id="lists-cards" class="show-mobile"></div>
         <div class="card-title" style="margin-top:16px">Add Custom List</div>
         <div class="input-row">
           <input type="text" id="list-name" placeholder="List name">
@@ -1400,6 +1401,8 @@ class FiltersPage extends HTMLElement {
   async loadLists() {
     try {
       const lists = await api.get('/api/lists');
+
+      // Desktop table
       const body = this.querySelector('#lists-body');
       body.innerHTML = lists.map(l => `<tr>
         <td>
@@ -1410,18 +1413,37 @@ class FiltersPage extends HTMLElement {
           </label>
         </td>
         <td style="color:var(--text-primary)">${esc(l.name)}</td>
-        <td class="hide-mobile">${formatNum(l.rule_count)}</td>
-        <td class="hide-mobile">${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
+        <td>${formatNum(l.rule_count)}</td>
+        <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
       </tr>`).join('');
 
-      body.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      // Mobile cards
+      const cards = this.querySelector('#lists-cards');
+      cards.innerHTML = lists.map(l => `<div class="log-card">
+        <div class="log-card-row1">
+          <label class="toggle">
+            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+          <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${esc(l.name)}</span>
+          <button class="btn btn-danger btn-sm del-list" data-id="${l.id}" style="flex-shrink:0">${icons.trash}</button>
+        </div>
+        <div class="log-card-row2">
+          <span>${formatNum(l.rule_count)} rules</span>
+          <span>${l.last_updated ? timeAgo(l.last_updated) : 'never updated'}</span>
+        </div>
+      </div>`).join('');
+
+      // Bind toggles and delete buttons (both table and cards)
+      this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
         cb.onchange = async () => {
           await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
         };
       });
 
-      body.querySelectorAll('.del-list').forEach(btn => {
+      this.querySelectorAll('.del-list').forEach(btn => {
         btn.onclick = async () => {
           if (confirm('Delete this list?')) {
             await api.del(`/api/lists/${btn.dataset.id}`);
