@@ -74,16 +74,8 @@ pub fn admin_router(
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/update", post(trigger_list_update))
         // Rules
-        .route(
-            "/api/rules/allowlist",
-            get(get_allowlist).post(add_allowlist_rule),
-        )
-        .route("/api/rules/allowlist/{id}", delete(delete_allowlist_rule))
-        .route(
-            "/api/rules/blocklist",
-            get(get_blocklist).post(add_blocklist_rule),
-        )
-        .route("/api/rules/blocklist/{id}", delete(delete_blocklist_rule))
+        .route("/api/rules", get(get_rules).post(add_rule))
+        .route("/api/rules/{id}", delete(delete_rule))
         // Filter check
         .route("/api/filter/check", post(filter_check))
         // Upstream health
@@ -457,21 +449,6 @@ async fn trigger_list_update(
 
 // --- Rules ---
 
-async fn get_allowlist(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
-    let rules = state
-        .db
-        .get_custom_rules_by_type("allow")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(rules))
-}
-
 #[derive(Deserialize)]
 pub struct AddRuleRequest {
     pub rule: String,
@@ -482,39 +459,7 @@ pub struct AddRuleResponse {
     pub id: i64,
 }
 
-async fn add_allowlist_rule(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Json(body): Json<AddRuleRequest>,
-) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
-    let id = state
-        .db
-        .add_custom_rule(&body.rule, "allow")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
-}
-
-async fn delete_allowlist_rule(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
-    state
-        .db
-        .delete_custom_rule(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(StatusCode::OK)
-}
-
-async fn get_blocklist(
+async fn get_rules(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
@@ -522,30 +467,38 @@ async fn get_blocklist(
 
     let rules = state
         .db
-        .get_custom_rules_by_type("block")
+        .get_all_custom_rules()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(rules))
 }
 
-async fn add_blocklist_rule(
+async fn add_rule(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(body): Json<AddRuleRequest>,
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
     require_auth(&state, &jar)?;
 
+    let rule_type = match crate::filter::parser::parse_rule(&body.rule) {
+        Some(parsed) => match parsed.action {
+            crate::filter::parser::RuleAction::Allow => "allow",
+            crate::filter::parser::RuleAction::Block => "block",
+        },
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
+
     let id = state
         .db
-        .add_custom_rule(&body.rule, "block")
+        .add_custom_rule(&body.rule, rule_type)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
-async fn delete_blocklist_rule(
+async fn delete_rule(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(id): Path<i64>,

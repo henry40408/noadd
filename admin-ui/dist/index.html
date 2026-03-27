@@ -1165,24 +1165,11 @@ class FiltersPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Custom Rules</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-          <div>
-            <div class="card-title" style="font-size:0.85rem">Blocklist</div>
-            <div class="input-row">
-              <input type="text" id="block-rule" placeholder="||ads.example.com^">
-              <button class="btn btn-primary btn-sm" id="add-block">${icons.plus}</button>
-            </div>
-            <div id="blocklist"></div>
-          </div>
-          <div>
-            <div class="card-title" style="font-size:0.85rem">Allowlist</div>
-            <div class="input-row">
-              <input type="text" id="allow-rule" placeholder="@@||safe.example.com^">
-              <button class="btn btn-primary btn-sm" id="add-allow">${icons.plus}</button>
-            </div>
-            <div id="allowlist"></div>
-          </div>
+        <div class="input-row">
+          <input type="text" id="add-rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^">
+          <button class="btn btn-primary btn-sm" id="add-rule-btn">${icons.plus} Add</button>
         </div>
+        <div id="rules-list" style="margin-top:12px"></div>
         <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
           <strong style="color:var(--text-secondary)">Syntax Reference</strong>
           <table style="margin-top:8px;width:100%">
@@ -1220,23 +1207,18 @@ class FiltersPage extends HTMLElement {
     };
 
     // --- Custom Rules ---
-    this.querySelector('#add-block').onclick = async () => {
-      const v = this.querySelector('#block-rule').value.trim();
+    this.querySelector('#add-rule-btn').onclick = async () => {
+      const v = this.querySelector('#add-rule-input').value.trim();
       if (!v) return;
-      await api.post('/api/rules/blocklist', { rule: v });
-      this.querySelector('#block-rule').value = '';
-      this.loadRules();
+      try {
+        await api.post('/api/rules', { rule: v });
+        this.querySelector('#add-rule-input').value = '';
+        this.loadRules();
+      } catch (e) {
+        alert('Invalid rule syntax');
+      }
     };
-    this.querySelector('#block-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-block').click(); };
-
-    this.querySelector('#add-allow').onclick = async () => {
-      const v = this.querySelector('#allow-rule').value.trim();
-      if (!v) return;
-      await api.post('/api/rules/allowlist', { rule: v });
-      this.querySelector('#allow-rule').value = '';
-      this.loadRules();
-    };
-    this.querySelector('#allow-rule').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-allow').click(); };
+    this.querySelector('#add-rule-input').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-rule-btn').click(); };
 
     this.loadLists();
     this.loadRules();
@@ -1299,33 +1281,29 @@ class FiltersPage extends HTMLElement {
 
   async loadRules() {
     try {
-      const [block, allow] = await Promise.all([
-        api.get('/api/rules/blocklist'),
-        api.get('/api/rules/allowlist'),
-      ]);
-      this.renderRules('#blocklist', block, 'blocklist');
-      this.renderRules('#allowlist', allow, 'allowlist');
+      const rules = await api.get('/api/rules');
+      const el = this.querySelector('#rules-list');
+      if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
+      let html = '<table><tbody>';
+      for (const r of rules) {
+        const badge = r.rule_type === 'allow'
+          ? '<span class="badge badge-allowed">allow</span>'
+          : '<span class="badge badge-blocked">block</span>';
+        html += `<tr>
+          <td style="width:70px">${badge}</td>
+          <td style="color:var(--text-primary);font-family:var(--font-mono);font-size:0.85rem">${esc(r.rule)}</td>
+          <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}">${icons.trash}</button></td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+      el.querySelectorAll('.del-rule').forEach(btn => {
+        btn.onclick = async () => {
+          await api.del(`/api/rules/${btn.dataset.id}`);
+          this.loadRules();
+        };
+      });
     } catch (e) { console.error(e); }
-  }
-
-  renderRules(sel, rules, type) {
-    const el = this.querySelector(sel);
-    if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
-    let html = '<table><tbody>';
-    for (const r of rules) {
-      html += `<tr>
-        <td style="color:var(--text-primary)">${esc(r.rule)}</td>
-        <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}" data-type="${type}">${icons.trash}</button></td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    el.innerHTML = html;
-    el.querySelectorAll('.del-rule').forEach(btn => {
-      btn.onclick = async () => {
-        await api.del(`/api/rules/${btn.dataset.type}/${btn.dataset.id}`);
-        this.loadRules();
-      };
-    });
   }
 }
 customElements.define('filters-page', FiltersPage);

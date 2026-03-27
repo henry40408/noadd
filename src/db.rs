@@ -491,6 +491,28 @@ impl Database {
         Ok(id)
     }
 
+    pub async fn get_all_custom_rules(&self) -> Result<Vec<CustomRuleRow>, DbError> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, rule, rule_type FROM custom_rules ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map(params![], |row| {
+                        Ok(CustomRuleRow {
+                            id: row.get(0)?,
+                            rule: row.get(1)?,
+                            rule_type: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
     pub async fn get_custom_rules_by_type(
         &self,
         rule_type: &str,

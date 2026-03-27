@@ -195,32 +195,48 @@ async fn test_lists_crud() {
 }
 
 #[tokio::test]
-async fn test_rules_allowlist() {
+async fn test_rules_unified_api() {
     let (app, token) = setup().await;
     let cookie = format!("session={}", token);
 
-    // Add allowlist rule
+    // Add allow rule (@@|| prefix → auto-detected as allow)
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/rules/allowlist")
+                .uri("/api/rules")
                 .header("content-type", "application/json")
                 .header("cookie", &cookie)
-                .body(Body::from(r#"{"rule":"example.com"}"#))
+                .body(Body::from(r#"{"rule":"@@||safe.example.com^"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Get allowlist
+    // Add block rule (|| prefix → auto-detected as block)
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/rules/allowlist")
+                .method("POST")
+                .uri("/api/rules")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(r#"{"rule":"||ads.example.com^"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Get all rules
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/rules")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -233,9 +249,26 @@ async fn test_rules_allowlist() {
         .await
         .unwrap();
     let rules: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0]["rule"], "example.com");
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0]["rule"], "@@||safe.example.com^");
     assert_eq!(rules[0]["rule_type"], "allow");
+    assert_eq!(rules[1]["rule"], "||ads.example.com^");
+    assert_eq!(rules[1]["rule_type"], "block");
+
+    // Delete first rule
+    let id = rules[0]["id"].as_i64().unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/rules/{id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
