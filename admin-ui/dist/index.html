@@ -610,12 +610,59 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
 /* Responsive */
 @media (max-width: 768px) {
-  .sidebar { width: 60px; }
-  .sidebar-brand h1, .sidebar-brand .tagline, .nav-item span { display: none; }
-  .sidebar-nav { padding: 12px 4px; }
-  .nav-item { justify-content: center; padding: 10px; }
-  .main-content { margin-left: 60px; padding: 16px; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: fixed;
+    top: auto; bottom: 0; left: 0; right: 0;
+    flex-direction: row;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    z-index: 100;
+  }
+  .sidebar-brand { display: none; }
+  .sidebar-nav {
+    display: flex;
+    flex-direction: row;
+    padding: 0;
+    width: 100%;
+    justify-content: space-around;
+  }
+  .nav-item {
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 4px;
+    font-size: 0.65rem;
+    flex: 1;
+  }
+  .nav-item span { display: block; }
+  .nav-item svg { width: 20px; height: 20px; }
+  .main-content {
+    margin-left: 0;
+    padding: 16px;
+    padding-bottom: 72px;
+  }
+  .page-header h2 { font-size: 1.2rem; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .stat-card { padding: 12px; }
+  .stat-value { font-size: 1.3rem; }
+  .stat-label { font-size: 0.65rem; }
+  .card { padding: 14px; }
+  .input-row { flex-wrap: wrap; }
+  .input-row input { min-width: 0; }
+  .table-wrap { margin: 0 -14px; padding: 0 14px; }
+  table { font-size: 0.75rem; }
+  th, td { padding: 6px 8px; }
+  .pagination { flex-wrap: wrap; justify-content: center; }
+  .login-box { margin: 20px; padding: 24px; }
+
+  /* Dashboard: stack top domains / clients */
+  .dashboard-grid-2col { grid-template-columns: 1fr !important; }
+
+  /* Filters: stack block/allow columns */
+  .rules-grid { grid-template-columns: 1fr !important; }
 }
 </style>
 </head>
@@ -875,7 +922,7 @@ class DashboardPage extends HTMLElement {
         <div class="card-title">Queries (24h)</div>
         <div class="chart-container" id="chart"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="dashboard-grid-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div class="card fade-in" style="animation-delay:0.15s" id="domains-card">
           <div class="card-title">Top Queried Domains</div>
           <div id="top-domains"></div>
