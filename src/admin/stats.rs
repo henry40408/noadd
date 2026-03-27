@@ -13,6 +13,7 @@ pub struct Summary {
     pub block_ratio_today: f64,
     pub cache_hit_rate_today: f64,
     pub avg_response_ms_today: f64,
+    pub queries_1m: i64,
 }
 
 pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError> {
@@ -21,6 +22,8 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     let since_7d = now - 7 * one_day;
     let since_30d = now - 30 * one_day;
 
+    let since_1m = now - 60;
+    let (queries_1m, _) = db.count_queries_since(since_1m).await?;
     let (total_today, blocked_today) = db.count_queries_since(since_today).await?;
     let (total_7d, blocked_7d) = db.count_queries_since(since_7d).await?;
     let (total_30d, blocked_30d) = db.count_queries_since(since_30d).await?;
@@ -48,6 +51,7 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
         block_ratio_today,
         cache_hit_rate_today,
         avg_response_ms_today: avg_response_ms,
+        queries_1m,
     })
 }
 
