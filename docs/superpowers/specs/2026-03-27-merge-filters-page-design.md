@@ -18,7 +18,11 @@ Remove the `#lists` and `#rules` nav entries. Replace with a single `#filters` e
 
 2. **Filter Lists card** — Existing ListsPage content: table with enabled toggle, name, rule count, last updated. "Update All" button. "Add Custom List" form (name + URL).
 
-3. **Custom Rules card** — Existing RulesPage content: two-column grid with Blocklist (left) and Allowlist (right). Each has an input to add rules and a table of existing rules with delete buttons.
+3. **Custom Rules card** — Existing RulesPage content: two-column grid with Blocklist (left) and Allowlist (right). Each has an input to add rules and a table of existing rules with delete buttons. Below the inputs, show a syntax help section with supported formats and examples:
+   - `||ads.example.com^` — block domain and all subdomains
+   - `@@||safe.example.com^` — allow domain and all subdomains
+   - `example.com` — block exact domain
+   - `0.0.0.0 example.com` — block exact domain (hosts format)
 
 ### Navigation
 
