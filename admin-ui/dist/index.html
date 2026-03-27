@@ -952,8 +952,9 @@ class DashboardPage extends HTMLElement {
     const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
     const cacheRate = ((s.cache_hit_rate_today || 0) * 100).toFixed(1);
     const avgMs = (s.avg_response_ms_today || 0).toFixed(1);
+    const qps = (s.total_today / 86400).toFixed(1);
 
-    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs];
+    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs, qps];
     const prevVals = this._prevStats;
     this._prevStats = vals;
 
@@ -963,7 +964,8 @@ class DashboardPage extends HTMLElement {
       <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
       <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
-      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>`;
+      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>
+      <div class="stat-card" data-i="5"><div class="stat-label">Throughput</div><div class="stat-value accent">${qps}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div></div>`;
 
     // Flash cards that changed (skip on first render)
     if (prevVals) {
