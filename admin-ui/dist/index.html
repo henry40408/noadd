@@ -599,6 +599,37 @@ input:focus, select:focus { border-color: var(--border-focus); }
   transition: none;
 }
 
+.show-mobile { display: none; }
+
+.log-card {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.log-card:last-child { border-bottom: none; }
+.log-card-row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.log-card-domain {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-card-row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -665,7 +696,8 @@ input:focus, select:focus { border-color: var(--border-focus); }
   .pagination { flex-wrap: wrap; justify-content: center; }
   .login-box { margin: 20px; padding: 24px; }
 
-  .hide-mobile { display: none; }
+  .hide-mobile, .hide-mobile-block { display: none !important; }
+  .show-mobile { display: block !important; }
   .truncate-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Dashboard: stack top domains / clients */
@@ -1152,9 +1184,10 @@ class LogsPage extends HTMLElement {
         <button class="btn btn-danger btn-sm" id="clear-logs">${icons.trash} Clear All</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="table-wrap"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th class="hide-mobile">Type</th><th class="hide-mobile">Client</th><th>Status</th><th></th><th class="hide-mobile">Source</th><th class="hide-mobile">Token</th><th class="hide-mobile">ms</th>
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>Token</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
+        <div id="log-cards" class="show-mobile"></div>
         <div class="pagination" id="log-pagination"></div>
       </div>`;
 
@@ -1187,6 +1220,7 @@ class LogsPage extends HTMLElement {
   }
 
   renderLogs(logs) {
+    // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
       body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
@@ -1194,17 +1228,38 @@ class LogsPage extends HTMLElement {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
         <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div></td>
-        <td class="hide-mobile">${esc(l.query_type)}</td>
-        <td class="hide-mobile">${esc(l.client_ip)}</td>
+        <td>${esc(l.query_type)}</td>
+        <td>${esc(l.client_ip)}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td class="hide-mobile">${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td class="hide-mobile">${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td class="hide-mobile">${l.response_ms}</td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td>${l.response_ms}</td>
       </tr>`).join('');
     }
 
-    body.querySelectorAll('.log-action').forEach(btn => {
+    // Mobile card list
+    const cards = this.querySelector('#log-cards');
+    if (!logs.length) {
+      cards.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>';
+    } else {
+      cards.innerHTML = logs.map(l => `<div class="log-card">
+        <div class="log-card-row1">
+          <span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span>
+          <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
+          <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
+        </div>
+        <div class="log-card-row2">
+          <span>${timeAgo(l.timestamp)}</span>
+          <span>${esc(l.query_type)}</span>
+          <span>${l.cached ? 'cached' : l.upstream ? esc(l.upstream) : ''}</span>
+          <span>${l.response_ms}ms</span>
+        </div>
+      </div>`).join('');
+    }
+
+    // Bind action buttons (both table and cards)
+    this.querySelectorAll('.log-action').forEach(btn => {
       btn.onclick = async () => {
         const domain = btn.dataset.domain;
         const rule = btn.dataset.blocked === 'true' ? `@@||${domain}^` : `||${domain}^`;
