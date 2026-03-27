@@ -12,6 +12,12 @@ use super::strategy::UpstreamStrategy;
 /// EMA smoothing factor. 0.3 means 30% weight for new observations.
 const EMA_ALPHA: f64 = 0.3;
 
+/// Minimal DNS query for "." A record (root), used for health checks and probing.
+const ROOT_QUERY: [u8; 17] = [
+    0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+];
+
 /// Configuration for upstream DNS servers.
 #[derive(Debug, Clone)]
 pub struct UpstreamConfig {
@@ -108,12 +114,16 @@ impl UpstreamForwarder {
 
     /// Update the EMA latency for a server.
     pub fn update_latency(&self, server: &str, ms: f64) {
+        use std::collections::hash_map::Entry;
         let mut lat = self.latencies.lock().unwrap();
-        let ema = lat.entry(server.to_string()).or_insert(ms);
-        if (*ema - ms).abs() < f64::EPSILON && *ema == ms {
-            // First observation, already set by or_insert
-        } else {
-            *ema = EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * *ema;
+        match lat.entry(server.to_string()) {
+            Entry::Vacant(e) => {
+                e.insert(ms);
+            }
+            Entry::Occupied(mut e) => {
+                let ema = e.get_mut();
+                *ema = EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * *ema;
+            }
         }
     }
 
@@ -171,17 +181,12 @@ impl UpstreamForwarder {
     /// Health check all configured upstream servers.
     /// Returns a list of (server, status, latency_ms).
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
-        let query: [u8; 17] = [
-            0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
-        ];
-
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let mut results = Vec::new();
 
         for server in &self.config.servers {
             let start = std::time::Instant::now();
-            let ok = self.try_forward(server, &query, timeout).await.is_ok();
+            let ok = self.try_forward(server, &ROOT_QUERY, timeout).await.is_ok();
             let ms = start.elapsed().as_millis() as u64;
             results.push((server.clone(), ok, ms));
         }
@@ -191,16 +196,11 @@ impl UpstreamForwarder {
 
     /// Probe all servers and update EMA latencies. Used by background task.
     pub async fn probe_all(&self) {
-        let query: [u8; 17] = [
-            0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
-        ];
-
         let timeout = Duration::from_millis(self.config.timeout_ms);
 
         for server in &self.config.servers {
             let start = std::time::Instant::now();
-            if self.try_forward(server, &query, timeout).await.is_ok() {
+            if self.try_forward(server, &ROOT_QUERY, timeout).await.is_ok() {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 self.update_latency(server, ms);
             }
