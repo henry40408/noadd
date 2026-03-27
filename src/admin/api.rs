@@ -616,10 +616,12 @@ async fn filter_check(
                 "list": list,
             })))
         }
-        crate::filter::engine::FilterResult::Allowed => {
-            Ok(Json(serde_json::json!({
-                "action": "allowed",
-            })))
+        crate::filter::engine::FilterResult::Allowed { rule } => {
+            let mut json = serde_json::json!({ "action": "allowed" });
+            if let Some(r) = rule {
+                json["rule"] = serde_json::Value::String(r);
+            }
+            Ok(Json(json))
         }
     }
 }

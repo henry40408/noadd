@@ -1237,7 +1237,10 @@ class FiltersPage extends HTMLElement {
             &middot; List: <code style="color:var(--text-primary)">${esc(res.list)}</code>
           </span>`;
       } else {
-        el.innerHTML = '<span class="badge badge-allowed">Allowed</span>';
+        let detail = res.rule
+          ? ` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code></span>`
+          : '';
+        el.innerHTML = '<span class="badge badge-allowed">Allowed</span>' + detail;
       }
     } catch (e) {
       el.innerHTML = '<span style="color:var(--red)">Error checking domain</span>';
