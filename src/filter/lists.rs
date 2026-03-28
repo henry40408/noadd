@@ -25,7 +25,7 @@ pub const DEFAULT_LISTS: &[(&str, &str)] = &[
         "Peter Lowe's List",
         "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
     ),
-    ("OISD Basic", "https://abp.oisd.nl/basic/"),
+    ("OISD Small", "https://small.oisd.nl/"),
     (
         "Steven Black Unified Hosts",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",

@@ -12,7 +12,7 @@ const LISTS: &[(&str, &str)] = &[
         "peter_lowe",
         "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
     ),
-    ("oisd_basic", "https://abp.oisd.nl/basic/"),
+    ("oisd_small", "https://small.oisd.nl/"),
     (
         "steven_black",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
