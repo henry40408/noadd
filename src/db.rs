@@ -458,6 +458,21 @@ impl Database {
         Ok(rows)
     }
 
+    pub async fn update_filter_list(&self, id: i64, name: &str, url: &str) -> Result<(), DbError> {
+        let name = name.to_string();
+        let url = url.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE filter_lists SET name = ?1, url = ?2 WHERE id = ?3",
+                    params![name, url, id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_filter_list_enabled(&self, id: i64, enabled: bool) -> Result<(), DbError> {
         self.conn
             .call(move |conn| {
