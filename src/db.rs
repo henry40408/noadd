@@ -458,12 +458,7 @@ impl Database {
         Ok(rows)
     }
 
-    pub async fn update_filter_list(
-        &self,
-        id: i64,
-        name: &str,
-        url: &str,
-    ) -> Result<(), DbError> {
+    pub async fn update_filter_list(&self, id: i64, name: &str, url: &str) -> Result<(), DbError> {
         let name = name.to_string();
         let url = url.to_string();
         self.conn
