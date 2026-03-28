@@ -853,11 +853,46 @@ async fn get_stats_top_upstreams(
 
 // --- Apple mobileconfig ---
 
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MobileConfigProfile {
+    payload_content: Vec<MobileConfigDnsPayload>,
+    payload_display_name: String,
+    payload_identifier: String,
+    payload_type: String,
+    #[serde(rename = "PayloadUUID")]
+    payload_uuid: String,
+    payload_version: u32,
+    payload_description: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MobileConfigDnsPayload {
+    #[serde(rename = "DNSSettings")]
+    dns_settings: DnsSettings,
+    payload_display_name: String,
+    payload_identifier: String,
+    payload_type: String,
+    #[serde(rename = "PayloadUUID")]
+    payload_uuid: String,
+    payload_version: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct DnsSettings {
+    #[serde(rename = "DNSProtocol")]
+    dns_protocol: String,
+    server_addresses: Vec<String>,
+    #[serde(rename = "ServerURL")]
+    server_url: String,
+}
+
 async fn get_mobileconfig(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Validate token exists
     state
         .db
         .validate_doh_token(&token)
@@ -865,7 +900,6 @@ async fn get_mobileconfig(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Read public URL from server-side settings
     let public_url = state
         .db
         .get_setting("public_url")
@@ -880,65 +914,40 @@ async fn get_mobileconfig(
     let base = public_url.trim_end_matches('/');
     let server_url = format!("{base}/dns-query/{token}");
     let profile_id = format!("com.noadd.dns.{token}");
-    let payload_uuid = format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        crc32(&format!("{token}-payload")),
-        0x4e6f,
-        0x4164,
-        0x6444,
-        crc32(&token) as u64
-    );
-    let profile_uuid = format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        crc32(&format!("{token}-profile")),
-        0x6e6f,
-        0x6164,
-        0x6400,
-        crc32(&format!("{token}-root")) as u64
-    );
+    let payload_uuid = make_uuid(&format!("{token}-payload"));
+    let profile_uuid = make_uuid(&format!("{token}-profile"));
 
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>PayloadContent</key>
-    <array>
-        <dict>
-            <key>DNSSettings</key>
-            <dict>
-                <key>DNSProtocol</key>
-                <string>HTTPS</string>
-                <key>ServerURL</key>
-                <string>{server_url}</string>
-            </dict>
-            <key>PayloadDisplayName</key>
-            <string>noadd DNS ({token})</string>
-            <key>PayloadIdentifier</key>
-            <string>{profile_id}.dns</string>
-            <key>PayloadType</key>
-            <string>com.apple.dnsSettings.managed</string>
-            <key>PayloadUUID</key>
-            <string>{payload_uuid}</string>
-            <key>PayloadVersion</key>
-            <integer>1</integer>
-        </dict>
-    </array>
-    <key>PayloadDisplayName</key>
-    <string>noadd DNS ({token})</string>
-    <key>PayloadIdentifier</key>
-    <string>{profile_id}</string>
-    <key>PayloadType</key>
-    <string>Configuration</string>
-    <key>PayloadUUID</key>
-    <string>{profile_uuid}</string>
-    <key>PayloadVersion</key>
-    <integer>1</integer>
-    <key>PayloadDescription</key>
-    <string>Configures DNS-over-HTTPS to use noadd ad-blocking DNS server.</string>
-</dict>
-</plist>"#
-    );
+    let bootstrap_ips: Vec<String> = state
+        .forwarder
+        .server_order()
+        .iter()
+        .filter_map(|s| s.split(':').next().map(String::from))
+        .collect();
+
+    let profile = MobileConfigProfile {
+        payload_content: vec![MobileConfigDnsPayload {
+            dns_settings: DnsSettings {
+                dns_protocol: "HTTPS".into(),
+                server_addresses: bootstrap_ips,
+                server_url,
+            },
+            payload_display_name: format!("noadd DNS ({token})"),
+            payload_identifier: format!("{profile_id}.dns"),
+            payload_type: "com.apple.dnsSettings.managed".into(),
+            payload_uuid,
+            payload_version: 1,
+        }],
+        payload_display_name: format!("noadd DNS ({token})"),
+        payload_identifier: profile_id,
+        payload_type: "Configuration".into(),
+        payload_uuid: profile_uuid,
+        payload_version: 1,
+        payload_description: "Configures DNS-over-HTTPS to use noadd ad-blocking DNS server."
+            .into(),
+    };
+
+    let mut xml = Vec::new();
+    plist::to_writer_xml(&mut xml, &profile).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -957,20 +966,11 @@ async fn get_mobileconfig(
     Ok((StatusCode::OK, headers, xml))
 }
 
-/// Simple CRC32 for deterministic UUID generation from token strings.
-fn crc32(s: &str) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for byte in s.bytes() {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+/// Generate a deterministic UUID v5 from a seed string.
+///
+/// Uses the URL namespace since these UUIDs identify DoH URL-based resources.
+fn make_uuid(seed: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes()).to_string()
 }
 
 // --- Logs ---
