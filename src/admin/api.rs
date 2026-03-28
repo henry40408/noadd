@@ -884,7 +884,6 @@ struct MobileConfigDnsPayload {
 struct DnsSettings {
     #[serde(rename = "DNSProtocol")]
     dns_protocol: String,
-    server_addresses: Vec<String>,
     #[serde(rename = "ServerURL")]
     server_url: String,
 }
@@ -917,18 +916,10 @@ async fn get_mobileconfig(
     let payload_uuid = make_uuid(&format!("{token}-payload"));
     let profile_uuid = make_uuid(&format!("{token}-profile"));
 
-    let bootstrap_ips: Vec<String> = state
-        .forwarder
-        .server_order()
-        .iter()
-        .filter_map(|s| s.split(':').next().map(String::from))
-        .collect();
-
     let profile = MobileConfigProfile {
         payload_content: vec![MobileConfigDnsPayload {
             dns_settings: DnsSettings {
                 dns_protocol: "HTTPS".into(),
-                server_addresses: bootstrap_ips,
                 server_url,
             },
             payload_display_name: format!("noadd DNS ({token})"),
