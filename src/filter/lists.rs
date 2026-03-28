@@ -107,6 +107,7 @@ impl ListManager {
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .user_agent(crate::user_agent())
             .build()?;
 
         let content = client.get(&list.url).send().await?.text().await?;

@@ -463,6 +463,7 @@ async fn check_list_url(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent(crate::user_agent())
         .build()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
