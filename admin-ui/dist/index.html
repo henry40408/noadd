@@ -639,6 +639,50 @@ input:focus, select:focus { border-color: var(--border-focus); }
   color: var(--text-dim);
 }
 
+/* Dialog */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 90%;
+  max-width: 480px;
+}
+.dialog-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+.dialog label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  margin-top: 12px;
+}
+.dialog input {
+  width: 100%;
+}
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.dialog-health {
+  margin-top: 12px;
+  font-size: 0.8rem;
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -1425,7 +1469,10 @@ class FiltersPage extends HTMLElement {
         <td style="color:var(--text-primary)">${esc(l.name)}</td>
         <td>${formatNum(l.rule_count)}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
-        <td><button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash} Delete</button></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${esc(l.name)}" data-url="${esc(l.url)}">Edit</button>
+          <button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
+        </td>
       </tr>`).join('');
 
       // Mobile cards
@@ -1438,6 +1485,7 @@ class FiltersPage extends HTMLElement {
             <div class="toggle-thumb"></div>
           </label>
           <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${esc(l.name)}</span>
+          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${esc(l.name)}" data-url="${esc(l.url)}" style="flex-shrink:0">Edit</button>
           <button class="btn btn-danger btn-sm del-list" data-id="${l.id}" style="flex-shrink:0">${icons.trash}</button>
         </div>
         <div class="log-card-row2">
@@ -1461,7 +1509,70 @@ class FiltersPage extends HTMLElement {
           }
         };
       });
+
+      this.querySelectorAll('.edit-list').forEach(btn => {
+        btn.onclick = () => this.showEditDialog(btn.dataset.id, btn.dataset.name, btn.dataset.url);
+      });
     } catch (e) { console.error(e); }
+  }
+
+  showEditDialog(id, name, url) {
+    // Remove existing dialog if any
+    const existing = document.querySelector('.dialog-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="dialog">
+        <div class="dialog-title">Edit Filter List</div>
+        <label for="edit-name">Name</label>
+        <input type="text" id="edit-name" value="${esc(name)}">
+        <label for="edit-url">URL</label>
+        <input type="url" id="edit-url" value="${esc(url)}">
+        <div class="dialog-health" id="edit-health"></div>
+        <div class="dialog-actions">
+          <button class="btn btn-sm" id="edit-check">${icons.refresh} Check URL</button>
+          <span style="flex:1"></span>
+          <button class="btn btn-sm" id="edit-cancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="edit-save">Save</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#edit-cancel').onclick = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    overlay.querySelector('#edit-check').onclick = async () => {
+      const checkUrl = overlay.querySelector('#edit-url').value.trim();
+      const healthEl = overlay.querySelector('#edit-health');
+      const btn = overlay.querySelector('#edit-check');
+      btn.disabled = true;
+      btn.innerHTML = icons.refresh + ' Checking...';
+      try {
+        const res = await api.post(`/api/lists/${id}/check`, { url: checkUrl || undefined });
+        if (res.ok) {
+          const size = res.content_length > 1024 ? (res.content_length / 1024).toFixed(0) + ' KB' : res.content_length + ' B';
+          healthEl.innerHTML = `<span class="badge badge-allowed">OK</span> <span style="color:var(--text-secondary)">HTTP ${res.status} &middot; ${size}</span>`;
+        } else {
+          healthEl.innerHTML = `<span class="badge badge-blocked">FAIL</span> <span style="color:var(--text-secondary)">${esc(res.error || 'HTTP ' + res.status)}</span>`;
+        }
+      } catch (e) {
+        healthEl.innerHTML = '<span class="badge badge-blocked">Error</span>';
+      }
+      btn.disabled = false;
+      btn.innerHTML = icons.refresh + ' Check URL';
+    };
+
+    overlay.querySelector('#edit-save').onclick = async () => {
+      const newName = overlay.querySelector('#edit-name').value.trim();
+      const newUrl = overlay.querySelector('#edit-url').value.trim();
+      if (!newName || !newUrl) return;
+      await api.put(`/api/lists/${id}`, { name: newName, url: newUrl });
+      overlay.remove();
+      this.loadLists();
+    };
   }
 
   async loadRules() {
