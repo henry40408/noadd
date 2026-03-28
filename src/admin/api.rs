@@ -72,6 +72,7 @@ pub fn admin_router(
         // Lists
         .route("/api/lists", get(get_lists).post(add_list))
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
+        .route("/api/lists/{id}/check", post(check_list_url))
         .route("/api/lists/update", post(trigger_list_update))
         // Rules
         .route("/api/rules", get(get_rules).post(add_rule))
@@ -391,7 +392,9 @@ async fn add_list(
 
 #[derive(Deserialize)]
 pub struct UpdateListRequest {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
+    pub name: Option<String>,
+    pub url: Option<String>,
 }
 
 async fn update_list(
@@ -402,11 +405,21 @@ async fn update_list(
 ) -> Result<StatusCode, StatusCode> {
     require_auth(&state, &jar)?;
 
-    state
-        .db
-        .update_filter_list_enabled(id, body.enabled)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(enabled) = body.enabled {
+        state
+            .db
+            .update_filter_list_enabled(id, enabled)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    if let (Some(name), Some(url)) = (body.name.as_deref(), body.url.as_deref()) {
+        state
+            .db
+            .update_filter_list(id, name, url)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
     manager
@@ -415,6 +428,61 @@ async fn update_list(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct CheckListUrlRequest {
+    pub url: Option<String>,
+}
+
+async fn check_list_url(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    body: Option<Json<CheckListUrlRequest>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_auth(&state, &jar)?;
+
+    // Use provided URL or fetch from DB
+    let url = if let Some(Json(b)) = body
+        && let Some(u) = b.url
+    {
+        u
+    } else {
+        let lists = state
+            .db
+            .get_filter_lists()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        lists
+            .into_iter()
+            .find(|l| l.id == id)
+            .map(|l| l.url)
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let content_length = resp.content_length().unwrap_or(0);
+            Ok(Json(serde_json::json!({
+                "ok": resp.status().is_success(),
+                "status": status,
+                "content_length": content_length,
+                "url": url,
+            })))
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "url": url,
+        }))),
+    }
 }
 
 async fn delete_list(
