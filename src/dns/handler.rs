@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
@@ -14,6 +14,9 @@ use tracing::warn;
 use crate::cache::{CacheKey, DnsCache};
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
+
+/// Default TTL (seconds) used when no answer records are present in the response.
+const DEFAULT_TTL_SECS: u64 = 300;
 
 /// Errors that can occur during DNS query handling.
 #[derive(Debug, Error)]
@@ -110,15 +113,16 @@ impl DnsHandler {
                     if let Some(mut cached) = self.cache.get(&cache_key).await {
                         // Patch DNS ID to match the query
                         let id_bytes = query_id.to_be_bytes();
-                        if cached.len() >= 2 {
-                            cached[0] = id_bytes[0];
-                            cached[1] = id_bytes[1];
+                        if cached.bytes.len() >= 2 {
+                            cached.bytes[0] = id_bytes[0];
+                            cached.bytes[1] = id_bytes[1];
                         }
-                        (cached, "allowed".to_string(), true, None, None, None)
+                        (cached.bytes, "allowed".to_string(), true, None, None, None)
                     } else {
                         // 4. Forward upstream
                         let (response, upstream_addr) = self.forwarder.forward(query_bytes).await?;
-                        self.cache.insert(cache_key, response.clone()).await;
+                        let ttl = extract_min_ttl(&response);
+                        self.cache.insert(cache_key, response.clone(), ttl).await;
                         (
                             response,
                             "allowed".to_string(),
@@ -193,6 +197,33 @@ fn build_blocked_response(
     }
 
     Ok(response.to_vec()?)
+}
+
+/// Extract the minimum TTL from a DNS response as a `Duration`.
+///
+/// Examines the answer section; if no answers are present, falls back to the
+/// SOA minimum field from the authority section, or `DEFAULT_TTL_SECS`.
+pub fn extract_min_ttl(response_bytes: &[u8]) -> Duration {
+    let ttl_secs = Message::from_bytes(response_bytes)
+        .ok()
+        .and_then(|msg| {
+            // Try answer section first
+            let from_answers = msg.answers().iter().map(|r| r.ttl()).min();
+            if from_answers.is_some() {
+                return from_answers;
+            }
+            // Fall back to SOA minimum in authority section
+            msg.name_servers()
+                .iter()
+                .filter_map(|r| match r.data() {
+                    RData::SOA(soa) => Some(soa.minimum()),
+                    _ => None,
+                })
+                .min()
+        })
+        .unwrap_or(DEFAULT_TTL_SECS as u32);
+
+    Duration::from_secs(ttl_secs as u64)
 }
 
 /// Returns the current Unix timestamp in milliseconds.
