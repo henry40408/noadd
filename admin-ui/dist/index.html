@@ -1191,10 +1191,10 @@ class DashboardPage extends HTMLElement {
     if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
     this._prevClients = sig;
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    let html = '<table><thead><tr><th>Client</th><th class="hide-mobile">Token</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      const token = d.doh_token ? '<span style="color:var(--accent)">' + esc(d.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>';
-      html += `<tr><td>${esc(d.client_ip)}</td><td class="hide-mobile">${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      const token = d.doh_token ? `<br><span style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</span>` : '';
+      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
