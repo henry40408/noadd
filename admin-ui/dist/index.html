@@ -1239,7 +1239,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>Token</th><th>ms</th>
+          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div id="log-cards" class="show-mobile"></div>
         <div class="pagination" id="log-pagination"></div>
@@ -1277,17 +1277,16 @@ class LogsPage extends HTMLElement {
     // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
         <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div></td>
         <td>${esc(l.query_type)}</td>
-        <td>${esc(l.client_ip)}</td>
+        <td>${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
         <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td>${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
     }
@@ -1307,6 +1306,7 @@ class LogsPage extends HTMLElement {
           <span>${timeAgo(l.timestamp)}</span>
           <span>${esc(l.query_type)}</span>
           <span>${l.cached ? 'cached' : l.upstream ? esc(l.upstream) : ''}</span>
+          ${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : ''}
           <span>${l.response_ms}ms</span>
         </div>
       </div>`).join('');
