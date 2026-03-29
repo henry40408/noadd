@@ -972,6 +972,7 @@ pub struct LogsQuery {
     pub offset: Option<i64>,
     pub search: Option<String>,
     pub blocked: Option<bool>,
+    pub token: Option<String>,
 }
 
 async fn get_logs(
@@ -985,12 +986,22 @@ async fn get_logs(
     let offset = query.offset.unwrap_or(0);
     let logs = state
         .db
-        .query_logs(limit, offset, query.search.as_deref(), query.blocked)
+        .query_logs(
+            limit,
+            offset,
+            query.search.as_deref(),
+            query.blocked,
+            query.token.as_deref(),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let total = state
         .db
-        .count_logs(query.search.as_deref(), query.blocked)
+        .count_logs(
+            query.search.as_deref(),
+            query.blocked,
+            query.token.as_deref(),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

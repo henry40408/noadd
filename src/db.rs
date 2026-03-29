@@ -309,8 +309,10 @@ impl Database {
         offset: i64,
         search: Option<&str>,
         blocked: Option<bool>,
+        token: Option<&str>,
     ) -> Result<Vec<QueryLogEntry>, DbError> {
         let search = search.map(|s| s.to_string());
+        let token = token.map(|s| s.to_string());
         let rows = self
             .conn
             .call(move |conn| {
@@ -319,11 +321,15 @@ impl Database {
 
                 if let Some(ref s) = search {
                     sql.push_str(" AND domain LIKE ?");
-                    param_values.push(Box::new(format!("%{}%", s)));
+                    param_values.push(Box::new(format!("%{s}%")));
                 }
                 if let Some(b) = blocked {
                     sql.push_str(" AND blocked = ?");
                     param_values.push(Box::new(b as i64));
+                }
+                if let Some(ref t) = token {
+                    sql.push_str(" AND doh_token = ?");
+                    param_values.push(Box::new(t.clone()));
                 }
                 sql.push_str(" ORDER BY timestamp DESC LIMIT ? OFFSET ?");
                 param_values.push(Box::new(limit));
@@ -358,8 +364,10 @@ impl Database {
         &self,
         search: Option<&str>,
         blocked: Option<bool>,
+        token: Option<&str>,
     ) -> Result<i64, DbError> {
         let search = search.map(|s| s.to_string());
+        let token = token.map(|s| s.to_string());
         let count = self
             .conn
             .call(move |conn| {
@@ -373,6 +381,10 @@ impl Database {
                 if let Some(b) = blocked {
                     sql.push_str(" AND blocked = ?");
                     param_values.push(Box::new(b as i64));
+                }
+                if let Some(ref t) = token {
+                    sql.push_str(" AND doh_token = ?");
+                    param_values.push(Box::new(t.clone()));
                 }
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =

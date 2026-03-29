@@ -79,7 +79,7 @@ async fn test_full_query_pipeline_block() {
     logger_handle.await.unwrap();
 
     // 9. Verify query log in DB has blocked=true and domain="ads.blocked.com"
-    let logs = db.query_logs(10, 0, None, None).await.unwrap();
+    let logs = db.query_logs(10, 0, None, None, None).await.unwrap();
     assert!(!logs.is_empty(), "should have at least one log entry");
     let log = &logs[0];
     assert_eq!(log.domain, "ads.blocked.com");
@@ -123,7 +123,7 @@ async fn test_full_query_pipeline_allow() {
     drop(handler);
     logger_handle.await.unwrap();
 
-    let logs = db.query_logs(10, 0, None, None).await.unwrap();
+    let logs = db.query_logs(10, 0, None, None, None).await.unwrap();
     assert!(!logs.is_empty(), "should have at least one log entry");
     let log = &logs[0];
     assert_eq!(log.domain, "example.com");

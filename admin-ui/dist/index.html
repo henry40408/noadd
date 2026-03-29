@@ -1223,6 +1223,7 @@ class LogsPage extends HTMLElement {
     this.limit = 50;
     this.search = '';
     this.actionFilter = '';
+    this.tokenFilter = '';
   }
 
   connectedCallback() {
@@ -1234,6 +1235,9 @@ class LogsPage extends HTMLElement {
           <option value="">All</option>
           <option value="allowed">Allowed</option>
           <option value="blocked">Blocked</option>
+        </select>
+        <select id="log-token">
+          <option value="">All Tokens</option>
         </select>
         <button class="btn btn-danger btn-sm" id="clear-logs">${icons.trash} Clear All</button>
       </div>
@@ -1253,6 +1257,10 @@ class LogsPage extends HTMLElement {
     this.querySelector('#log-action').onchange = (e) => {
       this.actionFilter = e.target.value; this.offset = 0; this.load();
     };
+    this.querySelector('#log-token').onchange = (e) => {
+      this.tokenFilter = e.target.value; this.offset = 0; this.load();
+    };
+    this.loadTokens();
     this.querySelector('#clear-logs').onclick = async () => {
       if (confirm('Delete all query logs?')) {
         await api.del('/api/logs');
@@ -1267,6 +1275,7 @@ class LogsPage extends HTMLElement {
       let url = `/api/logs?limit=${this.limit}&offset=${this.offset}`;
       if (this.search) url += `&search=${encodeURIComponent(this.search)}`;
       if (this.actionFilter) url += `&blocked=${this.actionFilter === 'blocked'}`;
+      if (this.tokenFilter) url += `&token=${encodeURIComponent(this.tokenFilter)}`;
       const data = await api.get(url);
       this.total = data.total || 0;
       this.renderLogs(data.logs || []);
@@ -1334,6 +1343,18 @@ class LogsPage extends HTMLElement {
       <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
     pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
     pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
+  }
+  async loadTokens() {
+    try {
+      const tokens = await api.get('/api/doh-tokens');
+      const sel = this.querySelector('#log-token');
+      for (const t of tokens) {
+        const opt = document.createElement('option');
+        opt.value = t.token;
+        opt.textContent = t.token;
+        sel.appendChild(opt);
+      }
+    } catch (e) { console.error(e); }
   }
 }
 customElements.define('logs-page', LogsPage);

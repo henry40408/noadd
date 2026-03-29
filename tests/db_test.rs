@@ -83,19 +83,19 @@ async fn test_insert_and_query_logs() {
     db.insert_query_logs(&entries).await.unwrap();
 
     // Query all
-    let logs = db.query_logs(100, 0, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, None, None, None).await.unwrap();
     assert_eq!(logs.len(), 2);
     // Should be ordered by timestamp desc
     assert_eq!(logs[0].domain, "ads.tracker.com");
     assert_eq!(logs[1].domain, "example.com");
 
     // Filter by blocked
-    let blocked = db.query_logs(100, 0, None, Some(true)).await.unwrap();
+    let blocked = db.query_logs(100, 0, None, Some(true), None).await.unwrap();
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0].domain, "ads.tracker.com");
 
     // Filter by search
-    let searched = db.query_logs(100, 0, Some("example"), None).await.unwrap();
+    let searched = db.query_logs(100, 0, Some("example"), None, None).await.unwrap();
     assert_eq!(searched.len(), 1);
     assert_eq!(searched[0].domain, "example.com");
 }
@@ -119,16 +119,16 @@ async fn test_query_logs_pagination() {
     }
     db.insert_query_logs(&entries).await.unwrap();
 
-    let page1 = db.query_logs(10, 0, None, None).await.unwrap();
+    let page1 = db.query_logs(10, 0, None, None, None).await.unwrap();
     assert_eq!(page1.len(), 10);
     // Ordered desc: domain24, domain23, ...
     assert_eq!(page1[0].domain, "domain24.com");
 
-    let page2 = db.query_logs(10, 10, None, None).await.unwrap();
+    let page2 = db.query_logs(10, 10, None, None, None).await.unwrap();
     assert_eq!(page2.len(), 10);
     assert_eq!(page2[0].domain, "domain14.com");
 
-    let page3 = db.query_logs(10, 20, None, None).await.unwrap();
+    let page3 = db.query_logs(10, 20, None, None, None).await.unwrap();
     assert_eq!(page3.len(), 5);
 }
 
