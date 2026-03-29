@@ -9,11 +9,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hickory_proto::op::Message;
-use hickory_proto::serialize::binary::BinDecodable;
 use serde::Deserialize;
 
-use super::handler::DnsHandler;
+use super::handler::{self, DnsHandler};
 use crate::db::Database;
 
 const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
@@ -151,7 +149,7 @@ async fn handle_dns_query(
 ) -> Response {
     match handler.handle(query_bytes, client_ip, doh_token).await {
         Ok(response) => {
-            let min_ttl = extract_min_ttl(&response);
+            let min_ttl = handler::extract_min_ttl(&response).as_secs();
             let mut resp = response.into_response();
             resp.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
@@ -170,13 +168,4 @@ async fn handle_dns_query(
         )
             .into_response(),
     }
-}
-
-/// Extract the minimum TTL from the answer section of a DNS response.
-/// Returns 0 if the response cannot be parsed or has no answers.
-fn extract_min_ttl(response_bytes: &[u8]) -> u32 {
-    Message::from_bytes(response_bytes)
-        .ok()
-        .and_then(|msg| msg.answers().iter().map(|r| r.ttl()).min())
-        .unwrap_or(0)
 }
