@@ -95,7 +95,10 @@ async fn test_insert_and_query_logs() {
     assert_eq!(blocked[0].domain, "ads.tracker.com");
 
     // Filter by search
-    let searched = db.query_logs(100, 0, Some("example"), None, None).await.unwrap();
+    let searched = db
+        .query_logs(100, 0, Some("example"), None, None)
+        .await
+        .unwrap();
     assert_eq!(searched.len(), 1);
     assert_eq!(searched[0].domain, "example.com");
 }
