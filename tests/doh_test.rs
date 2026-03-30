@@ -11,6 +11,8 @@ use hickory_proto::rr::{Name, RecordType};
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
+use hickory_proto::op::ResponseCode;
+use hickory_proto::serialize::binary::BinDecodable;
 use noadd::cache::DnsCache;
 use noadd::db::Database;
 use noadd::dns::doh::doh_router;
@@ -105,6 +107,56 @@ async fn test_doh_post_no_token() {
 
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_doh_upstream_failure_returns_servfail_not_500() {
+    // Use unreachable upstream so all forwards fail
+    let block_rules = vec![];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let config = UpstreamConfig {
+        servers: vec!["192.0.2.1:53".into()], // TEST-NET-1, unreachable
+        timeout_ms: 500,
+    };
+    let forwarder = Arc::new(UpstreamForwarder::new(config));
+    let (tx, _rx) = mpsc::channel::<QueryContext>(64);
+    let handler = Arc::new(DnsHandler::new(filter, cache, forwarder, tx));
+
+    let db = test_db().await;
+    let app = doh_router(handler, db);
+
+    let query_bytes = make_query_bytes("example.com", RecordType::A);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(Body::from(query_bytes))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    // RFC 8484 §4.2.1: MUST return HTTP 200 with DNS SERVFAIL, not HTTP 500
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/dns-message"
+    );
+
+    // Verify the DNS response is SERVFAIL
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dns_response = Message::from_bytes(&body).expect("valid DNS message");
+    assert_eq!(dns_response.response_code(), ResponseCode::ServFail);
+    assert_eq!(dns_response.id(), 1234);
 }
 
 #[tokio::test]
