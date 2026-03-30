@@ -1243,7 +1243,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Time</th><th>Domain</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>ms</th>
+          <th>Time</th><th>Query</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div id="log-cards" class="show-mobile"></div>
         <div class="pagination" id="log-pagination"></div>
@@ -1290,7 +1290,7 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div></td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim)">→ ' + esc(l.result) + '</div>' : ''}</td>
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
@@ -1311,6 +1311,7 @@ class LogsPage extends HTMLElement {
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
           <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
+        ${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
           <span>${timeAgo(l.timestamp)}</span>
           <span>${esc(l.query_type)}</span>

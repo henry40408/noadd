@@ -88,6 +88,7 @@ fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
         response_ms: ctx.response_time_ms,
         upstream: ctx.upstream,
         doh_token: ctx.doh_token,
+        result: ctx.result,
     }
 }
 
