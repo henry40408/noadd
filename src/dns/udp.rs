@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, info};
 
-use super::handler::DnsHandler;
+use super::handler::{DnsHandler, build_servfail};
 
 /// Maximum UDP DNS message size (RFC 6891 recommends 4096 for EDNS, but
 /// standard DNS caps at 512; we use 4096 to support EDNS).
@@ -30,15 +30,15 @@ pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
         let socket = Arc::clone(&socket);
 
         tokio::spawn(async move {
-            match handler.handle(&buf, src.ip(), None).await {
-                Ok(response) => {
-                    if let Err(e) = socket.send_to(&response, src).await {
-                        debug!("UDP send_to error for {src}: {e}");
-                    }
-                }
+            let response = match handler.handle(&buf, src.ip(), None).await {
+                Ok(response) => response,
                 Err(e) => {
                     debug!("DNS handler error for UDP query from {src}: {e}");
+                    build_servfail(&buf)
                 }
+            };
+            if let Err(e) = socket.send_to(&response, src).await {
+                debug!("UDP send_to error for {src}: {e}");
             }
         });
     }

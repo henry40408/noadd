@@ -156,7 +156,7 @@ async fn handle_dns_query(
             tracing::warn!("DNS handler error: {e}");
             // RFC 8484 §4.2.1: return HTTP 200 with DNS SERVFAIL, not HTTP 500.
             // HTTP 500 causes iOS to penalize/disable the resolver entirely.
-            let servfail = build_servfail(query_bytes);
+            let servfail = handler::build_servfail(query_bytes);
             dns_response(servfail, 0)
         }
     }
@@ -174,39 +174,4 @@ fn dns_response(body: Vec<u8>, max_age: u64) -> Response {
             .unwrap_or(HeaderValue::from_static("max-age=0")),
     );
     resp
-}
-
-/// Build a DNS SERVFAIL response from the original query bytes.
-fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
-    use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
-    use hickory_proto::serialize::binary::BinDecodable;
-
-    // Try to parse the query to preserve ID and question section
-    if let Ok(query) = Message::from_bytes(query_bytes) {
-        let mut response = Message::new();
-        response.set_id(query.id());
-        response.set_message_type(MessageType::Response);
-        response.set_op_code(OpCode::Query);
-        response.set_response_code(ResponseCode::ServFail);
-        response.set_recursion_desired(true);
-        response.set_recursion_available(true);
-        for q in query.queries() {
-            response.add_query(q.clone());
-        }
-        if let Ok(bytes) = response.to_vec() {
-            return bytes;
-        }
-    }
-
-    // Fallback: minimal SERVFAIL with ID from raw bytes
-    let id0 = query_bytes.first().copied().unwrap_or(0);
-    let id1 = query_bytes.get(1).copied().unwrap_or(0);
-    vec![
-        id0, id1, // ID
-        0x81, 0x82, // Flags: QR=1, RD=1, RA=1, RCODE=SERVFAIL(2)
-        0x00, 0x00, // QDCOUNT: 0
-        0x00, 0x00, // ANCOUNT: 0
-        0x00, 0x00, // NSCOUNT: 0
-        0x00, 0x00, // ARCOUNT: 0
-    ]
 }

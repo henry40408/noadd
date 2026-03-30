@@ -226,6 +226,34 @@ pub fn extract_min_ttl(response_bytes: &[u8]) -> Duration {
     Duration::from_secs(ttl_secs as u64)
 }
 
+/// Build a DNS SERVFAIL response from raw query bytes.
+///
+/// Tries to parse the query to preserve ID and question section. Falls back
+/// to a minimal SERVFAIL with just the ID copied from raw bytes.
+pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
+    if let Ok(query) = Message::from_bytes(query_bytes) {
+        let mut response = Message::new();
+        response.set_id(query.id());
+        response.set_message_type(MessageType::Response);
+        response.set_op_code(OpCode::Query);
+        response.set_response_code(ResponseCode::ServFail);
+        response.set_recursion_desired(true);
+        response.set_recursion_available(true);
+        for q in query.queries() {
+            response.add_query(q.clone());
+        }
+        if let Ok(bytes) = response.to_vec() {
+            return bytes;
+        }
+    }
+
+    let id0 = query_bytes.first().copied().unwrap_or(0);
+    let id1 = query_bytes.get(1).copied().unwrap_or(0);
+    vec![
+        id0, id1, 0x81, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]
+}
+
 /// Returns the current Unix timestamp in milliseconds.
 ///
 /// Uses a simple approach without pulling in chrono.

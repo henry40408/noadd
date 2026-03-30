@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
-use super::handler::DnsHandler;
+use super::handler::{DnsHandler, build_servfail};
 
 /// Run the TCP DNS listener per RFC 1035 Section 4.2.2 (length-prefixed messages)
 /// with connection reuse per RFC 7766.
@@ -42,27 +42,27 @@ pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
                 }
 
                 // 3. Handle the query
-                match handler.handle(&buf, client_ip, None).await {
-                    Ok(response) => {
-                        // 4. Write 2-byte length prefix + response
-                        let resp_len = response.len() as u16;
-                        if let Err(e) = writer.write_u16(resp_len).await {
-                            debug!("TCP write length error for {peer_addr}: {e}");
-                            break;
-                        }
-                        if let Err(e) = writer.write_all(&response).await {
-                            debug!("TCP write response error for {peer_addr}: {e}");
-                            break;
-                        }
-                        if let Err(e) = writer.flush().await {
-                            debug!("TCP flush error for {peer_addr}: {e}");
-                            break;
-                        }
-                    }
+                let response = match handler.handle(&buf, client_ip, None).await {
+                    Ok(response) => response,
                     Err(e) => {
                         debug!("DNS handler error for TCP query from {peer_addr}: {e}");
-                        break;
+                        build_servfail(&buf)
                     }
+                };
+
+                // 4. Write 2-byte length prefix + response
+                let resp_len = response.len() as u16;
+                if let Err(e) = writer.write_u16(resp_len).await {
+                    debug!("TCP write length error for {peer_addr}: {e}");
+                    break;
+                }
+                if let Err(e) = writer.write_all(&response).await {
+                    debug!("TCP write response error for {peer_addr}: {e}");
+                    break;
+                }
+                if let Err(e) = writer.flush().await {
+                    debug!("TCP flush error for {peer_addr}: {e}");
+                    break;
                 }
             }
         });
