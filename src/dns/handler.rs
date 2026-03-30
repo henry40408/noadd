@@ -117,6 +117,21 @@ impl DnsHandler {
                             cached.bytes[0] = id_bytes[0];
                             cached.bytes[1] = id_bytes[1];
                         }
+
+                        if cached.is_stale() {
+                            // Optimistic: serve stale, refresh in background
+                            let forwarder = self.forwarder.clone();
+                            let cache = self.cache.clone();
+                            let query_owned = query_bytes.to_vec();
+                            let key = cache_key.clone();
+                            tokio::spawn(async move {
+                                if let Ok((response, _)) = forwarder.forward(&query_owned).await {
+                                    let ttl = extract_min_ttl(&response);
+                                    cache.insert(key, response, ttl).await;
+                                }
+                            });
+                        }
+
                         (cached.bytes, "allowed".to_string(), true, None, None, None)
                     } else {
                         // 4. Forward upstream
