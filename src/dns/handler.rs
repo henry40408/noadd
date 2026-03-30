@@ -43,6 +43,29 @@ pub struct QueryContext {
     pub matched_rule: Option<String>,
     pub matched_list: Option<String>,
     pub doh_token: Option<String>,
+    pub result: Option<String>,
+}
+
+/// Extract a short summary of the DNS answer section from response bytes.
+/// Returns the first few A/AAAA/CNAME records as a comma-separated string.
+fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
+    let msg = Message::from_bytes(response_bytes).ok()?;
+    let parts: Vec<String> = msg
+        .answers()
+        .iter()
+        .take(3)
+        .map(|r| match r.data() {
+            RData::A(a) => a.0.to_string(),
+            RData::AAAA(aaaa) => aaaa.0.to_string(),
+            RData::CNAME(cname) => cname.0.to_string(),
+            _ => format!("{}", r.record_type()),
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
 }
 
 /// Core DNS query handler implementing the filter-cache-forward pipeline.
@@ -153,6 +176,7 @@ impl DnsHandler {
         let elapsed = start.elapsed().as_millis() as i64;
 
         // 5. Send log context (non-blocking)
+        let result = extract_result_summary(&response_bytes);
         let ctx = QueryContext {
             timestamp: chrono_timestamp_ms(),
             client_ip: client_ip.to_string(),
@@ -165,6 +189,7 @@ impl DnsHandler {
             matched_rule,
             matched_list,
             doh_token,
+            result,
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
             warn!("failed to send log event: {e}");

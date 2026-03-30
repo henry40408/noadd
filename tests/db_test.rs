@@ -66,6 +66,7 @@ async fn test_insert_and_query_logs() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 5,
         },
         QueryLogEntry {
@@ -77,6 +78,7 @@ async fn test_insert_and_query_logs() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         },
     ];
@@ -117,6 +119,7 @@ async fn test_query_logs_pagination() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         });
     }
@@ -252,6 +255,7 @@ async fn test_count_queries_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 5,
         },
         QueryLogEntry {
@@ -263,6 +267,7 @@ async fn test_count_queries_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 3,
         },
         QueryLogEntry {
@@ -274,6 +279,7 @@ async fn test_count_queries_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         },
     ];
@@ -301,6 +307,7 @@ async fn test_top_domains_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         },
         QueryLogEntry {
@@ -312,6 +319,7 @@ async fn test_top_domains_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         },
         QueryLogEntry {
@@ -323,6 +331,7 @@ async fn test_top_domains_since() {
             cached: false,
             upstream: None,
             doh_token: None,
+            result: None,
             response_ms: 1,
         },
     ];

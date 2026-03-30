@@ -27,6 +27,7 @@ pub struct QueryLogEntry {
     pub response_ms: i64,
     pub upstream: Option<String>,
     pub doh_token: Option<String>,
+    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,7 +120,8 @@ impl Database {
                         cached INTEGER NOT NULL DEFAULT 0,
                         response_ms INTEGER NOT NULL DEFAULT 0,
                         upstream TEXT,
-                        doh_token TEXT
+                        doh_token TEXT,
+                        result TEXT
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain ON query_logs(domain);
@@ -213,8 +215,21 @@ impl Database {
             }
         }
 
+        // Migration 4: add `result` column to query_logs
+        if version < 4 {
+            let has_col: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='result'",
+                )?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if !has_col {
+                conn.execute("ALTER TABLE query_logs ADD COLUMN result TEXT", [])?;
+            }
+        }
+
         // Set to latest version
-        const LATEST_VERSION: i64 = 3;
+        const LATEST_VERSION: i64 = 4;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -280,7 +295,7 @@ impl Database {
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare(
-                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     )?;
                     for e in &entries {
                         stmt.execute(params![
@@ -293,6 +308,7 @@ impl Database {
                             e.response_ms,
                             e.upstream,
                             e.doh_token,
+                            e.result,
                         ])?;
                     }
                 }
@@ -316,7 +332,7 @@ impl Database {
         let rows = self
             .conn
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token FROM query_logs WHERE 1=1".to_string();
+                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
                 if let Some(ref s) = search {
@@ -351,6 +367,7 @@ impl Database {
                             response_ms: row.get(6)?,
                             upstream: row.get(7)?,
                             doh_token: row.get(8)?,
+                            result: row.get(9)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
