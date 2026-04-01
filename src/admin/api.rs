@@ -168,6 +168,7 @@ async fn login(
     // Rate limiting - use a default IP since we don't have access to ConnectInfo here
     let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     if !state.rate_limiter.check(ip) {
+        tracing::warn!(%ip, "login rate limited");
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     state.rate_limiter.record(ip);
@@ -183,9 +184,11 @@ async fn login(
         verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !valid {
+        tracing::warn!("login failed: invalid password");
         return Err(StatusCode::UNAUTHORIZED);
     }
 
+    tracing::info!("login successful");
     let token = create_session(&state.sessions);
 
     // Persist sessions to DB so they survive restarts
