@@ -89,8 +89,12 @@ impl ListManager {
             }
         }
 
+        let block_count = block_rules.len();
+        let allow_count = allow_rules.len();
         let engine = FilterEngine::new(block_rules, allow_rules);
         self.filter.store(Arc::new(engine));
+
+        tracing::info!(block_count, allow_count, "filter engine rebuilt");
 
         Ok(())
     }
@@ -137,9 +141,13 @@ impl ListManager {
             if !list.enabled {
                 continue;
             }
-            // Log errors but continue with other lists
-            if let Err(e) = self.download_and_update_list(list.id).await {
-                tracing::error!(list_id = list.id, name = %list.name, error = %e, "failed to download list");
+            match self.download_and_update_list(list.id).await {
+                Ok(rule_count) => {
+                    tracing::info!(list_id = list.id, name = %list.name, rule_count, "updated filter list");
+                }
+                Err(e) => {
+                    tracing::error!(list_id = list.id, name = %list.name, error = %e, "failed to download list");
+                }
             }
         }
 

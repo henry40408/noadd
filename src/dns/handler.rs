@@ -180,10 +180,18 @@ impl DnsHandler {
                                 let query_owned = query_bytes.to_vec();
                                 let key = cache_key.clone();
                                 tokio::spawn(async move {
-                                    let result = forwarder.forward(&query_owned).await;
-                                    if let Ok((response, _)) = result {
-                                        let ttl = extract_min_ttl(&response);
-                                        cache.insert(key.clone(), response, ttl).await;
+                                    match forwarder.forward(&query_owned).await {
+                                        Ok((response, _)) => {
+                                            let ttl = extract_min_ttl(&response);
+                                            cache.insert(key.clone(), response, ttl).await;
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                domain = %key.0,
+                                                error = %e,
+                                                "stale refresh failed"
+                                            );
+                                        }
                                     }
                                     refreshing.lock().unwrap().remove(&key);
                                 });
