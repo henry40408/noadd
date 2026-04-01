@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -76,6 +77,9 @@ pub struct DnsHandler {
     cache: DnsCache,
     forwarder: Arc<UpstreamForwarder>,
     log_tx: mpsc::Sender<QueryContext>,
+    /// Tracks cache keys currently being refreshed in the background,
+    /// preventing duplicate refresh tasks for the same stale entry.
+    refreshing: Arc<Mutex<HashSet<CacheKey>>>,
 }
 
 impl DnsHandler {
@@ -90,6 +94,7 @@ impl DnsHandler {
             cache,
             forwarder,
             log_tx,
+            refreshing: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -142,17 +147,26 @@ impl DnsHandler {
                         }
 
                         if cached.is_stale() {
-                            // Optimistic: serve stale, refresh in background
-                            let forwarder = self.forwarder.clone();
-                            let cache = self.cache.clone();
-                            let query_owned = query_bytes.to_vec();
-                            let key = cache_key.clone();
-                            tokio::spawn(async move {
-                                if let Ok((response, _)) = forwarder.forward(&query_owned).await {
-                                    let ttl = extract_min_ttl(&response);
-                                    cache.insert(key, response, ttl).await;
-                                }
-                            });
+                            // Optimistic: serve stale, refresh in background.
+                            // Deduplicate: only spawn if no refresh is already in flight.
+                            let should_refresh =
+                                self.refreshing.lock().unwrap().insert(cache_key.clone());
+
+                            if should_refresh {
+                                let forwarder = self.forwarder.clone();
+                                let cache = self.cache.clone();
+                                let refreshing = self.refreshing.clone();
+                                let query_owned = query_bytes.to_vec();
+                                let key = cache_key.clone();
+                                tokio::spawn(async move {
+                                    let result = forwarder.forward(&query_owned).await;
+                                    if let Ok((response, _)) = result {
+                                        let ttl = extract_min_ttl(&response);
+                                        cache.insert(key.clone(), response, ttl).await;
+                                    }
+                                    refreshing.lock().unwrap().remove(&key);
+                                });
+                            }
                         }
 
                         (cached.bytes, "allowed".to_string(), true, None, None, None)
