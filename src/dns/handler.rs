@@ -48,7 +48,7 @@ pub struct QueryContext {
 }
 
 /// Extract a short summary of the DNS answer section from response bytes.
-/// Returns the first few A/AAAA/CNAME records as a comma-separated string.
+/// Returns the first few records as a comma-separated string.
 fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
     let msg = Message::from_bytes(response_bytes).ok()?;
     let parts: Vec<String> = msg
@@ -59,7 +59,28 @@ fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
             RData::A(a) => a.0.to_string(),
             RData::AAAA(aaaa) => aaaa.0.to_string(),
             RData::CNAME(cname) => cname.0.to_string(),
-            _ => format!("{}", r.record_type()),
+            RData::MX(mx) => format!("{} {}", mx.preference(), mx.exchange()),
+            RData::NS(ns) => ns.0.to_string(),
+            RData::PTR(ptr) => ptr.0.to_string(),
+            RData::TXT(txt) => txt
+                .iter()
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect::<Vec<_>>()
+                .join(""),
+            RData::SOA(soa) => format!("{} {}", soa.mname(), soa.rname()),
+            RData::SRV(srv) => {
+                format!(
+                    "{}:{} p={} w={}",
+                    srv.target(),
+                    srv.port(),
+                    srv.priority(),
+                    srv.weight()
+                )
+            }
+            RData::CAA(caa) => {
+                format!("{} {}", caa.tag(), String::from_utf8_lossy(caa.raw_value()))
+            }
+            other => other.to_string(),
         })
         .collect();
     if parts.is_empty() {

@@ -973,6 +973,7 @@ pub struct LogsQuery {
     pub search: Option<String>,
     pub blocked: Option<bool>,
     pub token: Option<String>,
+    pub query_type: Option<String>,
 }
 
 async fn get_logs(
@@ -992,6 +993,7 @@ async fn get_logs(
             query.search.as_deref(),
             query.blocked,
             query.token.as_deref(),
+            query.query_type.as_deref(),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1001,6 +1003,7 @@ async fn get_logs(
             query.search.as_deref(),
             query.blocked,
             query.token.as_deref(),
+            query.query_type.as_deref(),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

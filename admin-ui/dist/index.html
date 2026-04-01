@@ -1224,6 +1224,7 @@ class LogsPage extends HTMLElement {
     this.search = '';
     this.actionFilter = '';
     this.tokenFilter = '';
+    this.typeFilter = '';
   }
 
   connectedCallback() {
@@ -1235,6 +1236,20 @@ class LogsPage extends HTMLElement {
           <option value="">All</option>
           <option value="allowed">Allowed</option>
           <option value="blocked">Blocked</option>
+        </select>
+        <select id="log-type">
+          <option value="">All Types</option>
+          <option value="A">A</option>
+          <option value="AAAA">AAAA</option>
+          <option value="CNAME">CNAME</option>
+          <option value="MX">MX</option>
+          <option value="TXT">TXT</option>
+          <option value="NS">NS</option>
+          <option value="SOA">SOA</option>
+          <option value="PTR">PTR</option>
+          <option value="SRV">SRV</option>
+          <option value="CAA">CAA</option>
+          <option value="HTTPS">HTTPS</option>
         </select>
         <select id="log-token">
           <option value="">All Tokens</option>
@@ -1260,6 +1275,9 @@ class LogsPage extends HTMLElement {
     this.querySelector('#log-token').onchange = (e) => {
       this.tokenFilter = e.target.value; this.offset = 0; this.load();
     };
+    this.querySelector('#log-type').onchange = (e) => {
+      this.typeFilter = e.target.value; this.offset = 0; this.load();
+    };
     this.loadTokens();
     this.querySelector('#clear-logs').onclick = async () => {
       if (confirm('Delete all query logs?')) {
@@ -1276,6 +1294,7 @@ class LogsPage extends HTMLElement {
       if (this.search) url += `&search=${encodeURIComponent(this.search)}`;
       if (this.actionFilter) url += `&blocked=${this.actionFilter === 'blocked'}`;
       if (this.tokenFilter) url += `&token=${encodeURIComponent(this.tokenFilter)}`;
+      if (this.typeFilter) url += `&query_type=${encodeURIComponent(this.typeFilter)}`;
       const data = await api.get(url);
       this.total = data.total || 0;
       this.renderLogs(data.logs || []);
@@ -1290,7 +1309,7 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim)">→ ' + esc(l.result) + '</div>' : ''}</td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
@@ -1311,7 +1330,7 @@ class LogsPage extends HTMLElement {
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
           <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
-        ${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px">→ ' + esc(l.result) + '</div>' : ''}
+        ${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
           <span>${timeAgo(l.timestamp)}</span>
           <span>${esc(l.query_type)}</span>

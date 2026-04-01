@@ -326,9 +326,11 @@ impl Database {
         search: Option<&str>,
         blocked: Option<bool>,
         token: Option<&str>,
+        query_type: Option<&str>,
     ) -> Result<Vec<QueryLogEntry>, DbError> {
         let search = search.map(|s| s.to_string());
         let token = token.map(|s| s.to_string());
+        let query_type = query_type.map(|s| s.to_string());
         let rows = self
             .conn
             .call(move |conn| {
@@ -346,6 +348,10 @@ impl Database {
                 if let Some(ref t) = token {
                     sql.push_str(" AND doh_token = ?");
                     param_values.push(Box::new(t.clone()));
+                }
+                if let Some(ref qt) = query_type {
+                    sql.push_str(" AND query_type = ?");
+                    param_values.push(Box::new(qt.clone()));
                 }
                 sql.push_str(" ORDER BY timestamp DESC LIMIT ? OFFSET ?");
                 param_values.push(Box::new(limit));
@@ -382,9 +388,11 @@ impl Database {
         search: Option<&str>,
         blocked: Option<bool>,
         token: Option<&str>,
+        query_type: Option<&str>,
     ) -> Result<i64, DbError> {
         let search = search.map(|s| s.to_string());
         let token = token.map(|s| s.to_string());
+        let query_type = query_type.map(|s| s.to_string());
         let count = self
             .conn
             .call(move |conn| {
@@ -402,6 +410,10 @@ impl Database {
                 if let Some(ref t) = token {
                     sql.push_str(" AND doh_token = ?");
                     param_values.push(Box::new(t.clone()));
+                }
+                if let Some(ref qt) = query_type {
+                    sql.push_str(" AND query_type = ?");
+                    param_values.push(Box::new(qt.clone()));
                 }
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =

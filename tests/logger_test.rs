@@ -41,7 +41,7 @@ async fn test_logger_flushes_on_threshold() {
     handle.await.unwrap();
 
     // Verify entries were written to the database
-    let logs = db.query_logs(100, 0, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), threshold);
 
     for log in &logs {
@@ -86,7 +86,7 @@ async fn test_logger_flushes_on_channel_close() {
     handle.await.unwrap();
 
     // Verify all entries were flushed on shutdown
-    let logs = db.query_logs(100, 0, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), 3);
 
     for log in &logs {
@@ -129,7 +129,7 @@ async fn test_logger_flushes_on_interval() {
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     // Verify entries were flushed by the timer
-    let logs = db.query_logs(100, 0, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), 2);
 
     // Clean up
