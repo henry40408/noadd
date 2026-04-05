@@ -159,12 +159,16 @@ impl DnsHandler {
                     let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
 
                     // 3. Check cache
-                    if let Some(mut cached) = self.cache.get(&cache_key).await {
+                    if let Some(cached) = self.cache.get(&cache_key).await {
+                        // Decrement TTL by elapsed time since insertion
+                        let elapsed = cached.elapsed().as_secs() as u32;
+                        let mut bytes = decrement_ttl(&cached.bytes, elapsed);
+
                         // Patch DNS ID to match the query
                         let id_bytes = query_id.to_be_bytes();
-                        if cached.bytes.len() >= 2 {
-                            cached.bytes[0] = id_bytes[0];
-                            cached.bytes[1] = id_bytes[1];
+                        if bytes.len() >= 2 {
+                            bytes[0] = id_bytes[0];
+                            bytes[1] = id_bytes[1];
                         }
 
                         if cached.is_stale() {
@@ -198,7 +202,7 @@ impl DnsHandler {
                             }
                         }
 
-                        (cached.bytes, "allowed".to_string(), true, None, None, None)
+                        (bytes, "allowed".to_string(), true, None, None, None)
                     } else {
                         // 4. Forward upstream
                         let (response, upstream_addr) = self.forwarder.forward(query_bytes).await?;
@@ -307,6 +311,38 @@ pub fn extract_min_ttl(response_bytes: &[u8]) -> Duration {
         .unwrap_or(DEFAULT_TTL_SECS as u32);
 
     Duration::from_secs(ttl_secs as u64)
+}
+
+/// Decrement the TTL of every resource record in a DNS response by `elapsed`
+/// seconds. Returns the patched wire-format bytes. If parsing fails, the
+/// original bytes are returned unchanged. TTL is clamped to a minimum of 1
+/// to avoid clients treating 0 as "do not cache" and re-querying immediately.
+pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
+    let Ok(msg) = Message::from_bytes(response_bytes) else {
+        return response_bytes.to_vec();
+    };
+
+    let patch = |records: Vec<Record>| -> Vec<Record> {
+        records
+            .into_iter()
+            .map(|mut r| {
+                let new_ttl = r.ttl().saturating_sub(elapsed_secs).max(1);
+                r.set_ttl(new_ttl);
+                r
+            })
+            .collect()
+    };
+
+    let mut patched = msg.clone();
+    let answers = patch(msg.answers().to_vec());
+    let ns = patch(msg.name_servers().to_vec());
+    let additionals = patch(msg.additionals().to_vec());
+
+    *patched.answers_mut() = answers;
+    *patched.name_servers_mut() = ns;
+    *patched.additionals_mut() = additionals;
+
+    patched.to_vec().unwrap_or_else(|_| response_bytes.to_vec())
 }
 
 /// Build a DNS SERVFAIL response from raw query bytes.
