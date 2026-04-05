@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use thiserror::Error;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 
 use super::strategy::UpstreamStrategy;
 
@@ -148,6 +149,18 @@ impl UpstreamForwarder {
             let start = std::time::Instant::now();
             match self.try_forward(server, query_bytes, timeout).await {
                 Ok(response) => {
+                    // Check TC (truncation) bit — byte 2, bit 1
+                    if response.len() >= 3 && (response[2] & 0x02) != 0 {
+                        // Retry via TCP for a complete response
+                        match self.try_forward_tcp(server, query_bytes, timeout).await {
+                            Ok(tcp_response) => {
+                                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                                self.update_latency(server, ms);
+                                return Ok((tcp_response, server.clone()));
+                            }
+                            Err(_) => continue,
+                        }
+                    }
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
                     self.update_latency(server, ms);
                     return Ok((response, server.clone()));
@@ -176,6 +189,45 @@ impl UpstreamForwarder {
             .map_err(|_| ForwardError::AllFailed)??;
 
         Ok(buf[..len].to_vec())
+    }
+
+    /// Attempt to forward a query to a single upstream server via TCP (RFC 7766).
+    ///
+    /// Used as fallback when the UDP response has the TC (truncation) bit set.
+    async fn try_forward_tcp(
+        &self,
+        server: &str,
+        query_bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ForwardError> {
+        let mut stream = tokio::time::timeout(timeout, TcpStream::connect(server))
+            .await
+            .map_err(|_| ForwardError::AllFailed)??;
+
+        // TCP DNS: 2-byte length prefix + message
+        let len_prefix = (query_bytes.len() as u16).to_be_bytes();
+        tokio::time::timeout(timeout, async {
+            stream.write_all(&len_prefix).await?;
+            stream.write_all(query_bytes).await?;
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|_| ForwardError::AllFailed)??;
+
+        // Read 2-byte length prefix
+        let mut len_buf = [0u8; 2];
+        tokio::time::timeout(timeout, stream.read_exact(&mut len_buf))
+            .await
+            .map_err(|_| ForwardError::AllFailed)??;
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+
+        // Read the full response
+        let mut buf = vec![0u8; msg_len];
+        tokio::time::timeout(timeout, stream.read_exact(&mut buf))
+            .await
+            .map_err(|_| ForwardError::AllFailed)??;
+
+        Ok(buf)
     }
 
     /// Health check all configured upstream servers.

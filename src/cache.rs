@@ -21,6 +21,11 @@ impl CacheValue {
     pub fn is_stale(&self) -> bool {
         self.inserted_at.elapsed() > self.ttl
     }
+
+    /// How long ago this entry was inserted.
+    pub fn elapsed(&self) -> Duration {
+        self.inserted_at.elapsed()
+    }
 }
 
 /// Optimistic DNS response cache backed by moka.

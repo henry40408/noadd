@@ -3,13 +3,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use hickory_proto::op::{Message, MessageType, OpCode};
-use hickory_proto::rr::{Name, RData, RecordType};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::A;
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use tokio::sync::mpsc;
 
 use noadd::cache::DnsCache;
-use noadd::dns::handler::{DnsHandler, QueryContext};
+use noadd::dns::handler::{self, DnsHandler, QueryContext};
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::parser::{ParsedRule, RuleAction};
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -140,4 +141,56 @@ async fn test_handler_sends_log_event() {
     assert_eq!(ctx.client_ip, "127.0.0.1");
     assert!(ctx.matched_rule.is_some());
     assert!(ctx.matched_list.is_some());
+}
+
+/// Build a fake DNS response with a single A record at the given TTL.
+fn build_response_with_ttl(id: u16, domain: &str, ttl: u32) -> Vec<u8> {
+    let mut msg = Message::new();
+    msg.set_id(id);
+    msg.set_message_type(MessageType::Response);
+    msg.set_op_code(OpCode::Query);
+    msg.set_response_code(ResponseCode::NoError);
+    msg.set_recursion_desired(true);
+    msg.set_recursion_available(true);
+
+    let name = Name::from_str(domain).unwrap();
+    let record = Record::from_rdata(name, ttl, RData::A(A(Ipv4Addr::new(93, 184, 216, 34))));
+    msg.add_answer(record);
+    msg.to_vec().unwrap()
+}
+
+#[test]
+fn test_decrement_ttl_reduces_answer_ttl() {
+    let original = build_response_with_ttl(0xABCD, "example.com.", 300);
+    let patched = handler::decrement_ttl(&original, 120);
+
+    let msg = Message::from_bytes(&patched).unwrap();
+    let answer_ttl = msg.answers()[0].ttl();
+    assert_eq!(
+        answer_ttl, 180,
+        "TTL should be decremented from 300 by 120 to 180"
+    );
+}
+
+#[test]
+fn test_decrement_ttl_clamps_to_minimum_1() {
+    let original = build_response_with_ttl(0x1234, "example.com.", 60);
+    let patched = handler::decrement_ttl(&original, 9999);
+
+    let msg = Message::from_bytes(&patched).unwrap();
+    let answer_ttl = msg.answers()[0].ttl();
+    assert_eq!(answer_ttl, 1, "TTL should be clamped to minimum of 1");
+}
+
+#[test]
+fn test_decrement_ttl_zero_elapsed_unchanged() {
+    let original = build_response_with_ttl(0x5678, "example.com.", 300);
+    let patched = handler::decrement_ttl(&original, 0);
+
+    let msg = Message::from_bytes(&patched).unwrap();
+    let answer_ttl = msg.answers()[0].ttl();
+    assert_eq!(
+        answer_ttl, 300,
+        "TTL should remain unchanged when elapsed is 0"
+    );
 }
