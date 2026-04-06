@@ -80,6 +80,21 @@ pub struct TimelinePoint {
     pub blocked: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineMultiPoint {
+    pub timestamp: i64,
+    pub total: i64,
+    pub blocked: i64,
+    pub cached: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeatmapCell {
+    pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
+    pub hour: i64,    // 0..=23
+    pub count: i64,
+}
+
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
         let conn = Connection::open(path).await?;
