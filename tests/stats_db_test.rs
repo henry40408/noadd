@@ -89,3 +89,39 @@ async fn heatmap_empty_db() {
     let cells = db.hourly_heatmap_since(0).await.unwrap();
     assert!(cells.is_empty());
 }
+
+#[tokio::test]
+async fn query_type_breakdown_sorts_desc() {
+    let db = test_db().await;
+    let entries = vec![
+        entry(1000, "A", false, false, Some("NOERROR")),
+        entry(1001, "A", false, false, Some("NOERROR")),
+        entry(1002, "AAAA", false, false, Some("NOERROR")),
+        entry(1003, "HTTPS", false, false, Some("NOERROR")),
+        entry(1004, "A", false, false, Some("NOERROR")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let rows = db.query_type_breakdown_since(0).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], ("A".to_string(), 3));
+    assert!(rows[1].1 == 1 && rows[2].1 == 1);
+}
+
+#[tokio::test]
+async fn result_breakdown_buckets_null_as_unknown() {
+    let db = test_db().await;
+    let entries = vec![
+        entry(1000, "A", false, false, Some("NOERROR")),
+        entry(1001, "A", true, false, Some("NXDOMAIN")),
+        entry(1002, "A", false, false, None),
+        entry(1003, "A", false, false, Some("NOERROR")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let rows = db.result_breakdown_since(0).await.unwrap();
+    let map: std::collections::HashMap<String, i64> = rows.into_iter().collect();
+    assert_eq!(map.get("NOERROR"), Some(&2));
+    assert_eq!(map.get("NXDOMAIN"), Some(&1));
+    assert_eq!(map.get("unknown"), Some(&1));
+}

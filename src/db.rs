@@ -975,6 +975,55 @@ impl Database {
         Ok(result)
     }
 
+    pub async fn query_type_breakdown_since(
+        &self,
+        since: i64,
+    ) -> Result<Vec<(String, i64)>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT query_type, COUNT(*) AS cnt \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY query_type \
+                     ORDER BY cnt DESC",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn result_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT COALESCE(result, 'unknown') AS r, COUNT(*) AS cnt \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY r \
+                     ORDER BY cnt DESC",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
     pub async fn timeline_since(
         &self,
         since: i64,
