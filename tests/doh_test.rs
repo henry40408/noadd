@@ -160,6 +160,55 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
 }
 
 #[tokio::test]
+async fn test_doh_post_wrong_content_type_returns_415() {
+    let handler = make_handler();
+    let db = test_db().await;
+    let app = doh_router(handler, db);
+
+    let query_bytes = make_query_bytes("example.com", RecordType::A);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/dns-query")
+        .header("content-type", "application/json")
+        .body(Body::from(query_bytes))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn test_doh_post_malformed_body_returns_400() {
+    let handler = make_handler();
+    let db = test_db().await;
+    let app = doh_router(handler, db);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(Body::from(vec![0xde, 0xad, 0xbe, 0xef]))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_doh_get_malformed_body_returns_400() {
+    let handler = make_handler();
+    let db = test_db().await;
+    let app = doh_router(handler, db);
+
+    let encoded = URL_SAFE_NO_PAD.encode([0xde, 0xad, 0xbe, 0xef]);
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/dns-query?dns={encoded}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_doh_token_required_when_configured() {
     let handler = make_handler();
     let db = test_db().await;
