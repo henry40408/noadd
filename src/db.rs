@@ -907,6 +907,42 @@ impl Database {
         Ok(rows)
     }
 
+    pub async fn timeline_multi_since(
+        &self,
+        since: i64, // unix seconds
+        bucket_secs: i64,
+    ) -> Result<Vec<TimelineMultiPoint>, DbError> {
+        let since_ms = since * 1000;
+        let bucket_ms = bucket_secs * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT (timestamp / ?1) * ?1 AS bucket, \
+                            COUNT(*), \
+                            COALESCE(SUM(blocked), 0), \
+                            COALESCE(SUM(cached), 0) \
+                     FROM query_logs \
+                     WHERE timestamp >= ?2 \
+                     GROUP BY bucket \
+                     ORDER BY bucket",
+                )?;
+                let rows = stmt
+                    .query_map(params![bucket_ms, since_ms], |row| {
+                        Ok(TimelineMultiPoint {
+                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
+                            total: row.get(1)?,
+                            blocked: row.get(2)?,
+                            cached: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
     pub async fn timeline_since(
         &self,
         since: i64,
