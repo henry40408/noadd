@@ -19,6 +19,12 @@ use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 /// Default TTL (seconds) used when no answer records are present in the response.
 const DEFAULT_TTL_SECS: u64 = 300;
 
+/// Maximum TTL (seconds) we will keep a *negative* response (NXDOMAIN or
+/// NoError with empty answer section). Caps RFC 2308 SOA-derived TTLs which
+/// can otherwise be hours long for some TLDs and cause prolonged "host not
+/// found" symptoms after a single transient upstream hiccup.
+const NEGATIVE_TTL_CAP_SECS: u64 = 60;
+
 /// Errors that can occur during DNS query handling.
 #[derive(Debug, Error)]
 pub enum HandlerError {
@@ -184,20 +190,32 @@ impl DnsHandler {
                                 let query_owned = query_bytes.to_vec();
                                 let key = cache_key.clone();
                                 tokio::spawn(async move {
+                                    // RAII guard ensures the in-flight marker is
+                                    // always cleared, even if the task panics or
+                                    // is cancelled — otherwise a single bad
+                                    // refresh could permanently block future
+                                    // refreshes for this key.
+                                    let _guard = RefreshGuard {
+                                        set: refreshing,
+                                        key: key.clone(),
+                                    };
                                     match forwarder.forward(&query_owned).await {
                                         Ok((response, _)) => {
-                                            let ttl = extract_min_ttl(&response);
-                                            cache.insert(key.clone(), response, ttl).await;
+                                            if let Some(ttl) = cache_ttl_for_response(&response) {
+                                                cache.insert(key, response, ttl).await;
+                                            } else {
+                                                tracing::debug!(
+                                                    "stale refresh got non-cacheable response"
+                                                );
+                                            }
                                         }
                                         Err(e) => {
                                             tracing::debug!(
-                                                domain = %key.0,
                                                 error = %e,
                                                 "stale refresh failed"
                                             );
                                         }
                                     }
-                                    refreshing.lock().unwrap().remove(&key);
                                 });
                             }
                         }
@@ -206,8 +224,13 @@ impl DnsHandler {
                     } else {
                         // 4. Forward upstream
                         let (response, upstream_addr) = self.forwarder.forward(query_bytes).await?;
-                        let ttl = extract_min_ttl(&response);
-                        self.cache.insert(cache_key, response.clone(), ttl).await;
+                        // Only cache cacheable responses (skip SERVFAIL etc.,
+                        // and apply a capped negative TTL for NXDOMAIN/empty
+                        // NoError) to prevent transient failures from
+                        // poisoning the cache.
+                        if let Some(ttl) = cache_ttl_for_response(&response) {
+                            self.cache.insert(cache_key, response.clone(), ttl).await;
+                        }
                         (
                             response,
                             "allowed".to_string(),
@@ -345,6 +368,56 @@ pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
     patched.to_vec().unwrap_or_else(|_| response_bytes.to_vec())
 }
 
+/// Decide whether and for how long a DNS response should be cached.
+///
+/// Returns `Some(ttl)` if the response is cacheable, `None` if it must not
+/// be cached (e.g. SERVFAIL or other server errors). The goal is to prevent
+/// transient upstream failures from poisoning the cache and producing
+/// long-lived `NXDOMAIN`/empty answers.
+///
+/// Rules:
+/// - SERVFAIL / Refused / FormErr / NotImp etc. → `None`
+/// - NoError with non-empty answer section → positive TTL from answers
+/// - NoError with empty answers → negative TTL (SOA min, capped)
+/// - NXDOMAIN → negative TTL (SOA min, capped)
+/// - Unparseable response → `None`
+pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
+    let msg = Message::from_bytes(response_bytes).ok()?;
+    match msg.response_code() {
+        ResponseCode::NoError => {
+            if msg.answers().is_empty() {
+                Some(negative_ttl_from_soa(&msg))
+            } else {
+                let ttl_secs = msg
+                    .answers()
+                    .iter()
+                    .map(|r| r.ttl())
+                    .min()
+                    .unwrap_or(DEFAULT_TTL_SECS as u32);
+                Some(Duration::from_secs(ttl_secs as u64))
+            }
+        }
+        ResponseCode::NXDomain => Some(negative_ttl_from_soa(&msg)),
+        // Do not cache SERVFAIL, Refused, FormErr, NotImp, etc.
+        _ => None,
+    }
+}
+
+/// Compute the negative-cache TTL from a response's SOA authority section,
+/// capped by `NEGATIVE_TTL_CAP_SECS`.
+fn negative_ttl_from_soa(msg: &Message) -> Duration {
+    let soa_min = msg
+        .name_servers()
+        .iter()
+        .filter_map(|r| match r.data() {
+            RData::SOA(soa) => Some(soa.minimum()),
+            _ => None,
+        })
+        .min()
+        .unwrap_or(NEGATIVE_TTL_CAP_SECS as u32);
+    Duration::from_secs((soa_min as u64).min(NEGATIVE_TTL_CAP_SECS))
+}
+
 /// Build a DNS SERVFAIL response from raw query bytes.
 ///
 /// Tries to parse the query to preserve ID and question section. Falls back
@@ -373,6 +446,20 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     ]
 }
 
+/// RAII guard that removes a key from the in-flight refresh set on drop.
+struct RefreshGuard {
+    set: Arc<Mutex<HashSet<CacheKey>>>,
+    key: CacheKey,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.set.lock() {
+            s.remove(&self.key);
+        }
+    }
+}
+
 /// Returns the current Unix timestamp in milliseconds.
 ///
 /// Uses a simple approach without pulling in chrono.
@@ -381,4 +468,127 @@ fn chrono_timestamp_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_proto::rr::Name;
+    use hickory_proto::rr::rdata::SOA;
+    use std::str::FromStr;
+
+    fn make_response(rcode: ResponseCode, answers: Vec<Record>, soa_min: Option<u32>) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(1);
+        msg.set_message_type(MessageType::Response);
+        msg.set_op_code(OpCode::Query);
+        msg.set_response_code(rcode);
+        for a in answers {
+            msg.add_answer(a);
+        }
+        if let Some(min) = soa_min {
+            let name = Name::from_str("example.com.").unwrap();
+            let soa = SOA::new(
+                Name::from_str("ns.example.com.").unwrap(),
+                Name::from_str("hostmaster.example.com.").unwrap(),
+                1,
+                3600,
+                600,
+                86400,
+                min,
+            );
+            let rec = Record::from_rdata(name, 3600, RData::SOA(soa));
+            msg.add_name_server(rec);
+        }
+        msg.to_vec().unwrap()
+    }
+
+    fn a_record(ttl: u32) -> Record {
+        Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            ttl,
+            RData::A(A(Ipv4Addr::new(93, 184, 216, 34))),
+        )
+    }
+
+    #[test]
+    fn servfail_is_not_cached() {
+        let bytes = make_response(ResponseCode::ServFail, vec![], None);
+        assert!(cache_ttl_for_response(&bytes).is_none());
+    }
+
+    #[test]
+    fn refused_is_not_cached() {
+        let bytes = make_response(ResponseCode::Refused, vec![], None);
+        assert!(cache_ttl_for_response(&bytes).is_none());
+    }
+
+    #[test]
+    fn positive_response_uses_min_answer_ttl() {
+        let bytes = make_response(
+            ResponseCode::NoError,
+            vec![a_record(120), a_record(60), a_record(900)],
+            None,
+        );
+        assert_eq!(
+            cache_ttl_for_response(&bytes),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn nxdomain_with_huge_soa_min_is_capped() {
+        // SOA minimum 3600s should be clamped to NEGATIVE_TTL_CAP_SECS (60).
+        let bytes = make_response(ResponseCode::NXDomain, vec![], Some(3600));
+        assert_eq!(
+            cache_ttl_for_response(&bytes),
+            Some(Duration::from_secs(NEGATIVE_TTL_CAP_SECS))
+        );
+    }
+
+    #[test]
+    fn nxdomain_with_small_soa_min_used_as_is() {
+        let bytes = make_response(ResponseCode::NXDomain, vec![], Some(15));
+        assert_eq!(
+            cache_ttl_for_response(&bytes),
+            Some(Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn empty_noerror_uses_negative_ttl() {
+        let bytes = make_response(ResponseCode::NoError, vec![], Some(86400));
+        assert_eq!(
+            cache_ttl_for_response(&bytes),
+            Some(Duration::from_secs(NEGATIVE_TTL_CAP_SECS))
+        );
+    }
+
+    #[test]
+    fn empty_noerror_without_soa_falls_back_to_cap() {
+        let bytes = make_response(ResponseCode::NoError, vec![], None);
+        assert_eq!(
+            cache_ttl_for_response(&bytes),
+            Some(Duration::from_secs(NEGATIVE_TTL_CAP_SECS))
+        );
+    }
+
+    #[test]
+    fn unparseable_response_is_not_cached() {
+        assert!(cache_ttl_for_response(&[0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn refresh_guard_removes_key_on_drop() {
+        let set: Arc<Mutex<HashSet<CacheKey>>> = Arc::new(Mutex::new(HashSet::new()));
+        let key: CacheKey = ("example.com".to_string(), 1);
+        set.lock().unwrap().insert(key.clone());
+        {
+            let _g = RefreshGuard {
+                set: set.clone(),
+                key: key.clone(),
+            };
+        }
+        assert!(!set.lock().unwrap().contains(&key));
+    }
 }
