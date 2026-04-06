@@ -11,10 +11,36 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 
+use hickory_proto::op::Message;
+use hickory_proto::serialize::binary::BinDecodable;
+
 use super::handler::{self, DnsHandler};
 use crate::db::Database;
 
 const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
+
+/// RFC 8484 §6: POST requests MUST use `application/dns-message` Content-Type.
+/// Returns true if header is present and acceptable (or absent).
+fn post_content_type_ok(headers: &HeaderMap) -> bool {
+    let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return true;
+    };
+    ct.to_str()
+        .ok()
+        .map(|s| {
+            s.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case(DNS_MESSAGE_CONTENT_TYPE)
+        })
+        .unwrap_or(false)
+}
+
+/// Validate that the body parses as a DNS wire-format message.
+fn is_valid_dns_wire(body: &[u8]) -> bool {
+    Message::from_bytes(body).is_ok()
+}
 
 #[derive(Deserialize)]
 struct DnsQueryParams {
@@ -97,6 +123,9 @@ async fn handle_get_with_token(
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response(),
     };
+    if !is_valid_dns_wire(&query_bytes) {
+        return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
+    }
     let ip = extract_client_ip(&headers);
     handle_dns_query(&state.handler, &query_bytes, ip, token_name).await
 }
@@ -107,10 +136,20 @@ async fn handle_post_with_token(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !post_content_type_ok(&headers) {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "expected Content-Type: application/dns-message",
+        )
+            .into_response();
+    }
     let token_name = match validate_token(&state.db, &token).await {
         Ok(name) => Some(name),
         Err(status) => return status.into_response(),
     };
+    if !is_valid_dns_wire(&body) {
+        return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
+    }
     let ip = extract_client_ip(&headers);
     handle_dns_query(&state.handler, &body, ip, token_name).await
 }
@@ -129,13 +168,26 @@ async fn handle_get(
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response(),
     };
+    if !is_valid_dns_wire(&query_bytes) {
+        return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
+    }
     let ip = extract_client_ip(&headers);
     handle_dns_query(&state.handler, &query_bytes, ip, None).await
 }
 
 async fn handle_post(State(state): State<DohState>, headers: HeaderMap, body: Bytes) -> Response {
+    if !post_content_type_ok(&headers) {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "expected Content-Type: application/dns-message",
+        )
+            .into_response();
+    }
     if !is_open_access(&state.db).await {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if !is_valid_dns_wire(&body) {
+        return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
     let ip = extract_client_ip(&headers);
     handle_dns_query(&state.handler, &body, ip, None).await
