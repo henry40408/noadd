@@ -125,3 +125,20 @@ async fn result_breakdown_buckets_null_as_unknown() {
     assert_eq!(map.get("NXDOMAIN"), Some(&1));
     assert_eq!(map.get("unknown"), Some(&1));
 }
+
+#[tokio::test]
+async fn db_file_size_is_positive() {
+    let db = test_db().await;
+    let size = db.db_file_size().await.unwrap();
+    assert!(size > 0);
+}
+
+#[tokio::test]
+async fn total_log_count_matches_inserts() {
+    let db = test_db().await;
+    assert_eq!(db.total_log_count().await.unwrap(), 0);
+    db.insert_query_logs(&[entry(1000, "A", false, false, None)])
+        .await
+        .unwrap();
+    assert_eq!(db.total_log_count().await.unwrap(), 1);
+}

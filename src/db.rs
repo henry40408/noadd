@@ -1024,6 +1024,30 @@ impl Database {
         Ok(result)
     }
 
+    pub async fn db_file_size(&self) -> Result<i64, DbError> {
+        let result = self
+            .conn
+            .call(|conn| {
+                let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+                let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+                Ok(page_count * page_size)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn total_log_count(&self) -> Result<i64, DbError> {
+        let result = self
+            .conn
+            .call(|conn| {
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))?;
+                Ok(count)
+            })
+            .await?;
+        Ok(result)
+    }
+
     pub async fn timeline_since(
         &self,
         since: i64,
