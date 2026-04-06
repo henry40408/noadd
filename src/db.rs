@@ -80,6 +80,21 @@ pub struct TimelinePoint {
     pub blocked: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineMultiPoint {
+    pub timestamp: i64,
+    pub total: i64,
+    pub blocked: i64,
+    pub cached: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeatmapCell {
+    pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
+    pub hour: i64,    // 0..=23
+    pub count: i64,
+}
+
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
         let conn = Connection::open(path).await?;
@@ -890,6 +905,147 @@ impl Database {
             })
             .await?;
         Ok(rows)
+    }
+
+    pub async fn timeline_multi_since(
+        &self,
+        since: i64, // unix seconds
+        bucket_secs: i64,
+    ) -> Result<Vec<TimelineMultiPoint>, DbError> {
+        let since_ms = since * 1000;
+        let bucket_ms = bucket_secs * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT (timestamp / ?1) * ?1 AS bucket, \
+                            COUNT(*), \
+                            COALESCE(SUM(blocked), 0), \
+                            COALESCE(SUM(cached), 0) \
+                     FROM query_logs \
+                     WHERE timestamp >= ?2 \
+                     GROUP BY bucket \
+                     ORDER BY bucket",
+                )?;
+                let rows = stmt
+                    .query_map(params![bucket_ms, since_ms], |row| {
+                        Ok(TimelineMultiPoint {
+                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
+                            total: row.get(1)?,
+                            blocked: row.get(2)?,
+                            cached: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn hourly_heatmap_since(
+        &self,
+        since: i64, // unix seconds
+    ) -> Result<Vec<HeatmapCell>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch') AS INTEGER) AS wday, \
+                            CAST(strftime('%H', timestamp / 1000, 'unixepoch') AS INTEGER) AS hr, \
+                            COUNT(*) \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY wday, hr \
+                     ORDER BY wday, hr",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok(HeatmapCell {
+                            weekday: row.get(0)?,
+                            hour: row.get(1)?,
+                            count: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn query_type_breakdown_since(
+        &self,
+        since: i64,
+    ) -> Result<Vec<(String, i64)>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT query_type, COUNT(*) AS cnt \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY query_type \
+                     ORDER BY cnt DESC",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn result_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT COALESCE(result, 'unknown') AS r, COUNT(*) AS cnt \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY r \
+                     ORDER BY cnt DESC",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn db_file_size(&self) -> Result<i64, DbError> {
+        let result = self
+            .conn
+            .call(|conn| {
+                let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+                let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+                Ok(page_count * page_size)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    pub async fn total_log_count(&self) -> Result<i64, DbError> {
+        let result = self
+            .conn
+            .call(|conn| {
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))?;
+                Ok(count)
+            })
+            .await?;
+        Ok(result)
     }
 
     pub async fn timeline_since(

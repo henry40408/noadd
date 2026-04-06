@@ -18,7 +18,7 @@ Blocks ads and trackers at the DNS level using community-maintained filter lists
 - **Custom rules** — unified API with auto-detection of block/allow syntax
 - **Domain test** — check if a domain is allowed or blocked with matched rule details
 - **Upstream DNS strategy** — Sequential, Round Robin, or Lowest Latency (EMA-based) with runtime switching
-- **Admin web UI** — dashboard with live stats, query log with quick Allow/Block actions, filter management
+- **Admin web UI** — dashboard with live stats, statistics page (7d/30d/90d trends, weekday×hour heatmap, query type & result breakdowns, DB health), query log with quick Allow/Block actions, filter management
 - **Mobile-friendly** — responsive layout with bottom tab navigation and card-based views
 - **DoH token auth** — restrict DoH access with user-defined URL tokens (`/dns-query/my-token`)
 - **Apple mobileconfig** — generate iOS/macOS DNS profiles for DoH tokens

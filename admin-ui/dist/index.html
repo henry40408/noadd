@@ -759,6 +759,128 @@ input:focus, select:focus { border-color: var(--border-focus); }
   /* Filters: stack block/allow columns */
   .rules-grid { grid-template-columns: 1fr !important; }
 }
+
+/* Statistics page */
+.chart-bar.cached { background: var(--green); opacity: 0.5; }
+.chart-col:hover .chart-bar.cached { opacity: 0.8; }
+
+.range-switcher {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.range-switcher button {
+  background: none;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 5px 14px;
+  transition: all var(--transition);
+}
+.range-switcher button:last-child { border-right: none; }
+.range-switcher button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.range-switcher button.active { background: var(--accent-glow); color: var(--accent); }
+
+.heatmap-wrap {
+  overflow-x: auto;
+}
+.heatmap-table {
+  display: grid;
+  grid-template-columns: 36px repeat(24, 1fr);
+  gap: 2px;
+  min-width: 600px;
+}
+.heatmap-row-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+.heatmap-col-labels {
+  display: grid;
+  grid-template-columns: 36px repeat(24, 1fr);
+  gap: 2px;
+  min-width: 600px;
+  margin-bottom: 4px;
+}
+.heatmap-col-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+.heatmap-cell {
+  height: 18px;
+  border-radius: 2px;
+  background: var(--accent);
+  position: relative;
+  cursor: default;
+}
+.heatmap-cell:hover .heatmap-tooltip { display: block; }
+.heatmap-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: 20;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.bar-list { display: flex; flex-direction: column; gap: 6px; }
+.bar-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 60px;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.8rem;
+}
+.bar-row-label {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar-row-track {
+  background: var(--bg-hover);
+  border-radius: 2px;
+  height: 10px;
+  overflow: hidden;
+}
+.bar-row-fill {
+  height: 100%;
+  border-radius: 2px;
+  min-width: 2px;
+}
+.bar-row-count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+@media (max-width: 768px) {
+  .bar-row { grid-template-columns: 80px 1fr 48px; }
+}
 </style>
 </head>
 <body>
@@ -865,6 +987,7 @@ const icons = {
   filter: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>',
   rules: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  stats: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
@@ -967,6 +1090,7 @@ class AppShell extends HTMLElement {
           </div>
           <div class="sidebar-nav">
             <button class="nav-item" data-route="#dashboard">${icons.dashboard}<span>Dashboard</span></button>
+            <button class="nav-item" data-route="#stats">${icons.stats}<span>Statistics</span></button>
             <button class="nav-item" data-route="#logs">${icons.logs}<span>Query Log</span></button>
             <button class="nav-item" data-route="#filters">${icons.filter}<span>Filters</span></button>
             <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
@@ -1214,6 +1338,250 @@ class DashboardPage extends HTMLElement {
   }
 }
 customElements.define('dashboard-page', DashboardPage);
+
+// --- Statistics Page ---
+class StatsPage extends HTMLElement {
+  constructor() {
+    super();
+    this._range = '7d';
+  }
+
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div><h2>Statistics</h2><p>Long-term traffic patterns</p></div>
+        <div class="range-switcher" id="range-switcher">
+          <button class="active" data-range="7d">7d</button>
+          <button data-range="30d">30d</button>
+          <button data-range="90d">90d</button>
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s" id="timeline-card">
+        <div class="card-title" id="timeline-title">Queries (last 7d)</div>
+        <div class="chart-container" id="timeline-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s" id="heatmap-card">
+        <div class="card-title">Activity by hour (last 30d)</div>
+        <div id="heatmap-container"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+      </div>
+      <div class="dashboard-grid-2col fade-in" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;animation-delay:0.15s">
+        <div class="card" id="qtypes-card">
+          <div class="card-title">Query Types</div>
+          <div id="qtypes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
+        </div>
+        <div class="card" id="results-card">
+          <div class="card-title">Result Codes</div>
+          <div id="results-chart"><p style="color:var(--text-dim)">Loading…</p></div>
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.2s" id="health-card">
+        <div class="card-title">Database Health</div>
+        <div class="stat-grid" id="health-grid"></div>
+      </div>`;
+
+    this.querySelector('#range-switcher').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-range]');
+      if (!btn) return;
+      this._range = btn.dataset.range;
+      this.querySelectorAll('#range-switcher button').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      this.querySelector('#timeline-title').textContent = `Queries (last ${this._range})`;
+      this._fetchRanged();
+    });
+
+    this._fetchAll();
+  }
+
+  async _fetchAll() {
+    await Promise.all([
+      this._fetchRanged(),
+      this._fetchHeatmap(),
+      this._fetchHealth(),
+    ]);
+  }
+
+  async _fetchRanged() {
+    try {
+      const [timeline, breakdown] = await Promise.all([
+        api.get(`/api/stats/v2/timeline?range=${this._range}`),
+        api.get(`/api/stats/v2/breakdown?range=${this._range}`),
+      ]);
+      this._renderTimeline(timeline);
+      this._renderBreakdown(breakdown);
+    } catch (e) { console.error(e); }
+  }
+
+  async _fetchHeatmap() {
+    try {
+      const data = await api.get('/api/stats/v2/heatmap');
+      this._renderHeatmap(data);
+    } catch (e) { console.error(e); }
+  }
+
+  async _fetchHealth() {
+    try {
+      const data = await api.get('/api/stats/v2/health');
+      this._renderHealth(data);
+    } catch (e) { console.error(e); }
+  }
+
+  _formatBytes(bytes) {
+    if (bytes == null) return '—';
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+  }
+
+  _renderTimeline(rawData) {
+    const el = this.querySelector('#timeline-chart');
+    if (!rawData || !rawData.length) {
+      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      return;
+    }
+
+    let data = rawData;
+    if (window.innerWidth <= 768 && rawData.length > 12) {
+      data = [];
+      for (let i = 0; i < rawData.length; i += 2) {
+        const a = rawData[i];
+        const b = rawData[i + 1];
+        if (b) {
+          data.push({ timestamp: a.timestamp, total: a.total + b.total, blocked: a.blocked + b.blocked, cached: (a.cached || 0) + (b.cached || 0) });
+        } else {
+          data.push(a);
+        }
+      }
+    }
+
+    const max = Math.max(...data.map(d => d.total), 1);
+    const len = data.length;
+    const labelEvery = Math.max(1, Math.floor(len / 6));
+
+    let bars = '<div class="chart-area">';
+    for (let i = 0; i < len; i++) {
+      const d = data[i];
+      const cached = d.cached || 0;
+      const blocked = d.blocked || 0;
+      const allowed = Math.max(0, d.total - blocked - cached);
+      const allowedH = (allowed / max * 100).toFixed(1);
+      const blockedH = (blocked / max * 100).toFixed(1);
+      const cachedH = (cached / max * 100).toFixed(1);
+      const ts = new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+      bars += `<div class="chart-col">
+        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${d.total} total</span> · <span style="color:var(--red)">${blocked} blocked</span> · <span style="color:var(--green)">${cached} cached</span></div>
+        <div class="chart-bar total" style="height:${allowedH}%"></div>
+        <div class="chart-bar cached" style="height:${cachedH}%"></div>
+        <div class="chart-bar blocked" style="height:${blockedH}%"></div>
+      </div>`;
+    }
+    bars += '</div>';
+
+    let labels = '<div class="chart-labels">';
+    for (let i = 0; i < len; i += labelEvery) {
+      const d = data[i];
+      const label = new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+      labels += `<div class="chart-label">${esc(label)}</div>`;
+    }
+    labels += '</div>';
+
+    el.innerHTML = bars + labels;
+  }
+
+  _renderHeatmap(rawData) {
+    const el = this.querySelector('#heatmap-container');
+    // Build a [weekday][hour] lookup. API: 0=Sun..6=Sat
+    // Display order: Mon(1)..Sun(0) — reorder so Mon is row 0
+    const displayOrder = [1, 2, 3, 4, 5, 6, 0]; // Mon..Sun
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    const grid = {};
+    if (rawData && rawData.length) {
+      for (const d of rawData) {
+        if (!grid[d.weekday]) grid[d.weekday] = {};
+        grid[d.weekday][d.hour] = d.count;
+      }
+    }
+
+    const allCounts = rawData && rawData.length ? rawData.map(d => d.count) : [0];
+    const maxCount = Math.max(...allCounts, 1);
+
+    if (!rawData || !rawData.length) {
+      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      return;
+    }
+
+    // Column labels row
+    let html = '<div class="heatmap-wrap"><div class="heatmap-col-labels"><div></div>';
+    for (let h = 0; h < 24; h++) {
+      const label = (h === 0 || h === 6 || h === 12 || h === 18) ? String(h).padStart(2, '0') : '';
+      html += `<div class="heatmap-col-label">${label}</div>`;
+    }
+    html += '</div>';
+
+    // Data rows
+    html += '<div class="heatmap-table">';
+    for (let ri = 0; ri < 7; ri++) {
+      const wd = displayOrder[ri];
+      html += `<div class="heatmap-row-label">${dayLabels[ri]}</div>`;
+      for (let h = 0; h < 24; h++) {
+        const count = (grid[wd] && grid[wd][h]) ? grid[wd][h] : 0;
+        const opacity = count > 0 ? Math.max(0.08, count / maxCount) : 0.04;
+        const dayName = dayLabels[ri];
+        html += `<div class="heatmap-cell" style="opacity:${opacity.toFixed(3)}" title="${count} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
+          <span class="heatmap-tooltip">${count} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
+        </div>`;
+      }
+    }
+    html += '</div></div>';
+    el.innerHTML = html;
+  }
+
+  _renderBarChart(containerId, entries, color) {
+    const el = this.querySelector(containerId);
+    if (!entries || !entries.length) {
+      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
+      return;
+    }
+    const sorted = [...entries].sort((a, b) => b[1] - a[1]);
+    const maxVal = Math.max(...sorted.map(e => e[1]), 1);
+    let html = '<div class="bar-list">';
+    for (const [label, count] of sorted) {
+      const pct = (count / maxVal * 100).toFixed(1);
+      html += `<div class="bar-row">
+        <div class="bar-row-label" title="${esc(label)}">${esc(label)}</div>
+        <div class="bar-row-track"><div class="bar-row-fill" style="width:${pct}%;background:${color}"></div></div>
+        <div class="bar-row-count">${formatNum(count)}</div>
+      </div>`;
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
+  _renderBreakdown(data) {
+    if (!data) return;
+    this._renderBarChart('#qtypes-chart', data.query_types, 'var(--accent)');
+    this._renderBarChart('#results-chart', data.results, 'var(--orange)');
+  }
+
+  _renderHealth(data) {
+    const el = this.querySelector('#health-grid');
+    if (!data) { el.innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const oldest = data.oldest_log_timestamp
+      ? new Date(data.oldest_log_timestamp * 1000).toLocaleDateString()
+      : '—';
+    const retention = data.log_retention_days != null ? `${data.log_retention_days}d` : '—';
+    const avgDay = data.avg_new_rows_per_day != null ? formatNum(Math.round(data.avg_new_rows_per_day)) : '—';
+    el.innerHTML = `
+      <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.db_size_bytes)}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem">${formatNum(data.total_log_count)}</div></div>
+      <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${esc(oldest)}</div></div>
+      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${esc(retention)}</div></div>
+      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>`;
+  }
+}
+customElements.define('stats-page', StatsPage);
 
 // --- Query Log Page ---
 class LogsPage extends HTMLElement {
@@ -1892,6 +2260,7 @@ function setPage(tag) {
 
 router
   .on('#dashboard', () => setPage('dashboard-page'))
+  .on('#stats', () => setPage('stats-page'))
   .on('#logs', () => setPage('logs-page'))
   .on('#filters', () => setPage('filters-page'))
   .on('#settings', () => setPage('settings-page'));
