@@ -91,6 +91,10 @@ pub fn admin_router(
         .route("/api/stats/top-domains", get(get_stats_top_domains))
         .route("/api/stats/top-clients", get(get_stats_top_clients))
         .route("/api/stats/top-upstreams", get(get_stats_top_upstreams))
+        .route("/api/stats/v2/timeline", get(get_stats_v2_timeline))
+        .route("/api/stats/v2/heatmap", get(get_stats_v2_heatmap))
+        .route("/api/stats/v2/breakdown", get(get_stats_v2_breakdown))
+        .route("/api/stats/v2/health", get(get_stats_v2_health))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
         // Apple mobileconfig (no auth — token in URL is the credential)
@@ -852,6 +856,70 @@ async fn get_stats_top_upstreams(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(upstreams))
+}
+
+// --- Stats v2 ---
+
+#[derive(Deserialize)]
+pub struct StatsRangeQuery {
+    pub range: Option<String>,
+}
+
+fn parse_stats_range(q: &StatsRangeQuery) -> Result<stats::StatsRange, StatusCode> {
+    let raw = q.range.as_deref().unwrap_or("7d");
+    stats::StatsRange::parse(raw).ok_or(StatusCode::BAD_REQUEST)
+}
+
+async fn get_stats_v2_timeline(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<StatsRangeQuery>,
+) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let range = parse_stats_range(&query)?;
+    let now = now_epoch();
+    let timeline = stats::compute_stats_timeline(&state.db, now, range)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(timeline))
+}
+
+async fn get_stats_v2_heatmap(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let now = now_epoch();
+    let cells = stats::compute_heatmap(&state.db, now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(cells))
+}
+
+async fn get_stats_v2_breakdown(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<StatsRangeQuery>,
+) -> Result<Json<stats::Breakdowns>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let range = parse_stats_range(&query)?;
+    let now = now_epoch();
+    let b = stats::compute_breakdowns(&state.db, now, range)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(b))
+}
+
+async fn get_stats_v2_health(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<stats::DbHealth>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let now = now_epoch();
+    let h = stats::compute_db_health(&state.db, now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(h))
 }
 
 // --- Apple mobileconfig ---
