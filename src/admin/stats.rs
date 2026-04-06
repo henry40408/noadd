@@ -1,6 +1,9 @@
 use serde::Serialize;
 
-use crate::db::{Database, DbError, TimelinePoint, TopClient, TopDomain, TopUpstream};
+use crate::db::{
+    Database, DbError, HeatmapCell, TimelineMultiPoint, TimelinePoint, TopClient, TopDomain,
+    TopUpstream,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
@@ -119,4 +122,102 @@ pub async fn compute_timeline(
     };
 
     db.timeline_since(since, bucket_secs).await
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StatsRange {
+    Days7,
+    Days30,
+    Days90,
+}
+
+impl StatsRange {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "7d" => Some(Self::Days7),
+            "30d" => Some(Self::Days30),
+            "90d" => Some(Self::Days90),
+            _ => None,
+        }
+    }
+
+    /// (since_seconds_offset, bucket_secs)
+    fn window(self) -> (i64, i64) {
+        match self {
+            Self::Days7 => (7 * 86400, 3600),
+            Self::Days30 => (30 * 86400, 6 * 3600),
+            Self::Days90 => (90 * 86400, 86400),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Breakdowns {
+    pub query_types: Vec<(String, i64)>,
+    pub results: Vec<(String, i64)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DbHealth {
+    pub db_size_bytes: i64,
+    pub total_log_count: i64,
+    pub oldest_log_timestamp: Option<i64>, // unix seconds
+    pub log_retention_days: Option<i64>,
+    pub avg_new_rows_per_day: f64,
+}
+
+pub async fn compute_stats_timeline(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+) -> Result<Vec<TimelineMultiPoint>, DbError> {
+    let (window_secs, bucket_secs) = range.window();
+    db.timeline_multi_since(now - window_secs, bucket_secs)
+        .await
+}
+
+pub async fn compute_heatmap(db: &Database, now: i64) -> Result<Vec<HeatmapCell>, DbError> {
+    db.hourly_heatmap_since(now - 30 * 86400).await
+}
+
+pub async fn compute_breakdowns(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+) -> Result<Breakdowns, DbError> {
+    let (window_secs, _) = range.window();
+    let since = now - window_secs;
+    let query_types = db.query_type_breakdown_since(since).await?;
+    let results = db.result_breakdown_since(since).await?;
+    Ok(Breakdowns {
+        query_types,
+        results,
+    })
+}
+
+pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbError> {
+    let db_size_bytes = db.db_file_size().await?;
+    let total_log_count = db.total_log_count().await?;
+    let earliest_ms = db.earliest_log_timestamp().await?;
+    let oldest_log_timestamp = earliest_ms.map(|ms| ms / 1000);
+    let log_retention_days = db
+        .get_setting("log_retention_days")
+        .await?
+        .and_then(|s| s.parse::<i64>().ok());
+
+    let avg_new_rows_per_day = match oldest_log_timestamp {
+        Some(oldest) if now > oldest => {
+            let span_days = ((now - oldest) as f64 / 86400.0).max(1.0);
+            total_log_count as f64 / span_days
+        }
+        _ => 0.0,
+    };
+
+    Ok(DbHealth {
+        db_size_bytes,
+        total_log_count,
+        oldest_log_timestamp,
+        log_retention_days,
+        avg_new_rows_per_day,
+    })
 }
