@@ -943,6 +943,38 @@ impl Database {
         Ok(result)
     }
 
+    pub async fn hourly_heatmap_since(
+        &self,
+        since: i64, // unix seconds
+    ) -> Result<Vec<HeatmapCell>, DbError> {
+        let since_ms = since * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch') AS INTEGER) AS wday, \
+                            CAST(strftime('%H', timestamp / 1000, 'unixepoch') AS INTEGER) AS hr, \
+                            COUNT(*) \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY wday, hr \
+                     ORDER BY wday, hr",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok(HeatmapCell {
+                            weekday: row.get(0)?,
+                            hour: row.get(1)?,
+                            count: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(result)
+    }
+
     pub async fn timeline_since(
         &self,
         since: i64,

@@ -57,3 +57,35 @@ async fn timeline_multi_empty_db() {
     let points = db.timeline_multi_since(0, 60).await.unwrap();
     assert!(points.is_empty());
 }
+
+#[tokio::test]
+async fn heatmap_groups_by_weekday_and_hour() {
+    let db = test_db().await;
+    // 2024-01-01 00:00:00 UTC = Monday, hour 0; epoch = 1704067200
+    let monday_midnight = 1704067200;
+    let entries = vec![
+        entry(monday_midnight + 10, "A", false, false, None),
+        entry(monday_midnight + 20, "A", false, false, None),
+        entry(monday_midnight + 3600 + 5, "A", false, false, None),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let cells = db.hourly_heatmap_since(0).await.unwrap();
+    let mon_0 = cells
+        .iter()
+        .find(|c| c.weekday == 1 && c.hour == 0)
+        .expect("mon 0");
+    let mon_1 = cells
+        .iter()
+        .find(|c| c.weekday == 1 && c.hour == 1)
+        .expect("mon 1");
+    assert_eq!(mon_0.count, 2);
+    assert_eq!(mon_1.count, 1);
+}
+
+#[tokio::test]
+async fn heatmap_empty_db() {
+    let db = test_db().await;
+    let cells = db.hourly_heatmap_since(0).await.unwrap();
+    assert!(cells.is_empty());
+}
