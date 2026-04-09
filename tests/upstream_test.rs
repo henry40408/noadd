@@ -70,6 +70,37 @@ async fn test_forward_failover_on_bad_primary() {
     );
 }
 
+#[tokio::test]
+async fn test_forward_failover_on_closed_local_port() {
+    // Bind a UDP socket to claim a port, then immediately drop it so the
+    // port is guaranteed closed for the duration of the test. This gives
+    // a fast-failing primary upstream (ICMP unreachable / connection
+    // refused) without waiting for a network timeout.
+    let dead_addr = {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.local_addr().unwrap()
+        // sock dropped here
+    };
+
+    let config = UpstreamConfig {
+        servers: vec![dead_addr.to_string(), "1.1.1.1:53".into()],
+        timeout_ms: 5000,
+    };
+    let forwarder = UpstreamForwarder::new(config);
+
+    let query = build_query("example.com.", RecordType::A);
+    let (response, upstream) = forwarder
+        .forward(&query)
+        .await
+        .expect("forward should fail over from closed local port to real upstream");
+
+    assert!(response.len() >= 12, "response too short");
+    assert_eq!(
+        upstream, "1.1.1.1:53",
+        "should have failed over past the dead local port"
+    );
+}
+
 // TC (truncation) → TCP fallback is now handled inside hickory's
 // NameServer transport layer (`ResolverOpts::try_tcp_on_error`), so we
 // no longer test it here — it would amount to testing a third-party
