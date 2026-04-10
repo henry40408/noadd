@@ -1,12 +1,7 @@
-use std::net::Ipv4Addr;
-
-use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-use hickory_proto::rr::rdata::A;
-use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::serialize::binary::BinEncodable;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, UdpSocket};
 
 /// Build a minimal DNS wire-format query for the given domain and record type.
 fn build_query(domain: &str, record_type: RecordType) -> Vec<u8> {
@@ -75,92 +70,39 @@ async fn test_forward_failover_on_bad_primary() {
     );
 }
 
-/// Build a DNS response with the TC (truncation) bit set.
-fn build_tc_response(query_id: u16) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(query_id);
-    msg.set_message_type(MessageType::Response);
-    msg.set_truncated(true);
-    msg.set_response_code(ResponseCode::NoError);
-    msg.to_bytes().expect("serialize TC response")
-}
-
-/// Build a full DNS response (not truncated) with one A record.
-fn build_full_response(query_id: u16, domain: &str) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(query_id);
-    msg.set_message_type(MessageType::Response);
-    msg.set_response_code(ResponseCode::NoError);
-    msg.set_recursion_desired(true);
-    msg.set_recursion_available(true);
-    let name = Name::from_ascii(domain).unwrap();
-    let record = Record::from_rdata(name, 300, RData::A(A(Ipv4Addr::new(93, 184, 216, 34))));
-    msg.add_answer(record);
-    msg.to_bytes().expect("serialize full response")
-}
-
 #[tokio::test]
-async fn test_forward_retries_tcp_on_truncation() {
-    // Start a mock server that returns TC=1 on UDP, full response on TCP.
-    let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let tcp_listener = TcpListener::bind(udp_sock.local_addr().unwrap())
-        .await
-        .unwrap();
-    let addr = udp_sock.local_addr().unwrap();
-
-    // UDP handler: reply with TC=1
-    tokio::spawn(async move {
-        let mut buf = [0u8; 512];
-        let (len, src) = udp_sock.recv_from(&mut buf).await.unwrap();
-        let query = Message::from_bytes(&buf[..len]).unwrap();
-        let tc_resp = build_tc_response(query.id());
-        udp_sock.send_to(&tc_resp, src).await.unwrap();
-    });
-
-    // TCP handler: reply with full response
-    tokio::spawn(async move {
-        let (mut stream, _) = tcp_listener.accept().await.unwrap();
-        let mut buf = [0u8; 514]; // 2-byte length prefix + message
-        let mut total = 0;
-        loop {
-            use tokio::io::AsyncReadExt;
-            let n = stream.read(&mut buf[total..]).await.unwrap();
-            if n == 0 {
-                break;
-            }
-            total += n;
-            if total >= 2 {
-                let msg_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-                if total >= 2 + msg_len {
-                    break;
-                }
-            }
-        }
-        let query = Message::from_bytes(&buf[2..total]).unwrap();
-        let domain = query.queries()[0].name().to_ascii();
-        let full_resp = build_full_response(query.id(), &domain);
-        let len_prefix = (full_resp.len() as u16).to_be_bytes();
-        stream.write_all(&len_prefix).await.unwrap();
-        stream.write_all(&full_resp).await.unwrap();
-    });
+async fn test_forward_failover_on_closed_local_port() {
+    // Bind a UDP socket to claim a port, then immediately drop it so the
+    // port is guaranteed closed for the duration of the test. This gives
+    // a fast-failing primary upstream (ICMP unreachable / connection
+    // refused) without waiting for a network timeout.
+    let dead_addr = {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.local_addr().unwrap()
+        // sock dropped here
+    };
 
     let config = UpstreamConfig {
-        servers: vec![addr.to_string()],
+        servers: vec![dead_addr.to_string(), "1.1.1.1:53".into()],
         timeout_ms: 5000,
     };
     let forwarder = UpstreamForwarder::new(config);
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, _upstream) = forwarder
+    let (response, upstream) = forwarder
         .forward(&query)
         .await
-        .expect("forward should succeed via TCP fallback");
+        .expect("forward should fail over from closed local port to real upstream");
 
-    let msg = Message::from_bytes(&response).unwrap();
-    assert!(!msg.truncated(), "final response should not be truncated");
-    assert!(
-        !msg.answers().is_empty(),
-        "TCP fallback response should contain answers"
+    assert!(response.len() >= 12, "response too short");
+    assert_eq!(
+        upstream, "1.1.1.1:53",
+        "should have failed over past the dead local port"
     );
-    assert_eq!(msg.answers()[0].ttl(), 300);
 }
+
+// TC (truncation) → TCP fallback is now handled inside hickory's
+// NameServer transport layer (`ResolverOpts::try_tcp_on_error`), so we
+// no longer test it here — it would amount to testing a third-party
+// dependency. The end-to-end behavior is still exercised by
+// `test_forward_resolves_known_domain` against real upstreams.

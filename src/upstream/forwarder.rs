@@ -1,23 +1,33 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::serialize::binary::BinEncodable;
+use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, FirstAnswer, Protocol};
+use hickory_resolver::config::{NameServerConfig, ResolverOpts};
+use hickory_resolver::name_server::{NameServer, TokioConnectionProvider};
+use hickory_resolver::proto::DnsHandle;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tracing::warn;
 
 use super::strategy::UpstreamStrategy;
 
 /// EMA smoothing factor. 0.3 means 30% weight for new observations.
 const EMA_ALPHA: f64 = 0.3;
 
-/// Minimal DNS query for "." A record (root), used for health checks and probing.
-const ROOT_QUERY: [u8; 17] = [
-    0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-    0x01,
-];
+/// Minimum upstream timeout. Mobile clients (NAT rebinding, Wi-Fi↔cellular
+/// switches) routinely need more than 2s for the first query after a
+/// network transition.
+const MIN_TIMEOUT_MS: u64 = 5000;
+
+/// UDP send attempts per query (1 original + N-1 retransmits) before the
+/// transport layer gives up on this upstream.
+const UDP_ATTEMPTS: usize = 2;
 
 /// Configuration for upstream DNS servers.
 #[derive(Debug, Clone)]
@@ -36,7 +46,7 @@ impl Default for UpstreamConfig {
                 "9.9.9.9:53".into(),
                 "194.242.2.2:53".into(),
             ],
-            timeout_ms: 2000,
+            timeout_ms: 5000,
         }
     }
 }
@@ -46,13 +56,26 @@ impl Default for UpstreamConfig {
 pub enum ForwardError {
     #[error("all upstreams failed")]
     AllFailed,
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("malformed query")]
+    BadQuery,
+}
+
+/// A persistent NameServer connection paired with its display label.
+struct UpstreamEntry {
+    label: String,
+    name_server: NameServer<TokioConnectionProvider>,
 }
 
 /// Forwards DNS queries to upstream servers with configurable strategy.
+///
+/// Transport (UDP retransmit, socket reuse, txid validation, automatic
+/// TCP-on-error fallback) is delegated to hickory's `NameServer`. This
+/// type owns the per-upstream selection strategy and latency tracking.
 pub struct UpstreamForwarder {
     config: UpstreamConfig,
+    /// Upstreams indexed by label, in the same order as `config.servers`.
+    /// Servers whose address cannot be parsed are silently dropped.
+    entries: HashMap<String, UpstreamEntry>,
     strategy: ArcSwap<UpstreamStrategy>,
     rr_counter: AtomicUsize,
     latencies: Mutex<HashMap<String, f64>>,
@@ -61,8 +84,40 @@ pub struct UpstreamForwarder {
 impl UpstreamForwarder {
     /// Create a new forwarder with the given configuration.
     pub fn new(config: UpstreamConfig) -> Self {
+        let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
+
+        let mut opts = ResolverOpts::default();
+        opts.timeout = timeout;
+        opts.attempts = UDP_ATTEMPTS;
+        opts.try_tcp_on_error = true;
+        opts.validate = false;
+        opts.preserve_intermediates = false;
+
+        let provider = TokioConnectionProvider::default();
+
+        let mut entries = HashMap::new();
+        for server in &config.servers {
+            match server.parse::<SocketAddr>() {
+                Ok(addr) => {
+                    let ns_cfg = NameServerConfig::new(addr, Protocol::Udp);
+                    let name_server = NameServer::new(ns_cfg, opts.clone(), provider.clone());
+                    entries.insert(
+                        server.clone(),
+                        UpstreamEntry {
+                            label: server.clone(),
+                            name_server,
+                        },
+                    );
+                }
+                Err(e) => {
+                    warn!(server = %server, error = %e, "skipping unparseable upstream address");
+                }
+            }
+        }
+
         Self {
             config,
+            entries,
             strategy: ArcSwap::from_pointee(UpstreamStrategy::default()),
             rr_counter: AtomicUsize::new(0),
             latencies: Mutex::new(HashMap::new()),
@@ -137,126 +192,104 @@ impl UpstreamForwarder {
     ///
     /// Returns `(response_bytes, upstream_address)` on success.
     pub async fn forward(&self, query_bytes: &[u8]) -> Result<(Vec<u8>, String), ForwardError> {
-        let timeout = Duration::from_millis(self.config.timeout_ms);
-        let servers = self.server_order();
+        // Parse incoming wire bytes once. We need a hickory `Message` to
+        // build a `DnsRequest`; the caller has already parsed this once
+        // in the handler, but the forwarder API stays bytes-in / bytes-out
+        // so the handler doesn't have to know about transport details.
+        let request_msg = Message::from_vec(query_bytes).map_err(|_| ForwardError::BadQuery)?;
+        let client_id = request_msg.id();
 
-        // For round-robin, increment counter after determining order
+        let order = self.server_order();
         if self.strategy() == UpstreamStrategy::RoundRobin {
             self.rr_counter.fetch_add(1, Ordering::Relaxed);
         }
 
-        for server in &servers {
+        for label in &order {
+            let Some(entry) = self.entries.get(label) else {
+                continue;
+            };
+
+            let request = DnsRequest::new(request_msg.clone(), DnsRequestOptions::default());
             let start = std::time::Instant::now();
-            match self.try_forward(server, query_bytes, timeout).await {
+
+            match entry.name_server.send(request).first_answer().await {
                 Ok(response) => {
-                    // Check TC (truncation) bit — byte 2, bit 1
-                    if response.len() >= 3 && (response[2] & 0x02) != 0 {
-                        // Retry via TCP for a complete response
-                        match self.try_forward_tcp(server, query_bytes, timeout).await {
-                            Ok(tcp_response) => {
-                                let ms = start.elapsed().as_secs_f64() * 1000.0;
-                                self.update_latency(server, ms);
-                                return Ok((tcp_response, server.clone()));
-                            }
-                            Err(_) => continue,
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    self.update_latency(&entry.label, ms);
+
+                    // hickory rewrites txids for connection multiplexing,
+                    // so the response message we get back may not echo the
+                    // client's original id. Restore it before re-encoding.
+                    let mut msg: Message = response.into();
+                    msg.set_id(client_id);
+
+                    match msg.to_bytes() {
+                        Ok(bytes) => return Ok((bytes, entry.label.clone())),
+                        Err(e) => {
+                            warn!(upstream = %entry.label, error = %e, "failed to re-encode upstream response");
+                            continue;
                         }
                     }
-                    let ms = start.elapsed().as_secs_f64() * 1000.0;
-                    self.update_latency(server, ms);
-                    return Ok((response, server.clone()));
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    warn!(upstream = %entry.label, error = %e, "upstream forward failed");
+                    continue;
+                }
             }
         }
 
         Err(ForwardError::AllFailed)
     }
 
-    /// Attempt to forward a query to a single upstream server.
-    async fn try_forward(
-        &self,
-        server: &str,
-        query_bytes: &[u8],
-        timeout: Duration,
-    ) -> Result<Vec<u8>, ForwardError> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect(server).await?;
-        socket.send(query_bytes).await?;
-
-        let mut buf = vec![0u8; 4096];
-        let len = tokio::time::timeout(timeout, socket.recv(&mut buf))
-            .await
-            .map_err(|_| ForwardError::AllFailed)??;
-
-        Ok(buf[..len].to_vec())
-    }
-
-    /// Attempt to forward a query to a single upstream server via TCP (RFC 7766).
-    ///
-    /// Used as fallback when the UDP response has the TC (truncation) bit set.
-    async fn try_forward_tcp(
-        &self,
-        server: &str,
-        query_bytes: &[u8],
-        timeout: Duration,
-    ) -> Result<Vec<u8>, ForwardError> {
-        let mut stream = tokio::time::timeout(timeout, TcpStream::connect(server))
-            .await
-            .map_err(|_| ForwardError::AllFailed)??;
-
-        // TCP DNS: 2-byte length prefix + message
-        let len_prefix = (query_bytes.len() as u16).to_be_bytes();
-        tokio::time::timeout(timeout, async {
-            stream.write_all(&len_prefix).await?;
-            stream.write_all(query_bytes).await?;
-            Ok::<_, std::io::Error>(())
-        })
-        .await
-        .map_err(|_| ForwardError::AllFailed)??;
-
-        // Read 2-byte length prefix
-        let mut len_buf = [0u8; 2];
-        tokio::time::timeout(timeout, stream.read_exact(&mut len_buf))
-            .await
-            .map_err(|_| ForwardError::AllFailed)??;
-        let msg_len = u16::from_be_bytes(len_buf) as usize;
-
-        // Read the full response
-        let mut buf = vec![0u8; msg_len];
-        tokio::time::timeout(timeout, stream.read_exact(&mut buf))
-            .await
-            .map_err(|_| ForwardError::AllFailed)??;
-
-        Ok(buf)
-    }
-
     /// Health check all configured upstream servers.
     /// Returns a list of (server, status, latency_ms).
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
-        let timeout = Duration::from_millis(self.config.timeout_ms);
         let mut results = Vec::new();
-
         for server in &self.config.servers {
+            let Some(entry) = self.entries.get(server) else {
+                results.push((server.clone(), false, 0));
+                continue;
+            };
             let start = std::time::Instant::now();
-            let ok = self.try_forward(server, &ROOT_QUERY, timeout).await.is_ok();
+            let ok = self.probe(entry).await.is_ok();
             let ms = start.elapsed().as_millis() as u64;
             results.push((server.clone(), ok, ms));
         }
-
         results
     }
 
     /// Probe all servers and update EMA latencies. Used by background task.
     pub async fn probe_all(&self) {
-        let timeout = Duration::from_millis(self.config.timeout_ms);
-
         for server in &self.config.servers {
+            let Some(entry) = self.entries.get(server) else {
+                continue;
+            };
             let start = std::time::Instant::now();
-            if self.try_forward(server, &ROOT_QUERY, timeout).await.is_ok() {
+            if self.probe(entry).await.is_ok() {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                self.update_latency(server, ms);
+                self.update_latency(&entry.label, ms);
             }
         }
+    }
+
+    /// Send a synthetic A query to a single upstream and return on success.
+    async fn probe(&self, entry: &UpstreamEntry) -> Result<(), ()> {
+        let name = Name::from_ascii("health.invalid.").map_err(|_| ())?;
+        let mut msg = Message::new();
+        msg.set_id(rand::random::<u16>());
+        msg.set_message_type(MessageType::Query);
+        msg.set_op_code(OpCode::Query);
+        msg.set_recursion_desired(true);
+        msg.add_query(Query::query(name, RecordType::A));
+
+        let request = DnsRequest::new(msg, DnsRequestOptions::default());
+        entry
+            .name_server
+            .send(request)
+            .first_answer()
+            .await
+            .map(|_| ())
+            .map_err(|_| ())
     }
 }
 
@@ -265,8 +298,14 @@ mod tests {
     use super::*;
 
     fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
+        // Use real-looking IP:port so NameServer construction succeeds; tests
+        // here only exercise ordering and EMA, never actually send.
         let config = UpstreamConfig {
-            servers: vec!["a:53".into(), "b:53".into(), "c:53".into()],
+            servers: vec![
+                "10.0.0.1:53".into(),
+                "10.0.0.2:53".into(),
+                "10.0.0.3:53".into(),
+            ],
             timeout_ms: 1000,
         };
         let f = UpstreamForwarder::new(config);
@@ -278,22 +317,22 @@ mod tests {
     fn test_sequential_order() {
         let f = make_forwarder(UpstreamStrategy::Sequential);
         let order = f.server_order();
-        assert_eq!(order, vec!["a:53", "b:53", "c:53"]);
+        assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
     }
 
     #[test]
     fn test_round_robin_rotates() {
         let f = make_forwarder(UpstreamStrategy::RoundRobin);
         let order1 = f.server_order();
-        assert_eq!(order1, vec!["a:53", "b:53", "c:53"]);
+        assert_eq!(order1, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
 
         f.rr_counter.fetch_add(1, Ordering::Relaxed);
         let order2 = f.server_order();
-        assert_eq!(order2, vec!["b:53", "c:53", "a:53"]);
+        assert_eq!(order2, vec!["10.0.0.2:53", "10.0.0.3:53", "10.0.0.1:53"]);
 
         f.rr_counter.fetch_add(1, Ordering::Relaxed);
         let order3 = f.server_order();
-        assert_eq!(order3, vec!["c:53", "a:53", "b:53"]);
+        assert_eq!(order3, vec!["10.0.0.3:53", "10.0.0.1:53", "10.0.0.2:53"]);
     }
 
     #[test]
@@ -302,37 +341,37 @@ mod tests {
 
         {
             let mut lat = f.latencies.lock().unwrap();
-            lat.insert("a:53".into(), 50.0);
-            lat.insert("b:53".into(), 10.0);
-            lat.insert("c:53".into(), 30.0);
+            lat.insert("10.0.0.1:53".into(), 50.0);
+            lat.insert("10.0.0.2:53".into(), 10.0);
+            lat.insert("10.0.0.3:53".into(), 30.0);
         }
 
         let order = f.server_order();
-        assert_eq!(order, vec!["b:53", "c:53", "a:53"]);
+        assert_eq!(order, vec!["10.0.0.2:53", "10.0.0.3:53", "10.0.0.1:53"]);
     }
 
     #[test]
     fn test_lowest_latency_no_data_uses_config_order() {
         let f = make_forwarder(UpstreamStrategy::LowestLatency);
         let order = f.server_order();
-        assert_eq!(order, vec!["a:53", "b:53", "c:53"]);
+        assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
     }
 
     #[test]
     fn test_ema_update() {
         let f = make_forwarder(UpstreamStrategy::LowestLatency);
 
-        f.update_latency("a:53", 100.0);
+        f.update_latency("10.0.0.1:53", 100.0);
         {
             let lat = f.latencies.lock().unwrap();
-            assert!((lat["a:53"] - 100.0).abs() < 0.001);
+            assert!((lat["10.0.0.1:53"] - 100.0).abs() < 0.001);
         }
 
         // EMA = 0.3 * 40 + 0.7 * 100 = 82.0
-        f.update_latency("a:53", 40.0);
+        f.update_latency("10.0.0.1:53", 40.0);
         {
             let lat = f.latencies.lock().unwrap();
-            assert!((lat["a:53"] - 82.0).abs() < 0.001);
+            assert!((lat["10.0.0.1:53"] - 82.0).abs() < 0.001);
         }
     }
 
