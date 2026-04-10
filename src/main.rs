@@ -21,18 +21,28 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Init tracing
-    let use_color = std::env::var_os("NO_COLOR").is_none();
-    tracing_subscriber::fmt()
-        .with_ansi(use_color)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "noadd=info".into()),
-        )
-        .init();
-
-    // 2. Parse CLI args
+    // 1. Parse CLI args (before tracing init so we can pick the log format)
     let args = CliArgs::parse();
+
+    // 2. Init tracing
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "noadd=info".into());
+
+    match args.log_format {
+        noadd::config::LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .init();
+        }
+        noadd::config::LogFormat::Text => {
+            let use_color = std::env::var_os("NO_COLOR").is_none();
+            tracing_subscriber::fmt()
+                .with_ansi(use_color)
+                .with_env_filter(env_filter)
+                .init();
+        }
+    }
 
     // 3. Open database
     let db_path = args.db_path.to_str().unwrap_or("noadd.db");
