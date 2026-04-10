@@ -1,5 +1,15 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+/// Log output format.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// Structured JSON (for Loki / Grafana / structured logging pipelines)
+    Json,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "noadd", about = "DNS ad-blocker with DoH support")]
@@ -36,4 +46,8 @@ pub struct CliArgs {
     /// Use Let's Encrypt production (default is staging)
     #[arg(long, env = "NOADD_ACME_PROD")]
     pub acme_prod: bool,
+
+    /// Log output format
+    #[arg(long, default_value = "text", env = "NOADD_LOG_FORMAT")]
+    pub log_format: LogFormat,
 }

@@ -272,9 +272,11 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Send a synthetic A query to a single upstream and return on success.
+    /// Send a root "." A query to a single upstream and return on success.
+    /// The root query always gets a valid response from any recursive resolver,
+    /// making it a reliable liveness check.
     async fn probe(&self, entry: &UpstreamEntry) -> Result<(), ()> {
-        let name = Name::from_ascii("health.invalid.").map_err(|_| ())?;
+        let name = Name::root();
         let mut msg = Message::new();
         msg.set_id(rand::random::<u16>());
         msg.set_message_type(MessageType::Query);
