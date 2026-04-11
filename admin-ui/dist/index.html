@@ -913,11 +913,36 @@ input:focus, select:focus { border-color: var(--border-focus); }
 /* Rate trend chart (Statistics page) */
 .rate-chart-container {
   margin-top: 12px;
+  position: relative;
 }
 .rate-svg {
   width: 100%;
   height: 160px;
   display: block;
+  touch-action: none;
+}
+.rate-cursor { display: none; pointer-events: none; }
+.rate-cursor.active { display: block; }
+.rate-tooltip {
+  display: none;
+  position: absolute;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: 20;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  transform: translate(-50%, -100%);
+  margin-top: -8px;
+}
+.rate-tooltip.active { display: block; }
+@media (prefers-color-scheme: light) {
+  .rate-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 }
 .rate-legend {
   display: flex;
@@ -958,7 +983,8 @@ stats-page .stat-grid { margin-bottom: 12px; }
 /* Let hover tooltips escape card clipping on chart-containing cards */
 #chart-card,
 stats-page #timeline-card,
-stats-page #heatmap-card { overflow: visible; }
+stats-page #heatmap-card,
+stats-page #rate-trend-card { overflow: visible; }
 
 @media (max-width: 960px) {
   .stats-row-2col { grid-template-columns: 1fr; }
@@ -1754,20 +1780,25 @@ class StatsPage extends HTMLElement {
     const innerH = h - padY * 2;
     const xs = (i) => padX + (len === 1 ? innerW / 2 : (i / (len - 1)) * innerW);
     const ys = (pct) => padY + innerH - (pct / 100) * innerH;
+    const points = [];
     const blockedPath = [];
     const cachedPath = [];
     for (let i = 0; i < len; i++) {
       const d = rawData[i];
       const total = d.total || 0;
-      const blockedPct = total > 0 ? (d.blocked / total) * 100 : 0;
-      const cachedPct = total > 0 ? ((d.cached || 0) / total) * 100 : 0;
-      blockedPath.push(`${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(blockedPct).toFixed(1)}`);
-      cachedPath.push(`${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(cachedPct).toFixed(1)}`);
+      const blocked = d.blocked || 0;
+      const cached = d.cached || 0;
+      const blockedPct = total > 0 ? (blocked / total) * 100 : 0;
+      const cachedPct = total > 0 ? (cached / total) * 100 : 0;
+      const x = xs(i);
+      const yb = ys(blockedPct);
+      const yc = ys(cachedPct);
+      points.push({ i, x, yb, yc, d, blockedPct, cachedPct });
+      blockedPath.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${yb.toFixed(1)}`);
+      cachedPath.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${yc.toFixed(1)}`);
     }
-    // Area under each line for visual weight
     const blockedArea = `${blockedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
     const cachedArea = `${cachedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
-    // Y axis ticks at 25/50/75%
     const ticks = [25, 50, 75].map(p => {
       const y = ys(p).toFixed(1);
       return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/><text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-mono)">${p}%</text>`;
@@ -1779,11 +1810,60 @@ class StatsPage extends HTMLElement {
         <path d="${cachedPath.join(' ')}" fill="none" stroke="var(--green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="${blockedArea}" fill="var(--red)" fill-opacity="0.12"/>
         <path d="${blockedPath.join(' ')}" fill="none" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <g class="rate-cursor">
+          <line x1="0" y1="${padY}" x2="0" y2="${padY + innerH}" stroke="var(--text-dim)" stroke-width="0.5" stroke-dasharray="2 3"/>
+          <circle class="rate-dot-cached" cx="0" cy="0" r="3" fill="var(--green)" stroke="var(--bg-panel)" stroke-width="1"/>
+          <circle class="rate-dot-blocked" cx="0" cy="0" r="3" fill="var(--red)" stroke="var(--bg-panel)" stroke-width="1"/>
+        </g>
       </svg>
+      <div class="rate-tooltip"></div>
       <div class="rate-legend">
         <span><i style="background:var(--red)"></i>blocked %</span>
         <span><i style="background:var(--green)"></i>cached %</span>
       </div>`;
+
+    const svg = el.querySelector('.rate-svg');
+    const cursor = el.querySelector('.rate-cursor');
+    const line = cursor.querySelector('line');
+    const dotCached = cursor.querySelector('.rate-dot-cached');
+    const dotBlocked = cursor.querySelector('.rate-dot-blocked');
+    const tooltip = el.querySelector('.rate-tooltip');
+
+    const onMove = (evt) => {
+      const rect = svg.getBoundingClientRect();
+      if (rect.width === 0) return;
+      const relX = evt.clientX - rect.left;
+      const svgX = (relX / rect.width) * w;
+      let best = points[0];
+      let bestDist = Math.abs(best.x - svgX);
+      for (let i = 1; i < points.length; i++) {
+        const dist = Math.abs(points[i].x - svgX);
+        if (dist < bestDist) { best = points[i]; bestDist = dist; }
+      }
+      line.setAttribute('x1', best.x.toFixed(1));
+      line.setAttribute('x2', best.x.toFixed(1));
+      dotCached.setAttribute('cx', best.x.toFixed(1));
+      dotCached.setAttribute('cy', best.yc.toFixed(1));
+      dotBlocked.setAttribute('cx', best.x.toFixed(1));
+      dotBlocked.setAttribute('cy', best.yb.toFixed(1));
+      cursor.classList.add('active');
+      const ts = new Date(best.d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+      tooltip.innerHTML = `${esc(ts)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatNum(best.d.total || 0)} total</span>`;
+      const pxX = (best.x / w) * rect.width;
+      const containerRect = el.getBoundingClientRect();
+      const svgTop = rect.top - containerRect.top;
+      const pxY = svgTop + (best.yb / h) * rect.height;
+      tooltip.style.left = `${pxX}px`;
+      tooltip.style.top = `${pxY}px`;
+      tooltip.classList.add('active');
+    };
+    const onLeave = () => {
+      cursor.classList.remove('active');
+      tooltip.classList.remove('active');
+    };
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerleave', onLeave);
+    svg.addEventListener('pointercancel', onLeave);
   }
 }
 customElements.define('stats-page', StatsPage);
