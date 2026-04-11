@@ -50,7 +50,7 @@ async fn test_full_query_pipeline_block() {
 
     // 4. Create DnsCache, UpstreamForwarder, DnsHandler with logger
     let cache = DnsCache::new(1000);
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger_handle = tokio::spawn(logger.run());
     let handler = Arc::new(DnsHandler::new(filter, cache, forwarder, log_tx));
@@ -100,7 +100,7 @@ async fn test_full_query_pipeline_allow() {
     manager.rebuild_filter().await.unwrap();
 
     let cache = DnsCache::new(1000);
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger_handle = tokio::spawn(logger.run());
     let handler = Arc::new(DnsHandler::new(filter, cache, forwarder, log_tx));

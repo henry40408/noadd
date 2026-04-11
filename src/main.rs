@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     list_manager.rebuild_filter().await?;
 
     // 6. Create upstream forwarder
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
 
     // Load upstream strategy from DB
     if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
