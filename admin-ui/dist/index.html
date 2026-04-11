@@ -904,6 +904,13 @@ input:focus, select:focus { border-color: var(--border-focus); }
   font-size: 0.75rem;
   color: var(--text-dim);
   text-align: right;
+  line-height: 1.15;
+}
+.bar-row-pct {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  opacity: 0.75;
+  margin-top: 1px;
 }
 
 @media (max-width: 768px) {
@@ -1061,6 +1068,10 @@ function formatFull(n) {
 function formatNumAdaptive(n, threshold = 1_000_000) {
   if (n == null || Number.isNaN(n)) return '—';
   return n < threshold ? fullNumberFormatter.format(n) : formatNum(n);
+}
+function formatPct(n, total) {
+  if (!total || total <= 0 || n == null || Number.isNaN(n)) return '';
+  return `${(n / total * 100).toFixed(1)}%`;
 }
 
 function normalizeTs(ts) {
@@ -1421,9 +1432,13 @@ class DashboardPage extends HTMLElement {
     if (this._prevDomains && sig !== this._prevDomains) this._flashCard('#domains-card');
     this._prevDomains = sig;
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const visible = data.slice(0, 10);
+    const sumVal = visible.reduce((a, d) => a + d.count, 0);
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of data.slice(0, 10)) {
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatFull(d.count)}</td></tr>`;
+    for (const d of visible) {
+      const sharePct = formatPct(d.count, sumVal);
+      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -1434,10 +1449,14 @@ class DashboardPage extends HTMLElement {
     if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
     this._prevClients = sig;
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const visible = data.slice(0, 10);
+    const sumVal = visible.reduce((a, d) => a + d.count, 0);
     let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of data.slice(0, 10)) {
+    for (const d of visible) {
       const token = d.doh_token ? `<br><span style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</span>` : '';
-      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatFull(d.count)}</td></tr>`;
+      const sharePct = formatPct(d.count, sumVal);
+      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
+      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -1448,9 +1467,12 @@ class DashboardPage extends HTMLElement {
     if (this._prevUpstreams && sig !== this._prevUpstreams) this._flashCard('#upstreams-card');
     this._prevUpstreams = sig;
     if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const sumVal = data.reduce((a, d) => a + d.count, 0);
     let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th class="hide-mobile" style="text-align:right">Avg Latency</th></tr></thead><tbody>';
     for (const d of data) {
-      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatFull(d.count)}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      const sharePct = formatPct(d.count, sumVal);
+      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
+      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
@@ -1620,8 +1642,12 @@ class StatsPage extends HTMLElement {
       const blockedH = (blocked / max * 100).toFixed(1);
       const cachedH = (cached / max * 100).toFixed(1);
       const ts = new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const blockedPct = formatPct(blocked, d.total);
+      const cachedPct = formatPct(cached, d.total);
+      const blockedStr = blockedPct ? `${formatFull(blocked)} blocked (${blockedPct})` : `${formatFull(blocked)} blocked`;
+      const cachedStr = cachedPct ? `${formatFull(cached)} cached (${cachedPct})` : `${formatFull(cached)} cached`;
       bars += `<div class="chart-col">
-        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(blocked)} blocked</span> · <span style="color:var(--green)">${formatFull(cached)} cached</span></div>
+        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--green)">${cachedStr}</span></div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar cached" style="height:${cachedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
@@ -1701,14 +1727,18 @@ class StatsPage extends HTMLElement {
     }
     const sorted = [...entries].sort((a, b) => b[1] - a[1]);
     const maxVal = Math.max(...sorted.map(e => e[1]), 1);
+    const sumVal = sorted.reduce((a, e) => a + e[1], 0);
+    const barThreshold = window.innerWidth <= 768 ? 100_000 : 1_000_000;
     let html = '<div class="bar-list">';
     for (const [label, count] of sorted) {
-      const pct = (count / maxVal * 100).toFixed(1);
-      const barThreshold = window.innerWidth <= 768 ? 100_000 : 1_000_000;
+      const barPct = (count / maxVal * 100).toFixed(1);
+      const sharePct = formatPct(count, sumVal);
+      const titleText = sharePct ? `${formatFull(count)} (${sharePct})` : formatFull(count);
+      const pctLine = sharePct ? `<div class="bar-row-pct">${sharePct}</div>` : '';
       html += `<div class="bar-row">
         <div class="bar-row-label" title="${esc(label)}">${esc(label)}</div>
-        <div class="bar-row-track"><div class="bar-row-fill" style="width:${pct}%;background:${color}"></div></div>
-        <div class="bar-row-count" title="${formatFull(count)}">${formatNumAdaptive(count, barThreshold)}</div>
+        <div class="bar-row-track"><div class="bar-row-fill" style="width:${barPct}%;background:${color}"></div></div>
+        <div class="bar-row-count" title="${titleText}"><div>${formatNumAdaptive(count, barThreshold)}</div>${pctLine}</div>
       </div>`;
     }
     html += '</div>';
