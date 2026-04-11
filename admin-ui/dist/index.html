@@ -833,7 +833,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 .heatmap-cell {
   height: 18px;
   border-radius: 2px;
-  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) calc(var(--cell-op, 1) * 100%), transparent);
   position: relative;
   cursor: default;
 }
@@ -1589,7 +1589,7 @@ class StatsPage extends HTMLElement {
         if (ri === 0) edgeCls.push('edge-top');
         if (h <= 2) edgeCls.push('edge-left');
         if (h >= 21) edgeCls.push('edge-right');
-        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="opacity:${opacity.toFixed(3)}" title="${count} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
+        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${count} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
           <span class="heatmap-tooltip">${count} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
         </div>`;
       }
