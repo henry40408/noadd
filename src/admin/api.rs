@@ -123,7 +123,13 @@ async fn serve_static(uri: Uri) -> impl IntoResponse {
                 .into_response()
         }
         None => {
-            // SPA fallback: serve index.html for client-side routing
+            // Only fall back to index.html for extension-less paths (SPA
+            // client-side routes like /dashboard, /settings). Requests for
+            // missing assets (favicon.ico, robots.txt, *.map, etc.) must
+            // 404 so the browser doesn't try to parse HTML as the asset.
+            if std::path::Path::new(path).extension().is_some() {
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
             match ADMIN_UI.get_file("index.html") {
                 Some(file) => {
                     Html(String::from_utf8_lossy(file.contents()).to_string()).into_response()
