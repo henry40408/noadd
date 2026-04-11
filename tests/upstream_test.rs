@@ -106,3 +106,44 @@ async fn test_forward_failover_on_closed_local_port() {
 // no longer test it here — it would amount to testing a third-party
 // dependency. The end-to-end behavior is still exercised by
 // `test_forward_resolves_known_domain` against real upstreams.
+
+#[tokio::test]
+async fn test_health_check_reports_live_upstream_as_ok() {
+    // Regression test for the probe hitting the root "." with A instead
+    // of NS: hickory translates the empty-answer NOERROR from "." A into
+    // a NoRecordsFound error, making every probe look like a failure.
+    // A live upstream must appear as ok=true.
+    let config = UpstreamConfig {
+        servers: vec!["1.1.1.1:53".into()],
+        timeout_ms: 5000,
+    };
+    let forwarder = UpstreamForwarder::new(config);
+    let results = forwarder.health_check().await;
+
+    assert_eq!(results.len(), 1);
+    let (server, ok, _ms) = &results[0];
+    assert_eq!(server, "1.1.1.1:53");
+    assert!(*ok, "expected live upstream 1.1.1.1:53 to report ok=true");
+}
+
+#[tokio::test]
+async fn test_health_check_reports_dead_upstream_as_fail() {
+    // A closed local port should probe as fail without affecting the
+    // live upstream's result.
+    let dead_addr = {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.local_addr().unwrap()
+    };
+    let config = UpstreamConfig {
+        servers: vec![dead_addr.to_string(), "1.1.1.1:53".into()],
+        timeout_ms: 2000,
+    };
+    let forwarder = UpstreamForwarder::new(config);
+    let results = forwarder.health_check().await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, dead_addr.to_string());
+    assert!(!results[0].1, "dead upstream should report ok=false");
+    assert_eq!(results[1].0, "1.1.1.1:53");
+    assert!(results[1].1, "live upstream should report ok=true");
+}
