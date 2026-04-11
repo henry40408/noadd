@@ -995,24 +995,27 @@ class AppRouter {
 // ============================================================
 // Utility
 // ============================================================
-const numberFormatter = new Intl.NumberFormat();
+const fullNumberFormatter = new Intl.NumberFormat();
+const compactDecimalFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 function formatNum(n) {
   if (n == null || Number.isNaN(n)) return '—';
-  return numberFormatter.format(n);
+  if (n >= 1_000_000) return compactDecimalFormatter.format(n / 1_000_000) + 'M';
+  if (n >= 1_000) return compactDecimalFormatter.format(n / 1_000) + 'K';
+  return fullNumberFormatter.format(n);
 }
 
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
 }
 
+const relativeTimeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto', style: 'short' });
 function timeAgoText(ts) {
-  if (!ts) return 'never';
+  if (!ts) return relativeTimeFormatter.format(0, 'second');
   const diff = Math.floor((Date.now() - normalizeTs(ts)) / 1000);
-  if (diff < 0) return 'just now';
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  if (Math.abs(diff) < 60) return relativeTimeFormatter.format(-diff, 'second');
+  if (Math.abs(diff) < 3600) return relativeTimeFormatter.format(-Math.round(diff / 60), 'minute');
+  if (Math.abs(diff) < 86400) return relativeTimeFormatter.format(-Math.round(diff / 3600), 'hour');
+  return relativeTimeFormatter.format(-Math.round(diff / 86400), 'day');
 }
 
 function absTime(ts) {
