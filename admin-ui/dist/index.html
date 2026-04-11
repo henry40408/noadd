@@ -895,11 +895,17 @@ stats-page .heatmap-cell { height: 14px; }
 stats-page .heatmap-table,
 stats-page .heatmap-col-labels {
   grid-template-columns: 28px repeat(24, 1fr);
-  min-width: 420px;
+  min-width: 0;
 }
+stats-page .heatmap-wrap { overflow: visible; }
 stats-page .bar-list { max-height: 220px; overflow-y: auto; padding-right: 4px; }
 stats-page .card { margin-bottom: 12px; }
 stats-page .stat-grid { margin-bottom: 12px; }
+
+/* Let hover tooltips escape card clipping on chart-containing cards */
+#chart-card,
+stats-page #timeline-card,
+stats-page #heatmap-card { overflow: visible; }
 
 @media (max-width: 960px) {
   .stats-row-2col { grid-template-columns: 1fr; }
