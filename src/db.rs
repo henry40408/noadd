@@ -95,6 +95,16 @@ pub struct HeatmapCell {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencySummary {
+    pub sample_count: i64,
+    pub avg_ms: f64,
+    pub p50_ms: i64,
+    pub p95_ms: i64,
+    pub p99_ms: i64,
+    pub max_ms: i64,
+}
+
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
         let conn = Connection::open(path).await?;
@@ -1029,6 +1039,63 @@ impl Database {
             })
             .await?;
         Ok(result)
+    }
+
+    pub async fn unique_domains_since(&self, since: i64) -> Result<i64, DbError> {
+        let since_ms = since * 1000;
+        let count = self
+            .conn
+            .call(move |conn| {
+                let n: i64 = conn.query_row(
+                    "SELECT COUNT(DISTINCT domain) FROM query_logs WHERE timestamp >= ?1",
+                    params![since_ms],
+                    |row| row.get(0),
+                )?;
+                Ok(n)
+            })
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
+        let since_ms = since * 1000;
+        let summary = self
+            .conn
+            .call(move |conn| {
+                // Single scan: order rows once via window functions, then take the
+                // row at the desired percentile offset using MAX(CASE WHEN ...).
+                let row = conn.query_row(
+                    "WITH ordered AS ( \
+                        SELECT response_ms, \
+                               ROW_NUMBER() OVER (ORDER BY response_ms) AS rn, \
+                               COUNT(*) OVER () AS total \
+                        FROM query_logs \
+                        WHERE timestamp >= ?1 \
+                     ) \
+                     SELECT \
+                        COALESCE(MAX(total), 0) AS sample_count, \
+                        COALESCE(AVG(response_ms), 0.0) AS avg_ms, \
+                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.50 AS INTEGER)) THEN response_ms END), 0) AS p50, \
+                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.95 AS INTEGER)) THEN response_ms END), 0) AS p95, \
+                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.99 AS INTEGER)) THEN response_ms END), 0) AS p99, \
+                        COALESCE(MAX(response_ms), 0) AS max_ms \
+                     FROM ordered",
+                    params![since_ms],
+                    |row| {
+                        Ok(LatencySummary {
+                            sample_count: row.get(0)?,
+                            avg_ms: row.get(1)?,
+                            p50_ms: row.get(2)?,
+                            p95_ms: row.get(3)?,
+                            p99_ms: row.get(4)?,
+                            max_ms: row.get(5)?,
+                        })
+                    },
+                )?;
+                Ok(row)
+            })
+            .await?;
+        Ok(summary)
     }
 
     pub async fn db_file_size(&self) -> Result<i64, DbError> {

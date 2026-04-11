@@ -95,6 +95,9 @@ pub fn admin_router(
         .route("/api/stats/v2/heatmap", get(get_stats_v2_heatmap))
         .route("/api/stats/v2/breakdown", get(get_stats_v2_breakdown))
         .route("/api/stats/v2/health", get(get_stats_v2_health))
+        .route("/api/stats/v2/highlights", get(get_stats_v2_highlights))
+        .route("/api/stats/v2/top-domains", get(get_stats_v2_top_domains))
+        .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
         // Apple mobileconfig (no auth — token in URL is the credential)
@@ -920,6 +923,60 @@ async fn get_stats_v2_health(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(h))
+}
+
+async fn get_stats_v2_highlights(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<StatsRangeQuery>,
+) -> Result<Json<stats::StatsHighlights>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let range = parse_stats_range(&query)?;
+    let now = now_epoch();
+    let h = stats::compute_highlights(&state.db, now, range)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(h))
+}
+
+#[derive(Deserialize)]
+pub struct RangedTopQuery {
+    pub range: Option<String>,
+    pub limit: Option<i64>,
+}
+
+async fn get_stats_v2_top_domains(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<RangedTopQuery>,
+) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let range = parse_stats_range(&StatsRangeQuery {
+        range: query.range.clone(),
+    })?;
+    let limit = query.limit.unwrap_or(15);
+    let now = now_epoch();
+    let rows = stats::compute_top_domains_ranged(&state.db, now, range, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(rows))
+}
+
+async fn get_stats_v2_top_clients(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<RangedTopQuery>,
+) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let range = parse_stats_range(&StatsRangeQuery {
+        range: query.range.clone(),
+    })?;
+    let limit = query.limit.unwrap_or(15);
+    let now = now_epoch();
+    let rows = stats::compute_top_clients_ranged(&state.db, now, range, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(rows))
 }
 
 // --- Apple mobileconfig ---

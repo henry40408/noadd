@@ -195,6 +195,47 @@ pub async fn compute_breakdowns(
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StatsHighlights {
+    pub unique_domains: i64,
+    pub latency: crate::db::LatencySummary,
+}
+
+pub async fn compute_highlights(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+) -> Result<StatsHighlights, DbError> {
+    let (window_secs, _) = range.window();
+    let since = now - window_secs;
+    let unique_domains = db.unique_domains_since(since).await?;
+    let latency = db.latency_summary_since(since).await?;
+    Ok(StatsHighlights {
+        unique_domains,
+        latency,
+    })
+}
+
+pub async fn compute_top_domains_ranged(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+    limit: i64,
+) -> Result<Vec<crate::db::TopDomain>, DbError> {
+    let (window_secs, _) = range.window();
+    db.top_domains_since(now - window_secs, limit).await
+}
+
+pub async fn compute_top_clients_ranged(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+    limit: i64,
+) -> Result<Vec<crate::db::TopClient>, DbError> {
+    let (window_secs, _) = range.window();
+    db.top_clients_since(now - window_secs, limit).await
+}
+
 pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbError> {
     let db_size_bytes = db.db_file_size().await?;
     let total_log_count = db.total_log_count().await?;
