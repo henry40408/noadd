@@ -1011,16 +1011,23 @@ impl Database {
         Ok(result)
     }
 
-    pub async fn result_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
+    pub async fn outcome_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
         let since_ms = since * 1000;
         let result = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT COALESCE(result, 'unknown') AS r, COUNT(*) AS cnt \
+                    "SELECT \
+                        CASE \
+                            WHEN blocked = 1 THEN 'Blocked' \
+                            WHEN cached = 1 THEN 'Cached' \
+                            WHEN result IS NOT NULL AND result != '' THEN 'Resolved' \
+                            ELSE 'Empty' \
+                        END AS outcome, \
+                        COUNT(*) AS cnt \
                      FROM query_logs \
                      WHERE timestamp >= ?1 \
-                     GROUP BY r \
+                     GROUP BY outcome \
                      ORDER BY cnt DESC",
                 )?;
                 let rows = stmt

@@ -154,7 +154,7 @@ impl StatsRange {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Breakdowns {
     pub query_types: Vec<(String, i64)>,
-    pub results: Vec<(String, i64)>,
+    pub outcomes: Vec<(String, i64)>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -188,10 +188,10 @@ pub async fn compute_breakdowns(
     let (window_secs, _) = range.window();
     let since = now - window_secs;
     let query_types = db.query_type_breakdown_since(since).await?;
-    let results = db.result_breakdown_since(since).await?;
+    let outcomes = db.outcome_breakdown_since(since).await?;
     Ok(Breakdowns {
         query_types,
-        results,
+        outcomes,
     })
 }
 
