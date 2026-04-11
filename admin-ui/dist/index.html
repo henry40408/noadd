@@ -881,6 +881,28 @@ input:focus, select:focus { border-color: var(--border-focus); }
 @media (max-width: 768px) {
   .bar-row { grid-template-columns: 80px 1fr 48px; }
 }
+
+/* Statistics page: tighter layout so content fits without excessive scroll */
+.stats-row-2col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.stats-row-2col > .card { margin-bottom: 0; }
+stats-page .chart-container { height: 160px; }
+stats-page .heatmap-cell { height: 14px; }
+stats-page .heatmap-table,
+stats-page .heatmap-col-labels {
+  grid-template-columns: 28px repeat(24, 1fr);
+  min-width: 420px;
+}
+stats-page .bar-list { max-height: 220px; overflow-y: auto; padding-right: 4px; }
+stats-page .card { margin-bottom: 12px; }
+stats-page .stat-grid { margin-bottom: 12px; }
+
+@media (max-width: 960px) {
+  .stats-row-2col { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -1356,15 +1378,18 @@ class StatsPage extends HTMLElement {
           <button data-range="90d">90d</button>
         </div>
       </div>
-      <div class="card fade-in" style="animation-delay:0.05s" id="timeline-card">
-        <div class="card-title" id="timeline-title">Queries (last 7d)</div>
-        <div class="chart-container" id="timeline-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+      <div class="stat-grid fade-in" id="health-grid"></div>
+      <div class="stats-row-2col fade-in" style="animation-delay:0.05s">
+        <div class="card" id="timeline-card">
+          <div class="card-title" id="timeline-title">Queries (last 7d)</div>
+          <div class="chart-container" id="timeline-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+        </div>
+        <div class="card" id="heatmap-card">
+          <div class="card-title">Activity by hour (last 30d)</div>
+          <div id="heatmap-container"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+        </div>
       </div>
-      <div class="card fade-in" style="animation-delay:0.1s" id="heatmap-card">
-        <div class="card-title">Activity by hour (last 30d)</div>
-        <div id="heatmap-container"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
-      </div>
-      <div class="dashboard-grid-2col fade-in" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;animation-delay:0.15s">
+      <div class="stats-row-2col fade-in" style="animation-delay:0.1s">
         <div class="card" id="qtypes-card">
           <div class="card-title">Query Types</div>
           <div id="qtypes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
@@ -1373,10 +1398,6 @@ class StatsPage extends HTMLElement {
           <div class="card-title">Result Codes</div>
           <div id="results-chart"><p style="color:var(--text-dim)">Loading…</p></div>
         </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.2s" id="health-card">
-        <div class="card-title">Database Health</div>
-        <div class="stat-grid" id="health-grid"></div>
       </div>`;
 
     this.querySelector('#range-switcher').addEventListener('click', (e) => {
