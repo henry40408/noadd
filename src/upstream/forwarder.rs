@@ -272,9 +272,14 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Send a root "." A query to a single upstream and return on success.
-    /// The root query always gets a valid response from any recursive resolver,
-    /// making it a reliable liveness check.
+    /// Send a root "." NS query to a single upstream and return on success.
+    ///
+    /// NS is used (not A) because the root has no A record: a "." A query
+    /// comes back as NOERROR with zero answers, which hickory's
+    /// `ProtoError::from_response` translates into a `NoRecordsFound`
+    /// error and makes every probe look like a failure. The root NS set
+    /// is always populated on any recursive resolver, so NS gives a
+    /// reliable liveness signal without hitting an authoritative zone.
     async fn probe(&self, entry: &UpstreamEntry) -> Result<(), ()> {
         let name = Name::root();
         let mut msg = Message::new();
@@ -282,7 +287,7 @@ impl UpstreamForwarder {
         msg.set_message_type(MessageType::Query);
         msg.set_op_code(OpCode::Query);
         msg.set_recursion_desired(true);
-        msg.add_query(Query::query(name, RecordType::A));
+        msg.add_query(Query::query(name, RecordType::NS));
 
         let request = DnsRequest::new(msg, DnsRequestOptions::default());
         entry
