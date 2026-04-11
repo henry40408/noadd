@@ -1429,9 +1429,9 @@ class StatsPage extends HTMLElement {
           <div class="card-title">Query Types</div>
           <div id="qtypes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
         </div>
-        <div class="card" id="results-card">
-          <div class="card-title">Result Codes</div>
-          <div id="results-chart"><p style="color:var(--text-dim)">Loading…</p></div>
+        <div class="card" id="outcomes-card">
+          <div class="card-title">Outcomes</div>
+          <div id="outcomes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
         </div>
       </div>`;
 
@@ -1622,7 +1622,7 @@ class StatsPage extends HTMLElement {
   _renderBreakdown(data) {
     if (!data) return;
     this._renderBarChart('#qtypes-chart', data.query_types, 'var(--accent)');
-    this._renderBarChart('#results-chart', data.results, 'var(--orange)');
+    this._renderBarChart('#outcomes-chart', data.outcomes, 'var(--orange)');
   }
 
   _renderHealth(data) {

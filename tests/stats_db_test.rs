@@ -109,21 +109,27 @@ async fn query_type_breakdown_sorts_desc() {
 }
 
 #[tokio::test]
-async fn result_breakdown_buckets_null_as_unknown() {
+async fn outcome_breakdown_categorizes_by_action() {
     let db = test_db().await;
     let entries = vec![
-        entry(1000, "A", false, false, Some("NOERROR")),
-        entry(1001, "A", true, false, Some("NXDOMAIN")),
-        entry(1002, "A", false, false, None),
-        entry(1003, "A", false, false, Some("NOERROR")),
+        // Resolved: upstream returned an answer
+        entry(1000, "A", false, false, Some("142.250.196.142")),
+        entry(1001, "A", false, false, Some("8.8.8.8")),
+        // Blocked: filter matched (result is ignored for this bucket)
+        entry(1002, "A", true, false, None),
+        // Cached: served from cache
+        entry(1003, "A", false, true, Some("1.1.1.1")),
+        // Empty: upstream answered with no records (NXDOMAIN/NODATA approx)
+        entry(1004, "A", false, false, None),
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let rows = db.result_breakdown_since(0).await.unwrap();
+    let rows = db.outcome_breakdown_since(0).await.unwrap();
     let map: std::collections::HashMap<String, i64> = rows.into_iter().collect();
-    assert_eq!(map.get("NOERROR"), Some(&2));
-    assert_eq!(map.get("NXDOMAIN"), Some(&1));
-    assert_eq!(map.get("unknown"), Some(&1));
+    assert_eq!(map.get("Resolved"), Some(&2));
+    assert_eq!(map.get("Blocked"), Some(&1));
+    assert_eq!(map.get("Cached"), Some(&1));
+    assert_eq!(map.get("Empty"), Some(&1));
 }
 
 #[tokio::test]
