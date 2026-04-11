@@ -94,7 +94,7 @@ async fn make_test_handler(
         servers: vec![upstream_addr.to_string()],
         timeout_ms: 10_000,
     };
-    let forwarder = Arc::new(UpstreamForwarder::new(config));
+    let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (log_tx, log_rx) = mpsc::channel::<QueryContext>(10_000);
     let handler = Arc::new(DnsHandler::new(filter, cache.clone(), forwarder, log_tx));
     (handler, cache, log_rx)

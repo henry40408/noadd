@@ -14,7 +14,7 @@ base64 = "0.22"
 bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "env"] }
 hickory-proto = "0.25"
-hickory-resolver = { version = "0.25", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio"] }
+hickory-resolver = { version = "0.25", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio", "webpki-roots"] }
 include_dir = "0.7"
 mime_guess = "2"
 moka = { version = "0.12", default-features = false, features = ["future"] }

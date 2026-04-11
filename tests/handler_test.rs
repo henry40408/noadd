@@ -28,7 +28,7 @@ fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
     msg.to_vec().unwrap()
 }
 
-fn make_handler(
+async fn make_handler(
     block_rules: Vec<(ParsedRule, String)>,
     allow_rules: Vec<ParsedRule>,
 ) -> (DnsHandler, mpsc::Receiver<QueryContext>) {
@@ -36,7 +36,7 @@ fn make_handler(
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let config = UpstreamConfig::default();
-    let forwarder = Arc::new(UpstreamForwarder::new(config));
+    let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (tx, rx) = mpsc::channel(64);
     let handler = DnsHandler::new(filter, cache, forwarder, tx);
     (handler, rx)
@@ -53,7 +53,7 @@ async fn test_handler_blocks_domain() {
         "test-list".to_string(),
     )];
 
-    let (handler, _rx) = make_handler(block_rules, vec![]);
+    let (handler, _rx) = make_handler(block_rules, vec![]).await;
     let query = make_query_bytes("ads.example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -84,7 +84,7 @@ async fn test_handler_blocks_aaaa_domain() {
         "test-list".to_string(),
     )];
 
-    let (handler, _rx) = make_handler(block_rules, vec![]);
+    let (handler, _rx) = make_handler(block_rules, vec![]).await;
     let query = make_query_bytes("ads.example.com", RecordType::AAAA);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -107,7 +107,7 @@ async fn test_handler_blocks_aaaa_domain() {
 
 #[tokio::test]
 async fn test_handler_forwards_allowed_domain() {
-    let (handler, _rx) = make_handler(vec![], vec![]);
+    let (handler, _rx) = make_handler(vec![], vec![]).await;
     let query = make_query_bytes("example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -129,7 +129,7 @@ async fn test_handler_sends_log_event() {
         "test-list".to_string(),
     )];
 
-    let (handler, mut rx) = make_handler(block_rules, vec![]);
+    let (handler, mut rx) = make_handler(block_rules, vec![]).await;
     let query = make_query_bytes("ads.example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 

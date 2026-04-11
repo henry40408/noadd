@@ -34,7 +34,7 @@ fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
     msg.to_vec().unwrap()
 }
 
-fn make_handler() -> Arc<DnsHandler> {
+async fn make_handler() -> Arc<DnsHandler> {
     let block_rules = vec![(
         ParsedRule {
             domain: "blocked.example.com".to_string(),
@@ -47,7 +47,7 @@ fn make_handler() -> Arc<DnsHandler> {
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let config = UpstreamConfig::default();
-    let forwarder = Arc::new(UpstreamForwarder::new(config));
+    let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (tx, _rx) = mpsc::channel::<QueryContext>(64);
     Arc::new(DnsHandler::new(filter, cache, forwarder, tx))
 }
@@ -63,7 +63,7 @@ async fn test_db() -> Database {
 
 #[tokio::test]
 async fn test_doh_get_no_token() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     let app = doh_router(handler, db);
 
@@ -92,7 +92,7 @@ async fn test_doh_get_no_token() {
 
 #[tokio::test]
 async fn test_doh_post_no_token() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     let app = doh_router(handler, db);
 
@@ -120,7 +120,7 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
         servers: vec!["192.0.2.1:53".into()], // TEST-NET-1, unreachable
         timeout_ms: 500,
     };
-    let forwarder = Arc::new(UpstreamForwarder::new(config));
+    let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (tx, _rx) = mpsc::channel::<QueryContext>(64);
     let handler = Arc::new(DnsHandler::new(filter, cache, forwarder, tx));
 
@@ -161,7 +161,7 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
 
 #[tokio::test]
 async fn test_doh_post_wrong_content_type_returns_415() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     let app = doh_router(handler, db);
 
@@ -178,7 +178,7 @@ async fn test_doh_post_wrong_content_type_returns_415() {
 
 #[tokio::test]
 async fn test_doh_post_malformed_body_returns_400() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     let app = doh_router(handler, db);
 
@@ -194,7 +194,7 @@ async fn test_doh_post_malformed_body_returns_400() {
 
 #[tokio::test]
 async fn test_doh_get_malformed_body_returns_400() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     let app = doh_router(handler, db);
 
@@ -210,7 +210,7 @@ async fn test_doh_get_malformed_body_returns_400() {
 
 #[tokio::test]
 async fn test_doh_token_required_when_configured() {
-    let handler = make_handler();
+    let handler = make_handler().await;
     let db = test_db().await;
     // Configure a token and set policy to deny
     db.add_doh_token("my-secret-token").await.unwrap();

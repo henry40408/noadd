@@ -24,7 +24,7 @@ async fn setup() -> (axum::Router, String) {
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
 
     // Set admin password
     let hash = hash_password("admin").unwrap();
@@ -352,7 +352,7 @@ async fn test_setup_initial_password() {
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()));
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
 
     // No password set initially
     let app = admin_router(

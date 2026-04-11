@@ -32,7 +32,11 @@ const UDP_ATTEMPTS: usize = 2;
 /// Configuration for upstream DNS servers.
 #[derive(Debug, Clone)]
 pub struct UpstreamConfig {
-    /// Upstream server addresses in "IP:port" format.
+    /// Upstream server addresses. Each entry may be:
+    /// - `IP:port` — plain UDP (e.g. `1.1.1.1:53`, `[::1]:53`)
+    /// - `tls://host[:port]` — DNS-over-TLS, default port 853
+    /// - `https://host[:port][/path]` — DNS-over-HTTPS, default port 443
+    ///   and default path `/dns-query`
     pub servers: Vec<String>,
     /// Timeout in milliseconds for each upstream attempt.
     pub timeout_ms: u64,
@@ -44,10 +48,109 @@ impl Default for UpstreamConfig {
             servers: vec![
                 "1.1.1.1:53".into(),
                 "9.9.9.9:53".into(),
-                "194.242.2.2:53".into(),
+                // Mullvad's `194.242.2.2:53` plain-UDP endpoint is not a
+                // recursive resolver from arbitrary networks (returns
+                // REFUSED), so use their DoT endpoint instead.
+                "tls://dns.mullvad.net:853".into(),
             ],
             timeout_ms: 5000,
         }
+    }
+}
+
+/// Parsed transport kind for an upstream entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpstreamKind {
+    Udp,
+    Tls { sni: String },
+    Https { sni: String, path: String },
+}
+
+/// A syntactically validated upstream entry, prior to address resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpstreamSpec {
+    /// Hostname (DoT/DoH) or IP literal (UDP) used for both display
+    /// and the address-resolution step.
+    host: String,
+    port: u16,
+    kind: UpstreamKind,
+}
+
+impl UpstreamSpec {
+    /// Parse an upstream entry string. Recognizes the `tls://` and
+    /// `https://` URL schemes; everything else is treated as plain
+    /// `IP:port` UDP and validated by `SocketAddr` to preserve the
+    /// existing v4/v6 behavior.
+    fn parse(input: &str) -> Result<Self, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err("empty upstream entry".into());
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("tls://") {
+            let (host, port) = parse_host_port(rest, 853)?;
+            Ok(Self {
+                host: host.clone(),
+                port,
+                kind: UpstreamKind::Tls { sni: host },
+            })
+        } else if let Some(rest) = trimmed.strip_prefix("https://") {
+            let (hostport, path) = match rest.find('/') {
+                Some(i) => (&rest[..i], rest[i..].to_string()),
+                None => (rest, "/dns-query".to_string()),
+            };
+            let (host, port) = parse_host_port(hostport, 443)?;
+            Ok(Self {
+                host: host.clone(),
+                port,
+                kind: UpstreamKind::Https { sni: host, path },
+            })
+        } else {
+            let addr: SocketAddr = trimmed
+                .parse()
+                .map_err(|e| format!("invalid UDP upstream {trimmed:?}: {e}"))?;
+            Ok(Self {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                kind: UpstreamKind::Udp,
+            })
+        }
+    }
+}
+
+/// Parse a `host[:port]` fragment, returning a default port when omitted.
+/// Handles bracketed IPv6 literals (`[::1]:853`).
+fn parse_host_port(s: &str, default_port: u16) -> Result<(String, u16), String> {
+    if s.is_empty() {
+        return Err("missing host".into());
+    }
+    if let Some(rest) = s.strip_prefix('[') {
+        let end = rest
+            .find(']')
+            .ok_or_else(|| "unclosed `[` in IPv6 literal".to_string())?;
+        let host = &rest[..end];
+        let after = &rest[end + 1..];
+        let port = if let Some(p) = after.strip_prefix(':') {
+            p.parse().map_err(|e| format!("invalid port {p:?}: {e}"))?
+        } else if after.is_empty() {
+            default_port
+        } else {
+            return Err(format!("unexpected text after IPv6 literal: {after:?}"));
+        };
+        return Ok((host.to_string(), port));
+    }
+    if let Some(colon) = s.rfind(':') {
+        let host = &s[..colon];
+        let port_str = &s[colon + 1..];
+        if host.is_empty() {
+            return Err("missing host".into());
+        }
+        let port: u16 = port_str
+            .parse()
+            .map_err(|e| format!("invalid port {port_str:?}: {e}"))?;
+        Ok((host.to_string(), port))
+    } else {
+        Ok((s.to_string(), default_port))
     }
 }
 
@@ -83,7 +186,12 @@ pub struct UpstreamForwarder {
 
 impl UpstreamForwarder {
     /// Create a new forwarder with the given configuration.
-    pub fn new(config: UpstreamConfig) -> Self {
+    ///
+    /// Hostname-bearing entries (`tls://`, `https://`) are resolved to
+    /// `SocketAddr` via `tokio::net::lookup_host`. The first address
+    /// returned is used; geo-routed providers like Mullvad therefore
+    /// pin to the PoP that DNS picks at startup.
+    pub async fn new(config: UpstreamConfig) -> Self {
         let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
 
         let mut opts = ResolverOpts::default();
@@ -97,22 +205,52 @@ impl UpstreamForwarder {
 
         let mut entries = HashMap::new();
         for server in &config.servers {
-            match server.parse::<SocketAddr>() {
-                Ok(addr) => {
-                    let ns_cfg = NameServerConfig::new(addr, Protocol::Udp);
-                    let name_server = NameServer::new(ns_cfg, opts.clone(), provider.clone());
-                    entries.insert(
-                        server.clone(),
-                        UpstreamEntry {
-                            label: server.clone(),
-                            name_server,
-                        },
-                    );
-                }
+            let spec = match UpstreamSpec::parse(server) {
+                Ok(s) => s,
                 Err(e) => {
-                    warn!(server = %server, error = %e, "skipping unparseable upstream address");
+                    warn!(server = %server, error = %e, "skipping unparseable upstream entry");
+                    continue;
                 }
-            }
+            };
+
+            let lookup_target = format!("{}:{}", spec.host, spec.port);
+            let addr = match tokio::net::lookup_host(&lookup_target).await {
+                Ok(mut addrs) => match addrs.next() {
+                    Some(a) => a,
+                    None => {
+                        warn!(server = %server, "no addresses returned for upstream");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    warn!(server = %server, error = %e, "failed to resolve upstream host");
+                    continue;
+                }
+            };
+
+            let ns_cfg = match &spec.kind {
+                UpstreamKind::Udp => NameServerConfig::new(addr, Protocol::Udp),
+                UpstreamKind::Tls { sni } => {
+                    let mut c = NameServerConfig::new(addr, Protocol::Tls);
+                    c.tls_dns_name = Some(sni.clone());
+                    c
+                }
+                UpstreamKind::Https { sni, path } => {
+                    let mut c = NameServerConfig::new(addr, Protocol::Https);
+                    c.tls_dns_name = Some(sni.clone());
+                    c.http_endpoint = Some(path.clone());
+                    c
+                }
+            };
+
+            let name_server = NameServer::new(ns_cfg, opts.clone(), provider.clone());
+            entries.insert(
+                server.clone(),
+                UpstreamEntry {
+                    label: server.clone(),
+                    name_server,
+                },
+            );
         }
 
         Self {
@@ -304,9 +442,10 @@ impl UpstreamForwarder {
 mod tests {
     use super::*;
 
-    fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
+    async fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
         // Use real-looking IP:port so NameServer construction succeeds; tests
-        // here only exercise ordering and EMA, never actually send.
+        // here only exercise ordering and EMA, never actually send. Plain
+        // IP literals don't trigger any DNS lookup in `tokio::net::lookup_host`.
         let config = UpstreamConfig {
             servers: vec![
                 "10.0.0.1:53".into(),
@@ -315,21 +454,21 @@ mod tests {
             ],
             timeout_ms: 1000,
         };
-        let f = UpstreamForwarder::new(config);
+        let f = UpstreamForwarder::new(config).await;
         f.set_strategy(strategy);
         f
     }
 
-    #[test]
-    fn test_sequential_order() {
-        let f = make_forwarder(UpstreamStrategy::Sequential);
+    #[tokio::test]
+    async fn test_sequential_order() {
+        let f = make_forwarder(UpstreamStrategy::Sequential).await;
         let order = f.server_order();
         assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
     }
 
-    #[test]
-    fn test_round_robin_rotates() {
-        let f = make_forwarder(UpstreamStrategy::RoundRobin);
+    #[tokio::test]
+    async fn test_round_robin_rotates() {
+        let f = make_forwarder(UpstreamStrategy::RoundRobin).await;
         let order1 = f.server_order();
         assert_eq!(order1, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
 
@@ -342,9 +481,9 @@ mod tests {
         assert_eq!(order3, vec!["10.0.0.3:53", "10.0.0.1:53", "10.0.0.2:53"]);
     }
 
-    #[test]
-    fn test_lowest_latency_order() {
-        let f = make_forwarder(UpstreamStrategy::LowestLatency);
+    #[tokio::test]
+    async fn test_lowest_latency_order() {
+        let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
 
         {
             let mut lat = f.latencies.lock().unwrap();
@@ -357,16 +496,16 @@ mod tests {
         assert_eq!(order, vec!["10.0.0.2:53", "10.0.0.3:53", "10.0.0.1:53"]);
     }
 
-    #[test]
-    fn test_lowest_latency_no_data_uses_config_order() {
-        let f = make_forwarder(UpstreamStrategy::LowestLatency);
+    #[tokio::test]
+    async fn test_lowest_latency_no_data_uses_config_order() {
+        let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
         let order = f.server_order();
         assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
     }
 
-    #[test]
-    fn test_ema_update() {
-        let f = make_forwarder(UpstreamStrategy::LowestLatency);
+    #[tokio::test]
+    async fn test_ema_update() {
+        let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
 
         f.update_latency("10.0.0.1:53", 100.0);
         {
@@ -382,9 +521,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_set_strategy() {
-        let f = make_forwarder(UpstreamStrategy::Sequential);
+    #[tokio::test]
+    async fn test_set_strategy() {
+        let f = make_forwarder(UpstreamStrategy::Sequential).await;
         assert_eq!(f.strategy(), UpstreamStrategy::Sequential);
 
         f.set_strategy(UpstreamStrategy::RoundRobin);
@@ -392,5 +531,101 @@ mod tests {
 
         f.set_strategy(UpstreamStrategy::LowestLatency);
         assert_eq!(f.strategy(), UpstreamStrategy::LowestLatency);
+    }
+
+    #[test]
+    fn parse_plain_udp_v4() {
+        let s = UpstreamSpec::parse("1.1.1.1:53").unwrap();
+        assert_eq!(s.host, "1.1.1.1");
+        assert_eq!(s.port, 53);
+        assert_eq!(s.kind, UpstreamKind::Udp);
+    }
+
+    #[test]
+    fn parse_plain_udp_v6() {
+        let s = UpstreamSpec::parse("[::1]:53").unwrap();
+        assert_eq!(s.host, "::1");
+        assert_eq!(s.port, 53);
+        assert_eq!(s.kind, UpstreamKind::Udp);
+    }
+
+    #[test]
+    fn parse_dot_default_port() {
+        let s = UpstreamSpec::parse("tls://dns.mullvad.net").unwrap();
+        assert_eq!(s.host, "dns.mullvad.net");
+        assert_eq!(s.port, 853);
+        assert_eq!(
+            s.kind,
+            UpstreamKind::Tls {
+                sni: "dns.mullvad.net".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dot_explicit_port() {
+        let s = UpstreamSpec::parse("tls://dns.mullvad.net:8853").unwrap();
+        assert_eq!(s.port, 8853);
+    }
+
+    #[test]
+    fn parse_doh_default_path_and_port() {
+        let s = UpstreamSpec::parse("https://dns.mullvad.net").unwrap();
+        assert_eq!(s.host, "dns.mullvad.net");
+        assert_eq!(s.port, 443);
+        assert_eq!(
+            s.kind,
+            UpstreamKind::Https {
+                sni: "dns.mullvad.net".into(),
+                path: "/dns-query".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_doh_custom_path() {
+        let s = UpstreamSpec::parse("https://dns.example.com/custom-dns").unwrap();
+        assert_eq!(s.port, 443);
+        assert_eq!(
+            s.kind,
+            UpstreamKind::Https {
+                sni: "dns.example.com".into(),
+                path: "/custom-dns".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_doh_with_port_and_path() {
+        let s = UpstreamSpec::parse("https://dns.example.com:8443/dns-query").unwrap();
+        assert_eq!(s.port, 8443);
+        assert_eq!(
+            s.kind,
+            UpstreamKind::Https {
+                sni: "dns.example.com".into(),
+                path: "/dns-query".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_invalid_udp_returns_error() {
+        assert!(UpstreamSpec::parse("not an address").is_err());
+    }
+
+    #[test]
+    fn parse_empty_returns_error() {
+        assert!(UpstreamSpec::parse("").is_err());
+        assert!(UpstreamSpec::parse("   ").is_err());
+    }
+
+    #[test]
+    fn parse_dot_invalid_port() {
+        assert!(UpstreamSpec::parse("tls://dns.example.com:abc").is_err());
+    }
+
+    #[test]
+    fn parse_dot_unclosed_ipv6() {
+        assert!(UpstreamSpec::parse("tls://[::1:853").is_err());
     }
 }

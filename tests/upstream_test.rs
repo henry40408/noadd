@@ -21,7 +21,7 @@ fn build_query(domain: &str, record_type: RecordType) -> Vec<u8> {
 #[tokio::test]
 async fn test_forward_resolves_known_domain() {
     let config = UpstreamConfig::default();
-    let forwarder = UpstreamForwarder::new(config);
+    let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
     let (response, upstream) = forwarder
@@ -51,7 +51,7 @@ async fn test_forward_failover_on_bad_primary() {
         // Short timeout so the test doesn't take too long waiting for the bad server.
         timeout_ms: 1000,
     };
-    let forwarder = UpstreamForwarder::new(config);
+    let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
     let (response, upstream) = forwarder
@@ -86,7 +86,7 @@ async fn test_forward_failover_on_closed_local_port() {
         servers: vec![dead_addr.to_string(), "1.1.1.1:53".into()],
         timeout_ms: 5000,
     };
-    let forwarder = UpstreamForwarder::new(config);
+    let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
     let (response, upstream) = forwarder
@@ -117,13 +117,53 @@ async fn test_health_check_reports_live_upstream_as_ok() {
         servers: vec!["1.1.1.1:53".into()],
         timeout_ms: 5000,
     };
-    let forwarder = UpstreamForwarder::new(config);
+    let forwarder = UpstreamForwarder::new(config).await;
     let results = forwarder.health_check().await;
 
     assert_eq!(results.len(), 1);
     let (server, ok, _ms) = &results[0];
     assert_eq!(server, "1.1.1.1:53");
     assert!(*ok, "expected live upstream 1.1.1.1:53 to report ok=true");
+}
+
+#[tokio::test]
+async fn test_health_check_mullvad_dot_succeeds() {
+    // Mullvad's plain UDP:53 endpoint returns REFUSED to recursive
+    // queries from arbitrary networks (anti-amplification policy), so
+    // 194.242.2.2:53 cannot be used as a real upstream. Their DoT
+    // endpoint at dns.mullvad.net:853 fully recurses, so the forwarder
+    // must report it as healthy.
+    let config = UpstreamConfig {
+        servers: vec!["tls://dns.mullvad.net:853".into()],
+        timeout_ms: 8000,
+    };
+    let forwarder = UpstreamForwarder::new(config).await;
+    let results = forwarder.health_check().await;
+
+    assert_eq!(results.len(), 1);
+    let (server, ok, _ms) = &results[0];
+    assert_eq!(server, "tls://dns.mullvad.net:853");
+    assert!(*ok, "Mullvad DoT upstream should report ok=true");
+}
+
+#[tokio::test]
+async fn test_forward_via_mullvad_dot_resolves_known_domain() {
+    // End-to-end: forward a real query through Mullvad DoT and verify
+    // we get a usable DNS response back.
+    let config = UpstreamConfig {
+        servers: vec!["tls://dns.mullvad.net:853".into()],
+        timeout_ms: 8000,
+    };
+    let forwarder = UpstreamForwarder::new(config).await;
+
+    let query = build_query("example.com.", RecordType::A);
+    let (response, upstream) = forwarder
+        .forward(&query)
+        .await
+        .expect("forward via Mullvad DoT should succeed");
+
+    assert!(response.len() >= 12, "response too short");
+    assert_eq!(upstream, "tls://dns.mullvad.net:853");
 }
 
 #[tokio::test]
@@ -138,7 +178,7 @@ async fn test_health_check_reports_dead_upstream_as_fail() {
         servers: vec![dead_addr.to_string(), "1.1.1.1:53".into()],
         timeout_ms: 2000,
     };
-    let forwarder = UpstreamForwarder::new(config);
+    let forwarder = UpstreamForwarder::new(config).await;
     let results = forwarder.health_check().await;
 
     assert_eq!(results.len(), 2);
