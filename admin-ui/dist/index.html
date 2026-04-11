@@ -995,10 +995,10 @@ class AppRouter {
 // ============================================================
 // Utility
 // ============================================================
+const numberFormatter = new Intl.NumberFormat();
 function formatNum(n) {
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-  return String(n);
+  if (n == null || Number.isNaN(n)) return '—';
+  return numberFormatter.format(n);
 }
 
 function normalizeTs(ts) {
@@ -1340,7 +1340,7 @@ class DashboardPage extends HTMLElement {
       const blockedH = (d.blocked / max * 100).toFixed(1);
       const pct = d.total > 0 ? ((d.blocked / d.total) * 100).toFixed(0) : '0';
       bars += `<div class="chart-col">
-        <div class="chart-tooltip">${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${d.total} total</span> · <span style="color:var(--red)">${d.blocked} blocked</span> (${pct}%)</div>
+        <div class="chart-tooltip">${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatNum(d.total)} total</span> · <span style="color:var(--red)">${formatNum(d.blocked)} blocked</span> (${pct}%)</div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
       </div>`;
@@ -1526,7 +1526,7 @@ class StatsPage extends HTMLElement {
       const cachedH = (cached / max * 100).toFixed(1);
       const ts = new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
       bars += `<div class="chart-col">
-        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${d.total} total</span> · <span style="color:var(--red)">${blocked} blocked</span> · <span style="color:var(--green)">${cached} cached</span></div>
+        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${formatNum(d.total)} total</span> · <span style="color:var(--red)">${formatNum(blocked)} blocked</span> · <span style="color:var(--green)">${formatNum(cached)} cached</span></div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar cached" style="height:${cachedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
@@ -1589,8 +1589,8 @@ class StatsPage extends HTMLElement {
         if (ri === 0) edgeCls.push('edge-top');
         if (h <= 2) edgeCls.push('edge-left');
         if (h >= 21) edgeCls.push('edge-right');
-        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${count} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
-          <span class="heatmap-tooltip">${count} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
+        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${formatNum(count)} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
+          <span class="heatmap-tooltip">${formatNum(count)} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
         </div>`;
       }
     }
