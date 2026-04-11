@@ -1054,6 +1054,14 @@ function formatNum(n) {
   if (n >= 1_000) return compactDecimalFormatter.format(n / 1_000) + 'K';
   return fullNumberFormatter.format(n);
 }
+function formatFull(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  return fullNumberFormatter.format(n);
+}
+function formatNumAdaptive(n, threshold = 1_000_000) {
+  if (n == null || Number.isNaN(n)) return '—';
+  return n < threshold ? fullNumberFormatter.format(n) : formatNum(n);
+}
 
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
@@ -1338,8 +1346,8 @@ class DashboardPage extends HTMLElement {
 
     const statsEl = this.querySelector('#stats');
     statsEl.innerHTML = `
-      <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent">${formatNum(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
-      <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red">${formatNum(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
+      <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
+      <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
       <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
       <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>
@@ -1394,7 +1402,7 @@ class DashboardPage extends HTMLElement {
       const blockedH = (d.blocked / max * 100).toFixed(1);
       const pct = d.total > 0 ? ((d.blocked / d.total) * 100).toFixed(0) : '0';
       bars += `<div class="chart-col">
-        <div class="chart-tooltip">${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatNum(d.total)} total</span> · <span style="color:var(--red)">${formatNum(d.blocked)} blocked</span> (${pct}%)</div>
+        <div class="chart-tooltip">${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(d.blocked)} blocked</span> (${pct}%)</div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
       </div>`;
@@ -1415,7 +1423,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatFull(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -1429,7 +1437,7 @@ class DashboardPage extends HTMLElement {
     let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of data.slice(0, 10)) {
       const token = d.doh_token ? `<br><span style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</span>` : '';
-      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatNum(d.count)}</td></tr>`;
+      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatFull(d.count)}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -1442,7 +1450,7 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th class="hide-mobile" style="text-align:right">Avg Latency</th></tr></thead><tbody>';
     for (const d of data) {
-      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatNum(d.count)}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatFull(d.count)}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
@@ -1613,7 +1621,7 @@ class StatsPage extends HTMLElement {
       const cachedH = (cached / max * 100).toFixed(1);
       const ts = new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
       bars += `<div class="chart-col">
-        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${formatNum(d.total)} total</span> · <span style="color:var(--red)">${formatNum(blocked)} blocked</span> · <span style="color:var(--green)">${formatNum(cached)} cached</span></div>
+        <div class="chart-tooltip">${esc(ts)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(blocked)} blocked</span> · <span style="color:var(--green)">${formatFull(cached)} cached</span></div>
         <div class="chart-bar total" style="height:${allowedH}%"></div>
         <div class="chart-bar cached" style="height:${cachedH}%"></div>
         <div class="chart-bar blocked" style="height:${blockedH}%"></div>
@@ -1676,8 +1684,8 @@ class StatsPage extends HTMLElement {
         if (ri === 0) edgeCls.push('edge-top');
         if (h <= 2) edgeCls.push('edge-left');
         if (h >= 21) edgeCls.push('edge-right');
-        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${formatNum(count)} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
-          <span class="heatmap-tooltip">${formatNum(count)} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
+        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${formatFull(count)} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
+          <span class="heatmap-tooltip">${formatFull(count)} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
         </div>`;
       }
     }
@@ -1696,10 +1704,11 @@ class StatsPage extends HTMLElement {
     let html = '<div class="bar-list">';
     for (const [label, count] of sorted) {
       const pct = (count / maxVal * 100).toFixed(1);
+      const barThreshold = window.innerWidth <= 768 ? 100_000 : 1_000_000;
       html += `<div class="bar-row">
         <div class="bar-row-label" title="${esc(label)}">${esc(label)}</div>
         <div class="bar-row-track"><div class="bar-row-fill" style="width:${pct}%;background:${color}"></div></div>
-        <div class="bar-row-count">${formatNum(count)}</div>
+        <div class="bar-row-count" title="${formatFull(count)}">${formatNumAdaptive(count, barThreshold)}</div>
       </div>`;
     }
     html += '</div>';
@@ -1722,7 +1731,7 @@ class StatsPage extends HTMLElement {
     const avgDay = data.avg_new_rows_per_day != null ? formatNum(Math.round(data.avg_new_rows_per_day)) : '—';
     el.innerHTML = `
       <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.db_size_bytes)}</div></div>
-      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem">${formatNum(data.total_log_count)}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
       <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${esc(oldest)}</div></div>
       <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${esc(retention)}</div></div>
       <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>`;
@@ -1736,7 +1745,7 @@ class StatsPage extends HTMLElement {
     const hasLat = sample > 0;
     const fmtMs = (ms) => hasLat ? `${formatNum(ms)}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span>` : '—';
     el.innerHTML = `
-      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" style="font-size:1.6rem">${formatNum(data.unique_domains)}</div></div>
+      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" style="font-size:1.6rem" title="${formatFull(data.unique_domains)}">${formatNumAdaptive(data.unique_domains, 10_000_000)}</div></div>
       <div class="stat-card"><div class="stat-label">Latency p50</div><div class="stat-value" style="font-size:1.6rem;color:var(--green)">${fmtMs(lat.p50_ms)}</div></div>
       <div class="stat-card"><div class="stat-label">Latency p95</div><div class="stat-value" style="font-size:1.6rem;color:var(--orange)">${fmtMs(lat.p95_ms)}</div></div>
       <div class="stat-card"><div class="stat-label">Latency p99</div><div class="stat-value" style="font-size:1.6rem;color:var(--red)">${fmtMs(lat.p99_ms)}</div></div>`;
@@ -1848,7 +1857,7 @@ class StatsPage extends HTMLElement {
       dotBlocked.setAttribute('cy', best.yb.toFixed(1));
       cursor.classList.add('active');
       const ts = new Date(best.d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-      tooltip.innerHTML = `${esc(ts)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatNum(best.d.total || 0)} total</span>`;
+      tooltip.innerHTML = `${esc(ts)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
       const pxX = (best.x / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
       const svgTop = rect.top - containerRect.top;
@@ -2161,7 +2170,7 @@ class FiltersPage extends HTMLElement {
           </label>
         </td>
         <td style="color:var(--text-primary)">${esc(l.name)}</td>
-        <td>${formatNum(l.rule_count)}</td>
+        <td>${formatFull(l.rule_count)}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td style="white-space:nowrap">
           <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${esc(l.name)}" data-url="${esc(l.url)}">Edit</button>
