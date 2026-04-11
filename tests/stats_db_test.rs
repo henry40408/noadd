@@ -142,3 +142,71 @@ async fn total_log_count_matches_inserts() {
         .unwrap();
     assert_eq!(db.total_log_count().await.unwrap(), 1);
 }
+
+fn entry_with(ts_secs: i64, domain: &str, response_ms: i64) -> QueryLogEntry {
+    QueryLogEntry {
+        timestamp: ts_secs * 1000,
+        domain: domain.to_string(),
+        query_type: "A".to_string(),
+        client_ip: "1.2.3.4".to_string(),
+        blocked: false,
+        cached: false,
+        upstream: None,
+        doh_token: None,
+        result: None,
+        response_ms,
+    }
+}
+
+#[tokio::test]
+async fn unique_domains_counts_distinct() {
+    let db = test_db().await;
+    db.insert_query_logs(&[
+        entry_with(1000, "a.com", 1),
+        entry_with(1001, "a.com", 2),
+        entry_with(1002, "b.com", 3),
+        entry_with(1003, "c.com", 4),
+    ])
+    .await
+    .unwrap();
+
+    assert_eq!(db.unique_domains_since(0).await.unwrap(), 3);
+    // since filter excludes earlier rows
+    assert_eq!(db.unique_domains_since(1002).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn unique_domains_empty_db_is_zero() {
+    let db = test_db().await;
+    assert_eq!(db.unique_domains_since(0).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn latency_summary_computes_percentiles() {
+    let db = test_db().await;
+    let entries: Vec<_> = (1..=100)
+        .map(|i| entry_with(1000 + i, "x.com", i))
+        .collect();
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let summary = db.latency_summary_since(0).await.unwrap();
+    assert_eq!(summary.sample_count, 100);
+    assert_eq!(summary.max_ms, 100);
+    // Avg of 1..=100 is 50.5
+    assert!((summary.avg_ms - 50.5).abs() < 0.001);
+    // p50 -> rn <= 50 -> max response_ms = 50
+    assert_eq!(summary.p50_ms, 50);
+    assert_eq!(summary.p95_ms, 95);
+    assert_eq!(summary.p99_ms, 99);
+}
+
+#[tokio::test]
+async fn latency_summary_empty_db_is_zero() {
+    let db = test_db().await;
+    let summary = db.latency_summary_since(0).await.unwrap();
+    assert_eq!(summary.sample_count, 0);
+    assert_eq!(summary.p50_ms, 0);
+    assert_eq!(summary.p95_ms, 0);
+    assert_eq!(summary.p99_ms, 0);
+    assert_eq!(summary.max_ms, 0);
+}

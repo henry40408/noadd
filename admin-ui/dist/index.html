@@ -881,6 +881,31 @@ input:focus, select:focus { border-color: var(--border-focus); }
 @media (max-width: 768px) {
   .bar-row { grid-template-columns: 80px 1fr 48px; }
 }
+
+/* Rate trend chart (Statistics page) */
+.rate-chart-container {
+  margin-top: 12px;
+}
+.rate-svg {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+.rate-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.rate-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rate-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+}
 </style>
 </head>
 <body>
@@ -1356,9 +1381,14 @@ class StatsPage extends HTMLElement {
           <button data-range="90d">90d</button>
         </div>
       </div>
+      <div class="stat-grid fade-in" id="highlights-grid" style="animation-delay:0.03s"></div>
       <div class="card fade-in" style="animation-delay:0.05s" id="timeline-card">
         <div class="card-title" id="timeline-title">Queries (last 7d)</div>
         <div class="chart-container" id="timeline-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.08s" id="rate-trend-card">
+        <div class="card-title" id="rate-trend-title">Block &amp; Cache rate (last 7d)</div>
+        <div class="rate-chart-container" id="rate-trend-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s" id="heatmap-card">
         <div class="card-title">Activity by hour (last 30d)</div>
@@ -1374,6 +1404,16 @@ class StatsPage extends HTMLElement {
           <div id="results-chart"><p style="color:var(--text-dim)">Loading…</p></div>
         </div>
       </div>
+      <div class="dashboard-grid-2col fade-in" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;animation-delay:0.18s">
+        <div class="card" id="ranged-domains-card">
+          <div class="card-title" id="ranged-domains-title">Top Domains (last 7d)</div>
+          <div id="ranged-domains"><p style="color:var(--text-dim)">Loading…</p></div>
+        </div>
+        <div class="card" id="ranged-clients-card">
+          <div class="card-title" id="ranged-clients-title">Top Sources (last 7d)</div>
+          <div id="ranged-clients"><p style="color:var(--text-dim)">Loading…</p></div>
+        </div>
+      </div>
       <div class="card fade-in" style="animation-delay:0.2s" id="health-card">
         <div class="card-title">Database Health</div>
         <div class="stat-grid" id="health-grid"></div>
@@ -1386,7 +1426,6 @@ class StatsPage extends HTMLElement {
       this.querySelectorAll('#range-switcher button').forEach(b => {
         b.classList.toggle('active', b === btn);
       });
-      this.querySelector('#timeline-title').textContent = `Queries (last ${this._range})`;
       this._fetchRanged();
     });
 
@@ -1401,14 +1440,30 @@ class StatsPage extends HTMLElement {
     ]);
   }
 
+  _updateRangedTitles() {
+    const r = this._range;
+    this.querySelector('#timeline-title').textContent = `Queries (last ${r})`;
+    this.querySelector('#rate-trend-title').innerHTML = `Block &amp; Cache rate (last ${r})`;
+    this.querySelector('#ranged-domains-title').textContent = `Top Domains (last ${r})`;
+    this.querySelector('#ranged-clients-title').textContent = `Top Sources (last ${r})`;
+  }
+
   async _fetchRanged() {
+    this._updateRangedTitles();
     try {
-      const [timeline, breakdown] = await Promise.all([
+      const [timeline, breakdown, highlights, topDomains, topClients] = await Promise.all([
         api.get(`/api/stats/v2/timeline?range=${this._range}`),
         api.get(`/api/stats/v2/breakdown?range=${this._range}`),
+        api.get(`/api/stats/v2/highlights?range=${this._range}`),
+        api.get(`/api/stats/v2/top-domains?range=${this._range}`),
+        api.get(`/api/stats/v2/top-clients?range=${this._range}`),
       ]);
       this._renderTimeline(timeline);
       this._renderBreakdown(breakdown);
+      this._renderRateTrend(timeline);
+      this._renderHighlights(highlights);
+      this._renderRangedTopDomains(topDomains);
+      this._renderRangedTopClients(topClients);
     } catch (e) { console.error(e); }
   }
 
@@ -1579,6 +1634,90 @@ class StatsPage extends HTMLElement {
       <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${esc(oldest)}</div></div>
       <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${esc(retention)}</div></div>
       <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>`;
+  }
+
+  _renderHighlights(data) {
+    const el = this.querySelector('#highlights-grid');
+    if (!data) { el.innerHTML = ''; return; }
+    const lat = data.latency || {};
+    const sample = lat.sample_count || 0;
+    const hasLat = sample > 0;
+    const fmtMs = (ms) => hasLat ? `${formatNum(ms)}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span>` : '—';
+    el.innerHTML = `
+      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" style="font-size:1.6rem">${formatNum(data.unique_domains)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p50</div><div class="stat-value" style="font-size:1.6rem;color:var(--green)">${fmtMs(lat.p50_ms)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p95</div><div class="stat-value" style="font-size:1.6rem;color:var(--orange)">${fmtMs(lat.p95_ms)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p99</div><div class="stat-value" style="font-size:1.6rem;color:var(--red)">${fmtMs(lat.p99_ms)}</div></div>`;
+  }
+
+  _renderRangedTopDomains(rows) {
+    const el = this.querySelector('#ranged-domains');
+    if (!rows || !rows.length) {
+      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
+      return;
+    }
+    const entries = rows.map(d => [d.domain, d.count]);
+    this._renderBarChart('#ranged-domains', entries, 'var(--accent)');
+  }
+
+  _renderRangedTopClients(rows) {
+    const el = this.querySelector('#ranged-clients');
+    if (!rows || !rows.length) {
+      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
+      return;
+    }
+    const entries = rows.map(d => {
+      const label = d.doh_token ? `${d.client_ip} · ${d.doh_token}` : d.client_ip;
+      return [label, d.count];
+    });
+    this._renderBarChart('#ranged-clients', entries, 'var(--green)');
+  }
+
+  _renderRateTrend(rawData) {
+    const el = this.querySelector('#rate-trend-chart');
+    if (!rawData || !rawData.length) {
+      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      return;
+    }
+    const len = rawData.length;
+    const w = 600;
+    const h = 140;
+    const padX = 8;
+    const padY = 12;
+    const innerW = w - padX * 2;
+    const innerH = h - padY * 2;
+    const xs = (i) => padX + (len === 1 ? innerW / 2 : (i / (len - 1)) * innerW);
+    const ys = (pct) => padY + innerH - (pct / 100) * innerH;
+    const blockedPath = [];
+    const cachedPath = [];
+    for (let i = 0; i < len; i++) {
+      const d = rawData[i];
+      const total = d.total || 0;
+      const blockedPct = total > 0 ? (d.blocked / total) * 100 : 0;
+      const cachedPct = total > 0 ? ((d.cached || 0) / total) * 100 : 0;
+      blockedPath.push(`${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(blockedPct).toFixed(1)}`);
+      cachedPath.push(`${i === 0 ? 'M' : 'L'}${xs(i).toFixed(1)},${ys(cachedPct).toFixed(1)}`);
+    }
+    // Area under each line for visual weight
+    const blockedArea = `${blockedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
+    const cachedArea = `${cachedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
+    // Y axis ticks at 25/50/75%
+    const ticks = [25, 50, 75].map(p => {
+      const y = ys(p).toFixed(1);
+      return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/><text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-mono)">${p}%</text>`;
+    }).join('');
+    el.innerHTML = `
+      <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="rate-svg">
+        ${ticks}
+        <path d="${cachedArea}" fill="var(--green)" fill-opacity="0.12"/>
+        <path d="${cachedPath.join(' ')}" fill="none" stroke="var(--green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="${blockedArea}" fill="var(--red)" fill-opacity="0.12"/>
+        <path d="${blockedPath.join(' ')}" fill="none" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="rate-legend">
+        <span><i style="background:var(--red)"></i>blocked %</span>
+        <span><i style="background:var(--green)"></i>cached %</span>
+      </div>`;
   }
 }
 customElements.define('stats-page', StatsPage);
