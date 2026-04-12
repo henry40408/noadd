@@ -55,7 +55,7 @@ src/
 │   └── doh.rs           # DNS-over-HTTPS endpoints (RFC 8484)
 ├── filter/
 │   ├── parser.rs        # Rule parsing (AdGuard/ABP, hosts, domain list)
-│   ├── engine.rs        # HashMap + reverse domain trie matching
+│   ├── engine.rs        # FST + flat reverse-domain trie matching
 │   └── lists.rs         # List download, storage, and filter rebuild
 ├── upstream/
 │   └── forwarder.rs     # UDP forwarding with failover
@@ -71,8 +71,8 @@ src/
 
 Uses two data structures for domain matching:
 
-- **HashMap** for exact domain lookups (O(1))
-- **Reverse domain trie** for subdomain matching — domain `sub.ads.example.com` is stored as labels `["com", "example", "ads", "sub"]`. Walking the trie, if any node is a terminal, the domain is blocked.
+- **FST (finite state transducer)** for exact domain lookups — compact sorted-set/map representation via the `fst` crate, sharing common prefixes and suffixes across domains.
+- **Flat reverse-domain trie** for subdomain matching — domain `sub.ads.example.com` is stored as labels `["com", "example", "ads", "sub"]`. Walking the trie, if any node is a terminal, the domain is blocked. The trie is serialized into two contiguous byte buffers (node index + label pool) instead of heap-allocated tree nodes, reducing per-rule overhead to ~19 bytes.
 
 The engine is behind `ArcSwap` for lock-free reads. Filter updates build a new engine and atomically swap it in.
 
@@ -116,6 +116,7 @@ Key crates:
 | `hickory-proto` | DNS wire format parsing |
 | `tokio-rusqlite` | Async SQLite (dedicated thread) |
 | `moka` | TTL-based cache |
+| `fst` | Compact finite state transducer for exact-match filter sets |
 | `arc-swap` | Lock-free atomic pointer swap |
 | `argon2` | Password hashing |
 | `rustls` | TLS |
