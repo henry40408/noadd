@@ -13,7 +13,7 @@ Blocks ads and trackers at the DNS level using community-maintained filter lists
 ## Features
 
 - **Plain DNS** (UDP + TCP, port 53) and **DNS-over-HTTPS** (RFC 8484)
-- **Filter engine** with HashMap + reverse domain trie for fast domain matching
+- **Filter engine** with FST + flat trie — 390K rules in ~7 MB RAM (~19 bytes/rule), 50K+ QPS
 - **Built-in filter lists** — AdGuard DNS, EasyList, Peter Lowe's, OISD Basic, Steven Black, URLhaus
 - **Custom rules** — unified API with auto-detection of block/allow syntax
 - **Domain test** — check if a domain is allowed or blocked with matched rule details
