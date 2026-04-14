@@ -216,3 +216,123 @@ async fn latency_summary_empty_db_is_zero() {
     assert_eq!(summary.p99_ms, 0);
     assert_eq!(summary.max_ms, 0);
 }
+
+#[tokio::test]
+async fn compute_summary_populates_7d_and_30d_rates() {
+    use noadd::admin::stats::compute_summary;
+
+    let db = test_db().await;
+    // "now" is 40 days past the epoch so all windows have room.
+    let now: i64 = 40 * 86400;
+    let one_day: i64 = 86400;
+
+    // Today window (now - 86400 .. now): 2 total, 1 blocked, 1 allowed+cached.
+    // Allowed row in today: response_ms=5, cached=true.
+    let today_blocked = entry(now - 100, "A", true, false, Some("NXDOMAIN"));
+    let today_allowed_cached = entry(now - 200, "A", false, true, Some("NOERROR"));
+
+    // 7d window adds one allowed+uncached entry 3 days ago (response_ms=5, cached=false).
+    let three_days_ago = entry(now - 3 * one_day, "A", false, false, Some("NOERROR"));
+
+    // 30d window adds one blocked entry 20 days ago.
+    let twenty_days_ago = entry(now - 20 * one_day, "A", true, false, Some("NXDOMAIN"));
+
+    db.insert_query_logs(&[
+        today_blocked,
+        today_allowed_cached,
+        three_days_ago,
+        twenty_days_ago,
+    ])
+    .await
+    .unwrap();
+
+    let s = compute_summary(&db, now).await.unwrap();
+
+    // today: 2 total, 1 blocked -> 0.5
+    assert!((s.block_ratio_today - 0.5).abs() < 1e-9);
+    // 7d: 3 total, 1 blocked -> 1/3
+    assert!((s.block_ratio_7d - (1.0 / 3.0)).abs() < 1e-9);
+    // 30d: 4 total, 2 blocked -> 0.5
+    assert!((s.block_ratio_30d - 0.5).abs() < 1e-9);
+
+    // today cache_hit_rate: 1 allowed row, cached=true -> 1.0
+    assert!((s.cache_hit_rate_today - 1.0).abs() < 1e-9);
+    // 7d cache_hit_rate: 2 allowed rows (one cached, one not) -> 0.5
+    assert!((s.cache_hit_rate_7d - 0.5).abs() < 1e-9);
+    // 30d cache_hit_rate: 2 allowed rows (same as 7d; the 20d-old is blocked) -> 0.5
+    assert!((s.cache_hit_rate_30d - 0.5).abs() < 1e-9);
+
+    // avg_response_ms across allowed rows. entry() hardcodes response_ms=5.
+    assert!((s.avg_response_ms_today - 5.0).abs() < 1e-9);
+    assert!((s.avg_response_ms_7d - 5.0).abs() < 1e-9);
+    assert!((s.avg_response_ms_30d - 5.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn count_queries_multi_since_matches_single_window() {
+    let db = test_db().await;
+    let now: i64 = 40 * 86400;
+    let one_day: i64 = 86400;
+
+    let entries = vec![
+        entry(now - 100, "A", true, false, Some("NXDOMAIN")),
+        entry(now - 200, "A", false, true, Some("NOERROR")),
+        entry(now - 3 * one_day, "A", false, false, Some("NOERROR")),
+        entry(now - 20 * one_day, "A", true, false, Some("NXDOMAIN")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let single_today = db.count_queries_since(now - one_day).await.unwrap();
+    let single_7d = db.count_queries_since(now - 7 * one_day).await.unwrap();
+    let single_30d = db.count_queries_since(now - 30 * one_day).await.unwrap();
+
+    let (today, d7, d30) = db
+        .count_queries_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
+        .await
+        .unwrap();
+
+    assert_eq!(today, single_today);
+    assert_eq!(d7, single_7d);
+    assert_eq!(d30, single_30d);
+
+    // Sanity: today = (2, 1); 7d = (3, 1); 30d = (4, 2).
+    assert_eq!(today, (2, 1));
+    assert_eq!(d7, (3, 1));
+    assert_eq!(d30, (4, 2));
+}
+
+#[tokio::test]
+async fn cache_stats_multi_since_matches_single_window() {
+    let db = test_db().await;
+    let now: i64 = 40 * 86400;
+    let one_day: i64 = 86400;
+
+    let entries = vec![
+        entry(now - 100, "A", true, false, Some("NXDOMAIN")),
+        entry(now - 200, "A", false, true, Some("NOERROR")),
+        entry(now - 3 * one_day, "A", false, false, Some("NOERROR")),
+        entry(now - 20 * one_day, "A", true, false, Some("NXDOMAIN")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let single_today = db.cache_stats_since(now - one_day).await.unwrap();
+    let single_7d = db.cache_stats_since(now - 7 * one_day).await.unwrap();
+    let single_30d = db.cache_stats_since(now - 30 * one_day).await.unwrap();
+
+    let (today, d7, d30) = db
+        .cache_stats_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
+        .await
+        .unwrap();
+
+    assert_eq!(today.0, single_today.0);
+    assert_eq!(today.1, single_today.1);
+    assert!((today.2 - single_today.2).abs() < 1e-9);
+
+    assert_eq!(d7.0, single_7d.0);
+    assert_eq!(d7.1, single_7d.1);
+    assert!((d7.2 - single_7d.2).abs() < 1e-9);
+
+    assert_eq!(d30.0, single_30d.0);
+    assert_eq!(d30.1, single_30d.1);
+    assert!((d30.2 - single_30d.2).abs() < 1e-9);
+}

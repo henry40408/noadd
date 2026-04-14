@@ -837,6 +837,97 @@ impl Database {
         Ok(result)
     }
 
+    /// Returns ((total, blocked), (total, blocked), (total, blocked)) for today / 7d / 30d in one scan.
+    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest window as `since_30d`.
+    pub async fn count_queries_multi_since(
+        &self,
+        since_today: i64,
+        since_7d: i64,
+        since_30d: i64,
+    ) -> Result<((i64, i64), (i64, i64), (i64, i64)), DbError> {
+        let today_ms = since_today * 1000;
+        let d7_ms = since_7d * 1000;
+        let d30_ms = since_30d * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT
+                    COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked ELSE 0 END), 0),
+                    COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN blocked ELSE 0 END), 0),
+                    COUNT(CASE WHEN timestamp >= ?3 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN blocked ELSE 0 END), 0)
+                 FROM query_logs
+                 WHERE timestamp >= ?3",
+                )?;
+                let row = stmt.query_row(params![today_ms, d7_ms, d30_ms], |row| {
+                    Ok((
+                        (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?),
+                        (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?),
+                        (row.get::<_, i64>(4)?, row.get::<_, i64>(5)?),
+                    ))
+                })?;
+                Ok(row)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    /// Returns ((cache_hits, allowed_total, avg_response_ms), ...) for today / 7d / 30d in one scan.
+    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest window as `since_30d`.
+    pub async fn cache_stats_multi_since(
+        &self,
+        since_today: i64,
+        since_7d: i64,
+        since_30d: i64,
+    ) -> Result<((i64, i64, f64), (i64, i64, f64), (i64, i64, f64)), DbError> {
+        let today_ms = since_today * 1000;
+        let d7_ms = since_7d * 1000;
+        let d30_ms = since_30d * 1000;
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cached END), 0),
+                    COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?1 THEN response_ms END), 0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN cached END), 0),
+                    COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?2 THEN response_ms END), 0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN cached END), 0),
+                    COUNT(CASE WHEN timestamp >= ?3 THEN 1 END),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?3 THEN response_ms END), 0)
+                 FROM query_logs
+                 WHERE timestamp >= ?3 AND blocked = 0",
+                )?;
+                let row = stmt.query_row(params![today_ms, d7_ms, d30_ms], |row| {
+                    Ok((
+                        (
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, f64>(2)?,
+                        ),
+                        (
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, f64>(5)?,
+                        ),
+                        (
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, f64>(8)?,
+                        ),
+                    ))
+                })?;
+                Ok(row)
+            })
+            .await?;
+        Ok(result)
+    }
+
     pub async fn top_domains_since(
         &self,
         since: i64,
