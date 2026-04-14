@@ -14,8 +14,14 @@ pub struct Summary {
     pub total_30d: i64,
     pub blocked_30d: i64,
     pub block_ratio_today: f64,
+    pub block_ratio_7d: f64,
+    pub block_ratio_30d: f64,
     pub cache_hit_rate_today: f64,
+    pub cache_hit_rate_7d: f64,
+    pub cache_hit_rate_30d: f64,
     pub avg_response_ms_today: f64,
+    pub avg_response_ms_7d: f64,
+    pub avg_response_ms_30d: f64,
     pub queries_1m: i64,
 }
 
@@ -24,24 +30,35 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     let since_today = now - one_day;
     let since_7d = now - 7 * one_day;
     let since_30d = now - 30 * one_day;
-
     let since_1m = now - 60;
+
     let (queries_1m, _) = db.count_queries_since(since_1m).await?;
     let (total_today, blocked_today) = db.count_queries_since(since_today).await?;
     let (total_7d, blocked_7d) = db.count_queries_since(since_7d).await?;
     let (total_30d, blocked_30d) = db.count_queries_since(since_30d).await?;
-    let (cache_hits, allowed_total, avg_response_ms) = db.cache_stats_since(since_today).await?;
 
-    let block_ratio_today = if total_today > 0 {
-        blocked_today as f64 / total_today as f64
-    } else {
-        0.0
+    let (cache_today, cache_7d, cache_30d) = tokio::try_join!(
+        db.cache_stats_since(since_today),
+        db.cache_stats_since(since_7d),
+        db.cache_stats_since(since_30d),
+    )?;
+    let (cache_hits_today, allowed_total_today, avg_response_ms_today) = cache_today;
+    let (cache_hits_7d, allowed_total_7d, avg_response_ms_7d) = cache_7d;
+    let (cache_hits_30d, allowed_total_30d, avg_response_ms_30d) = cache_30d;
+
+    let ratio = |blocked: i64, total: i64| -> f64 {
+        if total > 0 {
+            blocked as f64 / total as f64
+        } else {
+            0.0
+        }
     };
-
-    let cache_hit_rate_today = if allowed_total > 0 {
-        cache_hits as f64 / allowed_total as f64
-    } else {
-        0.0
+    let hit_rate = |hits: i64, allowed: i64| -> f64 {
+        if allowed > 0 {
+            hits as f64 / allowed as f64
+        } else {
+            0.0
+        }
     };
 
     Ok(Summary {
@@ -51,9 +68,15 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
         blocked_7d,
         total_30d,
         blocked_30d,
-        block_ratio_today,
-        cache_hit_rate_today,
-        avg_response_ms_today: avg_response_ms,
+        block_ratio_today: ratio(blocked_today, total_today),
+        block_ratio_7d: ratio(blocked_7d, total_7d),
+        block_ratio_30d: ratio(blocked_30d, total_30d),
+        cache_hit_rate_today: hit_rate(cache_hits_today, allowed_total_today),
+        cache_hit_rate_7d: hit_rate(cache_hits_7d, allowed_total_7d),
+        cache_hit_rate_30d: hit_rate(cache_hits_30d, allowed_total_30d),
+        avg_response_ms_today,
+        avg_response_ms_7d,
+        avg_response_ms_30d,
         queries_1m,
     })
 }
