@@ -26,25 +26,23 @@ pub struct Summary {
 }
 
 pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError> {
-    let one_day = 86400;
+    let one_day: i64 = 86_400;
     let since_today = now - one_day;
     let since_7d = now - 7 * one_day;
     let since_30d = now - 30 * one_day;
     let since_1m = now - 60;
 
     let (queries_1m, _) = db.count_queries_since(since_1m).await?;
-    let (total_today, blocked_today) = db.count_queries_since(since_today).await?;
-    let (total_7d, blocked_7d) = db.count_queries_since(since_7d).await?;
-    let (total_30d, blocked_30d) = db.count_queries_since(since_30d).await?;
-
-    let (cache_today, cache_7d, cache_30d) = tokio::try_join!(
-        db.cache_stats_since(since_today),
-        db.cache_stats_since(since_7d),
-        db.cache_stats_since(since_30d),
-    )?;
-    let (cache_hits_today, allowed_total_today, avg_response_ms_today) = cache_today;
-    let (cache_hits_7d, allowed_total_7d, avg_response_ms_7d) = cache_7d;
-    let (cache_hits_30d, allowed_total_30d, avg_response_ms_30d) = cache_30d;
+    let ((total_today, blocked_today), (total_7d, blocked_7d), (total_30d, blocked_30d)) = db
+        .count_queries_multi_since(since_today, since_7d, since_30d)
+        .await?;
+    let (
+        (cache_hits_today, allowed_total_today, avg_response_ms_today),
+        (cache_hits_7d, allowed_total_7d, avg_response_ms_7d),
+        (cache_hits_30d, allowed_total_30d, avg_response_ms_30d),
+    ) = db
+        .cache_stats_multi_since(since_today, since_7d, since_30d)
+        .await?;
 
     let ratio = |blocked: i64, total: i64| -> f64 {
         if total > 0 {
