@@ -1347,9 +1347,18 @@ class DashboardPage extends HTMLElement {
   }
 
   renderStats(s) {
+    const pct = (v) => ((v || 0) * 100).toFixed(1);
+    const ms = (v) => (v || 0).toFixed(1);
+
     const ratio = s.total_today > 0 ? ((s.blocked_today / s.total_today) * 100).toFixed(1) : '0.0';
-    const cacheRate = ((s.cache_hit_rate_today || 0) * 100).toFixed(1);
-    const avgMs = (s.avg_response_ms_today || 0).toFixed(1);
+    const ratio7d = pct(s.block_ratio_7d);
+    const ratio30d = pct(s.block_ratio_30d);
+    const cacheRate = pct(s.cache_hit_rate_today);
+    const cacheRate7d = pct(s.cache_hit_rate_7d);
+    const cacheRate30d = pct(s.cache_hit_rate_30d);
+    const avgMs = ms(s.avg_response_ms_today);
+    const avgMs7d = ms(s.avg_response_ms_7d);
+    const avgMs30d = ms(s.avg_response_ms_30d);
     const qps = ((s.queries_1m || 0) / 60).toFixed(1);
 
     const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs, qps];
@@ -1360,9 +1369,9 @@ class DashboardPage extends HTMLElement {
     statsEl.innerHTML = `
       <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
       <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
-      <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div></div>
-      <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div></div>
-      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div></div>
+      <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
+      <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
+      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
       <div class="stat-card" data-i="5"><div class="stat-label">Throughput (1m)</div><div class="stat-value accent">${qps}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div></div>`;
 
     // Flash cards that changed (skip on first render)
