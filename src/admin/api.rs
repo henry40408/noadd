@@ -42,27 +42,7 @@ pub struct ServerInfo {
     pub tls_enabled: bool,
 }
 
-pub fn admin_router(
-    db: Database,
-    sessions: SessionStore,
-    filter: Arc<ArcSwap<FilterEngine>>,
-    cache: DnsCache,
-    rate_limiter: Arc<RateLimiter>,
-    forwarder: Arc<UpstreamForwarder>,
-    handler: Arc<DnsHandler>,
-    server_info: ServerInfo,
-) -> Router {
-    let state = AppState {
-        db,
-        sessions,
-        filter,
-        cache,
-        rate_limiter,
-        forwarder,
-        handler,
-        server_info,
-    };
-
+pub fn admin_router(state: AppState) -> Router {
     Router::new()
         // Auth (no auth required)
         .route("/api/auth/login", post(login))

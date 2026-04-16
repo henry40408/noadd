@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use noadd::admin::api::{ServerInfo, admin_router};
+use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
@@ -39,7 +39,7 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
-    let router = admin_router(
+    let router = admin_router(AppState {
         db,
         sessions,
         filter,
@@ -47,12 +47,12 @@ async fn setup() -> (axum::Router, String) {
         rate_limiter,
         forwarder,
         handler,
-        ServerInfo {
+        server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
-    );
+    });
     (router, token)
 }
 

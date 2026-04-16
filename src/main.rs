@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use clap::Parser;
 
-use noadd::admin::api::{ServerInfo, admin_router};
+use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, load_sessions_from_db, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::config::CliArgs;
@@ -134,16 +134,16 @@ async fn main() -> anyhow::Result<()> {
         http_addr: args.http_addr.clone(),
         tls_enabled: args.tls_cert.is_some() && args.tls_key.is_some(),
     };
-    let admin_routes = admin_router(
-        db.clone(),
-        session_store,
-        filter.clone(),
-        cache.clone(),
+    let admin_routes = admin_router(AppState {
+        db: db.clone(),
+        sessions: session_store,
+        filter: filter.clone(),
+        cache: cache.clone(),
         rate_limiter,
-        forwarder.clone(),
-        handler.clone(),
+        forwarder: forwarder.clone(),
+        handler: handler.clone(),
         server_info,
-    );
+    });
     let app = doh_routes.merge(admin_routes);
 
     // 14. Start HTTP server

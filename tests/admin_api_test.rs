@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use noadd::admin::api::{ServerInfo, admin_router};
+use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
@@ -39,7 +39,7 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
-    let router = admin_router(
+    let router = admin_router(AppState {
         db,
         sessions,
         filter,
@@ -47,12 +47,12 @@ async fn setup() -> (axum::Router, String) {
         rate_limiter,
         forwarder,
         handler,
-        ServerInfo {
+        server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
-    );
+    });
     (router, token)
 }
 
@@ -438,20 +438,20 @@ async fn test_setup_initial_password() {
     ));
 
     // No password set initially
-    let app = admin_router(
-        db.clone(),
-        sessions.clone(),
-        filter.clone(),
-        cache.clone(),
-        rate_limiter.clone(),
-        forwarder.clone(),
-        handler.clone(),
-        ServerInfo {
+    let app = admin_router(AppState {
+        db: db.clone(),
+        sessions: sessions.clone(),
+        filter: filter.clone(),
+        cache: cache.clone(),
+        rate_limiter: rate_limiter.clone(),
+        forwarder: forwarder.clone(),
+        handler: handler.clone(),
+        server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
-    );
+    });
 
     // Setup should succeed
     let response = app
@@ -469,7 +469,7 @@ async fn test_setup_initial_password() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Setup again should fail (password already exists)
-    let app2 = admin_router(
+    let app2 = admin_router(AppState {
         db,
         sessions,
         filter,
@@ -477,12 +477,12 @@ async fn test_setup_initial_password() {
         rate_limiter,
         forwarder,
         handler,
-        ServerInfo {
+        server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
-    );
+    });
     let response = app2
         .oneshot(
             Request::builder()
