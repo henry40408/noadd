@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,10 +10,12 @@ use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::warn;
 
 use crate::cache::{CacheKey, DnsCache};
+use crate::dns::inflight::{BeginResult, InflightUpstream};
+use crate::dns::ratelimit::IpRateLimiter;
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 
@@ -107,22 +110,69 @@ pub struct DnsHandler {
     /// Tracks cache keys currently being refreshed in the background,
     /// preventing duplicate refresh tasks for the same stale entry.
     refreshing: Arc<Mutex<HashSet<CacheKey>>>,
+    /// Coalesces concurrent cold-miss upstream queries for the same key:
+    /// N simultaneous clients produce one upstream request, not N.
+    inflight_fetches: Arc<InflightUpstream>,
+    /// Bounds concurrent `handle()` calls across all listeners (UDP/TCP/DoH).
+    /// Prevents a single noisy client from exhausting the tokio runtime with
+    /// unbounded spawned tasks. `None` = unlimited.
+    concurrency_limit: Option<Arc<Semaphore>>,
+    /// Monotonic count of log events dropped because the async logger
+    /// channel was full. A non-zero value means the logger can't keep up
+    /// with query volume and some query logs were lost.
+    log_drop_count: Arc<AtomicU64>,
+    /// Per-client-IP token bucket. `None` means no per-IP limiting.
+    rate_limiter: Option<Arc<IpRateLimiter>>,
 }
 
 impl DnsHandler {
+    /// Create a handler with no in-flight limit. Suitable for tests.
     pub fn new(
         filter: Arc<ArcSwap<FilterEngine>>,
         cache: DnsCache,
         forwarder: Arc<UpstreamForwarder>,
         log_tx: mpsc::Sender<QueryContext>,
     ) -> Self {
+        Self::with_max_inflight(filter, cache, forwarder, log_tx, 0)
+    }
+
+    /// Create a handler that caps concurrent `handle()` calls at `max_inflight`.
+    /// A value of `0` disables the limit.
+    pub fn with_max_inflight(
+        filter: Arc<ArcSwap<FilterEngine>>,
+        cache: DnsCache,
+        forwarder: Arc<UpstreamForwarder>,
+        log_tx: mpsc::Sender<QueryContext>,
+        max_inflight: usize,
+    ) -> Self {
+        let concurrency_limit = if max_inflight == 0 {
+            None
+        } else {
+            Some(Arc::new(Semaphore::new(max_inflight)))
+        };
         Self {
             filter,
             cache,
             forwarder,
             log_tx,
             refreshing: Arc::new(Mutex::new(HashSet::new())),
+            inflight_fetches: Arc::new(InflightUpstream::new()),
+            concurrency_limit,
+            log_drop_count: Arc::new(AtomicU64::new(0)),
+            rate_limiter: None,
         }
+    }
+
+    /// Attach a per-client-IP rate limiter. Chainable during construction.
+    pub fn with_rate_limiter(mut self, limiter: Arc<IpRateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Cumulative number of log events dropped because the async logger
+    /// channel was full.
+    pub fn log_drop_count(&self) -> u64 {
+        self.log_drop_count.load(Ordering::Relaxed)
     }
 
     /// Handle a DNS query. Takes raw query bytes, client IP, and optional DoH token name.
@@ -135,6 +185,20 @@ impl DnsHandler {
     ) -> Result<Vec<u8>, HandlerError> {
         let start = Instant::now();
 
+        // 0. Acquire in-flight permit. Held until this function returns, so
+        // the total number of queries actively consuming upstream / cache /
+        // filter resources is bounded — regardless of how many tasks upstream
+        // listeners have spawned.
+        let _permit = match &self.concurrency_limit {
+            Some(sem) => Some(
+                sem.clone()
+                    .acquire_owned()
+                    .await
+                    .expect("concurrency-limit semaphore is never closed"),
+            ),
+            None => None,
+        };
+
         // 1. Parse query
         let message = Message::from_bytes(query_bytes)?;
         let query = message.queries().first().ok_or(HandlerError::NoQuery)?;
@@ -144,7 +208,37 @@ impl DnsHandler {
         let query_type = query.query_type();
         let query_id = message.id();
 
-        // 2. Check filter
+        // 2a. Per-IP rate limit. Token drained here protects upstream and
+        // cache from a single noisy client. REFUSED (rcode 5) is the
+        // semantically correct response; it tells the client the server
+        // is unwilling, not broken (as SERVFAIL would).
+        if let Some(limiter) = &self.rate_limiter
+            && !limiter.try_acquire(client_ip)
+        {
+            let response_bytes = build_refused_response(&message)?;
+            let elapsed = start.elapsed().as_millis() as i64;
+            let ctx = QueryContext {
+                timestamp: chrono_timestamp_ms(),
+                client_ip: client_ip.to_string(),
+                domain: domain_clean.to_string(),
+                query_type: format!("{query_type}"),
+                action: "rate_limited".to_string(),
+                cached: false,
+                upstream: None,
+                response_time_ms: elapsed,
+                matched_rule: None,
+                matched_list: None,
+                doh_token,
+                result: None,
+            };
+            if let Err(e) = self.log_tx.try_send(ctx) {
+                self.log_drop_count.fetch_add(1, Ordering::Relaxed);
+                warn!("failed to send log event: {e}");
+            }
+            return Ok(response_bytes);
+        }
+
+        // 2b. Check filter
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
@@ -222,23 +316,67 @@ impl DnsHandler {
 
                         (bytes, "allowed".to_string(), true, None, None, None)
                     } else {
-                        // 4. Forward upstream
-                        let (response, upstream_addr) = self.forwarder.forward(query_bytes).await?;
-                        // Only cache cacheable responses (skip SERVFAIL etc.,
-                        // and apply a capped negative TTL for NXDOMAIN/empty
-                        // NoError) to prevent transient failures from
-                        // poisoning the cache.
-                        if let Some(ttl) = cache_ttl_for_response(&response) {
-                            self.cache.insert(cache_key, response.clone(), ttl).await;
+                        // 4. Forward upstream, coalescing concurrent misses.
+                        //    If another task is already fetching this key,
+                        //    subscribe to its Notify, re-check cache once it
+                        //    fires, and only fall back to our own forward if
+                        //    the original fetcher failed.
+                        let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
+                            BeginResult::Fetcher(g) => Some(g),
+                            BeginResult::Waiter(notify) => {
+                                // Subscribe BEFORE checking cache so we don't
+                                // miss `notify_waiters` fired between our
+                                // cache read and our await.
+                                let fut = notify.notified();
+                                tokio::pin!(fut);
+                                fut.as_mut().enable();
+                                if self.cache.get(&cache_key).await.is_none() {
+                                    // 3s cap in case the fetcher is wedged
+                                    // (bug or stuck upstream); we'll fall
+                                    // through and do our own forward.
+                                    let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
+                                }
+                                None
+                            }
+                        };
+
+                        if let Some(cached) = self.cache.get(&cache_key).await {
+                            // Fetcher populated the cache — treat like a
+                            // cache hit (TTL decrement + ID patch).
+                            let elapsed = cached.elapsed().as_secs() as u32;
+                            let mut bytes = decrement_ttl(&cached.bytes, elapsed);
+                            let id_bytes = query_id.to_be_bytes();
+                            if bytes.len() >= 2 {
+                                bytes[0] = id_bytes[0];
+                                bytes[1] = id_bytes[1];
+                            }
+                            (bytes, "allowed".to_string(), true, None, None, None)
+                        } else {
+                            // We are the fetcher, OR a waiter whose fetcher
+                            // failed / timed out. Forward ourselves.
+                            let (response, upstream_addr) =
+                                self.forwarder.forward(query_bytes).await?;
+                            // Only cache cacheable responses (skip SERVFAIL
+                            // etc., and apply a capped negative TTL for
+                            // NXDOMAIN/empty NoError) to prevent transient
+                            // failures from poisoning the cache.
+                            if let Some(ttl) = cache_ttl_for_response(&response) {
+                                self.cache
+                                    .insert(cache_key.clone(), response.clone(), ttl)
+                                    .await;
+                            }
+                            // Drop guard (if we hold one) — notifies waiters
+                            // after the cache insert is observable.
+                            drop(fetcher_guard);
+                            (
+                                response,
+                                "allowed".to_string(),
+                                false,
+                                Some(upstream_addr),
+                                None,
+                                None,
+                            )
                         }
-                        (
-                            response,
-                            "allowed".to_string(),
-                            false,
-                            Some(upstream_addr),
-                            None,
-                            None,
-                        )
                     }
                 }
             };
@@ -262,11 +400,29 @@ impl DnsHandler {
             result,
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
+            self.log_drop_count.fetch_add(1, Ordering::Relaxed);
             warn!("failed to send log event: {e}");
         }
 
         Ok(response_bytes)
     }
+}
+
+/// Build a DNS REFUSED response for the given query message. Used when a
+/// client exceeds its per-IP rate limit. Preserves the query ID and
+/// question section so the caller can correlate the answer.
+fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
+    let mut response = Message::new();
+    response.set_id(query.id());
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_response_code(ResponseCode::Refused);
+    response.set_recursion_desired(true);
+    response.set_recursion_available(true);
+    for q in query.queries() {
+        response.add_query(q.clone());
+    }
+    Ok(response.to_vec()?)
 }
 
 /// Build a blocked DNS response for the given query message.

@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use noadd::cache::DnsCache;
 use noadd::dns::handler::{self, DnsHandler, QueryContext};
+use noadd::dns::ratelimit::IpRateLimiter;
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::parser::{ParsedRule, RuleAction};
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -180,6 +181,147 @@ fn test_decrement_ttl_clamps_to_minimum_1() {
     let msg = Message::from_bytes(&patched).unwrap();
     let answer_ttl = msg.answers()[0].ttl();
     assert_eq!(answer_ttl, 1, "TTL should be clamped to minimum of 1");
+}
+
+#[tokio::test]
+async fn test_handler_returns_refused_when_rate_limit_exhausted() {
+    // Block rule keeps the test local (no upstream calls). Rate limiter
+    // configured with 1 token capacity, 0 qps refill — one query allowed,
+    // the second must be refused.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (tx, mut rx) = mpsc::channel(16);
+    // qps=1, burst=1 — back-to-back queries happen in microseconds, far
+    // below the 1s needed to refill one token, so the second query from
+    // the same IP is guaranteed to be refused.
+    let limiter = Arc::new(IpRateLimiter::new(1, 1));
+    let handler = DnsHandler::new(filter, cache, forwarder, tx).with_rate_limiter(limiter);
+
+    let query = make_query_bytes("ads.example.com", RecordType::A);
+    let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Check that the first allowed query still returns the blocked answer
+    // (NoError with 0.0.0.0), not REFUSED — so we know we're not
+    // over-filtering.
+    let first = handler.handle(&query, ip1, None).await.unwrap();
+    let first_msg = Message::from_bytes(&first).unwrap();
+    assert_eq!(first_msg.response_code(), ResponseCode::NoError);
+
+    let second = handler.handle(&query, ip1, None).await.unwrap();
+    let second_msg = Message::from_bytes(&second).unwrap();
+    assert_eq!(
+        second_msg.response_code(),
+        ResponseCode::Refused,
+        "2nd query from ip1 should be REFUSED after bucket drained"
+    );
+
+    // ip2 has its own bucket — must still be served.
+    let from_ip2 = handler.handle(&query, ip2, None).await.unwrap();
+    let from_ip2_msg = Message::from_bytes(&from_ip2).unwrap();
+    assert_eq!(
+        from_ip2_msg.response_code(),
+        ResponseCode::NoError,
+        "ip2 should not be affected by ip1's exhaustion"
+    );
+
+    // A rate-limited query must emit a log entry tagged "rate_limited".
+    let mut saw_rate_limited = false;
+    while let Ok(ctx) = rx.try_recv() {
+        if ctx.action == "rate_limited" {
+            assert_eq!(ctx.client_ip, ip1.to_string());
+            saw_rate_limited = true;
+        }
+    }
+    assert!(
+        saw_rate_limited,
+        "expected a log event with action=rate_limited"
+    );
+}
+
+#[tokio::test]
+async fn test_handler_counts_dropped_log_events() {
+    // Tiny channel (capacity 1, no receiver consuming) saturates immediately,
+    // so try_send fails on every query past the first. Queries still succeed
+    // (logging is non-blocking), but the drop counter should increment.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (tx, _rx) = mpsc::channel(1);
+    let handler = DnsHandler::new(filter, cache, forwarder, tx);
+
+    let query = make_query_bytes("ads.example.com", RecordType::A);
+    let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    for _ in 0..20 {
+        let _ = handler.handle(&query, client_ip, None).await.unwrap();
+    }
+
+    assert!(
+        handler.log_drop_count() > 0,
+        "at least one log event should have been dropped (got {})",
+        handler.log_drop_count()
+    );
+}
+
+#[tokio::test]
+async fn test_handler_inflight_limit_serves_all_queries() {
+    // With a low concurrency limit, queries must still complete (permits are
+    // released once each call returns). Uses a block rule so queries stay
+    // local and fast — no upstream dependency.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (tx, _rx) = mpsc::channel(256);
+    let handler = Arc::new(DnsHandler::with_max_inflight(
+        filter, cache, forwarder, tx, 2,
+    ));
+
+    let query = make_query_bytes("ads.example.com", RecordType::A);
+    let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    let mut joins = Vec::new();
+    for _ in 0..50 {
+        let h = handler.clone();
+        let q = query.clone();
+        joins.push(tokio::spawn(
+            async move { h.handle(&q, client_ip, None).await },
+        ));
+    }
+
+    for j in joins {
+        let bytes = j.await.unwrap().expect("query should succeed");
+        let response = Message::from_bytes(&bytes).unwrap();
+        assert!(!response.answers().is_empty());
+    }
 }
 
 #[test]

@@ -1,13 +1,13 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, Uri};
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, include_dir};
@@ -19,6 +19,7 @@ use crate::admin::auth::{
 use crate::admin::stats;
 use crate::cache::DnsCache;
 use crate::db::Database;
+use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
 use crate::upstream::forwarder::UpstreamForwarder;
 
@@ -30,6 +31,7 @@ pub struct AppState {
     pub cache: DnsCache,
     pub rate_limiter: Arc<RateLimiter>,
     pub forwarder: Arc<UpstreamForwarder>,
+    pub handler: Arc<DnsHandler>,
     pub server_info: ServerInfo,
 }
 
@@ -40,25 +42,7 @@ pub struct ServerInfo {
     pub tls_enabled: bool,
 }
 
-pub fn admin_router(
-    db: Database,
-    sessions: SessionStore,
-    filter: Arc<ArcSwap<FilterEngine>>,
-    cache: DnsCache,
-    rate_limiter: Arc<RateLimiter>,
-    forwarder: Arc<UpstreamForwarder>,
-    server_info: ServerInfo,
-) -> Router {
-    let state = AppState {
-        db,
-        sessions,
-        filter,
-        cache,
-        rate_limiter,
-        forwarder,
-        server_info,
-    };
-
+pub fn admin_router(state: AppState) -> Router {
     Router::new()
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
@@ -140,6 +124,43 @@ async fn serve_static(uri: Uri) -> impl IntoResponse {
     }
 }
 
+// --- Client IP extraction ---
+
+/// Resolve the client IP for rate-limiting and audit purposes.
+///
+/// Policy:
+/// 1. Start from the TCP peer (`ConnectInfo`).
+/// 2. Only if that peer is loopback (127.0.0.0/8 or ::1) — the usual shape
+///    when a reverse proxy is in front — trust `X-Forwarded-For` (first hop)
+///    or `X-Real-IP`. Otherwise the headers are client-controlled and must
+///    NOT be honoured, or a remote caller could spoof arbitrary source IPs to
+///    evade per-IP rate limits.
+/// 3. Fall back to loopback when no information is available (e.g. unit tests
+///    using `oneshot` that never populate `ConnectInfo`).
+fn client_ip(connect: Option<&ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> IpAddr {
+    let peer = connect.map(|ci| ci.0.ip());
+
+    let trust_headers = matches!(peer, Some(ip) if ip.is_loopback()) || peer.is_none();
+
+    if trust_headers
+        && let Some(hv) = headers.get("x-forwarded-for")
+        && let Ok(s) = hv.to_str()
+        && let Some(first) = s.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return ip;
+    }
+    if trust_headers
+        && let Some(hv) = headers.get("x-real-ip")
+        && let Ok(s) = hv.to_str()
+        && let Ok(ip) = s.trim().parse::<IpAddr>()
+    {
+        return ip;
+    }
+
+    peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
 // --- Auth helper ---
 
 fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
@@ -175,11 +196,12 @@ pub struct LoginResponse {
 
 async fn login(
     State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
-    // Rate limiting - use a default IP since we don't have access to ConnectInfo here
-    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let ip = client_ip(connect.as_deref(), &headers);
     if !state.rate_limiter.check(ip) {
         tracing::warn!(%ip, "login rate limited");
         return Err(StatusCode::TOO_MANY_REQUESTS);
@@ -273,6 +295,9 @@ pub struct HealthResponse {
     pub status: String,
     pub needs_setup: bool,
     pub version: &'static str,
+    /// Number of query-log events dropped because the async logger channel
+    /// was saturated. Non-zero means query logging is incomplete.
+    pub dropped_log_count: u64,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -287,6 +312,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok".to_string(),
         needs_setup,
         version: env!("GIT_VERSION"),
+        dropped_log_count: state.handler.log_drop_count(),
     })
 }
 
