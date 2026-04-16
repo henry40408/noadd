@@ -1,4 +1,4 @@
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 use thiserror::Error;
 use tokio_rusqlite::Connection;
@@ -14,6 +14,7 @@ pub enum DbError {
 #[derive(Clone)]
 pub struct Database {
     conn: Connection,
+    read_conn: Connection,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,12 +106,40 @@ pub struct LatencySummary {
     pub max_ms: i64,
 }
 
+/// Open a second connection to the same SQLite file in read-only mode.
+/// Used for admin SELECT queries so they run concurrently with the writer
+/// under WAL without blocking on a single worker thread.
+async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    let conn = Connection::open_with_flags(path, flags).await?;
+    conn.call(|conn| {
+        conn.execute_batch(
+            "
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = -20000;
+            PRAGMA temp_store = MEMORY;
+            ",
+        )?;
+        Ok(())
+    })
+    .await?;
+    Ok(conn)
+}
+
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
         let conn = Connection::open(path).await?;
-        let db = Self { conn };
-        db.init_schema().await?;
-        Ok(db)
+        let db_init = Self {
+            conn: conn.clone(),
+            // Placeholder — replaced below. We need schema init to run on
+            // the write conn before opening the read conn so WAL is in effect.
+            read_conn: conn.clone(),
+        };
+        db_init.init_schema().await?;
+        let read_conn = open_read_conn(path).await?;
+        Ok(Self { conn, read_conn })
     }
 
     async fn init_schema(&self) -> Result<(), DbError> {

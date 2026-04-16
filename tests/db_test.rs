@@ -351,3 +351,29 @@ async fn test_top_domains_since() {
     let top = db.top_domains_since(0, 1).await.unwrap();
     assert_eq!(top.len(), 1);
 }
+
+#[tokio::test]
+async fn test_read_conn_opens_and_basic_roundtrip_works() {
+    // Verifies that Database::open successfully opens both connections
+    // against the same file and that a write followed by a read still
+    // works end-to-end after the read_conn infrastructure is wired.
+    let db = test_db().await;
+    let entry = QueryLogEntry {
+        timestamp: 1_700_000_000_000,
+        domain: "example.com".to_string(),
+        query_type: "A".to_string(),
+        client_ip: "127.0.0.1".to_string(),
+        blocked: false,
+        cached: false,
+        response_ms: 1,
+        upstream: None,
+        doh_token: None,
+        result: None,
+    };
+    db.insert_query_logs(std::slice::from_ref(&entry))
+        .await
+        .unwrap();
+    let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].domain, "example.com");
+}
