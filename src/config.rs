@@ -56,4 +56,16 @@ pub struct CliArgs {
     /// memory under multi-client load. `0` disables the limit.
     #[arg(long, default_value = "2048", env = "NOADD_MAX_INFLIGHT_QUERIES")]
     pub max_inflight_queries: usize,
+
+    /// Per-client-IP steady-state query rate limit (queries/sec). A single
+    /// noisy client is capped here so it cannot starve others of upstream
+    /// or cache capacity. `0` disables per-IP rate limiting.
+    #[arg(long, default_value = "100", env = "NOADD_RATE_LIMIT_QPS")]
+    pub rate_limit_qps: u32,
+
+    /// Per-client-IP burst allowance (max tokens the bucket accumulates).
+    /// A single page load can fan out 20–40 DNS queries in milliseconds;
+    /// the burst must be high enough to absorb this without false positives.
+    #[arg(long, default_value = "200", env = "NOADD_RATE_LIMIT_BURST")]
+    pub rate_limit_burst: u32,
 }

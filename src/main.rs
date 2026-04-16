@@ -11,6 +11,7 @@ use noadd::config::CliArgs;
 use noadd::db::Database;
 use noadd::dns::doh::doh_router;
 use noadd::dns::handler::DnsHandler;
+use noadd::dns::ratelimit::IpRateLimiter;
 use noadd::dns::tcp::run_tcp_listener;
 use noadd::dns::udp::run_udp_listener;
 use noadd::filter::engine::FilterEngine;
@@ -82,16 +83,25 @@ async fn main() -> anyhow::Result<()> {
     let logger_handle = tokio::spawn(logger.run());
 
     // 9. Create DNS handler
-    let handler = Arc::new(DnsHandler::with_max_inflight(
-        filter.clone(),
-        cache.clone(),
-        forwarder.clone(),
-        log_tx,
-        args.max_inflight_queries,
+    let ip_rate_limiter = Arc::new(IpRateLimiter::new(
+        args.rate_limit_qps,
+        args.rate_limit_burst,
     ));
+    let handler = Arc::new(
+        DnsHandler::with_max_inflight(
+            filter.clone(),
+            cache.clone(),
+            forwarder.clone(),
+            log_tx,
+            args.max_inflight_queries,
+        )
+        .with_rate_limiter(ip_rate_limiter.clone()),
+    );
     tracing::info!(
         max_inflight = args.max_inflight_queries,
-        "DNS handler concurrency limit set"
+        rate_limit_qps = args.rate_limit_qps,
+        rate_limit_burst = args.rate_limit_burst,
+        "DNS handler limits configured"
     );
 
     // 10. Setup shutdown signal
@@ -183,6 +193,27 @@ async fn main() -> anyhow::Result<()> {
                         Ok(count) if count > 0 => tracing::info!(count, "pruned old query logs"),
                         Err(e) => tracing::error!(error = %e, "failed to prune logs"),
                         _ => {}
+                    }
+                }
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+
+    // 17a. Background rate-limiter bucket pruning. IPs unseen for 10 min are
+    // evicted so the map cannot grow without bound if clients roam or a
+    // scanner cycles through source addresses.
+    let prune_limiter = ip_rate_limiter.clone();
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        interval.tick().await; // skip immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let removed = prune_limiter.prune(std::time::Duration::from_secs(600));
+                    if removed > 0 {
+                        tracing::debug!(removed, "pruned inactive rate-limit buckets");
                     }
                 }
                 _ = shutdown_rx.recv() => break,

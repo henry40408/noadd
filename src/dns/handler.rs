@@ -14,6 +14,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tracing::warn;
 
 use crate::cache::{CacheKey, DnsCache};
+use crate::dns::ratelimit::IpRateLimiter;
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 
@@ -116,6 +117,8 @@ pub struct DnsHandler {
     /// channel was full. A non-zero value means the logger can't keep up
     /// with query volume and some query logs were lost.
     log_drop_count: Arc<AtomicU64>,
+    /// Per-client-IP token bucket. `None` means no per-IP limiting.
+    rate_limiter: Option<Arc<IpRateLimiter>>,
 }
 
 impl DnsHandler {
@@ -151,7 +154,14 @@ impl DnsHandler {
             refreshing: Arc::new(Mutex::new(HashSet::new())),
             inflight,
             log_drop_count: Arc::new(AtomicU64::new(0)),
+            rate_limiter: None,
         }
+    }
+
+    /// Attach a per-client-IP rate limiter. Chainable during construction.
+    pub fn with_rate_limiter(mut self, limiter: Arc<IpRateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
     }
 
     /// Cumulative number of log events dropped because the async logger
@@ -193,7 +203,37 @@ impl DnsHandler {
         let query_type = query.query_type();
         let query_id = message.id();
 
-        // 2. Check filter
+        // 2a. Per-IP rate limit. Token drained here protects upstream and
+        // cache from a single noisy client. REFUSED (rcode 5) is the
+        // semantically correct response; it tells the client the server
+        // is unwilling, not broken (as SERVFAIL would).
+        if let Some(limiter) = &self.rate_limiter
+            && !limiter.try_acquire(client_ip)
+        {
+            let response_bytes = build_refused_response(&message)?;
+            let elapsed = start.elapsed().as_millis() as i64;
+            let ctx = QueryContext {
+                timestamp: chrono_timestamp_ms(),
+                client_ip: client_ip.to_string(),
+                domain: domain_clean.to_string(),
+                query_type: format!("{query_type}"),
+                action: "rate_limited".to_string(),
+                cached: false,
+                upstream: None,
+                response_time_ms: elapsed,
+                matched_rule: None,
+                matched_list: None,
+                doh_token,
+                result: None,
+            };
+            if let Err(e) = self.log_tx.try_send(ctx) {
+                self.log_drop_count.fetch_add(1, Ordering::Relaxed);
+                warn!("failed to send log event: {e}");
+            }
+            return Ok(response_bytes);
+        }
+
+        // 2b. Check filter
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
@@ -317,6 +357,23 @@ impl DnsHandler {
 
         Ok(response_bytes)
     }
+}
+
+/// Build a DNS REFUSED response for the given query message. Used when a
+/// client exceeds its per-IP rate limit. Preserves the query ID and
+/// question section so the caller can correlate the answer.
+fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
+    let mut response = Message::new();
+    response.set_id(query.id());
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_response_code(ResponseCode::Refused);
+    response.set_recursion_desired(true);
+    response.set_recursion_available(true);
+    for q in query.queries() {
+        response.add_query(q.clone());
+    }
+    Ok(response.to_vec()?)
 }
 
 /// Build a blocked DNS response for the given query message.
