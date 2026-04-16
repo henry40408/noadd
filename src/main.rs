@@ -82,12 +82,17 @@ async fn main() -> anyhow::Result<()> {
     let logger_handle = tokio::spawn(logger.run());
 
     // 9. Create DNS handler
-    let handler = Arc::new(DnsHandler::new(
+    let handler = Arc::new(DnsHandler::with_max_inflight(
         filter.clone(),
         cache.clone(),
         forwarder.clone(),
         log_tx,
+        args.max_inflight_queries,
     ));
+    tracing::info!(
+        max_inflight = args.max_inflight_queries,
+        "DNS handler concurrency limit set"
+    );
 
     // 10. Setup shutdown signal
     let (shutdown_tx, shutdown_signal) = shutdown_signal();

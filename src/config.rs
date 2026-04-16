@@ -50,4 +50,10 @@ pub struct CliArgs {
     /// Log output format
     #[arg(long, default_value = "text", env = "NOADD_LOG_FORMAT")]
     pub log_format: LogFormat,
+
+    /// Maximum concurrent in-flight DNS queries across UDP/TCP/DoH. Excess
+    /// queries wait for a permit; bounds upstream/cache pressure and task
+    /// memory under multi-client load. `0` disables the limit.
+    #[arg(long, default_value = "2048", env = "NOADD_MAX_INFLIGHT_QUERIES")]
+    pub max_inflight_queries: usize,
 }

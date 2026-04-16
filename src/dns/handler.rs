@@ -9,7 +9,7 @@ use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::warn;
 
 use crate::cache::{CacheKey, DnsCache};
@@ -107,21 +107,44 @@ pub struct DnsHandler {
     /// Tracks cache keys currently being refreshed in the background,
     /// preventing duplicate refresh tasks for the same stale entry.
     refreshing: Arc<Mutex<HashSet<CacheKey>>>,
+    /// Bounds concurrent in-flight `handle()` calls across all listeners
+    /// (UDP/TCP/DoH). Prevents a single noisy client from exhausting the
+    /// tokio runtime with unbounded spawned tasks. `None` = unlimited.
+    inflight: Option<Arc<Semaphore>>,
 }
 
 impl DnsHandler {
+    /// Create a handler with no in-flight limit. Suitable for tests.
     pub fn new(
         filter: Arc<ArcSwap<FilterEngine>>,
         cache: DnsCache,
         forwarder: Arc<UpstreamForwarder>,
         log_tx: mpsc::Sender<QueryContext>,
     ) -> Self {
+        Self::with_max_inflight(filter, cache, forwarder, log_tx, 0)
+    }
+
+    /// Create a handler that caps concurrent `handle()` calls at `max_inflight`.
+    /// A value of `0` disables the limit.
+    pub fn with_max_inflight(
+        filter: Arc<ArcSwap<FilterEngine>>,
+        cache: DnsCache,
+        forwarder: Arc<UpstreamForwarder>,
+        log_tx: mpsc::Sender<QueryContext>,
+        max_inflight: usize,
+    ) -> Self {
+        let inflight = if max_inflight == 0 {
+            None
+        } else {
+            Some(Arc::new(Semaphore::new(max_inflight)))
+        };
         Self {
             filter,
             cache,
             forwarder,
             log_tx,
             refreshing: Arc::new(Mutex::new(HashSet::new())),
+            inflight,
         }
     }
 
@@ -134,6 +157,20 @@ impl DnsHandler {
         doh_token: Option<String>,
     ) -> Result<Vec<u8>, HandlerError> {
         let start = Instant::now();
+
+        // 0. Acquire in-flight permit. Held until this function returns, so
+        // the total number of queries actively consuming upstream / cache /
+        // filter resources is bounded — regardless of how many tasks upstream
+        // listeners have spawned.
+        let _permit = match &self.inflight {
+            Some(sem) => Some(
+                sem.clone()
+                    .acquire_owned()
+                    .await
+                    .expect("in-flight semaphore is never closed"),
+            ),
+            None => None,
+        };
 
         // 1. Parse query
         let message = Message::from_bytes(query_bytes)?;

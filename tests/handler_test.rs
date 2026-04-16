@@ -182,6 +182,47 @@ fn test_decrement_ttl_clamps_to_minimum_1() {
     assert_eq!(answer_ttl, 1, "TTL should be clamped to minimum of 1");
 }
 
+#[tokio::test]
+async fn test_handler_inflight_limit_serves_all_queries() {
+    // With a low concurrency limit, queries must still complete (permits are
+    // released once each call returns). Uses a block rule so queries stay
+    // local and fast — no upstream dependency.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (tx, _rx) = mpsc::channel(256);
+    let handler = Arc::new(DnsHandler::with_max_inflight(
+        filter, cache, forwarder, tx, 2,
+    ));
+
+    let query = make_query_bytes("ads.example.com", RecordType::A);
+    let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    let mut joins = Vec::new();
+    for _ in 0..50 {
+        let h = handler.clone();
+        let q = query.clone();
+        joins.push(tokio::spawn(
+            async move { h.handle(&q, client_ip, None).await },
+        ));
+    }
+
+    for j in joins {
+        let bytes = j.await.unwrap().expect("query should succeed");
+        let response = Message::from_bytes(&bytes).unwrap();
+        assert!(!response.answers().is_empty());
+    }
+}
+
 #[test]
 fn test_decrement_ttl_zero_elapsed_unchanged() {
     let original = build_response_with_ttl(0x5678, "example.com.", 300);
