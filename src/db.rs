@@ -138,7 +138,14 @@ impl Database {
             read_conn: conn.clone(),
         };
         db_init.init_schema().await?;
-        let read_conn = open_read_conn(path).await?;
+        // SQLite in-memory databases are per-connection; a second OPEN_READ_ONLY
+        // connection to ":memory:" would be an empty, unrelated database. Fall
+        // back to sharing the writer connection so tests using ":memory:" work.
+        let read_conn = if path == ":memory:" {
+            conn.clone()
+        } else {
+            open_read_conn(path).await?
+        };
         Ok(Self { conn, read_conn })
     }
 
@@ -294,7 +301,7 @@ impl Database {
     /// List all table names (for testing).
     pub async fn list_tables(&self) -> Result<Vec<String>, DbError> {
         let tables = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let mut stmt = conn.prepare(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -313,7 +320,7 @@ impl Database {
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         let val = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
                 let result = stmt
@@ -386,7 +393,7 @@ impl Database {
         let token = token.map(|s| s.to_string());
         let query_type = query_type.map(|s| s.to_string());
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -448,7 +455,7 @@ impl Database {
         let token = token.map(|s| s.to_string());
         let query_type = query_type.map(|s| s.to_string());
         let count = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut sql = "SELECT COUNT(*) FROM query_logs WHERE 1=1".to_string();
                 let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -530,7 +537,7 @@ impl Database {
 
     pub async fn get_filter_lists(&self) -> Result<Vec<FilterListRow>, DbError> {
         let rows = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, name, url, enabled, last_updated, rule_count FROM filter_lists ORDER BY id",
@@ -618,7 +625,7 @@ impl Database {
     pub async fn has_custom_rule(&self, rule: &str) -> Result<bool, DbError> {
         let rule = rule.to_string();
         let exists = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 conn.query_row(
                     "SELECT COUNT(*) FROM custom_rules WHERE rule = ?1",
@@ -648,7 +655,7 @@ impl Database {
 
     pub async fn get_all_custom_rules(&self) -> Result<Vec<CustomRuleRow>, DbError> {
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt =
                     conn.prepare("SELECT id, rule, rule_type FROM custom_rules ORDER BY id")?;
@@ -673,7 +680,7 @@ impl Database {
     ) -> Result<Vec<CustomRuleRow>, DbError> {
         let rule_type = rule_type.to_string();
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, rule, rule_type FROM custom_rules WHERE rule_type = ?1 ORDER BY id",
@@ -707,7 +714,7 @@ impl Database {
 
     pub async fn get_filter_list_content(&self, list_id: i64) -> Result<Option<String>, DbError> {
         let val = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt =
                     conn.prepare("SELECT content FROM filter_list_content WHERE list_id = ?1")?;
@@ -742,7 +749,7 @@ impl Database {
 
     pub async fn get_doh_tokens(&self) -> Result<Vec<DohTokenRow>, DbError> {
         let rows = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let mut stmt = conn.prepare("SELECT id, token FROM doh_tokens ORDER BY id")?;
                 let rows = stmt
@@ -785,7 +792,7 @@ impl Database {
     pub async fn validate_doh_token(&self, token: &str) -> Result<Option<String>, DbError> {
         let token = token.to_string();
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare("SELECT token FROM doh_tokens WHERE token = ?1")?;
                 let found: Option<String> = stmt.query_row(params![token], |row| row.get(0)).ok();
@@ -797,7 +804,7 @@ impl Database {
 
     pub async fn has_doh_tokens(&self) -> Result<bool, DbError> {
         let count = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let count: i64 =
                     conn.query_row("SELECT COUNT(*) FROM doh_tokens", [], |row| row.get(0))?;
@@ -812,7 +819,7 @@ impl Database {
     /// Returns the earliest log timestamp in milliseconds, or None if no logs.
     pub async fn earliest_log_timestamp(&self) -> Result<Option<i64>, DbError> {
         let result = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let ts: Option<i64> = conn
                     .query_row("SELECT MIN(timestamp) FROM query_logs", [], |row| {
@@ -829,7 +836,7 @@ impl Database {
     pub async fn count_queries_since(&self, since: i64) -> Result<(i64, i64), DbError> {
         let since_ms = since * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT COUNT(*), COALESCE(SUM(blocked), 0) FROM query_logs WHERE timestamp >= ?1",
@@ -848,7 +855,7 @@ impl Database {
     pub async fn cache_stats_since(&self, since: i64) -> Result<(i64, i64, f64), DbError> {
         let since_ms = since * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT COALESCE(SUM(cached), 0), COUNT(*), COALESCE(AVG(response_ms), 0) FROM query_logs WHERE timestamp >= ?1 AND blocked = 0",
@@ -878,7 +885,7 @@ impl Database {
         let d7_ms = since_7d * 1000;
         let d30_ms = since_30d * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT
@@ -916,7 +923,7 @@ impl Database {
         let d7_ms = since_7d * 1000;
         let d30_ms = since_30d * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT
@@ -964,7 +971,7 @@ impl Database {
     ) -> Result<Vec<TopDomain>, DbError> {
         let since_ms = since * 1000;
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT domain, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY domain ORDER BY cnt DESC LIMIT ?2",
@@ -990,7 +997,7 @@ impl Database {
     ) -> Result<Vec<TopClient>, DbError> {
         let since_ms = since * 1000;
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT client_ip, doh_token, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip, doh_token ORDER BY cnt DESC LIMIT ?2",
@@ -1017,7 +1024,7 @@ impl Database {
     ) -> Result<Vec<TopUpstream>, DbError> {
         let since_ms = since * 1000;
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms FROM query_logs WHERE timestamp >= ?1 AND upstream IS NOT NULL GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
@@ -1045,7 +1052,7 @@ impl Database {
         let since_ms = since * 1000;
         let bucket_ms = bucket_secs * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT (timestamp / ?1) * ?1 AS bucket, \
@@ -1079,7 +1086,7 @@ impl Database {
     ) -> Result<Vec<HeatmapCell>, DbError> {
         let since_ms = since * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch') AS INTEGER) AS wday, \
@@ -1111,7 +1118,7 @@ impl Database {
     ) -> Result<Vec<(String, i64)>, DbError> {
         let since_ms = since * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT query_type, COUNT(*) AS cnt \
@@ -1134,7 +1141,7 @@ impl Database {
     pub async fn outcome_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
         let since_ms = since * 1000;
         let result = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT \
@@ -1164,7 +1171,7 @@ impl Database {
     pub async fn unique_domains_since(&self, since: i64) -> Result<i64, DbError> {
         let since_ms = since * 1000;
         let count = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 let n: i64 = conn.query_row(
                     "SELECT COUNT(DISTINCT domain) FROM query_logs WHERE timestamp >= ?1",
@@ -1180,7 +1187,7 @@ impl Database {
     pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
         let since_ms = since * 1000;
         let summary = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 // Single scan: order rows once via window functions, then take the
                 // row at the desired percentile offset using MAX(CASE WHEN ...).
@@ -1220,7 +1227,7 @@ impl Database {
 
     pub async fn db_file_size(&self) -> Result<i64, DbError> {
         let result = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
                 let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -1232,7 +1239,7 @@ impl Database {
 
     pub async fn total_log_count(&self) -> Result<i64, DbError> {
         let result = self
-            .conn
+            .read_conn
             .call(|conn| {
                 let count: i64 =
                     conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))?;
@@ -1248,7 +1255,7 @@ impl Database {
         bucket_secs: i64,
     ) -> Result<Vec<TimelinePoint>, DbError> {
         let rows = self
-            .conn
+            .read_conn
             .call(move |conn| {
                 // Convert seconds to milliseconds to match timestamp storage
                 let since_ms = since * 1000;
