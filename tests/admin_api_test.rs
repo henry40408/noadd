@@ -9,8 +9,10 @@ use noadd::admin::api::{ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
+use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
+use tokio::sync::mpsc;
 
 async fn setup() -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
@@ -25,6 +27,13 @@ async fn setup() -> (axum::Router, String) {
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (log_tx, _log_rx) = mpsc::channel(64);
+    let handler = Arc::new(DnsHandler::new(
+        filter.clone(),
+        cache.clone(),
+        forwarder.clone(),
+        log_tx,
+    ));
 
     // Set admin password
     let hash = hash_password("admin").unwrap();
@@ -37,6 +46,7 @@ async fn setup() -> (axum::Router, String) {
         cache,
         rate_limiter,
         forwarder,
+        handler,
         ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -44,6 +54,72 @@ async fn setup() -> (axum::Router, String) {
         },
     );
     (router, token)
+}
+
+#[tokio::test]
+async fn test_health_endpoint_exposes_dropped_log_count() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let drops = body
+        .get("dropped_log_count")
+        .and_then(|v| v.as_u64())
+        .expect("dropped_log_count should be present and a u64");
+    assert_eq!(drops, 0, "fresh handler should have zero drops");
+}
+
+#[tokio::test]
+async fn test_login_rate_limit_is_per_connect_info_ip() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let (app, _token) = setup().await;
+    let addr1: SocketAddr = "203.0.113.5:40000".parse().unwrap();
+    let addr2: SocketAddr = "203.0.113.6:40000".parse().unwrap();
+
+    // Rate limiter is configured as (5, 60). Six failed logins from addr1
+    // should exhaust the budget; a request from addr2 must still be served.
+    let make_req = |addr: SocketAddr| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"wrong"}"#))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    };
+
+    let mut last_status = StatusCode::OK;
+    for _ in 0..6 {
+        last_status = app.clone().oneshot(make_req(addr1)).await.unwrap().status();
+    }
+    assert_eq!(
+        last_status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "addr1 should be rate limited after 5 attempts"
+    );
+
+    let other = app.clone().oneshot(make_req(addr2)).await.unwrap();
+    assert_eq!(
+        other.status(),
+        StatusCode::UNAUTHORIZED,
+        "addr2 should hit auth failure, not rate limit — limits are per-IP"
+    );
 }
 
 #[tokio::test]
@@ -353,6 +429,13 @@ async fn test_setup_initial_password() {
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (log_tx, _log_rx) = mpsc::channel(64);
+    let handler = Arc::new(DnsHandler::new(
+        filter.clone(),
+        cache.clone(),
+        forwarder.clone(),
+        log_tx,
+    ));
 
     // No password set initially
     let app = admin_router(
@@ -362,6 +445,7 @@ async fn test_setup_initial_password() {
         cache.clone(),
         rate_limiter.clone(),
         forwarder.clone(),
+        handler.clone(),
         ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -392,6 +476,7 @@ async fn test_setup_initial_password() {
         cache,
         rate_limiter,
         forwarder,
+        handler,
         ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),

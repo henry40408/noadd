@@ -183,6 +183,40 @@ fn test_decrement_ttl_clamps_to_minimum_1() {
 }
 
 #[tokio::test]
+async fn test_handler_counts_dropped_log_events() {
+    // Tiny channel (capacity 1, no receiver consuming) saturates immediately,
+    // so try_send fails on every query past the first. Queries still succeed
+    // (logging is non-blocking), but the drop counter should increment.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let engine = FilterEngine::new(block_rules, vec![]);
+    let filter = Arc::new(ArcSwap::from_pointee(engine));
+    let cache = DnsCache::new(100);
+    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (tx, _rx) = mpsc::channel(1);
+    let handler = DnsHandler::new(filter, cache, forwarder, tx);
+
+    let query = make_query_bytes("ads.example.com", RecordType::A);
+    let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    for _ in 0..20 {
+        let _ = handler.handle(&query, client_ip, None).await.unwrap();
+    }
+
+    assert!(
+        handler.log_drop_count() > 0,
+        "at least one log event should have been dropped (got {})",
+        handler.log_drop_count()
+    );
+}
+
+#[tokio::test]
 async fn test_handler_inflight_limit_serves_all_queries() {
     // With a low concurrency limit, queries must still complete (permits are
     // released once each call returns). Uses a block rule so queries stay

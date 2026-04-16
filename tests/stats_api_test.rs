@@ -9,8 +9,10 @@ use noadd::admin::api::{ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
+use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
+use tokio::sync::mpsc;
 
 async fn setup() -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
@@ -25,6 +27,13 @@ async fn setup() -> (axum::Router, String) {
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let (log_tx, _log_rx) = mpsc::channel(64);
+    let handler = Arc::new(DnsHandler::new(
+        filter.clone(),
+        cache.clone(),
+        forwarder.clone(),
+        log_tx,
+    ));
 
     // Set admin password
     let hash = hash_password("admin").unwrap();
@@ -37,6 +46,7 @@ async fn setup() -> (axum::Router, String) {
         cache,
         rate_limiter,
         forwarder,
+        handler,
         ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -111,6 +112,10 @@ pub struct DnsHandler {
     /// (UDP/TCP/DoH). Prevents a single noisy client from exhausting the
     /// tokio runtime with unbounded spawned tasks. `None` = unlimited.
     inflight: Option<Arc<Semaphore>>,
+    /// Monotonic count of log events dropped because the async logger
+    /// channel was full. A non-zero value means the logger can't keep up
+    /// with query volume and some query logs were lost.
+    log_drop_count: Arc<AtomicU64>,
 }
 
 impl DnsHandler {
@@ -145,7 +150,14 @@ impl DnsHandler {
             log_tx,
             refreshing: Arc::new(Mutex::new(HashSet::new())),
             inflight,
+            log_drop_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Cumulative number of log events dropped because the async logger
+    /// channel was full.
+    pub fn log_drop_count(&self) -> u64 {
+        self.log_drop_count.load(Ordering::Relaxed)
     }
 
     /// Handle a DNS query. Takes raw query bytes, client IP, and optional DoH token name.
@@ -299,6 +311,7 @@ impl DnsHandler {
             result,
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
+            self.log_drop_count.fetch_add(1, Ordering::Relaxed);
             warn!("failed to send log event: {e}");
         }
 

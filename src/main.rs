@@ -131,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         cache.clone(),
         rate_limiter,
         forwarder.clone(),
+        handler.clone(),
         server_info,
     );
     let app = doh_routes.merge(admin_routes);
@@ -252,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
         axum_server::bind(http_addr)
             .acceptor(acceptor)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else if use_tls {
         // Manual TLS with provided cert/key
@@ -270,15 +271,18 @@ async fn main() -> anyhow::Result<()> {
         });
         axum_server::bind_rustls(http_addr, rustls_config)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
         // Plain HTTP
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
         tracing::info!(%http_addr, "HTTP server started (DoH + Admin)");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal)
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
     }
 
     // 19. Cleanup
