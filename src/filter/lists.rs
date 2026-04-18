@@ -48,6 +48,9 @@ impl ListManager {
 
     /// Rebuild the filter engine from all enabled lists + custom rules in DB.
     pub async fn rebuild_filter(&self) -> Result<(), ListError> {
+        let start = std::time::Instant::now();
+        tracing::info!("rebuilding filter engine");
+
         let lists = self.db.get_filter_lists().await?;
 
         let mut block_rules = Vec::new();
@@ -94,7 +97,12 @@ impl ListManager {
         let engine = FilterEngine::new(block_rules, allow_rules);
         self.filter.store(Arc::new(engine));
 
-        tracing::info!(block_count, allow_count, "filter engine rebuilt");
+        tracing::info!(
+            block_count,
+            allow_count,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "filter engine rebuilt"
+        );
 
         Ok(())
     }
