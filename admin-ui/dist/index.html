@@ -270,6 +270,19 @@ td {
 
 tr:hover td { background: var(--bg-hover); }
 
+/* Top-N tables: fixed layout keeps the right-hand count column visible
+   even when the left-hand label (domain, upstream, client) is very long. */
+.top-table { table-layout: fixed; width: 100%; }
+.top-table td, .top-table th { overflow: hidden; }
+.truncate-cell {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Badges */
 .badge {
   display: inline-block;
@@ -764,7 +777,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
   .hide-mobile, .hide-mobile-block { display: none !important; }
   .show-mobile { display: block !important; }
-  .truncate-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .truncate-cell { max-width: 180px; }
 
   /* Dashboard: stack top domains / clients */
   .dashboard-grid-2col { grid-template-columns: 1fr !important; }
@@ -1444,11 +1457,11 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     const visible = data.slice(0, 10);
     const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of visible) {
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -1461,12 +1474,14 @@ class DashboardPage extends HTMLElement {
     if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     const visible = data.slice(0, 10);
     const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
+    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
     for (const d of visible) {
-      const token = d.doh_token ? `<br><span style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</span>` : '';
+      const tokenLine = d.doh_token
+        ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
+        : '';
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td>${esc(d.client_ip)}${token}</td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -1478,11 +1493,11 @@ class DashboardPage extends HTMLElement {
     this._prevUpstreams = sig;
     if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     const sumVal = data.reduce((a, d) => a + d.count, 0);
-    let html = '<table><thead><tr><th>Upstream</th><th style="text-align:right">Queries</th><th class="hide-mobile" style="text-align:right">Avg Latency</th></tr></thead><tbody>';
+    let html = '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>';
     for (const d of data) {
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td style="font-family:var(--font-mono)">${esc(d.upstream)}</td><td style="text-align:right">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.upstream)}" style="font-family:var(--font-mono)">${esc(d.upstream)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
