@@ -34,7 +34,7 @@ async fn test_seed_default_lists() {
     for (i, list) in lists.iter().enumerate() {
         assert_eq!(list.name, DEFAULT_LISTS[i].0);
         assert_eq!(list.url, DEFAULT_LISTS[i].1);
-        assert!(list.enabled);
+        assert_eq!(list.enabled, DEFAULT_LISTS[i].2);
     }
 }
 
