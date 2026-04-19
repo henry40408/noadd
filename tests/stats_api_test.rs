@@ -39,6 +39,12 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
+    let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
+        db.clone(),
+        filter.clone(),
+    ));
+    let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+
     let router = admin_router(AppState {
         db,
         sessions,
@@ -52,6 +58,8 @@ async fn setup() -> (axum::Router, String) {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        list_manager,
+        rebuild,
     });
     (router, token)
 }

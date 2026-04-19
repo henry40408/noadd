@@ -21,6 +21,8 @@ use crate::cache::DnsCache;
 use crate::db::Database;
 use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
+use crate::filter::lists::ListManager;
+use crate::filter::rebuild::RebuildCoordinator;
 use crate::upstream::forwarder::UpstreamForwarder;
 
 #[derive(Clone)]
@@ -33,6 +35,8 @@ pub struct AppState {
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub server_info: ServerInfo,
+    pub list_manager: Arc<ListManager>,
+    pub rebuild: Arc<RebuildCoordinator>,
 }
 
 #[derive(Clone, Serialize)]

@@ -39,6 +39,12 @@ async fn setup() -> (axum::Router, String) {
     let hash = hash_password("admin").unwrap();
     db.set_setting("admin_password_hash", &hash).await.unwrap();
 
+    let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
+        db.clone(),
+        filter.clone(),
+    ));
+    let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+
     let router = admin_router(AppState {
         db,
         sessions,
@@ -52,6 +58,8 @@ async fn setup() -> (axum::Router, String) {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        list_manager,
+        rebuild,
     });
     (router, token)
 }
@@ -437,6 +445,12 @@ async fn test_setup_initial_password() {
         log_tx,
     ));
 
+    let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
+        db.clone(),
+        filter.clone(),
+    ));
+    let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+
     // No password set initially
     let app = admin_router(AppState {
         db: db.clone(),
@@ -451,6 +465,8 @@ async fn test_setup_initial_password() {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        list_manager: list_manager.clone(),
+        rebuild: rebuild.clone(),
     });
 
     // Setup should succeed
@@ -482,6 +498,8 @@ async fn test_setup_initial_password() {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        list_manager,
+        rebuild,
     });
     let response = app2
         .oneshot(

@@ -133,8 +133,8 @@ impl ListManager {
         Ok(rule_count)
     }
 
-    /// Download all enabled lists and rebuild the filter.
-    pub async fn update_all_lists(&self) -> Result<(), ListError> {
+    /// Download all enabled lists. Does **not** rebuild the filter engine.
+    pub async fn update_all_lists_no_rebuild(&self) -> Result<(), ListError> {
         let lists = self.db.get_filter_lists().await?;
 
         for list in &lists {
@@ -151,8 +151,13 @@ impl ListManager {
             }
         }
 
-        self.rebuild_filter().await?;
+        Ok(())
+    }
 
+    /// Download all enabled lists and rebuild the filter.
+    pub async fn update_all_lists(&self) -> Result<(), ListError> {
+        self.update_all_lists_no_rebuild().await?;
+        self.rebuild_filter().await?;
         Ok(())
     }
 
