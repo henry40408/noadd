@@ -674,3 +674,38 @@ async fn test_spa_route_still_serves_index_html() {
         "expected text/html, got {ctype}"
     );
 }
+
+#[tokio::test]
+async fn test_apple_touch_icon_served_as_png() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let ctype = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ctype.starts_with("image/png"),
+        "expected image/png, got {ctype}"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n", "missing PNG magic bytes");
+    assert!(
+        body.len() > 500,
+        "PNG body suspiciously small: {} bytes",
+        body.len()
+    );
+}
