@@ -1,10 +1,12 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+use crate::now_unix;
 
 pub struct RebuildCoordinator {
     lock: Mutex<()>,
@@ -17,13 +19,6 @@ pub struct RebuildState {
     pub started_at: AtomicI64,
     pub last_completed_at: AtomicI64,
     pub last_duration_ms: AtomicU64,
-}
-
-pub fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 impl RebuildCoordinator {

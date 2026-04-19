@@ -168,7 +168,7 @@ async fn batch_add_rejects_oversized() {
 
 #[tokio::test]
 async fn batch_add_all_success() {
-    use noadd::filter::rebuild::now_unix;
+    use noadd::now_unix;
 
     let base = common::spawn_fake_upstream(
         "/filter_a.txt",

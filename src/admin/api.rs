@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -198,13 +197,6 @@ fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
-}
-
-fn now_epoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
 
 // --- Auth endpoints ---
@@ -724,7 +716,7 @@ async fn batch_add_lists(
                             error: format!("{e}"),
                         });
                     }
-                    let now = crate::filter::rebuild::now_unix();
+                    let now = crate::now_unix();
                     let _ = db.update_filter_list_stats(id, now, rule_count).await;
                     Ok(BatchAddedEntry {
                         id,
@@ -1021,7 +1013,7 @@ async fn get_stats_summary(
 ) -> Result<Json<stats::Summary>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let summary = stats::compute_summary(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1041,7 +1033,7 @@ async fn get_stats_timeline(
 ) -> Result<Json<Vec<crate::db::TimelinePoint>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let hours = query.hours.unwrap_or(24);
     let timeline = stats::compute_timeline(&state.db, now, hours)
         .await
@@ -1062,7 +1054,7 @@ async fn get_stats_top_domains(
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let domains = stats::compute_top_domains(&state.db, now, limit)
         .await
@@ -1078,7 +1070,7 @@ async fn get_stats_top_clients(
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let clients = stats::compute_top_clients(&state.db, now, limit)
         .await
@@ -1094,7 +1086,7 @@ async fn get_stats_top_upstreams(
 ) -> Result<Json<Vec<crate::db::TopUpstream>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(10);
     let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
         .await
@@ -1122,7 +1114,7 @@ async fn get_stats_v2_timeline(
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let timeline = stats::compute_stats_timeline(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1134,7 +1126,7 @@ async fn get_stats_v2_heatmap(
     jar: CookieJar,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
     require_auth(&state, &jar)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1148,7 +1140,7 @@ async fn get_stats_v2_breakdown(
 ) -> Result<Json<stats::Breakdowns>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1160,7 +1152,7 @@ async fn get_stats_v2_health(
     jar: CookieJar,
 ) -> Result<Json<stats::DbHealth>, StatusCode> {
     require_auth(&state, &jar)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let h = stats::compute_db_health(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1174,7 +1166,7 @@ async fn get_stats_v2_highlights(
 ) -> Result<Json<stats::StatsHighlights>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1197,7 +1189,7 @@ async fn get_stats_v2_top_domains(
         range: query.range.clone(),
     })?;
     let limit = query.limit.unwrap_or(15);
-    let now = now_epoch();
+    let now = crate::now_unix();
     let rows = stats::compute_top_domains_ranged(&state.db, now, range, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1214,7 +1206,7 @@ async fn get_stats_v2_top_clients(
         range: query.range.clone(),
     })?;
     let limit = query.limit.unwrap_or(15);
-    let now = now_epoch();
+    let now = crate::now_unix();
     let rows = stats::compute_top_clients_ranged(&state.db, now, range, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
