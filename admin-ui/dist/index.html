@@ -1013,61 +1013,74 @@ stats-page #rate-trend-card { overflow: visible; }
 }
 
 /* ============================================================
-   Rebuild Pill — inline status pill, matches .badge language
+   Rebuild Status Strip — card-aligned status row with accent rail
    ============================================================ */
+rebuild-banner { display: block; }
 .rebuild-banner { display: none; }
 .rebuild-banner.show {
-  display: block;
-  margin-bottom: 12px;
-  animation: rebuild-pill-in 160ms ease-out;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  animation: rebuild-strip-in 200ms ease-out;
 }
-.rebuild-banner .pill {
+.rebuild-banner.active {
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-glow), var(--bg-card) 55%);
+}
+.rebuild-banner.done {
+  border-left-color: var(--green);
+  background: linear-gradient(90deg, var(--green-dim), var(--bg-card) 55%);
+}
+.rebuild-banner .icon {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 11px 5px 9px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  line-height: 1;
+  justify-content: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
-.rebuild-banner.active .pill {
-  background: var(--accent-glow);
-  color: var(--accent);
-}
-.rebuild-banner.done .pill {
-  background: var(--green-dim);
-  color: var(--green);
-}
+.rebuild-banner.active .icon { background: var(--accent-glow); color: var(--accent); }
+.rebuild-banner.done .icon { background: var(--green-dim); color: var(--green); }
 .rebuild-banner .spin {
-  width: 10px; height: 10px;
-  border: 1.5px solid currentColor;
+  width: 13px; height: 13px;
+  border: 2px solid currentColor;
   border-right-color: transparent;
   border-radius: 50%;
   animation: rebuild-spin 0.8s linear infinite;
-  flex-shrink: 0;
-}
-@keyframes rebuild-spin {
-  to { transform: rotate(360deg); }
-}
-@keyframes rebuild-pill-in {
-  from { opacity: 0; transform: translateY(-3px); }
-  to { opacity: 1; transform: none; }
 }
 .rebuild-banner .check {
-  width: 11px; height: 11px;
+  width: 14px; height: 14px;
   stroke-width: 2.5;
-  flex-shrink: 0;
+}
+.rebuild-banner .text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rebuild-banner .label {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
 }
 .rebuild-banner .meta {
-  font-weight: 500;
-  opacity: 0.72;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  margin-left: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+}
+@keyframes rebuild-spin { to { transform: rotate(360deg); } }
+@keyframes rebuild-strip-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
 }
 
 /* ============================================================
@@ -1588,10 +1601,12 @@ class RebuildBanner extends HTMLElement {
     if (rebuilding) {
       if (this.doneTimer) { clearTimeout(this.doneTimer); this.doneTimer = null; }
       const elapsed = body.started_at ? Math.max(0, Math.floor(Date.now()/1000) - body.started_at) : 0;
-      this.render('active', 'Rebuilding filter', `· ${elapsed}s`);
+      this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
     } else if (this.prev === true) {
-      const meta = body.last_duration_ms ? `· ${(body.last_duration_ms / 1000).toFixed(1)}s` : '';
-      this.render('done', 'Filter updated', meta);
+      const meta = body.last_duration_ms
+        ? `Completed in ${(body.last_duration_ms / 1000).toFixed(1)}s`
+        : 'Completed';
+      this.render('done', 'Filter engine updated', meta);
       if (this.doneTimer) clearTimeout(this.doneTimer);
       this.doneTimer = setTimeout(() => {
         this.doneTimer = null;
@@ -1613,8 +1628,12 @@ class RebuildBanner extends HTMLElement {
       : `<span class="check">${icons.check}</span>`;
     const metaHtml = meta ? `<span class="meta">${esc(meta)}</span>` : '';
     this.innerHTML = `
-      <div class="rebuild-banner show ${state}">
-        <span class="pill">${indicator}<span>${esc(label)}</span>${metaHtml}</span>
+      <div class="rebuild-banner show ${state}" role="status" aria-live="polite">
+        <span class="icon">${indicator}</span>
+        <span class="text">
+          <span class="label">${esc(label)}</span>
+          ${metaHtml}
+        </span>
       </div>`;
   }
 }
