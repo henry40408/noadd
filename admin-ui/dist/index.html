@@ -1612,6 +1612,227 @@ class RebuildBanner extends HTMLElement {
 }
 customElements.define('rebuild-banner', RebuildBanner);
 
+// --- Registry Modal ---
+// Browse AdGuard HostlistsRegistry and batch-add selected filter lists.
+class RegistryModal extends HTMLElement {
+  constructor() {
+    super();
+    this.data = null;            // cached { filters, groups }
+    this.existingUrls = null;    // Set of URLs already in user's lists
+    this.selected = new Set();   // filterId values currently checked
+    this.adding = false;
+  }
+
+  async open() {
+    this.innerHTML = '';
+    const overlay = document.createElement('div');
+    overlay.className = 'registry-overlay';
+    overlay.innerHTML = `
+      <div class="registry-dialog" role="dialog" aria-labelledby="registry-title" aria-modal="true">
+        <div class="registry-head">
+          <h3 id="registry-title">Browse Filter Registry</h3>
+          <button class="close-btn" id="reg-close" aria-label="Close">${icons.close}</button>
+        </div>
+        <div class="registry-toolbar" style="display:none" id="reg-toolbar">
+          <input type="text" id="reg-search" placeholder="Search name or description">
+          <select id="reg-group">
+            <option value="">All groups</option>
+          </select>
+          <label class="check"><input type="checkbox" id="reg-deprecated"> Show deprecated</label>
+        </div>
+        <div class="registry-body" id="reg-body">
+          <div class="registry-loading"><div class="spin"></div>Loading registry…</div>
+        </div>
+        <div class="registry-summary" id="reg-summary" style="display:none"></div>
+        <div class="registry-foot" style="display:none" id="reg-foot">
+          <div class="count" id="reg-count">0 selected</div>
+          <button class="btn btn-sm" id="reg-cancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="reg-add" disabled>${icons.plus} Add Selected</button>
+        </div>
+      </div>`;
+    this.appendChild(overlay);
+
+    // Close on backdrop click + Escape + close button
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay && !this.adding) this.close();
+    });
+    this.escHandler = (e) => { if (e.key === 'Escape' && !this.adding) this.close(); };
+    document.addEventListener('keydown', this.escHandler);
+    this.querySelector('#reg-close').onclick = () => { if (!this.adding) this.close(); };
+    this.querySelector('#reg-cancel').onclick = () => { if (!this.adding) this.close(); };
+
+    await this.load();
+  }
+
+  close() {
+    if (this.escHandler) document.removeEventListener('keydown', this.escHandler);
+    this.remove();
+  }
+
+  async load() {
+    const body = this.querySelector('#reg-body');
+    try {
+      const [data, lists] = await Promise.all([
+        api.get('/api/registry/filters'),
+        api.get('/api/lists'),
+      ]);
+      this.data = data;
+      this.existingUrls = new Set(lists.map(l => l.url));
+      this.populateGroups();
+      this.wireControls();
+      this.querySelector('#reg-toolbar').style.display = '';
+      this.querySelector('#reg-foot').style.display = '';
+      this.render();
+    } catch (e) {
+      body.innerHTML = `
+        <div class="registry-error">
+          Failed to load registry.<br>
+          <button class="btn btn-sm" style="margin-top:14px" id="reg-retry">${icons.refresh} Retry</button>
+        </div>`;
+      this.querySelector('#reg-retry').onclick = () => { body.innerHTML = '<div class="registry-loading"><div class="spin"></div>Loading registry…</div>'; this.load(); };
+    }
+  }
+
+  populateGroups() {
+    const sel = this.querySelector('#reg-group');
+    for (const g of this.data.groups) {
+      const opt = document.createElement('option');
+      opt.value = String(g.groupId);
+      opt.textContent = g.groupName;
+      sel.appendChild(opt);
+    }
+  }
+
+  wireControls() {
+    this.querySelector('#reg-search').oninput = () => this.render();
+    this.querySelector('#reg-group').onchange = () => this.render();
+    this.querySelector('#reg-deprecated').onchange = () => this.render();
+    this.querySelector('#reg-add').onclick = () => this.submit();
+  }
+
+  filteredFilters() {
+    const q = this.querySelector('#reg-search').value.trim().toLowerCase();
+    const groupVal = this.querySelector('#reg-group').value;
+    const showDep = this.querySelector('#reg-deprecated').checked;
+    return this.data.filters.filter(f => {
+      if (!showDep && f.deprecated) return false;
+      if (groupVal && String(f.groupId) !== groupVal) return false;
+      if (q) {
+        const hay = (f.name + ' ' + f.description).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }
+
+  groupClassFor(groupId) {
+    const g = this.data.groups.find(x => x.groupId === groupId);
+    if (!g) return '';
+    const name = g.groupName.toLowerCase();
+    if (name.includes('security')) return 'security';
+    if (name.includes('regional')) return 'regional';
+    if (name.includes('general')) return 'general';
+    return '';
+  }
+
+  render() {
+    const body = this.querySelector('#reg-body');
+    const filtered = this.filteredFilters();
+    if (!filtered.length) {
+      body.innerHTML = '<div class="registry-empty">No filters match your search.</div>';
+      this.updateCount();
+      return;
+    }
+    const groupsById = new Map(this.data.groups.map(g => [g.groupId, g]));
+    body.innerHTML = filtered.map(f => {
+      const already = this.existingUrls.has(f.downloadUrl);
+      const checked = this.selected.has(f.filterId);
+      const groupName = groupsById.get(f.groupId)?.groupName || '';
+      const groupCls = this.groupClassFor(f.groupId);
+      const home = f.homepage ? `<a class="home" href="${esc(f.homepage)}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
+      return `
+        <label class="registry-row">
+          <input type="checkbox" data-id="${f.filterId}" ${checked ? 'checked' : ''} ${already ? 'disabled' : ''}>
+          <div class="info">
+            <div class="name-row">
+              <span class="name">${esc(f.name)}</span>
+              ${groupName ? `<span class="group-pill ${groupCls}">${esc(groupName)}</span>` : ''}
+              ${already ? '<span class="added-pill">Added</span>' : ''}
+              ${f.deprecated ? '<span class="dep-pill">Deprecated</span>' : ''}
+            </div>
+            <div class="desc">${esc(f.description || '')}</div>
+            ${home}
+          </div>
+        </label>`;
+    }).join('');
+    body.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.onchange = () => {
+        const id = parseInt(cb.dataset.id, 10);
+        if (cb.checked) this.selected.add(id); else this.selected.delete(id);
+        this.updateCount();
+      };
+    });
+    this.updateCount();
+  }
+
+  updateCount() {
+    const n = this.selected.size;
+    this.querySelector('#reg-count').textContent = n === 1 ? '1 selected' : `${n} selected`;
+    this.querySelector('#reg-add').disabled = n === 0 || this.adding;
+  }
+
+  async submit() {
+    if (!this.selected.size) return;
+    this.adding = true;
+    const items = this.data.filters
+      .filter(f => this.selected.has(f.filterId))
+      .map(f => ({ name: f.name, url: f.downloadUrl }));
+    const addBtn = this.querySelector('#reg-add');
+    const cancelBtn = this.querySelector('#reg-cancel');
+    const closeBtn = this.querySelector('#reg-close');
+    addBtn.disabled = true;
+    addBtn.innerHTML = '<div class="spin" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></div> Adding…';
+    cancelBtn.disabled = true;
+    closeBtn.disabled = true;
+    try {
+      const resp = await api.post('/api/lists/batch', { items });
+      this.dispatchEvent(new CustomEvent('batch-added', { bubbles: true }));
+      if (!resp.failed || resp.failed.length === 0) {
+        this.close();
+        return;
+      }
+      const summary = this.querySelector('#reg-summary');
+      summary.style.display = '';
+      summary.classList.add('error');
+      const failedList = resp.failed.map(f => `${esc(f.name)} (${esc(f.error)})`).join('; ');
+      summary.innerHTML = `Added ${resp.added.length}, failed ${resp.failed.length}: ${failedList}`;
+      this.selected.clear();
+      this.existingUrls = new Set(
+        [...this.existingUrls, ...resp.added.map(a => a.url)]
+      );
+      // Swap Cancel → Close since work is done
+      cancelBtn.textContent = 'Close';
+      cancelBtn.disabled = false;
+      closeBtn.disabled = false;
+      this.adding = false;
+      addBtn.innerHTML = `${icons.plus} Add Selected`;
+      this.render();
+    } catch (e) {
+      const summary = this.querySelector('#reg-summary');
+      summary.style.display = '';
+      summary.classList.add('error');
+      summary.textContent = 'Batch add failed. See browser console.';
+      console.error(e);
+      cancelBtn.disabled = false;
+      closeBtn.disabled = false;
+      addBtn.disabled = false;
+      addBtn.innerHTML = `${icons.plus} Add Selected`;
+      this.adding = false;
+    }
+  }
+}
+customElements.define('registry-modal', RegistryModal);
+
 // --- Dashboard Page ---
 class DashboardPage extends HTMLElement {
   constructor() {
@@ -2462,8 +2683,9 @@ class FiltersPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Filter Lists</div>
-        <div class="filters-row" style="margin-bottom:12px">
+        <div class="filters-row" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+          <button class="btn btn-sm" id="browse-registry">${icons.search} Browse Registry</button>
         </div>
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
           <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
@@ -2517,6 +2739,13 @@ class FiltersPage extends HTMLElement {
       this.querySelector('#list-name').value = '';
       this.querySelector('#list-url').value = '';
       this.loadLists();
+    };
+
+    this.querySelector('#browse-registry').onclick = () => {
+      const modal = document.createElement('registry-modal');
+      modal.addEventListener('batch-added', () => this.loadLists());
+      document.body.appendChild(modal);
+      modal.open();
     };
 
     // --- Custom Rules ---
