@@ -60,9 +60,14 @@ async fn main() -> anyhow::Result<()> {
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
 
     // 5. Seed default lists + rebuild filter
-    let list_manager = ListManager::new(db.clone(), filter.clone());
+    let list_manager = Arc::new(ListManager::new(db.clone(), filter.clone()));
     list_manager.seed_default_lists().await?;
     list_manager.rebuild_filter().await?;
+    let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+    let registry = noadd::registry::RegistryClient::new(
+        noadd::registry::DEFAULT_REGISTRY_URL,
+        std::time::Duration::from_secs(3600),
+    );
 
     // 6. Create upstream forwarder
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
@@ -143,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         server_info,
+        list_manager: list_manager.clone(),
+        rebuild: rebuild.clone(),
+        registry: registry.clone(),
     });
     let app = doh_routes.merge(admin_routes);
 
@@ -150,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
     let http_addr: SocketAddr = args.http_addr.parse()?;
 
     // 15. Background list update scheduler (every 24h)
-    let update_db = db.clone();
-    let update_filter = filter.clone();
+    let update_manager = list_manager.clone();
+    let update_rebuild = rebuild.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
@@ -159,10 +167,13 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let manager = ListManager::new(update_db.clone(), update_filter.clone());
-                    if let Err(e) = manager.update_all_lists().await {
+                    if let Err(e) = update_manager.update_all_lists_no_rebuild().await {
                         tracing::error!(error = %e, "failed to update filter lists");
                     }
+                    let mgr = update_manager.clone();
+                    update_rebuild.clone().spawn_raw(move || async move {
+                        mgr.rebuild_filter().await
+                    });
                 }
                 _ = shutdown_rx.recv() => break,
             }

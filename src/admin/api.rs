@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -21,6 +20,9 @@ use crate::cache::DnsCache;
 use crate::db::Database;
 use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
+use crate::filter::lists::ListManager;
+use crate::filter::rebuild::RebuildCoordinator;
+use crate::registry::RegistryClient;
 use crate::upstream::forwarder::UpstreamForwarder;
 
 #[derive(Clone)]
@@ -33,6 +35,9 @@ pub struct AppState {
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub server_info: ServerInfo,
+    pub list_manager: Arc<ListManager>,
+    pub rebuild: Arc<RebuildCoordinator>,
+    pub registry: Arc<RegistryClient>,
 }
 
 #[derive(Clone, Serialize)]
@@ -55,6 +60,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/settings", get(get_settings).put(put_settings))
         // Lists
         .route("/api/lists", get(get_lists).post(add_list))
+        .route("/api/lists/batch", post(batch_add_lists))
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/{id}/check", post(check_list_url))
         .route("/api/lists/update", post(trigger_list_update))
@@ -63,6 +69,9 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/rules/{id}", delete(delete_rule))
         // Filter check
         .route("/api/filter/check", post(filter_check))
+        .route("/api/filter/rebuild-status", get(get_rebuild_status))
+        // Registry
+        .route("/api/registry/filters", get(get_registry_filters))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
@@ -188,13 +197,6 @@ fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
-}
-
-fn now_epoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
 
 // --- Auth endpoints ---
@@ -478,11 +480,11 @@ async fn update_list(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
 
     Ok(StatusCode::OK)
 }
@@ -556,11 +558,11 @@ async fn delete_list(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
 
     Ok(StatusCode::OK)
 }
@@ -576,15 +578,200 @@ async fn trigger_list_update(
 ) -> Result<Json<ListUpdateResponse>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .update_all_lists()
+    state
+        .list_manager
+        .update_all_lists_no_rebuild()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
+
     Ok(Json(ListUpdateResponse {
-        message: "All lists updated and filter rebuilt".to_string(),
+        message: "All lists downloaded; rebuild in progress".to_string(),
     }))
+}
+
+#[derive(Serialize)]
+struct RebuildStatusResponse {
+    rebuilding: bool,
+    started_at: i64,
+    last_completed_at: i64,
+    last_duration_ms: u64,
+}
+
+async fn get_rebuild_status(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<RebuildStatusResponse>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let s = state.rebuild.state();
+    Ok(Json(RebuildStatusResponse {
+        rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
+        started_at: s.started_at.load(std::sync::atomic::Ordering::Relaxed),
+        last_completed_at: s
+            .last_completed_at
+            .load(std::sync::atomic::Ordering::Relaxed),
+        last_duration_ms: s
+            .last_duration_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct BatchAddRequest {
+    pub items: Vec<BatchAddItem>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchAddItem {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchAddedEntry {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub rule_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct BatchFailedEntry {
+    pub name: String,
+    pub url: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchAddResponse {
+    pub added: Vec<BatchAddedEntry>,
+    pub failed: Vec<BatchFailedEntry>,
+}
+
+async fn batch_add_lists(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<BatchAddRequest>,
+) -> Result<Json<BatchAddResponse>, StatusCode> {
+    require_auth(&state, &jar)?;
+    if body.items.is_empty() || body.items.len() > 50 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent(crate::user_agent())
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut set = tokio::task::JoinSet::new();
+    for item in body.items {
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        let db = state.db.clone();
+        let http = client.clone();
+        set.spawn(async move {
+            let _permit = permit;
+            let name = item.name.trim().to_string();
+            let url = item.url.trim().to_string();
+            let id = match db.add_filter_list(&name, &url, true).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Err(BatchFailedEntry {
+                        name,
+                        url,
+                        error: format!("{e}"),
+                    });
+                }
+            };
+            let fetch = http
+                .get(&url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            match fetch {
+                Ok(resp) => {
+                    let content = match resp.text().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = db.delete_filter_list(id).await;
+                            return Err(BatchFailedEntry {
+                                name,
+                                url,
+                                error: format!("{e}"),
+                            });
+                        }
+                    };
+                    let rule_count = crate::filter::parser::parse_list(&content).len() as i64;
+                    if let Err(e) = db.set_filter_list_content(id, &content).await {
+                        let _ = db.delete_filter_list(id).await;
+                        return Err(BatchFailedEntry {
+                            name,
+                            url,
+                            error: format!("{e}"),
+                        });
+                    }
+                    let now = crate::now_unix();
+                    let _ = db.update_filter_list_stats(id, now, rule_count).await;
+                    Ok(BatchAddedEntry {
+                        id,
+                        name,
+                        url,
+                        rule_count,
+                    })
+                }
+                Err(e) => {
+                    let _ = db.delete_filter_list(id).await;
+                    Err(BatchFailedEntry {
+                        name,
+                        url,
+                        error: format!("{e}"),
+                    })
+                }
+            }
+        });
+    }
+
+    let mut added = Vec::new();
+    let mut failed = Vec::new();
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(a)) => added.push(a),
+            Ok(Err(f)) => failed.push(f),
+            Err(e) => failed.push(BatchFailedEntry {
+                name: String::new(),
+                url: String::new(),
+                error: format!("task join error: {e}"),
+            }),
+        }
+    }
+
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
+
+    Ok(Json(BatchAddResponse { added, failed }))
+}
+
+async fn get_registry_filters(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<crate::registry::RegistryData>, StatusCode> {
+    require_auth(&state, &jar)?;
+    match state.registry.list().await {
+        Ok(data) => Ok(Json(data)),
+        Err(e) => {
+            tracing::error!(error = %e, "registry fetch failed");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
 }
 
 // --- Rules ---
@@ -826,7 +1013,7 @@ async fn get_stats_summary(
 ) -> Result<Json<stats::Summary>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let summary = stats::compute_summary(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -846,7 +1033,7 @@ async fn get_stats_timeline(
 ) -> Result<Json<Vec<crate::db::TimelinePoint>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let hours = query.hours.unwrap_or(24);
     let timeline = stats::compute_timeline(&state.db, now, hours)
         .await
@@ -867,7 +1054,7 @@ async fn get_stats_top_domains(
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let domains = stats::compute_top_domains(&state.db, now, limit)
         .await
@@ -883,7 +1070,7 @@ async fn get_stats_top_clients(
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let clients = stats::compute_top_clients(&state.db, now, limit)
         .await
@@ -899,7 +1086,7 @@ async fn get_stats_top_upstreams(
 ) -> Result<Json<Vec<crate::db::TopUpstream>>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let now = now_epoch();
+    let now = crate::now_unix();
     let limit = query.limit.unwrap_or(10);
     let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
         .await
@@ -927,7 +1114,7 @@ async fn get_stats_v2_timeline(
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let timeline = stats::compute_stats_timeline(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -939,7 +1126,7 @@ async fn get_stats_v2_heatmap(
     jar: CookieJar,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
     require_auth(&state, &jar)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -953,7 +1140,7 @@ async fn get_stats_v2_breakdown(
 ) -> Result<Json<stats::Breakdowns>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -965,7 +1152,7 @@ async fn get_stats_v2_health(
     jar: CookieJar,
 ) -> Result<Json<stats::DbHealth>, StatusCode> {
     require_auth(&state, &jar)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let h = stats::compute_db_health(&state.db, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -979,7 +1166,7 @@ async fn get_stats_v2_highlights(
 ) -> Result<Json<stats::StatsHighlights>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
-    let now = now_epoch();
+    let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1002,7 +1189,7 @@ async fn get_stats_v2_top_domains(
         range: query.range.clone(),
     })?;
     let limit = query.limit.unwrap_or(15);
-    let now = now_epoch();
+    let now = crate::now_unix();
     let rows = stats::compute_top_domains_ranged(&state.db, now, range, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1019,7 +1206,7 @@ async fn get_stats_v2_top_clients(
         range: query.range.clone(),
     })?;
     let limit = query.limit.unwrap_or(15);
-    let now = now_epoch();
+    let now = crate::now_unix();
     let rows = stats::compute_top_clients_ranged(&state.db, now, range, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

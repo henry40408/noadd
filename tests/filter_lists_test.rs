@@ -34,7 +34,7 @@ async fn test_seed_default_lists() {
     for (i, list) in lists.iter().enumerate() {
         assert_eq!(list.name, DEFAULT_LISTS[i].0);
         assert_eq!(list.url, DEFAULT_LISTS[i].1);
-        assert!(list.enabled);
+        assert_eq!(list.enabled, DEFAULT_LISTS[i].2);
     }
 }
 
@@ -90,5 +90,35 @@ async fn test_rebuild_filter_from_custom_rules() {
     assert!(matches!(
         engine.check("example.org"),
         FilterResult::Allowed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_update_all_lists_no_rebuild_does_not_rebuild() {
+    let (db, manager, filter) = setup_with_filter().await;
+
+    // Insert a custom block rule so rebuild would notice it.
+    db.add_custom_rule("||ads.example.com^", "block")
+        .await
+        .unwrap();
+
+    // Sanity: before any rebuild, engine does not know the rule.
+    assert!(matches!(
+        filter.load().check("ads.example.com"),
+        noadd::filter::engine::FilterResult::Allowed { .. }
+    ));
+
+    // update_all_lists_no_rebuild must leave engine untouched.
+    manager.update_all_lists_no_rebuild().await.unwrap();
+    assert!(matches!(
+        filter.load().check("ads.example.com"),
+        noadd::filter::engine::FilterResult::Allowed { .. }
+    ));
+
+    // A direct rebuild_filter call still works.
+    manager.rebuild_filter().await.unwrap();
+    assert!(matches!(
+        filter.load().check("ads.example.com"),
+        noadd::filter::engine::FilterResult::Blocked { .. }
     ));
 }

@@ -15,24 +15,16 @@ pub enum ListError {
     Http(#[from] reqwest::Error),
 }
 
-pub const DEFAULT_LISTS: &[(&str, &str)] = &[
+pub const DEFAULT_LISTS: &[(&str, &str, bool)] = &[
     (
-        "AdGuard DNS Filter",
+        "AdGuard DNS filter",
         "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt",
-    ),
-    ("EasyList", "https://easylist.to/easylist/easylist.txt"),
-    (
-        "Peter Lowe's List",
-        "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
-    ),
-    ("OISD Small", "https://small.oisd.nl/"),
-    (
-        "Steven Black Unified Hosts",
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        true,
     ),
     (
-        "URLhaus Malware Filter",
-        "https://urlhaus.abuse.ch/downloads/hostfile/",
+        "AdAway Default Blocklist",
+        "https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt",
+        false,
     ),
 ];
 
@@ -141,8 +133,8 @@ impl ListManager {
         Ok(rule_count)
     }
 
-    /// Download all enabled lists and rebuild the filter.
-    pub async fn update_all_lists(&self) -> Result<(), ListError> {
+    /// Download all enabled lists. Does **not** rebuild the filter engine.
+    pub async fn update_all_lists_no_rebuild(&self) -> Result<(), ListError> {
         let lists = self.db.get_filter_lists().await?;
 
         for list in &lists {
@@ -159,8 +151,13 @@ impl ListManager {
             }
         }
 
-        self.rebuild_filter().await?;
+        Ok(())
+    }
 
+    /// Download all enabled lists and rebuild the filter.
+    pub async fn update_all_lists(&self) -> Result<(), ListError> {
+        self.update_all_lists_no_rebuild().await?;
+        self.rebuild_filter().await?;
         Ok(())
     }
 
@@ -171,8 +168,8 @@ impl ListManager {
             return Ok(());
         }
 
-        for (name, url) in DEFAULT_LISTS {
-            self.db.add_filter_list(name, url, true).await?;
+        for (name, url, enabled) in DEFAULT_LISTS {
+            self.db.add_filter_list(name, url, *enabled).await?;
         }
 
         Ok(())

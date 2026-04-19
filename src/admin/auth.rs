@@ -44,12 +44,7 @@ pub fn new_session_store() -> SessionStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
+use crate::now_unix as now_secs;
 
 /// Load persisted sessions from the database into the session store.
 /// Expired sessions are discarded during load.

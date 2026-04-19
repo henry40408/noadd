@@ -1011,6 +1011,311 @@ stats-page #rate-trend-card { overflow: visible; }
 @media (max-width: 960px) {
   .stats-row-2col { grid-template-columns: 1fr; }
 }
+
+/* ============================================================
+   Rebuild Status Strip — card-aligned status row with accent rail
+   ============================================================ */
+rebuild-banner { display: block; }
+.rebuild-banner { display: none; }
+.rebuild-banner.show {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  animation: rebuild-strip-in 200ms ease-out;
+}
+.rebuild-banner.active {
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-glow), var(--bg-card) 55%);
+}
+.rebuild-banner.done {
+  border-left-color: var(--green);
+  background: linear-gradient(90deg, var(--green-dim), var(--bg-card) 55%);
+}
+.rebuild-banner .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.rebuild-banner.active .icon { background: var(--accent-glow); color: var(--accent); }
+.rebuild-banner.done .icon { background: var(--green-dim); color: var(--green); }
+.rebuild-banner .spin {
+  width: 13px; height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: rebuild-spin 0.8s linear infinite;
+}
+.rebuild-banner .check {
+  width: 14px; height: 14px;
+  stroke-width: 2.5;
+}
+.rebuild-banner .text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rebuild-banner .label {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+}
+.rebuild-banner .meta {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+}
+@keyframes rebuild-spin { to { transform: rotate(360deg); } }
+@keyframes rebuild-strip-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ============================================================
+   Registry Modal — filter picker dialog
+   ============================================================ */
+.registry-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 16, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 100;
+  animation: registry-fade 160ms ease-out;
+}
+@keyframes registry-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.registry-dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 820px;
+  max-height: min(86vh, 720px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: registry-rise 220ms cubic-bezier(0.2, 0.9, 0.2, 1.0);
+  overflow: hidden;
+}
+@keyframes registry-rise {
+  from { transform: translateY(14px) scale(0.985); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.registry-head {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.registry-head h3 {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex: 1;
+}
+.registry-head .close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color var(--transition), background var(--transition);
+}
+.registry-head .close-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.registry-head .close-btn svg { width: 18px; height: 18px; }
+
+.registry-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-wrap: wrap;
+}
+.registry-toolbar input[type="text"],
+.registry-toolbar select {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+}
+.registry-toolbar input[type="text"] { flex: 1; min-width: 180px; }
+.registry-toolbar input:focus, .registry-toolbar select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.registry-toolbar label.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+.registry-toolbar label.check input { accent-color: var(--accent); }
+
+.registry-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.registry-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+.registry-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.registry-row:last-child { border-bottom: none; }
+.registry-row:hover { background: var(--bg-hover); }
+.registry-row input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.registry-row input[type="checkbox"]:disabled { cursor: not-allowed; }
+.registry-row .info { flex: 1; min-width: 0; }
+.registry-row .name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.registry-row .name { font-weight: 600; color: var(--text-primary); font-size: 0.92rem; }
+.registry-row .desc {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.registry-row .group-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.registry-row .group-pill.general { background: var(--accent-glow); color: var(--accent); border-color: transparent; }
+.registry-row .group-pill.security { background: var(--red-dim); color: var(--red); border-color: transparent; }
+.registry-row .group-pill.regional { background: var(--orange-dim); color: var(--orange); border-color: transparent; }
+.registry-row .added-pill {
+  background: var(--green-dim);
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+.registry-row .dep-pill {
+  background: var(--red-dim);
+  color: var(--red);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+.registry-row .home {
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.78rem;
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.registry-row .home:hover { color: var(--accent); }
+.registry-row .home svg { width: 12px; height: 12px; }
+
+.registry-summary {
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.registry-summary.error { color: var(--red); }
+
+.registry-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.registry-foot .count { flex: 1; color: var(--text-secondary); font-size: 0.85rem; }
+
+.registry-loading, .registry-error {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+.registry-error { color: var(--red); }
+.registry-loading .spin {
+  margin: 0 auto 12px;
+  width: 22px; height: 22px;
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: rebuild-spin 0.8s linear infinite;
+}
+
+@media (max-width: 600px) {
+  .registry-overlay { padding: 0; }
+  .registry-dialog { max-height: 100vh; border-radius: 0; border: none; }
+  .registry-toolbar { gap: 8px; }
+  .registry-toolbar input[type="text"] { min-width: 140px; }
+  .registry-row { padding: 12px 14px; }
+}
 </style>
 </head>
 <body>
@@ -1136,6 +1441,10 @@ const icons = {
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+  external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
 };
 
 // ============================================================
@@ -1242,7 +1551,10 @@ class AppShell extends HTMLElement {
           </div>
           <div class="sidebar-version">${window.__noadd_version || ''}</div>
         </nav>
-        <main class="main-content" id="page-content"></main>
+        <main class="main-content">
+          <rebuild-banner></rebuild-banner>
+          <div id="page-content"></div>
+        </main>
       </div>`;
 
     this.querySelectorAll('.nav-item').forEach(btn => {
@@ -1262,6 +1574,291 @@ class AppShell extends HTMLElement {
   get pageContent() { return this.querySelector('#page-content'); }
 }
 customElements.define('app-shell', AppShell);
+
+// --- Rebuild Banner ---
+// Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
+// the filter engine is rebuilding, plus a brief success flash on completion.
+class RebuildBanner extends HTMLElement {
+  connectedCallback() {
+    this.prev = null;         // last observed rebuilding flag
+    this.doneTimer = null;    // timer handle for the post-rebuild flash
+    this.render('', '');
+    this.timer = setInterval(() => this.tick(), 2000);
+    this.tick();
+  }
+  disconnectedCallback() {
+    clearInterval(this.timer);
+    if (this.doneTimer) clearTimeout(this.doneTimer);
+  }
+  async tick() {
+    let body;
+    try {
+      body = await api.get('/api/filter/rebuild-status');
+    } catch (e) {
+      return;
+    }
+    const rebuilding = !!body.rebuilding;
+    if (rebuilding) {
+      if (this.doneTimer) { clearTimeout(this.doneTimer); this.doneTimer = null; }
+      const elapsed = body.started_at ? Math.max(0, Math.floor(Date.now()/1000) - body.started_at) : 0;
+      this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
+    } else if (this.prev === true) {
+      const meta = body.last_duration_ms
+        ? `Completed in ${(body.last_duration_ms / 1000).toFixed(1)}s`
+        : 'Completed';
+      this.render('done', 'Filter engine updated', meta);
+      if (this.doneTimer) clearTimeout(this.doneTimer);
+      this.doneTimer = setTimeout(() => {
+        this.doneTimer = null;
+        this.render('', '', '');
+      }, 3000);
+    } else {
+      // Steady idle — hide unless we're still showing the success flash.
+      if (!this.doneTimer) this.render('', '', '');
+    }
+    this.prev = rebuilding;
+  }
+  render(state, label, meta) {
+    if (!state) {
+      this.innerHTML = '';
+      return;
+    }
+    const indicator = state === 'active'
+      ? '<span class="spin"></span>'
+      : `<span class="check">${icons.check}</span>`;
+    const metaHtml = meta ? `<span class="meta">${esc(meta)}</span>` : '';
+    this.innerHTML = `
+      <div class="rebuild-banner show ${state}" role="status" aria-live="polite">
+        <span class="icon">${indicator}</span>
+        <span class="text">
+          <span class="label">${esc(label)}</span>
+          ${metaHtml}
+        </span>
+      </div>`;
+  }
+}
+customElements.define('rebuild-banner', RebuildBanner);
+
+// --- Registry Modal ---
+// Browse AdGuard HostlistsRegistry and batch-add selected filter lists.
+class RegistryModal extends HTMLElement {
+  constructor() {
+    super();
+    this.data = null;            // cached { filters, groups }
+    this.existingUrls = null;    // Set of URLs already in user's lists
+    this.selected = new Set();   // filterId values currently checked
+    this.adding = false;
+  }
+
+  async open() {
+    this.innerHTML = '';
+    const overlay = document.createElement('div');
+    overlay.className = 'registry-overlay';
+    overlay.innerHTML = `
+      <div class="registry-dialog" role="dialog" aria-labelledby="registry-title" aria-modal="true">
+        <div class="registry-head">
+          <h3 id="registry-title">Browse Filter Registry</h3>
+          <button class="close-btn" id="reg-close" aria-label="Close">${icons.close}</button>
+        </div>
+        <div class="registry-toolbar" style="display:none" id="reg-toolbar">
+          <input type="text" id="reg-search" placeholder="Search name or description">
+          <select id="reg-group">
+            <option value="">All groups</option>
+          </select>
+          <label class="check"><input type="checkbox" id="reg-deprecated"> Show deprecated</label>
+        </div>
+        <div class="registry-body" id="reg-body">
+          <div class="registry-loading"><div class="spin"></div>Loading registry…</div>
+        </div>
+        <div class="registry-summary" id="reg-summary" style="display:none"></div>
+        <div class="registry-foot" style="display:none" id="reg-foot">
+          <div class="count" id="reg-count">0 selected</div>
+          <button class="btn btn-sm" id="reg-cancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="reg-add" disabled>${icons.plus} Add Selected</button>
+        </div>
+      </div>`;
+    this.appendChild(overlay);
+
+    // Close on backdrop click + Escape + close button
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay && !this.adding) this.close();
+    });
+    this.escHandler = (e) => { if (e.key === 'Escape' && !this.adding) this.close(); };
+    document.addEventListener('keydown', this.escHandler);
+    this.querySelector('#reg-close').onclick = () => { if (!this.adding) this.close(); };
+    this.querySelector('#reg-cancel').onclick = () => { if (!this.adding) this.close(); };
+
+    await this.load();
+  }
+
+  close() {
+    if (this.escHandler) document.removeEventListener('keydown', this.escHandler);
+    this.remove();
+  }
+
+  async load() {
+    const body = this.querySelector('#reg-body');
+    try {
+      const [data, lists] = await Promise.all([
+        api.get('/api/registry/filters'),
+        api.get('/api/lists'),
+      ]);
+      this.data = data;
+      this.existingUrls = new Set(lists.map(l => l.url));
+      this.populateGroups();
+      this.wireControls();
+      this.querySelector('#reg-toolbar').style.display = '';
+      this.querySelector('#reg-foot').style.display = '';
+      this.render();
+    } catch (e) {
+      body.innerHTML = `
+        <div class="registry-error">
+          Failed to load registry.<br>
+          <button class="btn btn-sm" style="margin-top:14px" id="reg-retry">${icons.refresh} Retry</button>
+        </div>`;
+      this.querySelector('#reg-retry').onclick = () => { body.innerHTML = '<div class="registry-loading"><div class="spin"></div>Loading registry…</div>'; this.load(); };
+    }
+  }
+
+  populateGroups() {
+    const sel = this.querySelector('#reg-group');
+    for (const g of this.data.groups) {
+      const opt = document.createElement('option');
+      opt.value = String(g.groupId);
+      opt.textContent = g.groupName;
+      sel.appendChild(opt);
+    }
+  }
+
+  wireControls() {
+    this.querySelector('#reg-search').oninput = () => this.render();
+    this.querySelector('#reg-group').onchange = () => this.render();
+    this.querySelector('#reg-deprecated').onchange = () => this.render();
+    this.querySelector('#reg-add').onclick = () => this.submit();
+  }
+
+  filteredFilters() {
+    const q = this.querySelector('#reg-search').value.trim().toLowerCase();
+    const groupVal = this.querySelector('#reg-group').value;
+    const showDep = this.querySelector('#reg-deprecated').checked;
+    return this.data.filters.filter(f => {
+      if (!showDep && f.deprecated) return false;
+      if (groupVal && String(f.groupId) !== groupVal) return false;
+      if (q) {
+        const hay = (f.name + ' ' + f.description).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }
+
+  groupClassFor(groupId) {
+    const g = this.data.groups.find(x => x.groupId === groupId);
+    if (!g) return '';
+    const name = g.groupName.toLowerCase();
+    if (name.includes('security')) return 'security';
+    if (name.includes('regional')) return 'regional';
+    if (name.includes('general')) return 'general';
+    return '';
+  }
+
+  render() {
+    const body = this.querySelector('#reg-body');
+    const filtered = this.filteredFilters();
+    if (!filtered.length) {
+      body.innerHTML = '<div class="registry-empty">No filters match your search.</div>';
+      this.updateCount();
+      return;
+    }
+    const groupsById = new Map(this.data.groups.map(g => [g.groupId, g]));
+    body.innerHTML = filtered.map(f => {
+      const already = this.existingUrls.has(f.downloadUrl);
+      const checked = this.selected.has(f.filterId);
+      const groupName = groupsById.get(f.groupId)?.groupName || '';
+      const groupCls = this.groupClassFor(f.groupId);
+      const home = f.homepage ? `<a class="home" href="${esc(f.homepage)}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
+      return `
+        <label class="registry-row">
+          <input type="checkbox" data-id="${f.filterId}" ${checked ? 'checked' : ''} ${already ? 'disabled' : ''}>
+          <div class="info">
+            <div class="name-row">
+              <span class="name">${esc(f.name)}</span>
+              ${groupName ? `<span class="group-pill ${groupCls}">${esc(groupName)}</span>` : ''}
+              ${already ? '<span class="added-pill">Added</span>' : ''}
+              ${f.deprecated ? '<span class="dep-pill">Deprecated</span>' : ''}
+            </div>
+            <div class="desc">${esc(f.description || '')}</div>
+            ${home}
+          </div>
+        </label>`;
+    }).join('');
+    body.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.onchange = () => {
+        const id = parseInt(cb.dataset.id, 10);
+        if (cb.checked) this.selected.add(id); else this.selected.delete(id);
+        this.updateCount();
+      };
+    });
+    this.updateCount();
+  }
+
+  updateCount() {
+    const n = this.selected.size;
+    this.querySelector('#reg-count').textContent = n === 1 ? '1 selected' : `${n} selected`;
+    this.querySelector('#reg-add').disabled = n === 0 || this.adding;
+  }
+
+  async submit() {
+    if (!this.selected.size) return;
+    this.adding = true;
+    const items = this.data.filters
+      .filter(f => this.selected.has(f.filterId))
+      .map(f => ({ name: f.name, url: f.downloadUrl }));
+    const addBtn = this.querySelector('#reg-add');
+    const cancelBtn = this.querySelector('#reg-cancel');
+    const closeBtn = this.querySelector('#reg-close');
+    addBtn.disabled = true;
+    addBtn.innerHTML = '<div class="spin" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></div> Adding…';
+    cancelBtn.disabled = true;
+    closeBtn.disabled = true;
+    try {
+      const resp = await api.post('/api/lists/batch', { items });
+      this.dispatchEvent(new CustomEvent('batch-added', { bubbles: true }));
+      if (!resp.failed || resp.failed.length === 0) {
+        this.close();
+        return;
+      }
+      const summary = this.querySelector('#reg-summary');
+      summary.style.display = '';
+      summary.classList.add('error');
+      const failedList = resp.failed.map(f => `${esc(f.name)} (${esc(f.error)})`).join('; ');
+      summary.innerHTML = `Added ${resp.added.length}, failed ${resp.failed.length}: ${failedList}`;
+      this.selected.clear();
+      this.existingUrls = new Set(
+        [...this.existingUrls, ...resp.added.map(a => a.url)]
+      );
+      // Swap Cancel → Close since work is done
+      cancelBtn.textContent = 'Close';
+      cancelBtn.disabled = false;
+      closeBtn.disabled = false;
+      this.adding = false;
+      addBtn.innerHTML = `${icons.plus} Add Selected`;
+      this.render();
+    } catch (e) {
+      const summary = this.querySelector('#reg-summary');
+      summary.style.display = '';
+      summary.classList.add('error');
+      summary.textContent = 'Batch add failed. See browser console.';
+      console.error(e);
+      cancelBtn.disabled = false;
+      closeBtn.disabled = false;
+      addBtn.disabled = false;
+      addBtn.innerHTML = `${icons.plus} Add Selected`;
+      this.adding = false;
+    }
+  }
+}
+customElements.define('registry-modal', RegistryModal);
 
 // --- Dashboard Page ---
 class DashboardPage extends HTMLElement {
@@ -2113,8 +2710,9 @@ class FiltersPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Filter Lists</div>
-        <div class="filters-row" style="margin-bottom:12px">
+        <div class="filters-row" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
+          <button class="btn btn-sm" id="browse-registry">${icons.search} Browse Registry</button>
         </div>
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
           <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
@@ -2168,6 +2766,13 @@ class FiltersPage extends HTMLElement {
       this.querySelector('#list-name').value = '';
       this.querySelector('#list-url').value = '';
       this.loadLists();
+    };
+
+    this.querySelector('#browse-registry').onclick = () => {
+      const modal = document.createElement('registry-modal');
+      modal.addEventListener('batch-added', () => this.loadLists());
+      document.body.appendChild(modal);
+      modal.open();
     };
 
     // --- Custom Rules ---
