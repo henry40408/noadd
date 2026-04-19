@@ -67,6 +67,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/rules/{id}", delete(delete_rule))
         // Filter check
         .route("/api/filter/check", post(filter_check))
+        .route("/api/filter/rebuild-status", get(get_rebuild_status))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
@@ -482,11 +483,11 @@ async fn update_list(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
 
     Ok(StatusCode::OK)
 }
@@ -560,11 +561,11 @@ async fn delete_list(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
 
     Ok(StatusCode::OK)
 }
@@ -580,14 +581,46 @@ async fn trigger_list_update(
 ) -> Result<Json<ListUpdateResponse>, StatusCode> {
     require_auth(&state, &jar)?;
 
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .update_all_lists()
+    state
+        .list_manager
+        .update_all_lists_no_rebuild()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
+
     Ok(Json(ListUpdateResponse {
-        message: "All lists updated and filter rebuilt".to_string(),
+        message: "All lists downloaded; rebuild in progress".to_string(),
+    }))
+}
+
+#[derive(Serialize)]
+struct RebuildStatusResponse {
+    rebuilding: bool,
+    started_at: i64,
+    last_completed_at: i64,
+    last_duration_ms: u64,
+}
+
+async fn get_rebuild_status(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<RebuildStatusResponse>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let s = state.rebuild.state();
+    Ok(Json(RebuildStatusResponse {
+        rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
+        started_at: s.started_at.load(std::sync::atomic::Ordering::Relaxed),
+        last_completed_at: s
+            .last_completed_at
+            .load(std::sync::atomic::Ordering::Relaxed),
+        last_duration_ms: s
+            .last_duration_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 

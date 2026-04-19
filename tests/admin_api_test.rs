@@ -65,6 +65,46 @@ async fn setup() -> (axum::Router, String) {
 }
 
 #[tokio::test]
+async fn rebuild_status_unauthenticated_returns_401() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/filter/rebuild-status")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn rebuild_status_initial_is_idle() {
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/filter/rebuild-status")
+        .header("cookie", format!("session={}", token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body.get("rebuilding").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(body.get("started_at").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(
+        body.get("last_completed_at").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("last_duration_ms").and_then(|v| v.as_u64()),
+        Some(0)
+    );
+}
+
+#[tokio::test]
 async fn test_health_endpoint_exposes_dropped_log_count() {
     let (app, _token) = setup().await;
 
