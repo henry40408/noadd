@@ -86,11 +86,26 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/logs", get(get_logs).delete(delete_logs))
         // Apple mobileconfig (no auth — token in URL is the credential)
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
+        // Apple touch icon (rendered from favicon.svg at build time)
+        .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
         .fallback(serve_static)
         .with_state(state)
 }
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
+
+static APPLE_TOUCH_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apple-touch-icon.png"));
+
+async fn serve_apple_touch_icon() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "image/png"),
+            ("cache-control", "public, max-age=86400"),
+        ],
+        APPLE_TOUCH_ICON,
+    )
+}
 
 async fn serve_static(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
