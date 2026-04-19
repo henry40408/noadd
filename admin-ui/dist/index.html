@@ -1013,44 +1013,38 @@ stats-page #rate-trend-card { overflow: visible; }
 }
 
 /* ============================================================
-   Rebuild Banner — slim live status strip above page content
+   Rebuild Pill — inline status pill, matches .badge language
    ============================================================ */
-.rebuild-banner {
-  display: none;
+.rebuild-banner { display: none; }
+.rebuild-banner.show {
+  display: block;
+  margin-bottom: 12px;
+  animation: rebuild-pill-in 160ms ease-out;
+}
+.rebuild-banner .pill {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 20px;
-  font-size: 0.82rem;
+  gap: 8px;
+  padding: 5px 11px 5px 9px;
+  border-radius: 999px;
   font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-  border-bottom: 1px solid var(--border);
-  position: relative;
-  overflow: hidden;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
 }
-.rebuild-banner.show { display: flex; }
-.rebuild-banner.active {
-  background: linear-gradient(90deg, var(--accent-glow), transparent 60%), var(--bg-panel);
-  color: var(--text-primary);
+.rebuild-banner.active .pill {
+  background: var(--accent-glow);
+  color: var(--accent);
 }
-.rebuild-banner.active::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, var(--accent-glow), transparent);
-  transform: translateX(-100%);
-  animation: rebuild-sweep 1.8s ease-in-out infinite;
-  pointer-events: none;
-}
-@keyframes rebuild-sweep {
-  to { transform: translateX(100%); }
-}
-.rebuild-banner.done {
+.rebuild-banner.done .pill {
   background: var(--green-dim);
   color: var(--green);
 }
 .rebuild-banner .spin {
-  width: 14px; height: 14px;
-  border: 2px solid var(--accent);
+  width: 10px; height: 10px;
+  border: 1.5px solid currentColor;
   border-right-color: transparent;
   border-radius: 50%;
   animation: rebuild-spin 0.8s linear infinite;
@@ -1059,13 +1053,22 @@ stats-page #rate-trend-card { overflow: visible; }
 @keyframes rebuild-spin {
   to { transform: rotate(360deg); }
 }
+@keyframes rebuild-pill-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
 .rebuild-banner .check {
-  width: 14px; height: 14px;
-  color: var(--green);
+  width: 11px; height: 11px;
+  stroke-width: 2.5;
   flex-shrink: 0;
 }
-.rebuild-banner .label { flex: 1; }
-.rebuild-banner .meta { color: var(--text-dim); font-size: 0.75rem; }
+.rebuild-banner .meta {
+  font-weight: 500;
+  opacity: 0.72;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  margin-left: 2px;
+}
 
 /* ============================================================
    Registry Modal — filter picker dialog
@@ -1585,29 +1588,34 @@ class RebuildBanner extends HTMLElement {
     if (rebuilding) {
       if (this.doneTimer) { clearTimeout(this.doneTimer); this.doneTimer = null; }
       const elapsed = body.started_at ? Math.max(0, Math.floor(Date.now()/1000) - body.started_at) : 0;
-      this.render('active', `Rebuilding filter engine… <span class="meta">(${elapsed}s elapsed)</span>`);
+      this.render('active', 'Rebuilding filter', `· ${elapsed}s`);
     } else if (this.prev === true) {
-      const dur = body.last_duration_ms ? ` in ${(body.last_duration_ms / 1000).toFixed(1)}s` : '';
-      this.render('done', `Filter engine updated${dur}`);
+      const meta = body.last_duration_ms ? `· ${(body.last_duration_ms / 1000).toFixed(1)}s` : '';
+      this.render('done', 'Filter updated', meta);
       if (this.doneTimer) clearTimeout(this.doneTimer);
       this.doneTimer = setTimeout(() => {
         this.doneTimer = null;
-        this.render('', '');
+        this.render('', '', '');
       }, 3000);
     } else {
       // Steady idle — hide unless we're still showing the success flash.
-      if (!this.doneTimer) this.render('', '');
+      if (!this.doneTimer) this.render('', '', '');
     }
     this.prev = rebuilding;
   }
-  render(state, html) {
-    const indicator = state === 'active' ? '<div class="spin"></div>'
-      : state === 'done' ? `<span class="check">${icons.check}</span>`
-      : '';
-    const cls = state ? `rebuild-banner show ${state}` : 'rebuild-banner';
-    this.innerHTML = state
-      ? `<div class="${cls}">${indicator}<div class="label">${html}</div></div>`
-      : '<div class="rebuild-banner"></div>';
+  render(state, label, meta) {
+    if (!state) {
+      this.innerHTML = '';
+      return;
+    }
+    const indicator = state === 'active'
+      ? '<span class="spin"></span>'
+      : `<span class="check">${icons.check}</span>`;
+    const metaHtml = meta ? `<span class="meta">${esc(meta)}</span>` : '';
+    this.innerHTML = `
+      <div class="rebuild-banner show ${state}">
+        <span class="pill">${indicator}<span>${esc(label)}</span>${metaHtml}</span>
+      </div>`;
   }
 }
 customElements.define('rebuild-banner', RebuildBanner);
