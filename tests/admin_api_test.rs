@@ -92,6 +92,169 @@ async fn rebuild_status_unauthenticated_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
+    use std::time::Duration;
+    for _ in 0..100 {
+        let req = Request::builder()
+            .uri("/api/filter/rebuild-status")
+            .header("cookie", format!("session={}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rebuilding = body
+            .get("rebuilding")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let last_completed_at = body
+            .get("last_completed_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if !rebuilding && last_completed_at >= before {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("rebuild did not complete within 2s");
+}
+
+#[tokio::test]
+async fn batch_add_unauthenticated_returns_401() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/batch")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"items":[]}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn batch_add_rejects_empty() {
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/batch")
+        .header("content-type", "application/json")
+        .header("cookie", format!("session={}", token))
+        .body(Body::from(r#"{"items":[]}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn batch_add_rejects_oversized() {
+    let (app, token) = setup().await;
+    let items: Vec<serde_json::Value> = (0..51)
+        .map(|i| serde_json::json!({"name": format!("n{i}"), "url": format!("http://x/{i}")}))
+        .collect();
+    let body = serde_json::json!({ "items": items });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/batch")
+        .header("content-type", "application/json")
+        .header("cookie", format!("session={}", token))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn batch_add_all_success() {
+    use noadd::filter::rebuild::now_unix;
+
+    let base = common::spawn_fake_upstream(
+        "/filter_a.txt",
+        "||ads.example.com^\n".to_string(),
+        "text/plain",
+    )
+    .await;
+
+    let (app, token) = setup().await;
+    let before = now_unix();
+    let body = serde_json::json!({
+        "items": [
+            {"name": "A", "url": format!("{base}/filter_a.txt")}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/batch")
+        .header("content-type", "application/json")
+        .header("cookie", format!("session={}", token))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["added"].as_array().unwrap().len(), 1);
+    assert_eq!(v["failed"].as_array().unwrap().len(), 0);
+    assert_eq!(v["added"][0]["name"], "A");
+    assert!(v["added"][0]["rule_count"].as_i64().unwrap() >= 1);
+
+    wait_for_rebuild(&app, &token, before).await;
+}
+
+#[tokio::test]
+async fn batch_add_partial_failure() {
+    let ok_base =
+        common::spawn_fake_upstream("/ok.txt", "||ok.example.com^\n".to_string(), "text/plain")
+            .await;
+    let bad_base = common::spawn_fake_upstream_status("/bad.txt", 404).await;
+
+    let (app, token) = setup().await;
+    let body = serde_json::json!({
+        "items": [
+            {"name": "OK", "url": format!("{ok_base}/ok.txt")},
+            {"name": "BAD", "url": format!("{bad_base}/bad.txt")}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/batch")
+        .header("content-type", "application/json")
+        .header("cookie", format!("session={}", token))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let added = v["added"].as_array().unwrap();
+    let failed = v["failed"].as_array().unwrap();
+    assert_eq!(added.len(), 1);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(added[0]["name"], "OK");
+    assert_eq!(failed[0]["name"], "BAD");
+
+    // OK list exists; BAD list was rolled back and is absent.
+    let lists_req = Request::builder()
+        .uri("/api/lists")
+        .header("cookie", format!("session={}", token))
+        .body(Body::empty())
+        .unwrap();
+    let lists_resp = app.oneshot(lists_req).await.unwrap();
+    let bytes = axum::body::to_bytes(lists_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let lists: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = lists.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "OK");
+}
+
 #[tokio::test]
 async fn registry_filters_unauthenticated_returns_401() {
     let (app, _token) = setup().await;

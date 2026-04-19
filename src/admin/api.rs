@@ -61,6 +61,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/settings", get(get_settings).put(put_settings))
         // Lists
         .route("/api/lists", get(get_lists).post(add_list))
+        .route("/api/lists/batch", post(batch_add_lists))
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/{id}/check", post(check_list_url))
         .route("/api/lists/update", post(trigger_list_update))
@@ -626,6 +627,145 @@ async fn get_rebuild_status(
             .last_duration_ms
             .load(std::sync::atomic::Ordering::Relaxed),
     }))
+}
+
+#[derive(Deserialize)]
+pub struct BatchAddRequest {
+    pub items: Vec<BatchAddItem>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchAddItem {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchAddedEntry {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub rule_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct BatchFailedEntry {
+    pub name: String,
+    pub url: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct BatchAddResponse {
+    pub added: Vec<BatchAddedEntry>,
+    pub failed: Vec<BatchFailedEntry>,
+}
+
+async fn batch_add_lists(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<BatchAddRequest>,
+) -> Result<Json<BatchAddResponse>, StatusCode> {
+    require_auth(&state, &jar)?;
+    if body.items.is_empty() || body.items.len() > 50 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent(crate::user_agent())
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut set = tokio::task::JoinSet::new();
+    for item in body.items {
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        let db = state.db.clone();
+        let http = client.clone();
+        set.spawn(async move {
+            let _permit = permit;
+            let name = item.name.trim().to_string();
+            let url = item.url.trim().to_string();
+            let id = match db.add_filter_list(&name, &url, true).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Err(BatchFailedEntry {
+                        name,
+                        url,
+                        error: format!("{e}"),
+                    });
+                }
+            };
+            let fetch = http
+                .get(&url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            match fetch {
+                Ok(resp) => {
+                    let content = match resp.text().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = db.delete_filter_list(id).await;
+                            return Err(BatchFailedEntry {
+                                name,
+                                url,
+                                error: format!("{e}"),
+                            });
+                        }
+                    };
+                    let rule_count = crate::filter::parser::parse_list(&content).len() as i64;
+                    if let Err(e) = db.set_filter_list_content(id, &content).await {
+                        let _ = db.delete_filter_list(id).await;
+                        return Err(BatchFailedEntry {
+                            name,
+                            url,
+                            error: format!("{e}"),
+                        });
+                    }
+                    let now = crate::filter::rebuild::now_unix();
+                    let _ = db.update_filter_list_stats(id, now, rule_count).await;
+                    Ok(BatchAddedEntry {
+                        id,
+                        name,
+                        url,
+                        rule_count,
+                    })
+                }
+                Err(e) => {
+                    let _ = db.delete_filter_list(id).await;
+                    Err(BatchFailedEntry {
+                        name,
+                        url,
+                        error: format!("{e}"),
+                    })
+                }
+            }
+        });
+    }
+
+    let mut added = Vec::new();
+    let mut failed = Vec::new();
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(a)) => added.push(a),
+            Ok(Err(f)) => failed.push(f),
+            Err(e) => failed.push(BatchFailedEntry {
+                name: String::new(),
+                url: String::new(),
+                error: format!("task join error: {e}"),
+            }),
+        }
+    }
+
+    let manager = state.list_manager.clone();
+    state
+        .rebuild
+        .clone()
+        .spawn_raw(move || async move { manager.rebuild_filter().await });
+
+    Ok(Json(BatchAddResponse { added, failed }))
 }
 
 async fn get_registry_filters(
