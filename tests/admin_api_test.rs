@@ -14,7 +14,19 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 use tokio::sync::mpsc;
 
+#[path = "common/mod.rs"]
+mod common;
+
 async fn setup() -> (axum::Router, String) {
+    setup_inner("http://127.0.0.1:1/filters.json").await
+}
+
+#[allow(dead_code)]
+async fn setup_with_registry_url(url: String) -> (axum::Router, String) {
+    setup_inner(&url).await
+}
+
+async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
@@ -44,6 +56,10 @@ async fn setup() -> (axum::Router, String) {
         filter.clone(),
     ));
     let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+    let registry = noadd::registry::RegistryClient::new(
+        registry_url.to_string(),
+        std::time::Duration::from_secs(3600),
+    );
 
     let router = admin_router(AppState {
         db,
@@ -60,6 +76,7 @@ async fn setup() -> (axum::Router, String) {
         },
         list_manager,
         rebuild,
+        registry,
     });
     (router, token)
 }
@@ -73,6 +90,43 @@ async fn rebuild_status_unauthenticated_returns_401() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn registry_filters_unauthenticated_returns_401() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/registry/filters")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn registry_filters_returns_cached_data() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        r#"{"filters":[{"filterKey":"k","filterId":1,"groupId":1,"name":"N","description":"D","homepage":null,"downloadUrl":"http://example.com/f.txt","deprecated":false,"tags":[],"languages":[],"version":"1","expires":1,"displayNumber":1,"subscriptionUrl":"","timeAdded":"","timeUpdated":""}],"groups":[{"groupId":1,"groupName":"General"}],"tags":[]}"#.to_string(),
+        "application/json",
+    )
+    .await;
+
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let req = Request::builder()
+        .uri("/api/registry/filters")
+        .header("cookie", format!("session={}", token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["filters"].as_array().unwrap().len(), 1);
+    assert_eq!(body["groups"][0]["groupName"], "General");
 }
 
 #[tokio::test]
@@ -490,6 +544,10 @@ async fn test_setup_initial_password() {
         filter.clone(),
     ));
     let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+    let registry = noadd::registry::RegistryClient::new(
+        "http://127.0.0.1:1/filters.json".to_string(),
+        std::time::Duration::from_secs(3600),
+    );
 
     // No password set initially
     let app = admin_router(AppState {
@@ -507,6 +565,7 @@ async fn test_setup_initial_password() {
         },
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
+        registry: registry.clone(),
     });
 
     // Setup should succeed
@@ -540,6 +599,7 @@ async fn test_setup_initial_password() {
         },
         list_manager,
         rebuild,
+        registry,
     });
     let response = app2
         .oneshot(

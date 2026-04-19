@@ -23,6 +23,7 @@ use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
 use crate::filter::lists::ListManager;
 use crate::filter::rebuild::RebuildCoordinator;
+use crate::registry::RegistryClient;
 use crate::upstream::forwarder::UpstreamForwarder;
 
 #[derive(Clone)]
@@ -37,6 +38,7 @@ pub struct AppState {
     pub server_info: ServerInfo,
     pub list_manager: Arc<ListManager>,
     pub rebuild: Arc<RebuildCoordinator>,
+    pub registry: Arc<RegistryClient>,
 }
 
 #[derive(Clone, Serialize)]
@@ -68,6 +70,8 @@ pub fn admin_router(state: AppState) -> Router {
         // Filter check
         .route("/api/filter/check", post(filter_check))
         .route("/api/filter/rebuild-status", get(get_rebuild_status))
+        // Registry
+        .route("/api/registry/filters", get(get_registry_filters))
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
@@ -622,6 +626,20 @@ async fn get_rebuild_status(
             .last_duration_ms
             .load(std::sync::atomic::Ordering::Relaxed),
     }))
+}
+
+async fn get_registry_filters(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<crate::registry::RegistryData>, StatusCode> {
+    require_auth(&state, &jar)?;
+    match state.registry.list().await {
+        Ok(data) => Ok(Json(data)),
+        Err(e) => {
+            tracing::error!(error = %e, "registry fetch failed");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
 }
 
 // --- Rules ---

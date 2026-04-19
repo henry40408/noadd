@@ -44,6 +44,10 @@ async fn setup() -> (axum::Router, String) {
         filter.clone(),
     ));
     let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+    let registry = noadd::registry::RegistryClient::new(
+        "http://127.0.0.1:1/filters.json".to_string(),
+        std::time::Duration::from_secs(3600),
+    );
 
     let router = admin_router(AppState {
         db,
@@ -60,6 +64,7 @@ async fn setup() -> (axum::Router, String) {
         },
         list_manager,
         rebuild,
+        registry,
     });
     (router, token)
 }

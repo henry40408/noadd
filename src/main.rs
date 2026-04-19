@@ -64,6 +64,10 @@ async fn main() -> anyhow::Result<()> {
     list_manager.seed_default_lists().await?;
     list_manager.rebuild_filter().await?;
     let rebuild = noadd::filter::rebuild::RebuildCoordinator::new();
+    let registry = noadd::registry::RegistryClient::new(
+        noadd::registry::DEFAULT_REGISTRY_URL,
+        std::time::Duration::from_secs(3600),
+    );
 
     // 6. Create upstream forwarder
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
@@ -146,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         server_info,
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
+        registry: registry.clone(),
     });
     let app = doh_routes.merge(admin_routes);
 
