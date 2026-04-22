@@ -28,6 +28,7 @@ pub const DEFAULT_LISTS: &[(&str, &str, bool)] = &[
     ),
 ];
 
+#[derive(Clone)]
 pub struct ListManager {
     db: Database,
     filter: Arc<ArcSwap<FilterEngine>>,
@@ -121,10 +122,7 @@ impl ListManager {
         let parsed = parse_list(&content);
         let rule_count = parsed.len();
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::now_unix();
 
         self.db
             .update_filter_list_stats(list_id, now, rule_count as i64)
@@ -134,19 +132,33 @@ impl ListManager {
     }
 
     /// Download all enabled lists. Does **not** rebuild the filter engine.
+    ///
+    /// Downloads run concurrently (bounded) — serial downloads were the
+    /// dominant cost of the 24h update cycle on hosts running many lists.
     pub async fn update_all_lists_no_rebuild(&self) -> Result<(), ListError> {
         let lists = self.db.get_filter_lists().await?;
 
-        for list in &lists {
-            if !list.enabled {
-                continue;
-            }
-            match self.download_and_update_list(list.id).await {
-                Ok(rule_count) => {
-                    tracing::info!(list_id = list.id, name = %list.name, rule_count, "updated filter list");
+        let sem = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut set = tokio::task::JoinSet::new();
+        for list in lists.into_iter().filter(|l| l.enabled) {
+            let permit = sem.clone().acquire_owned().await.unwrap();
+            let this = self.clone();
+            set.spawn(async move {
+                let _permit = permit;
+                let result = this.download_and_update_list(list.id).await;
+                (list.id, list.name, result)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((list_id, name, Ok(rule_count))) => {
+                    tracing::info!(list_id, name = %name, rule_count, "updated filter list");
+                }
+                Ok((list_id, name, Err(e))) => {
+                    tracing::error!(list_id, name = %name, error = %e, "failed to download list");
                 }
                 Err(e) => {
-                    tracing::error!(list_id = list.id, name = %list.name, error = %e, "failed to download list");
+                    tracing::error!(error = %e, "list download task join failed");
                 }
             }
         }

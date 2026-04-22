@@ -218,7 +218,7 @@ impl DnsHandler {
             let response_bytes = build_refused_response(&message)?;
             let elapsed = start.elapsed().as_millis() as i64;
             let ctx = QueryContext {
-                timestamp: chrono_timestamp_ms(),
+                timestamp: crate::now_unix_ms(),
                 client_ip: client_ip.to_string(),
                 domain: domain_clean.to_string(),
                 query_type: format!("{query_type}"),
@@ -260,16 +260,7 @@ impl DnsHandler {
 
                     // 3. Check cache
                     if let Some(cached) = self.cache.get(&cache_key).await {
-                        // Decrement TTL by elapsed time since insertion
-                        let elapsed = cached.elapsed().as_secs() as u32;
-                        let mut bytes = decrement_ttl(&cached.bytes, elapsed);
-
-                        // Patch DNS ID to match the query
-                        let id_bytes = query_id.to_be_bytes();
-                        if bytes.len() >= 2 {
-                            bytes[0] = id_bytes[0];
-                            bytes[1] = id_bytes[1];
-                        }
+                        let bytes = prepare_cached_response(&cached, query_id);
 
                         if cached.is_stale() {
                             // Optimistic: serve stale, refresh in background.
@@ -343,13 +334,7 @@ impl DnsHandler {
                         if let Some(cached) = self.cache.get(&cache_key).await {
                             // Fetcher populated the cache — treat like a
                             // cache hit (TTL decrement + ID patch).
-                            let elapsed = cached.elapsed().as_secs() as u32;
-                            let mut bytes = decrement_ttl(&cached.bytes, elapsed);
-                            let id_bytes = query_id.to_be_bytes();
-                            if bytes.len() >= 2 {
-                                bytes[0] = id_bytes[0];
-                                bytes[1] = id_bytes[1];
-                            }
+                            let bytes = prepare_cached_response(&cached, query_id);
                             (bytes, "allowed".to_string(), true, None, None, None)
                         } else {
                             // We are the fetcher, OR a waiter whose fetcher
@@ -386,7 +371,7 @@ impl DnsHandler {
         // 5. Send log context (non-blocking)
         let result = extract_result_summary(&response_bytes);
         let ctx = QueryContext {
-            timestamp: chrono_timestamp_ms(),
+            timestamp: crate::now_unix_ms(),
             client_ip: client_ip.to_string(),
             domain: domain_clean.to_string(),
             query_type: format!("{query_type}"),
@@ -602,6 +587,19 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     ]
 }
 
+/// Produce a cache-hit response: decrement TTLs by how long the entry has been
+/// cached, then overwrite the DNS transaction ID with the client's query ID.
+fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> Vec<u8> {
+    let elapsed = cached.elapsed().as_secs() as u32;
+    let mut bytes = decrement_ttl(&cached.bytes, elapsed);
+    let id_bytes = query_id.to_be_bytes();
+    if bytes.len() >= 2 {
+        bytes[0] = id_bytes[0];
+        bytes[1] = id_bytes[1];
+    }
+    bytes
+}
+
 /// RAII guard that removes a key from the in-flight refresh set on drop.
 struct RefreshGuard {
     set: Arc<Mutex<HashSet<CacheKey>>>,
@@ -614,16 +612,6 @@ impl Drop for RefreshGuard {
             s.remove(&self.key);
         }
     }
-}
-
-/// Returns the current Unix timestamp in milliseconds.
-///
-/// Uses a simple approach without pulling in chrono.
-fn chrono_timestamp_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 #[cfg(test)]

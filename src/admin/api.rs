@@ -40,6 +40,18 @@ pub struct AppState {
     pub registry: Arc<RegistryClient>,
 }
 
+impl AppState {
+    /// Spawn a background filter-engine rebuild via the coordinator.
+    /// Handlers that mutate rules or lists use this so the HTTP response
+    /// returns immediately while rebuilds are serialized in the background.
+    fn trigger_rebuild(&self) {
+        let manager = self.list_manager.clone();
+        self.rebuild
+            .clone()
+            .spawn_raw(move || async move { manager.rebuild_filter().await });
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct ServerInfo {
     pub dns_addr: String,
@@ -480,11 +492,7 @@ async fn update_list(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    let manager = state.list_manager.clone();
-    state
-        .rebuild
-        .clone()
-        .spawn_raw(move || async move { manager.rebuild_filter().await });
+    state.trigger_rebuild();
 
     Ok(StatusCode::OK)
 }
@@ -558,11 +566,7 @@ async fn delete_list(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let manager = state.list_manager.clone();
-    state
-        .rebuild
-        .clone()
-        .spawn_raw(move || async move { manager.rebuild_filter().await });
+    state.trigger_rebuild();
 
     Ok(StatusCode::OK)
 }
@@ -584,11 +588,7 @@ async fn trigger_list_update(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let manager = state.list_manager.clone();
-    state
-        .rebuild
-        .clone()
-        .spawn_raw(move || async move { manager.rebuild_filter().await });
+    state.trigger_rebuild();
 
     Ok(Json(ListUpdateResponse {
         message: "All lists downloaded; rebuild in progress".to_string(),
@@ -751,11 +751,7 @@ async fn batch_add_lists(
         }
     }
 
-    let manager = state.list_manager.clone();
-    state
-        .rebuild
-        .clone()
-        .spawn_raw(move || async move { manager.rebuild_filter().await });
+    state.trigger_rebuild();
 
     Ok(Json(BatchAddResponse { added, failed }))
 }
@@ -832,12 +828,7 @@ async fn add_rule(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Rebuild filter engine so the new rule takes effect immediately
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.trigger_rebuild();
 
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
@@ -855,12 +846,7 @@ async fn delete_rule(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Rebuild filter engine so the deletion takes effect immediately
-    let manager = crate::filter::lists::ListManager::new(state.db.clone(), state.filter.clone());
-    manager
-        .rebuild_filter()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.trigger_rebuild();
 
     Ok(StatusCode::OK)
 }
@@ -986,7 +972,7 @@ async fn upstream_latency(
     let preferred = if strategy == crate::upstream::strategy::UpstreamStrategy::LowestLatency {
         latencies
             .iter()
-            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.1.total_cmp(b.1))
             .map(|(k, _)| k.clone())
     } else {
         None
@@ -1347,28 +1333,18 @@ async fn get_logs(
 
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
-    let logs = state
-        .db
-        .query_logs(
-            limit,
-            offset,
-            query.search.as_deref(),
-            query.blocked,
-            query.token.as_deref(),
-            query.query_type.as_deref(),
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let total = state
-        .db
-        .count_logs(
-            query.search.as_deref(),
-            query.blocked,
-            query.token.as_deref(),
-            query.query_type.as_deref(),
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let search = query.search.as_deref();
+    let blocked = query.blocked;
+    let token = query.token.as_deref();
+    let query_type = query.query_type.as_deref();
+    let (logs, total) = tokio::join!(
+        state
+            .db
+            .query_logs(limit, offset, search, blocked, token, query_type),
+        state.db.count_logs(search, blocked, token, query_type),
+    );
+    let logs = logs.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total = total.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({
         "logs": logs,

@@ -223,38 +223,19 @@ impl Database {
     /// Run forward-only migrations using PRAGMA user_version to track schema version.
     /// New databases start at the latest version (tables already have all columns).
     /// Existing databases get migrated incrementally.
+    //
+    // Fresh databases already have the target columns from CREATE TABLE, so
+    // `add_column_if_missing` is used below to make each migration idempotent
+    // whether run against a fresh or pre-existing DB.
     fn run_migrations(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
-        // Migration 1: add `cached` column to query_logs
         if version < 1 {
-            // Only run ALTER if table existed before (i.e. not a fresh DB).
-            // For fresh DBs the column already exists in CREATE TABLE.
-            let has_cached: bool = conn
-                .prepare(
-                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='cached'",
-                )?
-                .query_row([], |row| row.get::<_, i64>(0))
-                .map(|c| c > 0)?;
-            if !has_cached {
-                conn.execute(
-                    "ALTER TABLE query_logs ADD COLUMN cached INTEGER NOT NULL DEFAULT 0",
-                    [],
-                )?;
-            }
+            add_column_if_missing(conn, "query_logs", "cached", "INTEGER NOT NULL DEFAULT 0")?;
         }
 
-        // Migration 2: add `doh_token` column to query_logs, create doh_tokens table
         if version < 2 {
-            let has_col: bool = conn
-                .prepare(
-                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='doh_token'",
-                )?
-                .query_row([], |row| row.get::<_, i64>(0))
-                .map(|c| c > 0)?;
-            if !has_col {
-                conn.execute("ALTER TABLE query_logs ADD COLUMN doh_token TEXT", [])?;
-            }
+            add_column_if_missing(conn, "query_logs", "doh_token", "TEXT")?;
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS doh_tokens (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,33 +244,14 @@ impl Database {
             )?;
         }
 
-        // Migration 3: add `upstream` column to query_logs
         if version < 3 {
-            let has_col: bool = conn
-                .prepare(
-                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='upstream'",
-                )?
-                .query_row([], |row| row.get::<_, i64>(0))
-                .map(|c| c > 0)?;
-            if !has_col {
-                conn.execute("ALTER TABLE query_logs ADD COLUMN upstream TEXT", [])?;
-            }
+            add_column_if_missing(conn, "query_logs", "upstream", "TEXT")?;
         }
 
-        // Migration 4: add `result` column to query_logs
         if version < 4 {
-            let has_col: bool = conn
-                .prepare(
-                    "SELECT COUNT(*) FROM pragma_table_info('query_logs') WHERE name='result'",
-                )?
-                .query_row([], |row| row.get::<_, i64>(0))
-                .map(|c| c > 0)?;
-            if !has_col {
-                conn.execute("ALTER TABLE query_logs ADD COLUMN result TEXT", [])?;
-            }
+            add_column_if_missing(conn, "query_logs", "result", "TEXT")?;
         }
 
-        // Set to latest version
         const LATEST_VERSION: i64 = 4;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
@@ -396,24 +358,13 @@ impl Database {
             .read_conn
             .call(move |conn| {
                 let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result FROM query_logs WHERE 1=1".to_string();
-                let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-                if let Some(ref s) = search {
-                    sql.push_str(" AND domain LIKE ?");
-                    param_values.push(Box::new(format!("%{s}%")));
-                }
-                if let Some(b) = blocked {
-                    sql.push_str(" AND blocked = ?");
-                    param_values.push(Box::new(b as i64));
-                }
-                if let Some(ref t) = token {
-                    sql.push_str(" AND doh_token = ?");
-                    param_values.push(Box::new(t.clone()));
-                }
-                if let Some(ref qt) = query_type {
-                    sql.push_str(" AND query_type = ?");
-                    param_values.push(Box::new(qt.clone()));
-                }
+                let mut param_values = append_log_filters(
+                    &mut sql,
+                    search.as_deref(),
+                    blocked,
+                    token.as_deref(),
+                    query_type.as_deref(),
+                );
                 sql.push_str(" ORDER BY timestamp DESC LIMIT ? OFFSET ?");
                 param_values.push(Box::new(limit));
                 param_values.push(Box::new(offset));
@@ -458,24 +409,13 @@ impl Database {
             .read_conn
             .call(move |conn| {
                 let mut sql = "SELECT COUNT(*) FROM query_logs WHERE 1=1".to_string();
-                let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-                if let Some(ref s) = search {
-                    sql.push_str(" AND domain LIKE ?");
-                    param_values.push(Box::new(format!("%{s}%")));
-                }
-                if let Some(b) = blocked {
-                    sql.push_str(" AND blocked = ?");
-                    param_values.push(Box::new(b as i64));
-                }
-                if let Some(ref t) = token {
-                    sql.push_str(" AND doh_token = ?");
-                    param_values.push(Box::new(t.clone()));
-                }
-                if let Some(ref qt) = query_type {
-                    sql.push_str(" AND query_type = ?");
-                    param_values.push(Box::new(qt.clone()));
-                }
+                let param_values = append_log_filters(
+                    &mut sql,
+                    search.as_deref(),
+                    blocked,
+                    token.as_deref(),
+                    query_type.as_deref(),
+                );
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =
                     param_values.iter().map(|p| p.as_ref()).collect();
@@ -1279,4 +1219,63 @@ impl Database {
             .await?;
         Ok(rows)
     }
+}
+
+/// Add a column to `table` if it doesn't already exist.
+///
+/// SQLite doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
+/// probe `pragma_table_info` first. The `table` argument is interpolated into
+/// the SQL — only call this from migration code with trusted table names.
+fn add_column_if_missing(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    let exists: bool = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            params![column],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)?;
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Append the shared log-filter clauses to `sql` and return matching parameters.
+///
+/// Both `query_logs` and `count_logs` share the same four optional filters
+/// (search, blocked, doh_token, query_type); centralising the builder keeps
+/// the two code paths from drifting.
+fn append_log_filters(
+    sql: &mut String,
+    search: Option<&str>,
+    blocked: Option<bool>,
+    token: Option<&str>,
+    query_type: Option<&str>,
+) -> Vec<Box<dyn rusqlite::types::ToSql>> {
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(s) = search {
+        sql.push_str(" AND domain LIKE ?");
+        values.push(Box::new(format!("%{s}%")));
+    }
+    if let Some(b) = blocked {
+        sql.push_str(" AND blocked = ?");
+        values.push(Box::new(b as i64));
+    }
+    if let Some(t) = token {
+        sql.push_str(" AND doh_token = ?");
+        values.push(Box::new(t.to_string()));
+    }
+    if let Some(qt) = query_type {
+        sql.push_str(" AND query_type = ?");
+        values.push(Box::new(qt.to_string()));
+    }
+    values
 }
