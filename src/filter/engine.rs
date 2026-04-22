@@ -241,10 +241,6 @@ pub struct FilterEngine {
     allow_trie: FlatTrie,
 }
 
-// SAFETY: all fields are plain data with no interior mutability.
-unsafe impl Send for FilterEngine {}
-unsafe impl Sync for FilterEngine {}
-
 /// Marker value stored in allow-trie terminals (any value != NOT_TERMINAL).
 const ALLOW_MARKER: u16 = 0;
 
@@ -325,15 +321,25 @@ impl FilterEngine {
     /// 4. Blocklist subdomain match → Blocked
     /// 5. Default → Allowed
     pub fn check(&self, domain: &str) -> FilterResult {
-        let lower = domain.to_lowercase();
+        // Skip the `to_lowercase` allocation when the input is already
+        // lowercase — the common case for DNS queries, which normalize
+        // case during wire decoding.
+        let lower_storage: Option<String> = if domain.bytes().any(|b| b.is_ascii_uppercase()) {
+            Some(domain.to_lowercase())
+        } else {
+            None
+        };
+        let lower: &str = lower_storage.as_deref().unwrap_or(domain);
 
         // 1. Exact allow
         if self.exact_allow.contains(lower.as_bytes()) {
-            return FilterResult::Allowed { rule: Some(lower) };
+            return FilterResult::Allowed {
+                rule: Some(lower.to_string()),
+            };
         }
 
         // 2. Subdomain allow (trie)
-        let labels = reversed_labels(&lower);
+        let labels = reversed_labels(lower);
         if let Some((_marker, depth)) = self.allow_trie.lookup(&labels) {
             return FilterResult::Allowed {
                 rule: Some(reconstruct_domain(&labels, depth)),
@@ -343,7 +349,7 @@ impl FilterEngine {
         // 3. Exact block
         if let Some(list_idx) = self.exact_block.get(lower.as_bytes()) {
             return FilterResult::Blocked {
-                rule: lower,
+                rule: lower.to_string(),
                 list: self.list_names[list_idx as usize].to_string(),
             };
         }

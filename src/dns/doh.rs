@@ -1,9 +1,10 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -71,22 +72,33 @@ pub fn doh_router(handler: Arc<DnsHandler>, db: Database) -> Router {
         .with_state(state)
 }
 
-/// Extract client IP from headers or fall back to localhost.
-fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
-    if let Some(forwarded) = headers.get("x-forwarded-for")
+/// Resolve the client IP for logging and rate-limiting.
+///
+/// Trust policy mirrors the admin API: headers (`X-Forwarded-For`,
+/// `X-Real-IP`) are honoured only when the TCP peer is loopback — the usual
+/// shape when a reverse proxy is fronting noadd. If the peer is a remote
+/// address, headers are client-controlled and must not be trusted, otherwise
+/// a caller could spoof any source IP in the query log.
+fn extract_client_ip(connect: Option<&ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> IpAddr {
+    let peer = connect.map(|ci| ci.0.ip());
+    let trust_headers = matches!(peer, Some(ip) if ip.is_loopback()) || peer.is_none();
+
+    if trust_headers
+        && let Some(forwarded) = headers.get("x-forwarded-for")
         && let Ok(val) = forwarded.to_str()
         && let Some(first) = val.split(',').next()
         && let Ok(ip) = first.trim().parse::<IpAddr>()
     {
         return ip;
     }
-    if let Some(real_ip) = headers.get("x-real-ip")
+    if trust_headers
+        && let Some(real_ip) = headers.get("x-real-ip")
         && let Ok(val) = real_ip.to_str()
         && let Ok(ip) = val.trim().parse::<IpAddr>()
     {
         return ip;
     }
-    IpAddr::V4(Ipv4Addr::LOCALHOST)
+    peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
 /// Determine if unauthenticated access is allowed.
@@ -111,6 +123,7 @@ async fn validate_token(db: &Database, token: &str) -> Result<String, StatusCode
 
 async fn handle_get_with_token(
     State(state): State<DohState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(token): Path<String>,
     headers: HeaderMap,
     Query(params): Query<DnsQueryParams>,
@@ -126,12 +139,13 @@ async fn handle_get_with_token(
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(&headers);
+    let ip = extract_client_ip(connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &query_bytes, ip, token_name).await
 }
 
 async fn handle_post_with_token(
     State(state): State<DohState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(token): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -150,7 +164,7 @@ async fn handle_post_with_token(
     if !is_valid_dns_wire(&body) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(&headers);
+    let ip = extract_client_ip(connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &body, ip, token_name).await
 }
 
@@ -158,6 +172,7 @@ async fn handle_post_with_token(
 
 async fn handle_get(
     State(state): State<DohState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Query(params): Query<DnsQueryParams>,
 ) -> Response {
@@ -171,11 +186,16 @@ async fn handle_get(
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(&headers);
+    let ip = extract_client_ip(connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &query_bytes, ip, None).await
 }
 
-async fn handle_post(State(state): State<DohState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle_post(
+    State(state): State<DohState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !post_content_type_ok(&headers) {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -189,7 +209,7 @@ async fn handle_post(State(state): State<DohState>, headers: HeaderMap, body: By
     if !is_valid_dns_wire(&body) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(&headers);
+    let ip = extract_client_ip(connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &body, ip, None).await
 }
 

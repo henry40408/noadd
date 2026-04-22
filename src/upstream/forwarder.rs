@@ -203,7 +203,10 @@ impl UpstreamForwarder {
 
         let provider = TokioConnectionProvider::default();
 
-        let mut entries = HashMap::new();
+        // Resolve all upstream hosts concurrently — geo-routed providers and
+        // slow DNS can otherwise make startup linear in the number of
+        // upstreams.
+        let mut lookup_set = tokio::task::JoinSet::new();
         for server in &config.servers {
             let spec = match UpstreamSpec::parse(server) {
                 Ok(s) => s,
@@ -212,10 +215,27 @@ impl UpstreamForwarder {
                     continue;
                 }
             };
-
+            let server = server.clone();
             let lookup_target = format!("{}:{}", spec.host, spec.port);
-            let addr = match tokio::net::lookup_host(&lookup_target).await {
-                Ok(mut addrs) => match addrs.next() {
+            lookup_set.spawn(async move {
+                let addrs = tokio::net::lookup_host(lookup_target)
+                    .await
+                    .map(|it| it.collect::<Vec<_>>());
+                (server, spec, addrs)
+            });
+        }
+
+        let mut entries = HashMap::new();
+        while let Some(joined) = lookup_set.join_next().await {
+            let (server, spec, addrs) = match joined {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "upstream resolve task join failed");
+                    continue;
+                }
+            };
+            let addr = match addrs {
+                Ok(list) => match list.into_iter().next() {
                     Some(a) => a,
                     None => {
                         warn!(server = %server, "no addresses returned for upstream");
@@ -247,7 +267,7 @@ impl UpstreamForwarder {
             entries.insert(
                 server.clone(),
                 UpstreamEntry {
-                    label: server.clone(),
+                    label: server,
                     name_server,
                 },
             );
@@ -299,7 +319,7 @@ impl UpstreamForwarder {
                 sorted.sort_by(|a, b| {
                     let la = lat.get(a).copied().unwrap_or(f64::MAX);
                     let lb = lat.get(b).copied().unwrap_or(f64::MAX);
-                    la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal)
+                    la.total_cmp(&lb)
                 });
                 sorted
             }

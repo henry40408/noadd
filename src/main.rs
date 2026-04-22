@@ -22,10 +22,8 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Parse CLI args (before tracing init so we can pick the log format)
     let args = CliArgs::parse();
 
-    // 2. Init tracing
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "noadd=info".into());
 
@@ -45,7 +43,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 3. Open database
     let db_path = args.db_path.to_str().unwrap_or("noadd.db");
     let db = Database::open(db_path).await?;
 
@@ -56,10 +53,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%url, "auto-set public_url from ACME domain");
     }
 
-    // 4. Create filter engine (empty initially)
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
 
-    // 5. Seed default lists + rebuild filter
     let list_manager = Arc::new(ListManager::new(db.clone(), filter.clone()));
     list_manager.seed_default_lists().await?;
     list_manager.rebuild_filter().await?;
@@ -69,10 +64,8 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(3600),
     );
 
-    // 6. Create upstream forwarder
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
 
-    // Load upstream strategy from DB
     if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
         && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
     {
@@ -80,14 +73,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%strategy_str, "loaded upstream strategy from DB");
     }
 
-    // 7. Create DNS cache
     let cache = DnsCache::new(10_000);
 
-    // 8. Create query logger
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger_handle = tokio::spawn(logger.run());
 
-    // 9. Create DNS handler
     let ip_rate_limiter = Arc::new(IpRateLimiter::new(
         args.rate_limit_qps,
         args.rate_limit_burst,
@@ -109,10 +99,8 @@ async fn main() -> anyhow::Result<()> {
         "DNS handler limits configured"
     );
 
-    // 10. Setup shutdown signal
     let (shutdown_tx, shutdown_signal) = shutdown_signal();
 
-    // 11. Start UDP listener
     let dns_addr: SocketAddr = args.dns_addr.parse()?;
     let udp_handler = handler.clone();
     let udp_handle = tokio::spawn(async move {
@@ -121,7 +109,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 12. Start TCP listener
     let tcp_handler = handler.clone();
     let tcp_handle = tokio::spawn(async move {
         if let Err(e) = run_tcp_listener(dns_addr, tcp_handler).await {
@@ -129,7 +116,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 13. Build HTTP app (DoH + Admin)
     let doh_routes = doh_router(handler.clone(), db.clone());
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
@@ -154,10 +140,9 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = doh_routes.merge(admin_routes);
 
-    // 14. Start HTTP server
     let http_addr: SocketAddr = args.http_addr.parse()?;
 
-    // 15. Background list update scheduler (every 24h)
+    // Background list update scheduler (every 24h)
     let update_manager = list_manager.clone();
     let update_rebuild = rebuild.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -180,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 16. Background log pruning (every hour)
+    // Background log pruning (every hour)
     let prune_db = db.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
@@ -195,11 +180,7 @@ async fn main() -> anyhow::Result<()> {
                         .flatten()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(7);
-                    let cutoff = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64
-                        - retention_days * 86400;
+                    let cutoff = noadd::now_unix() - retention_days * 86400;
                     match prune_db.prune_logs_before(cutoff).await {
                         Ok(count) if count > 0 => tracing::info!(count, "pruned old query logs"),
                         Err(e) => tracing::error!(error = %e, "failed to prune logs"),
@@ -211,9 +192,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 17a. Background rate-limiter bucket pruning. IPs unseen for 10 min are
-    // evicted so the map cannot grow without bound if clients roam or a
-    // scanner cycles through source addresses.
+    // Rate-limiter bucket pruning — IPs unseen for 10 min are evicted so
+    // the map cannot grow without bound under clients that roam or scanners
+    // that cycle through source addresses.
     let prune_limiter = ip_rate_limiter.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
@@ -232,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 17. Background upstream latency probe (every 60s, only for lowest-latency strategy)
+    // Upstream latency probe (every 60s, only for the lowest-latency strategy)
     let probe_forwarder = forwarder.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
@@ -253,7 +234,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 18. Serve HTTP with graceful shutdown
     let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
     let use_acme = !args.acme_domain.is_empty();
 
@@ -327,7 +307,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    // 19. Cleanup
     tracing::info!("shutting down...");
     udp_handle.abort();
     tcp_handle.abort();
