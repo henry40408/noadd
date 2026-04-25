@@ -106,6 +106,11 @@ pub struct LatencySummary {
     pub max_ms: i64,
 }
 
+/// Default rusqlite cache is 16 statements; the read connection alone has
+/// ~20 distinct hot SQL strings (settings, stats, filter, token lookup),
+/// so anything below ~32 starts evicting on every admin poll.
+const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
+
 /// Open a second connection to the same SQLite file in read-only mode.
 /// Used for admin SELECT queries so they run concurrently with the writer
 /// under WAL without blocking on a single worker thread.
@@ -115,6 +120,7 @@ async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
         | OpenFlags::SQLITE_OPEN_URI;
     let conn = Connection::open_with_flags(path, flags).await?;
     conn.call(|conn| {
+        conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
         conn.execute_batch(
             "
             PRAGMA busy_timeout = 5000;
@@ -152,6 +158,7 @@ impl Database {
     async fn init_schema(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
+                conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
                 // Performance pragmas
                 conn.execute_batch(
                     "
@@ -265,7 +272,7 @@ impl Database {
         let tables = self
             .read_conn
             .call(|conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
                 )?;
                 let rows = stmt
@@ -284,7 +291,7 @@ impl Database {
         let val = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+                let mut stmt = conn.prepare_cached("SELECT value FROM settings WHERE key = ?1")?;
                 let result = stmt
                     .query_row(params![key], |row| row.get::<_, String>(0))
                     .optional()?;
@@ -299,10 +306,10 @@ impl Database {
         let value = value.to_string();
         self.conn
             .call(move |conn| {
-                conn.execute(
+                let mut stmt = conn.prepare_cached(
                     "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![key, value],
                 )?;
+                stmt.execute(params![key, value])?;
                 Ok(())
             })
             .await?;
@@ -317,7 +324,7 @@ impl Database {
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare(
+                    let mut stmt = tx.prepare_cached(
                         "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     )?;
                     for e in &entries {
@@ -372,7 +379,7 @@ impl Database {
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =
                     param_values.iter().map(|p| p.as_ref()).collect();
 
-                let mut stmt = conn.prepare(&sql)?;
+                let mut stmt = conn.prepare_cached(&sql)?;
                 let rows = stmt
                     .query_map(params_refs.as_slice(), |row| {
                         Ok(QueryLogEntry {
@@ -420,7 +427,8 @@ impl Database {
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =
                     param_values.iter().map(|p| p.as_ref()).collect();
 
-                conn.query_row(&sql, params_refs.as_slice(), |row| row.get(0))
+                let mut stmt = conn.prepare_cached(&sql)?;
+                stmt.query_row(params_refs.as_slice(), |row| row.get(0))
             })
             .await?;
         Ok(count)
@@ -479,7 +487,7 @@ impl Database {
         let rows = self
             .read_conn
             .call(|conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT id, name, url, enabled, last_updated, rule_count FROM filter_lists ORDER BY id",
                 )?;
                 let rows = stmt
@@ -597,8 +605,8 @@ impl Database {
         let rows = self
             .read_conn
             .call(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT id, rule, rule_type FROM custom_rules ORDER BY id")?;
+                let mut stmt = conn
+                    .prepare_cached("SELECT id, rule, rule_type FROM custom_rules ORDER BY id")?;
                 let rows = stmt
                     .query_map(params![], |row| {
                         Ok(CustomRuleRow {
@@ -622,7 +630,7 @@ impl Database {
         let rows = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT id, rule, rule_type FROM custom_rules WHERE rule_type = ?1 ORDER BY id",
                 )?;
                 let rows = stmt
@@ -656,8 +664,8 @@ impl Database {
         let val = self
             .read_conn
             .call(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT content FROM filter_list_content WHERE list_id = ?1")?;
+                let mut stmt = conn
+                    .prepare_cached("SELECT content FROM filter_list_content WHERE list_id = ?1")?;
                 let result = stmt
                     .query_row(params![list_id], |row| row.get::<_, String>(0))
                     .optional()?;
@@ -691,7 +699,8 @@ impl Database {
         let rows = self
             .read_conn
             .call(|conn| {
-                let mut stmt = conn.prepare("SELECT id, token FROM doh_tokens ORDER BY id")?;
+                let mut stmt =
+                    conn.prepare_cached("SELECT id, token FROM doh_tokens ORDER BY id")?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok(DohTokenRow {
@@ -734,7 +743,8 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare("SELECT token FROM doh_tokens WHERE token = ?1")?;
+                let mut stmt =
+                    conn.prepare_cached("SELECT token FROM doh_tokens WHERE token = ?1")?;
                 let found: Option<String> = stmt.query_row(params![token], |row| row.get(0)).ok();
                 Ok(found)
             })
@@ -778,7 +788,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT COUNT(*), COALESCE(SUM(blocked), 0) FROM query_logs WHERE timestamp >= ?1",
                 )?;
                 let (total, blocked) = stmt.query_row(params![since_ms], |row| {
@@ -797,7 +807,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT COALESCE(SUM(cached), 0), COUNT(*), COALESCE(AVG(response_ms), 0) FROM query_logs WHERE timestamp >= ?1 AND blocked = 0",
                 )?;
                 let row = stmt.query_row(params![since_ms], |row| {
@@ -827,7 +837,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT
                     COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
                     COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked ELSE 0 END), 0),
@@ -865,7 +875,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT
                     COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cached END), 0),
                     COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
@@ -913,7 +923,7 @@ impl Database {
         let rows = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT domain, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY domain ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
@@ -939,7 +949,7 @@ impl Database {
         let rows = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT client_ip, doh_token, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip, doh_token ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
@@ -966,7 +976,7 @@ impl Database {
         let rows = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms FROM query_logs WHERE timestamp >= ?1 AND upstream IS NOT NULL GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
@@ -994,7 +1004,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT (timestamp / ?1) * ?1 AS bucket, \
                             COUNT(*), \
                             COALESCE(SUM(blocked), 0), \
@@ -1028,7 +1038,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch') AS INTEGER) AS wday, \
                             CAST(strftime('%H', timestamp / 1000, 'unixepoch') AS INTEGER) AS hr, \
                             COUNT(*) \
@@ -1060,7 +1070,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT query_type, COUNT(*) AS cnt \
                      FROM query_logs \
                      WHERE timestamp >= ?1 \
@@ -1083,7 +1093,7 @@ impl Database {
         let result = self
             .read_conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT \
                         CASE \
                             WHEN blocked = 1 THEN 'Blocked' \
@@ -1200,7 +1210,7 @@ impl Database {
                 // Convert seconds to milliseconds to match timestamp storage
                 let since_ms = since * 1000;
                 let bucket_ms = bucket_secs * 1000;
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare_cached(
                     "SELECT (timestamp / ?1) * ?1 as bucket, COUNT(*) as total, COALESCE(SUM(blocked), 0) as blocked FROM query_logs WHERE timestamp >= ?2 GROUP BY bucket ORDER BY bucket",
                 )?;
                 let since = since_ms;
