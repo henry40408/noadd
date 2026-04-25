@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use moka::future::Cache;
@@ -7,24 +8,72 @@ use moka::policy::EvictionPolicy;
 pub type CacheKey = (String, u16);
 
 /// Cache value: raw DNS response bytes + TTL metadata for optimistic serving.
+///
+/// Backed by an `Arc<Inner>` so clones (one per `cache.get()`) share the
+/// patched-bytes cache below — without sharing, every cache hit would
+/// recompute the TTL-decremented response from scratch.
 #[derive(Clone)]
 pub struct CacheValue {
-    pub bytes: Vec<u8>,
-    /// The original upstream TTL.
-    pub ttl: Duration,
-    /// When this entry was inserted.
+    inner: Arc<CacheValueInner>,
+}
+
+struct CacheValueInner {
+    bytes: Vec<u8>,
+    ttl: Duration,
     inserted_at: Instant,
+    /// Snapshot of the TTL-decremented response, valid for one integer
+    /// second. Within that second multiple cache hits share the result;
+    /// when the second rolls over the next caller recomputes and replaces.
+    /// Whole-domain TTLs are integer seconds, so within a second the
+    /// decremented bytes are identical and reusing them is safe.
+    patched: Mutex<Option<PatchSnapshot>>,
+}
+
+struct PatchSnapshot {
+    elapsed_secs: u32,
+    bytes: Vec<u8>,
 }
 
 impl CacheValue {
+    /// Original (non-decremented) upstream response bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.inner.bytes
+    }
+
+    /// The original upstream TTL.
+    pub fn ttl(&self) -> Duration {
+        self.inner.ttl
+    }
+
     /// Whether the entry's original TTL has elapsed (stale but still usable).
     pub fn is_stale(&self) -> bool {
-        self.inserted_at.elapsed() > self.ttl
+        self.inner.inserted_at.elapsed() > self.inner.ttl
     }
 
     /// How long ago this entry was inserted.
     pub fn elapsed(&self) -> Duration {
-        self.inserted_at.elapsed()
+        self.inner.inserted_at.elapsed()
+    }
+
+    /// Return cached patched bytes if a snapshot exists for this exact
+    /// `elapsed_secs`. Caller falls back to recomputing + `store_patched_bytes`
+    /// when this returns `None`.
+    pub fn try_patched_bytes(&self, elapsed_secs: u32) -> Option<Vec<u8>> {
+        let snap = self.inner.patched.lock().unwrap();
+        snap.as_ref()
+            .filter(|s| s.elapsed_secs == elapsed_secs)
+            .map(|s| s.bytes.clone())
+    }
+
+    /// Replace the patched-bytes snapshot. Last writer wins; if two callers
+    /// race they both produce identical bytes for the same `elapsed_secs`,
+    /// so overwriting either is safe.
+    pub fn store_patched_bytes(&self, elapsed_secs: u32, bytes: Vec<u8>) {
+        let mut snap = self.inner.patched.lock().unwrap();
+        *snap = Some(PatchSnapshot {
+            elapsed_secs,
+            bytes,
+        });
     }
 }
 
@@ -63,7 +112,7 @@ impl DnsCache {
     pub async fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         let entry = self.cache.get(key).await?;
         // Evict if beyond stale window
-        if entry.inserted_at.elapsed() > entry.ttl + self.stale_window {
+        if entry.inner.inserted_at.elapsed() > entry.inner.ttl + self.stale_window {
             self.cache.invalidate(key).await;
             return None;
         }
@@ -76,9 +125,12 @@ impl DnsCache {
             .insert(
                 key,
                 CacheValue {
-                    bytes,
-                    ttl,
-                    inserted_at: Instant::now(),
+                    inner: Arc::new(CacheValueInner {
+                        bytes,
+                        ttl,
+                        inserted_at: Instant::now(),
+                        patched: Mutex::new(None),
+                    }),
                 },
             )
             .await;
@@ -105,8 +157,8 @@ mod tests {
             .await;
 
         let result = cache.get(&key).await.unwrap();
-        assert_eq!(result.bytes, data);
-        assert_eq!(result.ttl, Duration::from_secs(60));
+        assert_eq!(result.bytes(), data.as_slice());
+        assert_eq!(result.ttl(), Duration::from_secs(60));
         assert!(!result.is_stale());
     }
 
@@ -182,5 +234,60 @@ mod tests {
         // Long TTL entry should still exist and fresh
         let long = cache.get(&key_long).await.unwrap();
         assert!(!long.is_stale());
+    }
+
+    #[tokio::test]
+    async fn test_patched_bytes_window_reuse() {
+        let cache = DnsCache::new(100);
+        let key = ("patched.test".to_string(), 1);
+        cache
+            .insert(key.clone(), vec![0xab, 0xcd, 0xef], Duration::from_secs(60))
+            .await;
+
+        let entry = cache.get(&key).await.unwrap();
+
+        // No snapshot stored yet — first lookup misses.
+        assert!(entry.try_patched_bytes(0).is_none());
+
+        entry.store_patched_bytes(0, vec![1, 2, 3]);
+        assert_eq!(
+            entry.try_patched_bytes(0).as_deref(),
+            Some([1, 2, 3].as_slice())
+        );
+
+        // Different elapsed_secs window: cache miss.
+        assert!(entry.try_patched_bytes(1).is_none());
+
+        // Replacing the snapshot for a new window evicts the old one.
+        entry.store_patched_bytes(1, vec![4, 5, 6]);
+        assert_eq!(
+            entry.try_patched_bytes(1).as_deref(),
+            Some([4, 5, 6].as_slice())
+        );
+        assert!(entry.try_patched_bytes(0).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_patched_bytes_shared_across_clones() {
+        // CacheValue's Arc inner means a clone obtained from a separate
+        // cache.get() call must observe the same patched snapshot.
+        let cache = DnsCache::new(100);
+        let key = ("shared.test".to_string(), 1);
+        cache
+            .insert(
+                key.clone(),
+                vec![0xde, 0xad, 0xbe, 0xef],
+                Duration::from_secs(60),
+            )
+            .await;
+
+        let a = cache.get(&key).await.unwrap();
+        a.store_patched_bytes(0, vec![9, 9, 9]);
+
+        let b = cache.get(&key).await.unwrap();
+        assert_eq!(
+            b.try_patched_bytes(0).as_deref(),
+            Some([9, 9, 9].as_slice())
+        );
     }
 }

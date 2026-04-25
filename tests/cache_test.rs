@@ -21,7 +21,7 @@ async fn test_cache_insert_and_get() {
 
     let cached = cache.get(&key).await;
     assert!(cached.is_some());
-    assert_eq!(cached.unwrap().bytes, response);
+    assert_eq!(cached.unwrap().bytes(), response.as_slice());
 }
 
 #[tokio::test]

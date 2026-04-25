@@ -661,7 +661,7 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
 /// a response past the upstream TTL.
 fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
     cached
-        .ttl
+        .ttl()
         .saturating_sub(cached.elapsed())
         .as_secs()
         .min(u32::MAX as u64) as u32
@@ -669,9 +669,21 @@ fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
 
 /// Produce a cache-hit response: decrement TTLs by how long the entry has been
 /// cached, then overwrite the DNS transaction ID with the client's query ID.
+///
+/// Within a single integer-second window the decremented bytes are identical
+/// across all callers, so we cache them on the entry itself. The fast path is
+/// then a single `Vec<u8>` clone instead of parse + walk + reencode (~30-50us
+/// saved per cache hit after the first one in the window).
 fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> Vec<u8> {
     let elapsed = cached.elapsed().as_secs() as u32;
-    let mut bytes = decrement_ttl(&cached.bytes, elapsed);
+    let mut bytes = match cached.try_patched_bytes(elapsed) {
+        Some(cached_bytes) => cached_bytes,
+        None => {
+            let fresh = decrement_ttl(cached.bytes(), elapsed);
+            cached.store_patched_bytes(elapsed, fresh.clone());
+            fresh
+        }
+    };
     let id_bytes = query_id.to_be_bytes();
     if bytes.len() >= 2 {
         bytes[0] = id_bytes[0];
