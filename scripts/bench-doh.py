@@ -233,8 +233,34 @@ def main():
         print(f"probe failed: {e}", file=sys.stderr)
         sys.exit(2)
 
-    print("Warming cache...", flush=True)
-    run_serial(make, path, pairs, len(pairs))
+    # Warm + filter: drop (domain, qtype) pairs that don't return NoError so
+    # the timing phase isn't polluted by upstream-bound SERVFAIL/NXDomain
+    # responses (those never enter the cache). Run twice so a one-shot upstream
+    # hiccup doesn't permanently exclude an otherwise-cacheable pair.
+    print("Warming cache + filtering non-cacheable pairs...", flush=True)
+    conn = make()
+    surviving = []
+    dropped = []
+    for d, t in pairs:
+        rcs = set()
+        for _ in range(2):
+            try:
+                _, rc = send_once(conn, path, build_query(d, t))
+                rcs.add(rc)
+            except (http.client.HTTPException, ConnectionError, OSError):
+                conn.close()
+                conn = make()
+        if 0 in rcs:
+            surviving.append((d, t))
+        else:
+            dropped.append((d, t, sorted(rcs)))
+    conn.close()
+    if dropped:
+        print(f"  dropped {len(dropped)}/{len(pairs)} non-cacheable pairs:")
+        for d, t, rcs in dropped:
+            print(f"    {d:24s} {t:5s}  rcodes={rcs}")
+    pairs = surviving
+    print(f"  using {len(pairs)} cache-hit pairs")
     run_serial(make, path, blocked_pairs, len(blocked_pairs))
 
     print("\nSerial (single connection, keep-alive):")
