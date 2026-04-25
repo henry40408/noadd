@@ -125,6 +125,11 @@ pub struct DnsHandler {
     log_drop_count: Arc<AtomicU64>,
     /// Per-client-IP token bucket. `None` means no per-IP limiting.
     rate_limiter: Option<Arc<IpRateLimiter>>,
+    /// When true, parse every successful response a third time to populate
+    /// the admin-UI `result` column. Off by default — the column is a
+    /// nice-to-have and this is the largest single overhead on the
+    /// cache-hit path (~10us / cache hit).
+    log_query_results: bool,
 }
 
 impl DnsHandler {
@@ -162,12 +167,21 @@ impl DnsHandler {
             concurrency_limit,
             log_drop_count: Arc::new(AtomicU64::new(0)),
             rate_limiter: None,
+            log_query_results: false,
         }
     }
 
     /// Attach a per-client-IP rate limiter. Chainable during construction.
     pub fn with_rate_limiter(mut self, limiter: Arc<IpRateLimiter>) -> Self {
         self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Enable per-query result-summary extraction for the admin-UI log view.
+    /// Off by default; turn on only when the query log's `result` column is
+    /// actually consumed.
+    pub fn with_log_query_results(mut self, enabled: bool) -> Self {
+        self.log_query_results = enabled;
         self
     }
 
@@ -373,7 +387,11 @@ impl DnsHandler {
         let elapsed = start.elapsed().as_millis() as i64;
 
         // 5. Send log context (non-blocking)
-        let result = extract_result_summary(&response_bytes);
+        let result = if self.log_query_results {
+            extract_result_summary(&response_bytes)
+        } else {
+            None
+        };
         let ctx = QueryContext {
             timestamp: crate::now_unix_ms(),
             client_ip: client_ip.to_string(),
