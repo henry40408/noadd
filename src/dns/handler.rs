@@ -312,7 +312,15 @@ impl DnsHandler {
                     )
                 }
                 FilterResult::Allowed { .. } => {
-                    let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type_u16);
+                    // Most domains arrive lowercase already; skip the per-byte
+                    // case-mapping pass of to_lowercase() in that case. Both
+                    // branches still allocate the owned key string moka needs.
+                    let domain_lower = if domain_clean.bytes().any(|b| b.is_ascii_uppercase()) {
+                        domain_clean.to_lowercase()
+                    } else {
+                        domain_clean.to_string()
+                    };
+                    let cache_key: CacheKey = (domain_lower, query_type_u16);
 
                     // 3. Check cache
                     if let Some(cached) = self.cache.get(&cache_key).await {
