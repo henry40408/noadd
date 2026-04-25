@@ -21,6 +21,7 @@ Usage:
 import argparse
 import concurrent.futures as cf
 import http.client
+import secrets
 import ssl
 import statistics
 import struct
@@ -154,6 +155,48 @@ def run_parallel(make_conn, path, pairs, iters, workers):
     return samples, merged_rc, elapsed, qps
 
 
+def run_stampede(make_conn, path, base_domains, total, workers):
+    """Cold-miss flood: each worker issues unique random-subdomain queries.
+
+    Every query is guaranteed to miss the cache (the subdomain has never been
+    seen), so every request flows through the inflight-coalescing map. Used
+    to surface contention on that map under concurrent load.
+    """
+    per = max(1, total // workers)
+
+    def worker(wid):
+        conn = make_conn()
+        local_samples = []
+        local_rcodes = {}
+        for j in range(per):
+            # 16 hex chars of randomness; collision-free across worker runs.
+            label = secrets.token_hex(8)
+            domain = f"{label}.{base_domains[(wid + j) % len(base_domains)]}"
+            body = build_query(domain, "A", qid=(wid * per + j) & 0xFFFF)
+            try:
+                el, rc = send_once(conn, path, body)
+                local_samples.append(el)
+                local_rcodes[rc] = local_rcodes.get(rc, 0) + 1
+            except (http.client.HTTPException, ConnectionError, OSError):
+                conn.close()
+                conn = make_conn()
+        conn.close()
+        return local_samples, local_rcodes
+
+    t0 = time.perf_counter()
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(worker, range(workers)))
+    elapsed = time.perf_counter() - t0
+
+    samples = [s for r, _ in results for s in r]
+    merged_rc = {}
+    for _, rc in results:
+        for k, v in rc.items():
+            merged_rc[k] = merged_rc.get(k, 0) + v
+    qps = len(samples) / elapsed if elapsed > 0 else 0.0
+    return samples, merged_rc, elapsed, qps
+
+
 def percentile(sorted_samples, p):
     if not sorted_samples:
         return None
@@ -201,6 +244,15 @@ def main():
                     help="Iterations per phase (default: %(default)s)")
     ap.add_argument("--workers", type=int, default=8,
                     help="Parallel workers (default: %(default)s)")
+    ap.add_argument("--stampede-iters", type=int, default=0,
+                    help="If >0, run a cold-miss stampede phase with this "
+                         "many unique random-subdomain queries spread across "
+                         "--stampede-workers. Each query forces an inflight "
+                         "map insert/remove, surfacing contention on that map.")
+    ap.add_argument("--stampede-workers", type=int, default=64,
+                    help="Workers for stampede phase (default: %(default)s). "
+                         "Higher than --workers to push the map past the "
+                         "DashMap default shard count of 32.")
     ap.add_argument("--insecure", action="store_true",
                     help="Skip TLS verification (for untrusted self-signed certs)")
     args = ap.parse_args()
@@ -276,6 +328,20 @@ def main():
     blk, rc, elapsed, qps = run_parallel(make, path, blocked_pairs, args.iters, args.workers)
     summarise("blocked", blk, rc)
     print(f"  {'':12s}   elapsed={elapsed * 1000:.0f}ms  aggregate-qps={qps:.0f}")
+
+    if args.stampede_iters > 0:
+        # Use only the surviving cacheable domains as bases — a known-bad
+        # domain would just SERVFAIL and never reach the inflight path.
+        bases = sorted({d for d, _ in pairs}) or DOMAINS
+        print(
+            f"\nCold-miss stampede ({args.stampede_workers} workers, "
+            f"{args.stampede_iters} unique queries total):"
+        )
+        smp, rc, elapsed, qps = run_stampede(
+            make, path, bases, args.stampede_iters, args.stampede_workers
+        )
+        summarise("cold-miss", smp, rc)
+        print(f"  {'':12s}   elapsed={elapsed * 1000:.0f}ms  aggregate-qps={qps:.0f}")
 
 
 if __name__ == "__main__":
