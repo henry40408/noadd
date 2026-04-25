@@ -1,8 +1,9 @@
+use hickory_proto::rr::RecordType;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::db::{Database, QueryLogEntry};
-use crate::dns::handler::QueryContext;
+use crate::dns::handler::{QueryAction, QueryContext};
 
 /// Async query logger that buffers log entries and flushes them to the database
 /// in batches, either when the buffer reaches a threshold or on a timer.
@@ -77,13 +78,17 @@ impl QueryLogger {
 }
 
 /// Convert a `QueryContext` to a `QueryLogEntry` for database storage.
+///
+/// The hot path keeps `client_ip` and `query_type` in their native types
+/// (`IpAddr`, `u16`); stringification is amortised here, once per logger
+/// flush rather than once per query.
 fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
     QueryLogEntry {
         timestamp: ctx.timestamp,
         domain: ctx.domain,
-        query_type: ctx.query_type,
-        client_ip: ctx.client_ip,
-        blocked: ctx.action == "blocked",
+        query_type: RecordType::from(ctx.query_type).to_string(),
+        client_ip: ctx.client_ip.to_string(),
+        blocked: matches!(ctx.action, QueryAction::Blocked),
         cached: ctx.cached,
         response_ms: ctx.response_time_ms,
         upstream: ctx.upstream,

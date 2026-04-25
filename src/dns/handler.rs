@@ -28,6 +28,11 @@ const DEFAULT_TTL_SECS: u64 = 300;
 /// found" symptoms after a single transient upstream hiccup.
 const NEGATIVE_TTL_CAP_SECS: u64 = 60;
 
+/// TTL (seconds) used for synthesised blocked-domain responses. Long enough
+/// that clients don't re-query the blocked name on every request, short
+/// enough that an unblock takes effect without restart.
+const BLOCKED_RESPONSE_TTL_SECS: u32 = 300;
+
 /// Errors that can occur during DNS query handling.
 #[derive(Debug, Error)]
 pub enum HandlerError {
@@ -39,14 +44,40 @@ pub enum HandlerError {
     Upstream(#[from] ForwardError),
 }
 
+/// Outcome of `DnsHandler::handle`. Carries the response bytes plus
+/// metadata that downstream callers (DoH adapter, listeners) would
+/// otherwise have to recompute by re-parsing the response.
+#[derive(Debug, Clone)]
+pub struct HandleOutcome {
+    pub bytes: Vec<u8>,
+    /// Lowest TTL observed in the served response, in seconds. Used by
+    /// the DoH adapter for the `Cache-Control: max-age` header so it
+    /// doesn't have to re-parse the response a fourth time.
+    pub min_ttl: u32,
+}
+
+/// What action the handler took on a query. Replaces the previous
+/// stringly-typed `action: String` field — typos no longer compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryAction {
+    Allowed,
+    Blocked,
+    RateLimited,
+}
+
 /// Context for a single DNS query, sent to the async logger.
+///
+/// `client_ip` and `query_type` are kept in their native form here
+/// (`IpAddr`, `u16`) and stringified once per logger flush rather
+/// than once per query — the conversion only matters at the DB
+/// boundary.
 #[derive(Debug, Clone)]
 pub struct QueryContext {
     pub timestamp: i64,
-    pub client_ip: String,
+    pub client_ip: IpAddr,
     pub domain: String,
-    pub query_type: String,
-    pub action: String,
+    pub query_type: u16,
+    pub action: QueryAction,
     pub cached: bool,
     pub upstream: Option<String>,
     pub response_time_ms: i64,
@@ -125,6 +156,11 @@ pub struct DnsHandler {
     log_drop_count: Arc<AtomicU64>,
     /// Per-client-IP token bucket. `None` means no per-IP limiting.
     rate_limiter: Option<Arc<IpRateLimiter>>,
+    /// When true, parse every successful response a third time to populate
+    /// the admin-UI `result` column. Off by default — the column is a
+    /// nice-to-have and this is the largest single overhead on the
+    /// cache-hit path (~10us / cache hit).
+    log_query_results: bool,
 }
 
 impl DnsHandler {
@@ -162,12 +198,21 @@ impl DnsHandler {
             concurrency_limit,
             log_drop_count: Arc::new(AtomicU64::new(0)),
             rate_limiter: None,
+            log_query_results: false,
         }
     }
 
     /// Attach a per-client-IP rate limiter. Chainable during construction.
     pub fn with_rate_limiter(mut self, limiter: Arc<IpRateLimiter>) -> Self {
         self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Enable per-query result-summary extraction for the admin-UI log view.
+    /// Off by default; turn on only when the query log's `result` column is
+    /// actually consumed.
+    pub fn with_log_query_results(mut self, enabled: bool) -> Self {
+        self.log_query_results = enabled;
         self
     }
 
@@ -178,13 +223,14 @@ impl DnsHandler {
     }
 
     /// Handle a DNS query. Takes raw query bytes, client IP, and optional DoH token name.
-    /// Returns raw response bytes.
+    /// Returns the response bytes plus metadata downstream callers would
+    /// otherwise have to recompute (e.g. min TTL for the DoH `Cache-Control`).
     pub async fn handle(
         &self,
         query_bytes: &[u8],
         client_ip: IpAddr,
         doh_token: Option<String>,
-    ) -> Result<Vec<u8>, HandlerError> {
+    ) -> Result<HandleOutcome, HandlerError> {
         let start = Instant::now();
 
         // 0. Acquire in-flight permit. Held until this function returns, so
@@ -208,6 +254,7 @@ impl DnsHandler {
         // Strip trailing dot for filter matching
         let domain_clean = domain.trim_end_matches('.');
         let query_type = query.query_type();
+        let query_type_u16: u16 = query_type.into();
         let query_id = message.id();
 
         // 2a. Per-IP rate limit. Token drained here protects upstream and
@@ -221,10 +268,10 @@ impl DnsHandler {
             let elapsed = start.elapsed().as_millis() as i64;
             let ctx = QueryContext {
                 timestamp: crate::now_unix_ms(),
-                client_ip: client_ip.to_string(),
+                client_ip,
                 domain: domain_clean.to_string(),
-                query_type: format!("{query_type}"),
-                action: "rate_limited".to_string(),
+                query_type: query_type_u16,
+                action: QueryAction::RateLimited,
                 cached: false,
                 upstream: None,
                 response_time_ms: elapsed,
@@ -237,20 +284,27 @@ impl DnsHandler {
                 self.log_drop_count.fetch_add(1, Ordering::Relaxed);
                 warn!("failed to send log event: {e}");
             }
-            return Ok(response_bytes);
+            // REFUSED is not cacheable downstream.
+            return Ok(HandleOutcome {
+                bytes: response_bytes,
+                min_ttl: 0,
+            });
         }
 
         // 2b. Check filter
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
-        let (response_bytes, action, was_cached, upstream, matched_rule, matched_list) =
+        let (response_bytes, min_ttl, action, was_cached, upstream, matched_rule, matched_list) =
             match filter_result {
                 FilterResult::Blocked { rule, list } => {
                     let response = build_blocked_response(&message, query_type)?;
+                    // build_blocked_response sets every record's TTL to
+                    // BLOCKED_RESPONSE_TTL_SECS — keep this in sync.
                     (
                         response,
-                        "blocked".to_string(),
+                        BLOCKED_RESPONSE_TTL_SECS,
+                        QueryAction::Blocked,
                         false,
                         None,
                         Some(rule),
@@ -258,11 +312,12 @@ impl DnsHandler {
                     )
                 }
                 FilterResult::Allowed { .. } => {
-                    let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type.into());
+                    let cache_key: CacheKey = (domain_clean.to_lowercase(), query_type_u16);
 
                     // 3. Check cache
                     if let Some(cached) = self.cache.get(&cache_key).await {
                         let bytes = prepare_cached_response(&cached, query_id);
+                        let remaining = remaining_ttl_secs(&cached);
 
                         if cached.is_stale() {
                             // Optimistic: serve stale, refresh in background.
@@ -309,7 +364,15 @@ impl DnsHandler {
                             }
                         }
 
-                        (bytes, "allowed".to_string(), true, None, None, None)
+                        (
+                            bytes,
+                            remaining,
+                            QueryAction::Allowed,
+                            true,
+                            None,
+                            None,
+                            None,
+                        )
                     } else {
                         // 4. Forward upstream, coalescing concurrent misses.
                         //    If another task is already fetching this key,
@@ -339,7 +402,16 @@ impl DnsHandler {
                             // Fetcher populated the cache — treat like a
                             // cache hit (TTL decrement + ID patch).
                             let bytes = prepare_cached_response(&cached, query_id);
-                            (bytes, "allowed".to_string(), true, None, None, None)
+                            let remaining = remaining_ttl_secs(&cached);
+                            (
+                                bytes,
+                                remaining,
+                                QueryAction::Allowed,
+                                true,
+                                None,
+                                None,
+                                None,
+                            )
                         } else {
                             // We are the fetcher, OR a waiter whose fetcher
                             // failed / timed out. Forward ourselves.
@@ -349,17 +421,23 @@ impl DnsHandler {
                             // etc., and apply a capped negative TTL for
                             // NXDOMAIN/empty NoError) to prevent transient
                             // failures from poisoning the cache.
-                            if let Some(ttl) = cache_ttl_for_response(&response) {
+                            let cache_ttl = cache_ttl_for_response(&response);
+                            if let Some(ttl) = cache_ttl {
                                 self.cache
                                     .insert(cache_key.clone(), response.clone(), ttl)
                                     .await;
                             }
+                            // For DoH max-age: cacheable responses use the
+                            // same TTL we just stored; non-cacheable
+                            // (SERVFAIL etc.) tell downstream not to cache.
+                            let min_ttl = cache_ttl.map(|d| d.as_secs() as u32).unwrap_or(0);
                             // Drop guard (if we hold one) — notifies waiters
                             // after the cache insert is observable.
                             drop(fetcher_guard);
                             (
                                 response,
-                                "allowed".to_string(),
+                                min_ttl,
+                                QueryAction::Allowed,
                                 false,
                                 Some(upstream_addr),
                                 None,
@@ -373,12 +451,16 @@ impl DnsHandler {
         let elapsed = start.elapsed().as_millis() as i64;
 
         // 5. Send log context (non-blocking)
-        let result = extract_result_summary(&response_bytes);
+        let result = if self.log_query_results {
+            extract_result_summary(&response_bytes)
+        } else {
+            None
+        };
         let ctx = QueryContext {
             timestamp: crate::now_unix_ms(),
-            client_ip: client_ip.to_string(),
+            client_ip,
             domain: domain_clean.to_string(),
-            query_type: format!("{query_type}"),
+            query_type: query_type_u16,
             action,
             cached: was_cached,
             upstream,
@@ -393,7 +475,10 @@ impl DnsHandler {
             warn!("failed to send log event: {e}");
         }
 
-        Ok(response_bytes)
+        Ok(HandleOutcome {
+            bytes: response_bytes,
+            min_ttl,
+        })
     }
 }
 
@@ -437,12 +522,19 @@ fn build_blocked_response(
         let name = first_query.name().clone();
         match query_type {
             RecordType::A => {
-                let record = Record::from_rdata(name, 300, RData::A(A(Ipv4Addr::UNSPECIFIED)));
+                let record = Record::from_rdata(
+                    name,
+                    BLOCKED_RESPONSE_TTL_SECS,
+                    RData::A(A(Ipv4Addr::UNSPECIFIED)),
+                );
                 response.add_answer(record);
             }
             RecordType::AAAA => {
-                let record =
-                    Record::from_rdata(name, 300, RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)));
+                let record = Record::from_rdata(
+                    name,
+                    BLOCKED_RESPONSE_TTL_SECS,
+                    RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)),
+                );
                 response.add_answer(record);
             }
             _ => {
@@ -452,33 +544,6 @@ fn build_blocked_response(
     }
 
     Ok(response.to_vec()?)
-}
-
-/// Extract the minimum TTL from a DNS response as a `Duration`.
-///
-/// Examines the answer section; if no answers are present, falls back to the
-/// SOA minimum field from the authority section, or `DEFAULT_TTL_SECS`.
-pub fn extract_min_ttl(response_bytes: &[u8]) -> Duration {
-    let ttl_secs = Message::from_bytes(response_bytes)
-        .ok()
-        .and_then(|msg| {
-            // Try answer section first
-            let from_answers = msg.answers().iter().map(|r| r.ttl()).min();
-            if from_answers.is_some() {
-                return from_answers;
-            }
-            // Fall back to SOA minimum in authority section
-            msg.name_servers()
-                .iter()
-                .filter_map(|r| match r.data() {
-                    RData::SOA(soa) => Some(soa.minimum()),
-                    _ => None,
-                })
-                .min()
-        })
-        .unwrap_or(DEFAULT_TTL_SECS as u32);
-
-    Duration::from_secs(ttl_secs as u64)
 }
 
 /// Decrement the TTL of every resource record in a DNS response by `elapsed`
@@ -589,6 +654,17 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     vec![
         id0, id1, 0x81, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]
+}
+
+/// Remaining TTL of a cached entry, in seconds, clamped to a minimum of 0.
+/// Used as the DoH `Cache-Control: max-age` so downstream clients don't keep
+/// a response past the upstream TTL.
+fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
+    cached
+        .ttl
+        .saturating_sub(cached.elapsed())
+        .as_secs()
+        .min(u32::MAX as u64) as u32
 }
 
 /// Produce a cache-hit response: decrement TTLs by how long the entry has been

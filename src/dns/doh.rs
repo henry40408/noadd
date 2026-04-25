@@ -220,10 +220,7 @@ async fn handle_dns_query(
     doh_token: Option<String>,
 ) -> Response {
     match handler.handle(query_bytes, client_ip, doh_token).await {
-        Ok(response) => {
-            let min_ttl = handler::extract_min_ttl(&response).as_secs();
-            dns_response(response, min_ttl)
-        }
+        Ok(outcome) => dns_response(outcome.bytes, outcome.min_ttl as u64),
         Err(e) => {
             tracing::warn!("DNS handler error: {e}");
             // RFC 8484 §4.2.1: return HTTP 200 with DNS SERVFAIL, not HTTP 500.

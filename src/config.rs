@@ -68,4 +68,12 @@ pub struct CliArgs {
     /// the burst must be high enough to absorb this without false positives.
     #[arg(long, default_value = "200", env = "NOADD_RATE_LIMIT_BURST")]
     pub rate_limit_burst: u32,
+
+    /// Populate the admin-UI `result` column for every successful query.
+    /// Costs an extra DNS-message parse per query (the third one on the
+    /// hot path, after the inbound query parse and the cached-response
+    /// TTL decrement). Off by default — turn on only when you actually
+    /// need the per-query record summary in the query log.
+    #[arg(long, env = "NOADD_LOG_QUERY_RESULTS")]
+    pub log_query_results: bool,
 }

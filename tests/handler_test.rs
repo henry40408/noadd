@@ -10,7 +10,7 @@ use hickory_proto::serialize::binary::BinDecodable;
 use tokio::sync::mpsc;
 
 use noadd::cache::DnsCache;
-use noadd::dns::handler::{self, DnsHandler, QueryContext};
+use noadd::dns::handler::{self, DnsHandler, QueryAction, QueryContext};
 use noadd::dns::ratelimit::IpRateLimiter;
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::parser::{ParsedRule, RuleAction};
@@ -59,7 +59,7 @@ async fn test_handler_blocks_domain() {
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     let result = handler.handle(&query, client_ip, None).await.unwrap();
-    let response = Message::from_bytes(&result).unwrap();
+    let response = Message::from_bytes(&result.bytes).unwrap();
 
     assert!(response.message_type() == MessageType::Response);
     assert_eq!(response.id(), 1234);
@@ -90,7 +90,7 @@ async fn test_handler_blocks_aaaa_domain() {
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     let result = handler.handle(&query, client_ip, None).await.unwrap();
-    let response = Message::from_bytes(&result).unwrap();
+    let response = Message::from_bytes(&result.bytes).unwrap();
 
     assert!(!response.answers().is_empty(), "should have an answer");
     let answer = &response.answers()[0];
@@ -113,9 +113,9 @@ async fn test_handler_forwards_allowed_domain() {
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     let result = handler.handle(&query, client_ip, None).await.unwrap();
-    assert!(!result.is_empty(), "response should be non-empty");
+    assert!(!result.bytes.is_empty(), "response should be non-empty");
 
-    let response = Message::from_bytes(&result).unwrap();
+    let response = Message::from_bytes(&result.bytes).unwrap();
     assert!(response.message_type() == MessageType::Response);
 }
 
@@ -137,9 +137,9 @@ async fn test_handler_sends_log_event() {
     handler.handle(&query, client_ip, None).await.unwrap();
 
     let ctx = rx.try_recv().expect("should receive a log event");
-    assert_eq!(ctx.action, "blocked");
+    assert_eq!(ctx.action, QueryAction::Blocked);
     assert_eq!(ctx.domain, "ads.example.com");
-    assert_eq!(ctx.client_ip, "127.0.0.1");
+    assert_eq!(ctx.client_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert!(ctx.matched_rule.is_some());
     assert!(ctx.matched_list.is_some());
 }
@@ -215,11 +215,11 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     // (NoError with 0.0.0.0), not REFUSED — so we know we're not
     // over-filtering.
     let first = handler.handle(&query, ip1, None).await.unwrap();
-    let first_msg = Message::from_bytes(&first).unwrap();
+    let first_msg = Message::from_bytes(&first.bytes).unwrap();
     assert_eq!(first_msg.response_code(), ResponseCode::NoError);
 
     let second = handler.handle(&query, ip1, None).await.unwrap();
-    let second_msg = Message::from_bytes(&second).unwrap();
+    let second_msg = Message::from_bytes(&second.bytes).unwrap();
     assert_eq!(
         second_msg.response_code(),
         ResponseCode::Refused,
@@ -228,18 +228,18 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
 
     // ip2 has its own bucket — must still be served.
     let from_ip2 = handler.handle(&query, ip2, None).await.unwrap();
-    let from_ip2_msg = Message::from_bytes(&from_ip2).unwrap();
+    let from_ip2_msg = Message::from_bytes(&from_ip2.bytes).unwrap();
     assert_eq!(
         from_ip2_msg.response_code(),
         ResponseCode::NoError,
         "ip2 should not be affected by ip1's exhaustion"
     );
 
-    // A rate-limited query must emit a log entry tagged "rate_limited".
+    // A rate-limited query must emit a log entry tagged QueryAction::RateLimited.
     let mut saw_rate_limited = false;
     while let Ok(ctx) = rx.try_recv() {
-        if ctx.action == "rate_limited" {
-            assert_eq!(ctx.client_ip, ip1.to_string());
+        if ctx.action == QueryAction::RateLimited {
+            assert_eq!(ctx.client_ip, ip1);
             saw_rate_limited = true;
         }
     }
@@ -318,8 +318,8 @@ async fn test_handler_inflight_limit_serves_all_queries() {
     }
 
     for j in joins {
-        let bytes = j.await.unwrap().expect("query should succeed");
-        let response = Message::from_bytes(&bytes).unwrap();
+        let outcome = j.await.unwrap().expect("query should succeed");
+        let response = Message::from_bytes(&outcome.bytes).unwrap();
         assert!(!response.answers().is_empty());
     }
 }

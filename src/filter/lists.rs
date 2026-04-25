@@ -13,6 +13,8 @@ pub enum ListError {
     Db(#[from] crate::db::DbError),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("filter rebuild task panicked: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
 
 pub const DEFAULT_LISTS: &[(&str, &str, bool)] = &[
@@ -87,7 +89,14 @@ impl ListManager {
 
         let block_count = block_rules.len();
         let allow_count = allow_rules.len();
-        let engine = FilterEngine::new(block_rules, allow_rules);
+        // FilterEngine::new sorts + dedups + builds an FST + a flat trie; on
+        // a 100k+ rule blocklist this is hundreds of ms of pure CPU work.
+        // Push it onto the blocking pool so the runtime worker thread isn't
+        // pinned for that span — DNS queries served from other listener
+        // tasks keep moving while we rebuild.
+        let engine =
+            tokio::task::spawn_blocking(move || FilterEngine::new(block_rules, allow_rules))
+                .await?;
         self.filter.store(Arc::new(engine));
 
         tracing::info!(

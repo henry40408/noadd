@@ -90,7 +90,8 @@ async fn main() -> anyhow::Result<()> {
             log_tx,
             args.max_inflight_queries,
         )
-        .with_rate_limiter(ip_rate_limiter.clone()),
+        .with_rate_limiter(ip_rate_limiter.clone())
+        .with_log_query_results(args.log_query_results),
     );
     tracing::info!(
         max_inflight = args.max_inflight_queries,
