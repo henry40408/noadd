@@ -19,6 +19,7 @@ hickory-resolver = { version = "0.25", default-features = false, features = ["ht
 include_dir = "0.7"
 mime_guess = "2"
 moka = { version = "0.12", default-features = false, features = ["future"] }
+parking_lot = "0.12"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
 rusqlite = "0.37"

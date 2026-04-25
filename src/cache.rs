@@ -1,8 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moka::future::Cache;
 use moka::policy::EvictionPolicy;
+use parking_lot::Mutex;
 
 /// Cache key: (domain name, DNS record type as u16)
 pub type CacheKey = (String, u16);
@@ -59,7 +60,7 @@ impl CacheValue {
     /// `elapsed_secs`. Caller falls back to recomputing + `store_patched_bytes`
     /// when this returns `None`.
     pub fn try_patched_bytes(&self, elapsed_secs: u32) -> Option<Vec<u8>> {
-        let snap = self.inner.patched.lock().unwrap();
+        let snap = self.inner.patched.lock();
         snap.as_ref()
             .filter(|s| s.elapsed_secs == elapsed_secs)
             .map(|s| s.bytes.clone())
@@ -69,7 +70,7 @@ impl CacheValue {
     /// race they both produce identical bytes for the same `elapsed_secs`,
     /// so overwriting either is safe.
     pub fn store_patched_bytes(&self, elapsed_secs: u32, bytes: Vec<u8>) {
-        let mut snap = self.inner.patched.lock().unwrap();
+        let mut snap = self.inner.patched.lock();
         *snap = Some(PatchSnapshot {
             elapsed_secs,
             bytes,

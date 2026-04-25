@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -169,19 +168,32 @@ struct UpstreamEntry {
     name_server: NameServer<TokioConnectionProvider>,
 }
 
+/// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
+/// Sorts last under `total_cmp`, so an unobserved upstream is naturally
+/// the worst choice for `LowestLatency`.
+const NO_LATENCY: f64 = f64::INFINITY;
+
 /// Forwards DNS queries to upstream servers with configurable strategy.
 ///
 /// Transport (UDP retransmit, socket reuse, txid validation, automatic
 /// TCP-on-error fallback) is delegated to hickory's `NameServer`. This
 /// type owns the per-upstream selection strategy and latency tracking.
+///
+/// Upstreams are addressed by index (matching `config.servers`) — looking
+/// them up by label-string used to allocate a `String` per query and was
+/// the dominant per-query allocation outside the cache hot path.
 pub struct UpstreamForwarder {
     config: UpstreamConfig,
-    /// Upstreams indexed by label, in the same order as `config.servers`.
-    /// Servers whose address cannot be parsed are silently dropped.
-    entries: HashMap<String, UpstreamEntry>,
+    /// Same length and order as `config.servers`. `None` for entries
+    /// whose address parse / DNS lookup failed during construction.
+    entries: Vec<Option<UpstreamEntry>>,
     strategy: ArcSwap<UpstreamStrategy>,
     rr_counter: AtomicUsize,
-    latencies: Mutex<HashMap<String, f64>>,
+    /// EMA latencies (milliseconds), bit-packed into `AtomicU64`. Reads
+    /// and writes are lock-free; concurrent updates use a CAS loop so
+    /// the EMA computation is atomic with respect to the previous value.
+    /// Same length and order as `entries`.
+    latencies: Vec<AtomicU64>,
 }
 
 impl UpstreamForwarder {
@@ -205,9 +217,11 @@ impl UpstreamForwarder {
 
         // Resolve all upstream hosts concurrently — geo-routed providers and
         // slow DNS can otherwise make startup linear in the number of
-        // upstreams.
+        // upstreams. Each task reports its config index so we can place
+        // the result back into the parallel `entries` Vec without a
+        // post-hoc sort.
         let mut lookup_set = tokio::task::JoinSet::new();
-        for server in &config.servers {
+        for (idx, server) in config.servers.iter().enumerate() {
             let spec = match UpstreamSpec::parse(server) {
                 Ok(s) => s,
                 Err(e) => {
@@ -221,13 +235,14 @@ impl UpstreamForwarder {
                 let addrs = tokio::net::lookup_host(lookup_target)
                     .await
                     .map(|it| it.collect::<Vec<_>>());
-                (server, spec, addrs)
+                (idx, server, spec, addrs)
             });
         }
 
-        let mut entries = HashMap::new();
+        let mut entries: Vec<Option<UpstreamEntry>> =
+            (0..config.servers.len()).map(|_| None).collect();
         while let Some(joined) = lookup_set.join_next().await {
-            let (server, spec, addrs) = match joined {
+            let (idx, server, spec, addrs) = match joined {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(error = %e, "upstream resolve task join failed");
@@ -264,21 +279,22 @@ impl UpstreamForwarder {
             };
 
             let name_server = NameServer::new(ns_cfg, opts.clone(), provider.clone());
-            entries.insert(
-                server.clone(),
-                UpstreamEntry {
-                    label: server,
-                    name_server,
-                },
-            );
+            entries[idx] = Some(UpstreamEntry {
+                label: server,
+                name_server,
+            });
         }
+
+        let latencies = (0..config.servers.len())
+            .map(|_| AtomicU64::new(NO_LATENCY.to_bits()))
+            .collect();
 
         Self {
             config,
             entries,
             strategy: ArcSwap::from_pointee(UpstreamStrategy::default()),
             rr_counter: AtomicUsize::new(0),
-            latencies: Mutex::new(HashMap::new()),
+            latencies,
         }
     }
 
@@ -292,58 +308,83 @@ impl UpstreamForwarder {
         self.strategy.store(std::sync::Arc::new(strategy));
     }
 
-    /// Return the server try-order for the current strategy.
-    pub fn server_order(&self) -> Vec<String> {
-        let servers = &self.config.servers;
-        let len = servers.len();
+    /// Return the server try-order for the current strategy as indices
+    /// into `config.servers` / `entries`. Indices are returned (not
+    /// labels) to avoid a per-query allocation; callers that need a
+    /// label can read `entries[idx].label`.
+    pub fn server_order(&self) -> Vec<usize> {
+        let len = self.entries.len();
         if len == 0 {
             return vec![];
         }
 
         match self.strategy() {
-            UpstreamStrategy::Sequential => servers.clone(),
+            UpstreamStrategy::Sequential => (0..len).collect(),
             UpstreamStrategy::RoundRobin => {
-                let idx = self.rr_counter.load(Ordering::Relaxed) % len;
-                let mut order = Vec::with_capacity(len);
-                for i in 0..len {
-                    order.push(servers[(idx + i) % len].clone());
-                }
-                order
+                let start = self.rr_counter.load(Ordering::Relaxed) % len;
+                (0..len).map(|i| (start + i) % len).collect()
             }
             UpstreamStrategy::LowestLatency => {
-                let lat = self.latencies.lock().unwrap();
-                if lat.is_empty() {
-                    return servers.clone();
-                }
-                let mut sorted: Vec<String> = servers.clone();
-                sorted.sort_by(|a, b| {
-                    let la = lat.get(a).copied().unwrap_or(f64::MAX);
-                    let lb = lat.get(b).copied().unwrap_or(f64::MAX);
+                let mut order: Vec<usize> = (0..len).collect();
+                order.sort_by(|&a, &b| {
+                    let la = self.latency_ms_at(a);
+                    let lb = self.latency_ms_at(b);
                     la.total_cmp(&lb)
                 });
-                sorted
+                order
             }
         }
     }
 
-    /// Update the EMA latency for a server.
-    pub fn update_latency(&self, server: &str, ms: f64) {
-        use std::collections::hash_map::Entry;
-        let mut lat = self.latencies.lock().unwrap();
-        match lat.entry(server.to_string()) {
-            Entry::Vacant(e) => {
-                e.insert(ms);
-            }
-            Entry::Occupied(mut e) => {
-                let ema = e.get_mut();
-                *ema = EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * *ema;
+    /// Read the EMA latency for the upstream at `idx`, in milliseconds.
+    /// Returns `f64::INFINITY` when no observation has been recorded yet.
+    fn latency_ms_at(&self, idx: usize) -> f64 {
+        f64::from_bits(self.latencies[idx].load(Ordering::Relaxed))
+    }
+
+    /// Update the EMA latency for the upstream at `idx`. Concurrent
+    /// updates on the same index race via a CAS loop so the EMA is
+    /// always computed from the most recent stored value rather than a
+    /// stale local copy.
+    pub fn update_latency(&self, idx: usize, ms: f64) {
+        let cell = &self.latencies[idx];
+        let mut prev_bits = cell.load(Ordering::Relaxed);
+        loop {
+            let prev = f64::from_bits(prev_bits);
+            let next = if prev.is_infinite() {
+                ms
+            } else {
+                EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * prev
+            };
+            match cell.compare_exchange_weak(
+                prev_bits,
+                next.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => prev_bits = actual,
             }
         }
     }
 
-    /// Get a snapshot of current EMA latencies.
+    /// Get a snapshot of current EMA latencies, keyed by server label.
+    /// Servers without any observation yet are omitted (matches the
+    /// previous `Mutex<HashMap>`-backed behavior).
     pub fn latencies(&self) -> HashMap<String, f64> {
-        self.latencies.lock().unwrap().clone()
+        self.config
+            .servers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, label)| {
+                let ms = self.latency_ms_at(i);
+                if ms.is_finite() {
+                    Some((label.clone(), ms))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Forward a DNS query using the current strategy.
@@ -362,8 +403,8 @@ impl UpstreamForwarder {
             self.rr_counter.fetch_add(1, Ordering::Relaxed);
         }
 
-        for label in &order {
-            let Some(entry) = self.entries.get(label) else {
+        for &idx in &order {
+            let Some(entry) = self.entries[idx].as_ref() else {
                 continue;
             };
 
@@ -373,7 +414,7 @@ impl UpstreamForwarder {
             match entry.name_server.send(request).first_answer().await {
                 Ok(response) => {
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
-                    self.update_latency(&entry.label, ms);
+                    self.update_latency(idx, ms);
 
                     // hickory rewrites txids for connection multiplexing,
                     // so the response message we get back may not echo the
@@ -402,9 +443,9 @@ impl UpstreamForwarder {
     /// Health check all configured upstream servers.
     /// Returns a list of (server, status, latency_ms).
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
-        let mut results = Vec::new();
-        for server in &self.config.servers {
-            let Some(entry) = self.entries.get(server) else {
+        let mut results = Vec::with_capacity(self.config.servers.len());
+        for (idx, server) in self.config.servers.iter().enumerate() {
+            let Some(entry) = self.entries[idx].as_ref() else {
                 results.push((server.clone(), false, 0));
                 continue;
             };
@@ -418,14 +459,12 @@ impl UpstreamForwarder {
 
     /// Probe all servers and update EMA latencies. Used by background task.
     pub async fn probe_all(&self) {
-        for server in &self.config.servers {
-            let Some(entry) = self.entries.get(server) else {
-                continue;
-            };
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let Some(entry) = entry else { continue };
             let start = std::time::Instant::now();
             if self.probe(entry).await.is_ok() {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                self.update_latency(&entry.label, ms);
+                self.update_latency(idx, ms);
             }
         }
     }
@@ -482,63 +521,64 @@ mod tests {
     #[tokio::test]
     async fn test_sequential_order() {
         let f = make_forwarder(UpstreamStrategy::Sequential).await;
-        let order = f.server_order();
-        assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
+        assert_eq!(f.server_order(), vec![0, 1, 2]);
     }
 
     #[tokio::test]
     async fn test_round_robin_rotates() {
         let f = make_forwarder(UpstreamStrategy::RoundRobin).await;
-        let order1 = f.server_order();
-        assert_eq!(order1, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
+        assert_eq!(f.server_order(), vec![0, 1, 2]);
 
         f.rr_counter.fetch_add(1, Ordering::Relaxed);
-        let order2 = f.server_order();
-        assert_eq!(order2, vec!["10.0.0.2:53", "10.0.0.3:53", "10.0.0.1:53"]);
+        assert_eq!(f.server_order(), vec![1, 2, 0]);
 
         f.rr_counter.fetch_add(1, Ordering::Relaxed);
-        let order3 = f.server_order();
-        assert_eq!(order3, vec!["10.0.0.3:53", "10.0.0.1:53", "10.0.0.2:53"]);
+        assert_eq!(f.server_order(), vec![2, 0, 1]);
     }
 
     #[tokio::test]
     async fn test_lowest_latency_order() {
         let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
 
-        {
-            let mut lat = f.latencies.lock().unwrap();
-            lat.insert("10.0.0.1:53".into(), 50.0);
-            lat.insert("10.0.0.2:53".into(), 10.0);
-            lat.insert("10.0.0.3:53".into(), 30.0);
-        }
+        f.update_latency(0, 50.0);
+        f.update_latency(1, 10.0);
+        f.update_latency(2, 30.0);
 
-        let order = f.server_order();
-        assert_eq!(order, vec!["10.0.0.2:53", "10.0.0.3:53", "10.0.0.1:53"]);
+        // Sorted ascending by EMA: idx 1 (10ms) → 2 (30ms) → 0 (50ms)
+        assert_eq!(f.server_order(), vec![1, 2, 0]);
     }
 
     #[tokio::test]
     async fn test_lowest_latency_no_data_uses_config_order() {
         let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
-        let order = f.server_order();
-        assert_eq!(order, vec!["10.0.0.1:53", "10.0.0.2:53", "10.0.0.3:53"]);
+        // All entries are NO_LATENCY (INFINITY); sort is stable so the
+        // original config order survives.
+        assert_eq!(f.server_order(), vec![0, 1, 2]);
     }
 
     #[tokio::test]
     async fn test_ema_update() {
         let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
 
-        f.update_latency("10.0.0.1:53", 100.0);
-        {
-            let lat = f.latencies.lock().unwrap();
-            assert!((lat["10.0.0.1:53"] - 100.0).abs() < 0.001);
-        }
+        f.update_latency(0, 100.0);
+        assert!((f.latency_ms_at(0) - 100.0).abs() < 0.001);
 
         // EMA = 0.3 * 40 + 0.7 * 100 = 82.0
-        f.update_latency("10.0.0.1:53", 40.0);
-        {
-            let lat = f.latencies.lock().unwrap();
-            assert!((lat["10.0.0.1:53"] - 82.0).abs() < 0.001);
-        }
+        f.update_latency(0, 40.0);
+        assert!((f.latency_ms_at(0) - 82.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_latencies_snapshot_preserves_labels() {
+        let f = make_forwarder(UpstreamStrategy::LowestLatency).await;
+        f.update_latency(0, 12.5);
+        f.update_latency(2, 99.0);
+
+        let snap = f.latencies();
+        // Unobserved (idx 1) is omitted from the snapshot.
+        assert_eq!(snap.len(), 2);
+        assert!((snap["10.0.0.1:53"] - 12.5).abs() < 0.001);
+        assert!((snap["10.0.0.3:53"] - 99.0).abs() < 0.001);
     }
 
     #[tokio::test]

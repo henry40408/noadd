@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use parking_lot::Mutex;
 use rand::Rng;
 use rand::distr::Alphanumeric;
 
@@ -54,7 +55,7 @@ pub async fn load_sessions_from_db(
 ) -> Result<(), crate::db::DbError> {
     if let Some(data) = db.get_setting("sessions").await? {
         let now = now_secs();
-        let mut map = store.lock().unwrap();
+        let mut map = store.lock();
         for entry in data.split(';') {
             let entry = entry.trim();
             if entry.is_empty() {
@@ -79,7 +80,6 @@ pub async fn save_sessions_to_db(
 ) -> Result<(), crate::db::DbError> {
     let entries: Vec<String> = store
         .lock()
-        .unwrap()
         .iter()
         .map(|(token, ts)| format!("{token}:{ts}"))
         .collect();
@@ -91,7 +91,7 @@ pub async fn revoke_all_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
 ) -> Result<(), crate::db::DbError> {
-    store.lock().unwrap().clear();
+    store.lock().clear();
     db.set_setting("sessions", "").await
 }
 
@@ -122,13 +122,13 @@ pub fn create_session(store: &SessionStore) -> String {
         .take(64)
         .map(char::from)
         .collect();
-    store.lock().unwrap().insert(token.clone(), now_secs());
+    store.lock().insert(token.clone(), now_secs());
     token
 }
 
 /// Validate whether a session token exists and is not expired.
 pub fn validate_session(store: &SessionStore, token: &str) -> bool {
-    let mut map = store.lock().unwrap();
+    let mut map = store.lock();
     if let Some(&created_at) = map.get(token) {
         if now_secs() - created_at < SESSION_MAX_AGE_SECS {
             return true;
@@ -165,7 +165,7 @@ impl RateLimiter {
     ///
     /// Returns `true` if allowed, `false` if rate limited.
     pub fn check(&self, ip: IpAddr) -> bool {
-        let map = self.attempts.lock().unwrap();
+        let map = self.attempts.lock();
         if let Some((count, started)) = map.get(&ip) {
             if started.elapsed().as_secs() >= self.window_secs {
                 // Window expired, allow
@@ -179,7 +179,7 @@ impl RateLimiter {
 
     /// Record an attempt from the given IP.
     pub fn record(&self, ip: IpAddr) {
-        let mut map = self.attempts.lock().unwrap();
+        let mut map = self.attempts.lock();
         let entry = map.entry(ip).or_insert((0, Instant::now()));
         if entry.1.elapsed().as_secs() >= self.window_secs {
             // Reset window
