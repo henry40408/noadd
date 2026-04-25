@@ -120,7 +120,7 @@ async fn test_cold_miss_coalesces_concurrent_queries() {
     // Every caller must receive a well-formed response.
     for handle in handles {
         let resp = handle.await.unwrap();
-        let msg = Message::from_bytes(&resp).unwrap();
+        let msg = Message::from_bytes(&resp.bytes).unwrap();
         assert!(
             !msg.answers().is_empty(),
             "coalesced waiters should see the fetcher's answer section"

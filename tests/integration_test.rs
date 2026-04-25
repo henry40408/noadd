@@ -60,10 +60,10 @@ async fn test_full_query_pipeline_block() {
     let client_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
 
     // 6. Handle the query
-    let response_bytes = handler.handle(&query_bytes, client_ip, None).await.unwrap();
+    let outcome = handler.handle(&query_bytes, client_ip, None).await.unwrap();
 
     // 7. Parse response and verify answer is 0.0.0.0
-    let response = Message::from_bytes(&response_bytes).unwrap();
+    let response = Message::from_bytes(&outcome.bytes).unwrap();
     assert_eq!(response.message_type(), MessageType::Response);
     assert!(!response.answers().is_empty(), "should have an answer");
     let answer = &response.answers()[0];
@@ -109,10 +109,10 @@ async fn test_full_query_pipeline_allow() {
     let query_bytes = make_query_bytes("example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    let response_bytes = handler.handle(&query_bytes, client_ip, None).await.unwrap();
+    let outcome = handler.handle(&query_bytes, client_ip, None).await.unwrap();
 
     // 3. Verify response has non-empty answers (requires network to upstream)
-    let response = Message::from_bytes(&response_bytes).unwrap();
+    let response = Message::from_bytes(&outcome.bytes).unwrap();
     assert_eq!(response.message_type(), MessageType::Response);
     assert!(
         !response.answers().is_empty(),

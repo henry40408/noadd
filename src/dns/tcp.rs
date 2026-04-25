@@ -43,7 +43,7 @@ pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
 
                 // 3. Handle the query
                 let response = match handler.handle(&buf, client_ip, None).await {
-                    Ok(response) => response,
+                    Ok(outcome) => outcome.bytes,
                     Err(e) => {
                         debug!("DNS handler error for TCP query from {peer_addr}: {e}");
                         build_servfail(&buf)

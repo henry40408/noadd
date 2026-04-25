@@ -114,14 +114,14 @@ async fn test_stale_refresh_is_deduplicated() {
 
     // Prime the cache
     let prime_resp = handler.handle(&query_bytes, client_ip, None).await.unwrap();
-    assert!(!prime_resp.is_empty());
+    assert!(!prime_resp.bytes.is_empty());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
 
     // Replace with instantly-stale entry
     let cache_key = (domain.to_lowercase(), u16::from(RecordType::A));
     cache
-        .insert(cache_key, prime_resp, Duration::from_millis(1))
+        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1))
         .await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     upstream_counter.store(0, Ordering::SeqCst);
@@ -141,7 +141,7 @@ async fn test_stale_refresh_is_deduplicated() {
 
     for handle in handles {
         let resp = handle.await.unwrap();
-        assert!(!resp.is_empty());
+        assert!(!resp.bytes.is_empty());
     }
 
     // Wait for background tasks to reach upstream
@@ -179,7 +179,7 @@ async fn test_refresh_lock_released_after_completion() {
     cache
         .insert(
             cache_key.clone(),
-            prime_resp.clone(),
+            prime_resp.bytes.clone(),
             Duration::from_millis(1),
         )
         .await;
@@ -198,7 +198,7 @@ async fn test_refresh_lock_released_after_completion() {
 
     // Round 2: make stale again, query once → should trigger a NEW refresh
     cache
-        .insert(cache_key, prime_resp, Duration::from_millis(1))
+        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1))
         .await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     upstream_counter.store(0, Ordering::SeqCst);
@@ -236,7 +236,7 @@ async fn test_different_domains_refresh_independently() {
     for (domain, _, resp) in &primed {
         let key = (domain.to_lowercase(), u16::from(RecordType::A));
         cache
-            .insert(key, resp.clone(), Duration::from_millis(1))
+            .insert(key, resp.bytes.clone(), Duration::from_millis(1))
             .await;
     }
     tokio::time::sleep(Duration::from_millis(10)).await;

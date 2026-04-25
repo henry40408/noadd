@@ -1,5 +1,9 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
+
+use hickory_proto::rr::RecordType;
 use noadd::db::Database;
-use noadd::dns::handler::QueryContext;
+use noadd::dns::handler::{QueryAction, QueryContext};
 use noadd::logger::QueryLogger;
 
 #[tokio::test]
@@ -18,10 +22,10 @@ async fn test_logger_flushes_on_threshold() {
     for i in 0..threshold {
         let ctx = QueryContext {
             timestamp: 1000 + i as i64,
-            client_ip: "127.0.0.1".to_string(),
+            client_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             domain: format!("example{i}.com"),
-            query_type: "A".to_string(),
-            action: "allowed".to_string(),
+            query_type: u16::from(RecordType::A),
+            action: QueryAction::Allowed,
             cached: false,
             upstream: Some("8.8.8.8:53".to_string()),
             doh_token: None,
@@ -66,10 +70,10 @@ async fn test_logger_flushes_on_channel_close() {
     for i in 0..3 {
         let ctx = QueryContext {
             timestamp: 2000 + i as i64,
-            client_ip: "10.0.0.1".to_string(),
+            client_ip: IpAddr::from_str("10.0.0.1").unwrap(),
             domain: format!("test{i}.org"),
-            query_type: "AAAA".to_string(),
-            action: "blocked".to_string(),
+            query_type: u16::from(RecordType::AAAA),
+            action: QueryAction::Blocked,
             cached: false,
             upstream: None,
             doh_token: None,
@@ -110,10 +114,10 @@ async fn test_logger_flushes_on_interval() {
     for i in 0..2 {
         let ctx = QueryContext {
             timestamp: 3000 + i as i64,
-            client_ip: "192.168.1.1".to_string(),
+            client_ip: IpAddr::from_str("192.168.1.1").unwrap(),
             domain: format!("interval{i}.com"),
-            query_type: "A".to_string(),
-            action: "allowed".to_string(),
+            query_type: u16::from(RecordType::A),
+            action: QueryAction::Allowed,
             cached: false,
             upstream: None,
             doh_token: None,

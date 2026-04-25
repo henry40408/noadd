@@ -31,7 +31,7 @@ pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
 
         tokio::spawn(async move {
             let response = match handler.handle(&buf, src.ip(), None).await {
-                Ok(response) => response,
+                Ok(outcome) => outcome.bytes,
                 Err(e) => {
                     debug!("DNS handler error for UDP query from {src}: {e}");
                     build_servfail(&buf)
