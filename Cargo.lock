@@ -1652,6 +1652,7 @@ dependencies = [
  "include_dir",
  "mime_guess",
  "moka",
+ "parking_lot",
  "plist",
  "rand",
  "reqwest",

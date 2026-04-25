@@ -12,8 +12,9 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 #[derive(Debug)]
 struct Bucket {
@@ -52,7 +53,7 @@ impl IpRateLimiter {
             return true;
         }
         let now = Instant::now();
-        let mut map = self.buckets.lock().unwrap();
+        let mut map = self.buckets.lock();
         let bucket = map.entry(ip).or_insert_with(|| Bucket {
             tokens: self.burst,
             last_refill: now,
@@ -76,7 +77,7 @@ impl IpRateLimiter {
     /// bound on a public-facing deployment.
     pub fn prune(&self, max_age: Duration) -> usize {
         let now = Instant::now();
-        let mut map = self.buckets.lock().unwrap();
+        let mut map = self.buckets.lock();
         let before = map.len();
         map.retain(|_, b| now.duration_since(b.last_seen) < max_age);
         before - map.len()
@@ -84,7 +85,7 @@ impl IpRateLimiter {
 
     /// Current number of tracked IPs. Exposed for observability / tests.
     pub fn tracked_ips(&self) -> usize {
-        self.buckets.lock().unwrap().len()
+        self.buckets.lock().len()
     }
 }
 
