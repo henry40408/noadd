@@ -13,6 +13,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
 bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "env"] }
+dashmap = "6"
 hickory-proto = "0.25"
 hickory-resolver = { version = "0.25", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio", "webpki-roots"] }
 include_dir = "0.7"
