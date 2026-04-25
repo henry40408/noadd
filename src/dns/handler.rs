@@ -1,10 +1,10 @@
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
@@ -109,7 +109,9 @@ pub struct DnsHandler {
     log_tx: mpsc::Sender<QueryContext>,
     /// Tracks cache keys currently being refreshed in the background,
     /// preventing duplicate refresh tasks for the same stale entry.
-    refreshing: Arc<Mutex<HashSet<CacheKey>>>,
+    /// Sharded via `DashMap` so concurrent stale hits for different keys
+    /// don't serialise on a single mutex.
+    refreshing: Arc<DashMap<CacheKey, ()>>,
     /// Coalesces concurrent cold-miss upstream queries for the same key:
     /// N simultaneous clients produce one upstream request, not N.
     inflight_fetches: Arc<InflightUpstream>,
@@ -155,7 +157,7 @@ impl DnsHandler {
             cache,
             forwarder,
             log_tx,
-            refreshing: Arc::new(Mutex::new(HashSet::new())),
+            refreshing: Arc::new(DashMap::new()),
             inflight_fetches: Arc::new(InflightUpstream::new()),
             concurrency_limit,
             log_drop_count: Arc::new(AtomicU64::new(0)),
@@ -265,8 +267,10 @@ impl DnsHandler {
                         if cached.is_stale() {
                             // Optimistic: serve stale, refresh in background.
                             // Deduplicate: only spawn if no refresh is already in flight.
+                            // `insert` returns the previous value if any, so
+                            // `is_none()` ⇒ this caller is the first.
                             let should_refresh =
-                                self.refreshing.lock().unwrap().insert(cache_key.clone());
+                                self.refreshing.insert(cache_key.clone(), ()).is_none();
 
                             if should_refresh {
                                 let forwarder = self.forwarder.clone();
@@ -602,15 +606,13 @@ fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> 
 
 /// RAII guard that removes a key from the in-flight refresh set on drop.
 struct RefreshGuard {
-    set: Arc<Mutex<HashSet<CacheKey>>>,
+    set: Arc<DashMap<CacheKey, ()>>,
     key: CacheKey,
 }
 
 impl Drop for RefreshGuard {
     fn drop(&mut self) {
-        if let Ok(mut s) = self.set.lock() {
-            s.remove(&self.key);
-        }
+        self.set.remove(&self.key);
     }
 }
 
@@ -724,15 +726,15 @@ mod tests {
 
     #[test]
     fn refresh_guard_removes_key_on_drop() {
-        let set: Arc<Mutex<HashSet<CacheKey>>> = Arc::new(Mutex::new(HashSet::new()));
+        let set: Arc<DashMap<CacheKey, ()>> = Arc::new(DashMap::new());
         let key: CacheKey = ("example.com".to_string(), 1);
-        set.lock().unwrap().insert(key.clone());
+        set.insert(key.clone(), ());
         {
             let _g = RefreshGuard {
                 set: set.clone(),
                 key: key.clone(),
             };
         }
-        assert!(!set.lock().unwrap().contains(&key));
+        assert!(!set.contains_key(&key));
     }
 }

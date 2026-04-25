@@ -7,17 +7,20 @@
 //! subscribe to a `Notify` and re-check the cache after the fetcher stores
 //! its result.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use dashmap::DashMap;
 use tokio::sync::Notify;
 
 use crate::cache::CacheKey;
 
 /// Map of cache keys currently being resolved upstream.
+///
+/// `DashMap` shards entries across multiple internal locks, so concurrent
+/// `begin()` calls for different keys don't serialise on a single mutex.
 #[derive(Default)]
 pub struct InflightUpstream {
-    pending: Mutex<HashMap<CacheKey, Arc<Notify>>>,
+    pending: DashMap<CacheKey, Arc<Notify>>,
 }
 
 /// Outcome of registering interest in a key.
@@ -39,36 +42,36 @@ impl InflightUpstream {
     /// Register interest in `key`. At most one caller can hold a
     /// `FetchGuard` for a given key at a time.
     pub fn begin(self: &Arc<Self>, key: &CacheKey) -> BeginResult {
-        let mut map = self.pending.lock().unwrap();
-        if let Some(notify) = map.get(key) {
-            BeginResult::Waiter(notify.clone())
-        } else {
-            let notify = Arc::new(Notify::new());
-            map.insert(key.clone(), notify.clone());
-            BeginResult::Fetcher(FetchGuard {
-                owner: self.clone(),
-                key: key.clone(),
-                notify,
-            })
+        // `entry()` holds the per-shard lock for the duration of the match,
+        // so the vacant→insert path is atomic with respect to other tasks
+        // racing on the same key.
+        match self.pending.entry(key.clone()) {
+            dashmap::Entry::Occupied(o) => BeginResult::Waiter(o.get().clone()),
+            dashmap::Entry::Vacant(v) => {
+                let notify = Arc::new(Notify::new());
+                v.insert(notify.clone());
+                BeginResult::Fetcher(FetchGuard {
+                    owner: self.clone(),
+                    key: key.clone(),
+                    notify,
+                })
+            }
         }
     }
 
     /// Remove a key and notify any waiters. Called by `FetchGuard::drop`.
     fn finish(&self, key: &CacheKey, notify: &Arc<Notify>) {
-        {
-            let mut map = self.pending.lock().unwrap();
-            map.remove(key);
-        }
-        // Notify *after* dropping the lock so waiters don't wake into
-        // contention and so the cache-write (performed before this drop)
-        // is observable on their re-check.
+        self.pending.remove(key);
+        // Notify *after* dropping the entry so waiters don't wake into
+        // shard contention and so the cache-write (performed before this
+        // drop) is observable on their re-check.
         notify.notify_waiters();
     }
 
     /// Number of in-flight fetches. Exposed for tests.
     #[cfg(test)]
     pub fn inflight_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        self.pending.len()
     }
 }
 
