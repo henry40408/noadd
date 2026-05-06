@@ -6,8 +6,8 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>noadd</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.bunny.net">
+<link href="https://fonts.bunny.net/css?family=geist:400,500,600,700|geist-mono:400,500&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -31,7 +31,8 @@
   --orange: #fbbf24;
   --orange-dim: rgba(251, 191, 36, 0.12);
   --flash-bg: #1a2540;
-  --font-sans: 'DM Sans', sans-serif;
+  --font-sans: 'Geist', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius: 6px;
   --transition: 150ms ease;
 }
@@ -68,6 +69,8 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Scrollbar */
@@ -215,11 +218,12 @@ body {
 }
 
 .stat-value {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 2rem;
-  font-weight: 700;
+  font-weight: 600;
   margin-top: 4px;
   line-height: 1;
+  letter-spacing: -0.02em;
 }
 
 .stat-value.green { color: var(--green); }
@@ -227,9 +231,11 @@ body {
 .stat-value.accent { color: var(--accent); }
 
 .stat-sub {
-  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
   color: var(--text-dim);
   margin-top: 6px;
+  letter-spacing: -0.01em;
 }
 
 /* Tables */
@@ -269,6 +275,10 @@ td {
 }
 
 tr:hover td { background: var(--bg-hover); }
+
+/* Mono utility — applied to numeric / code-like cells (timestamps, IPs, tokens, latency, query types) */
+.mono { font-family: var(--font-mono); letter-spacing: -0.01em; }
+td.mono, .mono { font-variant-numeric: tabular-nums; }
 
 /* Top-N tables: fixed layout keeps the right-hand count column visible
    even when the left-hand label (domain, upstream, client) is very long. */
@@ -661,8 +671,10 @@ input:focus, select:focus { border-color: var(--border-focus); }
   display: flex;
   align-items: center;
   gap: 8px;
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--text-dim);
+  letter-spacing: -0.01em;
 }
 
 /* Dialog */
@@ -878,7 +890,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 4px 8px;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 0.65rem;
   color: var(--text-primary);
   white-space: nowrap;
@@ -914,17 +926,20 @@ input:focus, select:focus { border-color: var(--border-focus); }
   min-width: 2px;
 }
 .bar-row-count {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--text-dim);
   text-align: right;
   line-height: 1.15;
+  letter-spacing: -0.01em;
 }
 .bar-row-pct {
+  font-family: var(--font-mono);
   font-size: 0.65rem;
   color: var(--text-dim);
   opacity: 0.75;
   margin-top: 1px;
+  letter-spacing: -0.01em;
 }
 
 @media (max-width: 768px) {
@@ -2058,7 +2073,7 @@ class DashboardPage extends HTMLElement {
     for (const d of visible) {
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-domains').innerHTML = html;
@@ -2078,7 +2093,7 @@ class DashboardPage extends HTMLElement {
         : '';
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
+      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-clients').innerHTML = html;
@@ -2094,7 +2109,7 @@ class DashboardPage extends HTMLElement {
     for (const d of data) {
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.upstream)}" style="font-family:var(--font-sans)">${esc(d.upstream)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
@@ -2623,13 +2638,13 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-sans);font-size:0.7rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
-        <td>${esc(l.query_type)}</td>
-        <td>${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div class="mono" style="font-size:0.7rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
+        <td class="mono">${esc(l.query_type)}</td>
+        <td class="mono">${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-sans);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td>${l.response_ms}</td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span class="mono" style="font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td class="mono">${l.response_ms}</td>
       </tr>`).join('');
     }
 
@@ -2644,7 +2659,7 @@ class LogsPage extends HTMLElement {
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
           <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
-        ${l.result ? '<div style="font-family:var(--font-sans);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
+        ${l.result ? '<div class="mono" style="font-size:0.7rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
           <span>${timeAgo(l.timestamp)}</span>
           <span>${esc(l.query_type)}</span>
@@ -2950,7 +2965,7 @@ class FiltersPage extends HTMLElement {
           : '<span class="badge badge-blocked">block</span>';
         html += `<tr>
           <td style="width:70px">${badge}</td>
-          <td style="color:var(--text-primary);font-family:var(--font-sans);font-size:0.85rem">${esc(r.rule)}</td>
+          <td class="mono" style="color:var(--text-primary);font-size:0.85rem">${esc(r.rule)}</td>
           <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}">${icons.trash}</button></td>
         </tr>`;
       }
@@ -3060,7 +3075,7 @@ class SettingsPage extends HTMLElement {
           const status = r.ok
             ? '<span class="badge badge-allowed">OK</span>'
             : '<span class="badge badge-blocked">FAIL</span>';
-          html += `<tr><td style="font-family:var(--font-sans)">${esc(r.server)}</td><td>${status}</td><td>${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
+          html += `<tr><td class="mono">${esc(r.server)}</td><td>${status}</td><td class="mono">${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
         }
         html += '</tbody></table>';
         el.innerHTML = html;
@@ -3114,8 +3129,8 @@ class SettingsPage extends HTMLElement {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
         this.querySelector('#server-info').innerHTML = `
           <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px">
-            <span style="color:var(--text-dim)">DNS</span><span>${esc(info.dns_addr)}</span>
-            <span style="color:var(--text-dim)">HTTP</span><span>${esc(info.http_addr)} ${tls}</span>
+            <span style="color:var(--text-dim)">DNS</span><span class="mono">${esc(info.dns_addr)}</span>
+            <span style="color:var(--text-dim)">HTTP</span><span><span class="mono">${esc(info.http_addr)}</span> ${tls}</span>
           </div>`;
       }
     } catch (e) { console.error(e); }
@@ -3133,8 +3148,8 @@ class SettingsPage extends HTMLElement {
       let html = '<table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
       for (const t of tokens) {
         html += `<tr>
-          <td style="color:var(--text-primary);font-family:var(--font-sans)">${esc(t.token)}</td>
-          <td><code style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
+          <td class="mono" style="color:var(--text-primary)">${esc(t.token)}</td>
+          <td><code class="mono" style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
           <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${esc(t.token)}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
       }
@@ -3167,7 +3182,7 @@ class SettingsPage extends HTMLElement {
       let html = '<table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
       for (const d of data) {
         const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
-        html += `<tr><td style="font-family:var(--font-sans)">${esc(d.server)}</td><td>${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
+        html += `<tr><td class="mono">${esc(d.server)}</td><td class="mono">${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
       }
       html += '</tbody></table>';
       el.innerHTML = html;
