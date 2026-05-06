@@ -7,7 +7,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>noadd</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -31,7 +31,6 @@
   --orange: #fbbf24;
   --orange-dim: rgba(251, 191, 36, 0.12);
   --flash-bg: #1a2540;
-  --font-mono: 'JetBrains Mono', monospace;
   --font-sans: 'DM Sans', sans-serif;
   --radius: 6px;
   --transition: 150ms ease;
@@ -97,7 +96,7 @@ body {
 }
 
 .sidebar-brand h1 {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 1.4rem;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -110,14 +109,14 @@ body {
   font-size: 0.75rem;
   color: var(--text-dim);
   margin-top: 2px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .sidebar-nav { flex: 1; padding: 12px 8px; }
 
 .sidebar-version {
   padding: 8px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   color: var(--text-dim);
   border-top: 1px solid var(--border);
@@ -182,7 +181,7 @@ body {
 }
 
 .card-title {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8rem;
   font-weight: 500;
   color: var(--text-dim);
@@ -207,7 +206,7 @@ body {
 }
 
 .stat-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   font-weight: 500;
   color: var(--text-dim);
@@ -216,7 +215,7 @@ body {
 }
 
 .stat-value {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 2rem;
   font-weight: 700;
   margin-top: 4px;
@@ -249,7 +248,7 @@ td, th { white-space: nowrap; }
 th {
   text-align: left;
   padding: 10px 12px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   font-weight: 500;
   color: var(--text-dim);
@@ -265,7 +264,7 @@ td {
   padding: 9px 12px;
   border-bottom: 1px solid var(--border);
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8rem;
 }
 
@@ -289,7 +288,7 @@ tr:hover td { background: var(--bg-hover); }
   display: inline-block;
   padding: 2px 8px;
   border-radius: 3px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -358,7 +357,7 @@ input[type="text"], input[type="password"], input[type="url"], select {
   border: 1px solid var(--border);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.85rem;
   outline: none;
   transition: border-color var(--transition);
@@ -465,7 +464,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px 10px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   color: var(--text-primary);
   white-space: nowrap;
@@ -501,7 +500,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 }
 
 .chart-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   color: var(--text-dim);
 }
@@ -536,7 +535,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 }
 
 .login-box h1 {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 1.6rem;
   font-weight: 700;
   margin-bottom: 4px;
@@ -552,7 +551,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 
 .login-box label {
   display: block;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   font-weight: 500;
   color: var(--text-dim);
@@ -582,7 +581,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 }
 
 .pagination span {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8rem;
   color: var(--text-dim);
 }
@@ -593,7 +592,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -651,7 +650,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
 .log-card-domain {
   flex: 1;
   min-width: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.8rem;
   color: var(--text-primary);
   overflow: hidden;
@@ -804,7 +803,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   border-right: 1px solid var(--border);
   color: var(--text-secondary);
   cursor: pointer;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.75rem;
   font-weight: 600;
   padding: 5px 14px;
@@ -824,7 +823,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   min-width: 600px;
 }
 .heatmap-row-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   color: var(--text-dim);
   display: flex;
@@ -840,7 +839,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   margin-bottom: 4px;
 }
 .heatmap-col-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   color: var(--text-dim);
   text-align: center;
@@ -879,7 +878,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 4px 8px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   color: var(--text-primary);
   white-space: nowrap;
@@ -897,7 +896,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   font-size: 0.8rem;
 }
 .bar-row-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -915,7 +914,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   min-width: 2px;
 }
 .bar-row-count {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.75rem;
   color: var(--text-dim);
   text-align: right;
@@ -952,7 +951,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px 10px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   color: var(--text-primary);
   white-space: nowrap;
@@ -970,7 +969,7 @@ input:focus, select:focus { border-color: var(--border-focus); }
   display: flex;
   gap: 16px;
   margin-top: 8px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.7rem;
   color: var(--text-dim);
 }
@@ -1072,7 +1071,7 @@ rebuild-banner { display: block; }
   letter-spacing: -0.005em;
 }
 .rebuild-banner .meta {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.72rem;
   color: var(--text-dim);
   letter-spacing: 0.03em;
@@ -1127,7 +1126,7 @@ rebuild-banner { display: block; }
   border-bottom: 1px solid var(--border);
 }
 .registry-head h3 {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.95rem;
   font-weight: 500;
   letter-spacing: 0.04em;
@@ -1232,7 +1231,7 @@ rebuild-banner { display: block; }
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 0.65rem;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   background: var(--bg-input);
@@ -1245,7 +1244,7 @@ rebuild-banner { display: block; }
 .registry-row .added-pill {
   background: var(--green-dim);
   color: var(--green);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1255,7 +1254,7 @@ rebuild-banner { display: block; }
 .registry-row .dep-pill {
   background: var(--red-dim);
   color: var(--red);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.65rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -2095,7 +2094,7 @@ class DashboardPage extends HTMLElement {
     for (const d of data) {
       const sharePct = formatPct(d.count, sumVal);
       const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.upstream)}" style="font-family:var(--font-mono)">${esc(d.upstream)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
+      html += `<tr><td><div class="truncate-cell" title="${esc(d.upstream)}" style="font-family:var(--font-sans)">${esc(d.upstream)}</div></td><td style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
     }
     html += '</tbody></table>';
     this.querySelector('#top-upstreams').innerHTML = html;
@@ -2463,7 +2462,7 @@ class StatsPage extends HTMLElement {
     const cachedArea = `${cachedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
     const ticks = [25, 50, 75].map(p => {
       const y = ys(p).toFixed(1);
-      return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/><text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-mono)">${p}%</text>`;
+      return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/><text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-sans)">${p}%</text>`;
     }).join('');
     el.innerHTML = `
       <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="rate-svg">
@@ -2624,12 +2623,12 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
+        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div style="font-family:var(--font-sans);font-size:0.7rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
         <td>${esc(l.query_type)}</td>
         <td>${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.7rem">' + esc(l.doh_token) + '</span>' : ''}</td>
         <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-mono);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span style="font-family:var(--font-sans);font-size:0.75rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td>${l.response_ms}</td>
       </tr>`).join('');
     }
@@ -2645,7 +2644,7 @@ class LogsPage extends HTMLElement {
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
           <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
-        ${l.result ? '<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
+        ${l.result ? '<div style="font-family:var(--font-sans);font-size:0.7rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
           <span>${timeAgo(l.timestamp)}</span>
           <span>${esc(l.query_type)}</span>
@@ -2951,7 +2950,7 @@ class FiltersPage extends HTMLElement {
           : '<span class="badge badge-blocked">block</span>';
         html += `<tr>
           <td style="width:70px">${badge}</td>
-          <td style="color:var(--text-primary);font-family:var(--font-mono);font-size:0.85rem">${esc(r.rule)}</td>
+          <td style="color:var(--text-primary);font-family:var(--font-sans);font-size:0.85rem">${esc(r.rule)}</td>
           <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}">${icons.trash}</button></td>
         </tr>`;
       }
@@ -2976,7 +2975,7 @@ class SettingsPage extends HTMLElement {
       <div class="card fade-in">
         <div class="card-title">Server Info</div>
         <p style="color:var(--text-dim);font-size:0.8rem;margin-bottom:12px">These values are set via CLI arguments and cannot be changed at runtime.</p>
-        <div id="server-info" style="font-family:var(--font-mono);font-size:0.85rem;color:var(--text-secondary)">Loading...</div>
+        <div id="server-info" style="font-family:var(--font-sans);font-size:0.85rem;color:var(--text-secondary)">Loading...</div>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
@@ -3061,7 +3060,7 @@ class SettingsPage extends HTMLElement {
           const status = r.ok
             ? '<span class="badge badge-allowed">OK</span>'
             : '<span class="badge badge-blocked">FAIL</span>';
-          html += `<tr><td style="font-family:var(--font-mono)">${esc(r.server)}</td><td>${status}</td><td>${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
+          html += `<tr><td style="font-family:var(--font-sans)">${esc(r.server)}</td><td>${status}</td><td>${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
         }
         html += '</tbody></table>';
         el.innerHTML = html;
@@ -3134,7 +3133,7 @@ class SettingsPage extends HTMLElement {
       let html = '<table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
       for (const t of tokens) {
         html += `<tr>
-          <td style="color:var(--text-primary);font-family:var(--font-mono)">${esc(t.token)}</td>
+          <td style="color:var(--text-primary);font-family:var(--font-sans)">${esc(t.token)}</td>
           <td><code style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
           <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${esc(t.token)}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
@@ -3168,7 +3167,7 @@ class SettingsPage extends HTMLElement {
       let html = '<table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
       for (const d of data) {
         const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
-        html += `<tr><td style="font-family:var(--font-mono)">${esc(d.server)}</td><td>${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
+        html += `<tr><td style="font-family:var(--font-sans)">${esc(d.server)}</td><td>${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
       }
       html += '</tbody></table>';
       el.innerHTML = html;
