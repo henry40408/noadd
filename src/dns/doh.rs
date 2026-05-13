@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Extension;
@@ -17,6 +17,7 @@ use hickory_proto::serialize::binary::BinDecodable;
 
 use super::handler::{self, DnsHandler};
 use crate::db::Database;
+use crate::net::{TrustedProxies, extract_client_ip};
 
 const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
 
@@ -52,6 +53,7 @@ struct DnsQueryParams {
 pub struct DohState {
     pub handler: Arc<DnsHandler>,
     pub db: Database,
+    pub trusted_proxies: Arc<TrustedProxies>,
 }
 
 /// Create an axum Router with DoH endpoints per RFC 8484.
@@ -61,8 +63,16 @@ pub struct DohState {
 /// - `"allow"`: all requests are allowed, even without a token
 ///
 /// Token-authenticated route: `/dns-query/{token}`
-pub fn doh_router(handler: Arc<DnsHandler>, db: Database) -> Router {
-    let state = DohState { handler, db };
+pub fn doh_router(
+    handler: Arc<DnsHandler>,
+    db: Database,
+    trusted_proxies: Arc<TrustedProxies>,
+) -> Router {
+    let state = DohState {
+        handler,
+        db,
+        trusted_proxies,
+    };
     Router::new()
         .route(
             "/dns-query/{token}",
@@ -72,33 +82,12 @@ pub fn doh_router(handler: Arc<DnsHandler>, db: Database) -> Router {
         .with_state(state)
 }
 
-/// Resolve the client IP for logging and rate-limiting.
-///
-/// Trust policy mirrors the admin API: headers (`X-Forwarded-For`,
-/// `X-Real-IP`) are honoured only when the TCP peer is loopback — the usual
-/// shape when a reverse proxy is fronting noadd. If the peer is a remote
-/// address, headers are client-controlled and must not be trusted, otherwise
-/// a caller could spoof any source IP in the query log.
-fn extract_client_ip(connect: Option<&ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> IpAddr {
-    let peer = connect.map(|ci| ci.0.ip());
-    let trust_headers = matches!(peer, Some(ip) if ip.is_loopback()) || peer.is_none();
-
-    if trust_headers
-        && let Some(forwarded) = headers.get("x-forwarded-for")
-        && let Ok(val) = forwarded.to_str()
-        && let Some(first) = val.split(',').next()
-        && let Ok(ip) = first.trim().parse::<IpAddr>()
-    {
-        return ip;
-    }
-    if trust_headers
-        && let Some(real_ip) = headers.get("x-real-ip")
-        && let Ok(val) = real_ip.to_str()
-        && let Ok(ip) = val.trim().parse::<IpAddr>()
-    {
-        return ip;
-    }
-    peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+fn client_ip_for(
+    state: &DohState,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+) -> IpAddr {
+    extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
 /// Determine if unauthenticated access is allowed.
@@ -139,7 +128,7 @@ async fn handle_get_with_token(
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(connect.as_deref(), &headers);
+    let ip = client_ip_for(&state, connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &query_bytes, ip, token_name).await
 }
 
@@ -164,7 +153,7 @@ async fn handle_post_with_token(
     if !is_valid_dns_wire(&body) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(connect.as_deref(), &headers);
+    let ip = client_ip_for(&state, connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &body, ip, token_name).await
 }
 
@@ -186,7 +175,7 @@ async fn handle_get(
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(connect.as_deref(), &headers);
+    let ip = client_ip_for(&state, connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &query_bytes, ip, None).await
 }
 
@@ -209,7 +198,7 @@ async fn handle_post(
     if !is_valid_dns_wire(&body) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
     }
-    let ip = extract_client_ip(connect.as_deref(), &headers);
+    let ip = client_ip_for(&state, connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &body, ip, None).await
 }
 

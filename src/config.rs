@@ -76,4 +76,14 @@ pub struct CliArgs {
     /// need the per-query record summary in the query log.
     #[arg(long, env = "NOADD_LOG_QUERY_RESULTS")]
     pub log_query_results: bool,
+
+    /// Comma-separated CIDR list of reverse-proxy peers permitted to set
+    /// `X-Forwarded-For` / `X-Real-IP`. Loopback (127.0.0.0/8, ::1) is
+    /// always trusted; configure this when noadd sits behind a proxy on a
+    /// non-loopback address — e.g. SWAG/nginx in a separate Docker
+    /// container reaching noadd over the bridge network
+    /// (`NOADD_TRUSTED_PROXIES=172.18.0.0/16`). Empty disables proxy
+    /// header trust outside loopback.
+    #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
+    pub trusted_proxies: String,
 }

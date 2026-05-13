@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -22,6 +22,7 @@ use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
 use crate::filter::lists::ListManager;
 use crate::filter::rebuild::RebuildCoordinator;
+use crate::net::{TrustedProxies, extract_client_ip};
 use crate::registry::RegistryClient;
 use crate::upstream::forwarder::UpstreamForwarder;
 
@@ -38,6 +39,7 @@ pub struct AppState {
     pub list_manager: Arc<ListManager>,
     pub rebuild: Arc<RebuildCoordinator>,
     pub registry: Arc<RegistryClient>,
+    pub trusted_proxies: Arc<TrustedProxies>,
 }
 
 impl AppState {
@@ -162,39 +164,17 @@ async fn serve_static(uri: Uri) -> impl IntoResponse {
 
 // --- Client IP extraction ---
 
-/// Resolve the client IP for rate-limiting and audit purposes.
-///
-/// Policy:
-/// 1. Start from the TCP peer (`ConnectInfo`).
-/// 2. Only if that peer is loopback (127.0.0.0/8 or ::1) — the usual shape
-///    when a reverse proxy is in front — trust `X-Forwarded-For` (first hop)
-///    or `X-Real-IP`. Otherwise the headers are client-controlled and must
-///    NOT be honoured, or a remote caller could spoof arbitrary source IPs to
-///    evade per-IP rate limits.
-/// 3. Fall back to loopback when no information is available (e.g. unit tests
-///    using `oneshot` that never populate `ConnectInfo`).
-fn client_ip(connect: Option<&ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> IpAddr {
-    let peer = connect.map(|ci| ci.0.ip());
-
-    let trust_headers = matches!(peer, Some(ip) if ip.is_loopback()) || peer.is_none();
-
-    if trust_headers
-        && let Some(hv) = headers.get("x-forwarded-for")
-        && let Ok(s) = hv.to_str()
-        && let Some(first) = s.split(',').next()
-        && let Ok(ip) = first.trim().parse::<IpAddr>()
-    {
-        return ip;
-    }
-    if trust_headers
-        && let Some(hv) = headers.get("x-real-ip")
-        && let Ok(s) = hv.to_str()
-        && let Ok(ip) = s.trim().parse::<IpAddr>()
-    {
-        return ip;
-    }
-
-    peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+/// Resolve the client IP for rate-limiting and audit purposes via the shared
+/// `extract_client_ip` helper. Headers (`X-Forwarded-For`, `X-Real-IP`) are
+/// trusted only when the TCP peer is loopback or matches a configured CIDR
+/// in [`TrustedProxies`]; otherwise headers are client-controlled and would
+/// let a remote caller spoof source IPs to evade per-IP rate limits.
+fn client_ip(
+    state: &AppState,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+) -> std::net::IpAddr {
+    extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
 // --- Auth helper ---
@@ -230,7 +210,7 @@ async fn login(
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
-    let ip = client_ip(connect.as_deref(), &headers);
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     if !state.rate_limiter.check(ip) {
         tracing::warn!(%ip, "login rate limited");
         return Err(StatusCode::TOO_MANY_REQUESTS);

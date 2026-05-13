@@ -17,6 +17,7 @@ use noadd::dns::udp::run_udp_listener;
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::lists::ListManager;
 use noadd::logger::QueryLogger;
+use noadd::net::TrustedProxies;
 use noadd::shutdown::shutdown_signal;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
@@ -117,7 +118,17 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let doh_routes = doh_router(handler.clone(), db.clone());
+    let trusted_proxies = Arc::new(TrustedProxies::parse(&args.trusted_proxies).map_err(|e| {
+        anyhow::anyhow!("failed to parse --trusted-proxies / NOADD_TRUSTED_PROXIES: {e}")
+    })?);
+    if !trusted_proxies.is_empty() {
+        tracing::info!(
+            count = trusted_proxies.len(),
+            "trusted proxy CIDRs configured — X-Forwarded-For / X-Real-IP will be honoured for matching peers"
+        );
+    }
+
+    let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
@@ -138,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
         registry: registry.clone(),
+        trusted_proxies: trusted_proxies.clone(),
     });
     let app = doh_routes.merge(admin_routes);
 

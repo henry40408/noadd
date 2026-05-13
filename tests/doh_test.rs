@@ -65,7 +65,11 @@ async fn test_db() -> Database {
 async fn test_doh_get_no_token() {
     let handler = make_handler().await;
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let query_bytes = make_query_bytes("blocked.example.com", RecordType::A);
     let encoded = URL_SAFE_NO_PAD.encode(&query_bytes);
@@ -94,7 +98,11 @@ async fn test_doh_get_no_token() {
 async fn test_doh_post_no_token() {
     let handler = make_handler().await;
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let query_bytes = make_query_bytes("blocked.example.com", RecordType::A);
 
@@ -125,7 +133,11 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
     let handler = Arc::new(DnsHandler::new(filter, cache, forwarder, tx));
 
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let query_bytes = make_query_bytes("example.com", RecordType::A);
 
@@ -163,7 +175,11 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
 async fn test_doh_post_wrong_content_type_returns_415() {
     let handler = make_handler().await;
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let query_bytes = make_query_bytes("example.com", RecordType::A);
     let request = Request::builder()
@@ -180,7 +196,11 @@ async fn test_doh_post_wrong_content_type_returns_415() {
 async fn test_doh_post_malformed_body_returns_400() {
     let handler = make_handler().await;
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let request = Request::builder()
         .method("POST")
@@ -196,7 +216,11 @@ async fn test_doh_post_malformed_body_returns_400() {
 async fn test_doh_get_malformed_body_returns_400() {
     let handler = make_handler().await;
     let db = test_db().await;
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let encoded = URL_SAFE_NO_PAD.encode([0xde, 0xad, 0xbe, 0xef]);
     let request = Request::builder()
@@ -215,7 +239,11 @@ async fn test_doh_token_required_when_configured() {
     // Configure a token and set policy to deny
     db.add_doh_token("my-secret-token").await.unwrap();
     db.set_setting("doh_access_policy", "deny").await.unwrap();
-    let app = doh_router(handler, db);
+    let app = doh_router(
+        handler,
+        db,
+        std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+    );
 
     let query_bytes = make_query_bytes("blocked.example.com", RecordType::A);
     let encoded = URL_SAFE_NO_PAD.encode(&query_bytes);
