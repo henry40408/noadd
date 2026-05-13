@@ -43,7 +43,7 @@ async fn make_handler() -> Arc<DnsHandler> {
         },
         "test-list".to_string(),
     )];
-    let engine = FilterEngine::new(block_rules, vec![]);
+    let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let config = UpstreamConfig::default();
@@ -121,7 +121,7 @@ async fn test_doh_post_no_token() {
 async fn test_doh_upstream_failure_returns_servfail_not_500() {
     // Use unreachable upstream so all forwards fail
     let block_rules = vec![];
-    let engine = FilterEngine::new(block_rules, vec![]);
+    let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let config = UpstreamConfig {

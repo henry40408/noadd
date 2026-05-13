@@ -23,7 +23,11 @@ async fn setup() -> (axum::Router, String) {
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();
     let token = create_session(&sessions);
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);

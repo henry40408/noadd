@@ -44,7 +44,11 @@ async fn test_full_query_pipeline_block() {
         .unwrap();
 
     // 3. Create FilterEngine + ListManager and rebuild filter
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
     let manager = ListManager::new(db.clone(), filter.clone());
     manager.rebuild_filter().await.unwrap();
 
@@ -95,7 +99,11 @@ async fn test_full_query_pipeline_allow() {
     let db_path = tmp.path().to_str().unwrap().to_string();
     let db = Database::open(&db_path).await.unwrap();
 
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
     let manager = ListManager::new(db.clone(), filter.clone());
     manager.rebuild_filter().await.unwrap();
 

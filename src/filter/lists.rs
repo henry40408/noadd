@@ -48,60 +48,101 @@ impl ListManager {
 
         let lists = self.db.get_filter_lists().await?;
 
-        let mut block_rules = Vec::new();
-        let mut allow_rules = Vec::new();
-
-        // Load rules from enabled filter lists
-        for list in &lists {
-            if !list.enabled {
-                continue;
-            }
+        // Read each enabled list's content sequentially (a single SQLite
+        // connection serializes the calls anyway) into a `(name, content)`
+        // vector. Parse + trie build then run on the blocking pool.
+        let mut list_payloads: Vec<(String, String)> = Vec::new();
+        for list in lists.iter().filter(|l| l.enabled) {
             if let Some(content) = self.db.get_filter_list_content(list.id).await? {
-                let parsed = parse_list(&content);
+                list_payloads.push((list.name.clone(), content));
+            }
+        }
+
+        let custom_blocks = self.db.get_custom_rules_by_type("block").await?;
+        let custom_block_rules: Vec<String> = custom_blocks.into_iter().map(|cr| cr.rule).collect();
+
+        let custom_allows = self.db.get_custom_rules_by_type("allow").await?;
+        let custom_allow_rules: Vec<String> = custom_allows.into_iter().map(|cr| cr.rule).collect();
+
+        // Parse each list on its own blocking worker so the parse cost (line
+        // tokenising + per-rule `to_lowercase`) is shared across cores.
+        let parse_start = std::time::Instant::now();
+        let mut set: tokio::task::JoinSet<(usize, String, Vec<crate::filter::parser::ParsedRule>)> =
+            tokio::task::JoinSet::new();
+        for (idx, (name, content)) in list_payloads.into_iter().enumerate() {
+            set.spawn_blocking(move || (idx, name, parse_list(&content)));
+        }
+        let mut parsed_lists: Vec<Option<(String, Vec<crate::filter::parser::ParsedRule>)>> =
+            (0..set.len()).map(|_| None).collect();
+        while let Some(joined) = set.join_next().await {
+            let (idx, name, parsed) = joined?;
+            parsed_lists[idx] = Some((name, parsed));
+        }
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+        // Finalise rule tables on the blocking pool so FilterEngine::new
+        // (FST + flat trie build) doesn't pin a runtime worker. DNS queries
+        // served from other listener tasks keep moving while we rebuild.
+        let engine = tokio::task::spawn_blocking(move || {
+            let mut list_names: Vec<Box<str>> = Vec::new();
+            let mut block_rules: Vec<(crate::filter::parser::ParsedRule, u16)> = Vec::new();
+            let mut allow_rules: Vec<crate::filter::parser::ParsedRule> = Vec::new();
+
+            for slot in parsed_lists.into_iter() {
+                let (name, parsed) = match slot {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let list_idx = list_names.len() as u16;
+                let mut used = false;
                 for rule in parsed {
                     match rule.action {
                         RuleAction::Block => {
-                            block_rules.push((rule, list.name.clone()));
+                            block_rules.push((rule, list_idx));
+                            used = true;
                         }
                         RuleAction::Allow => {
                             allow_rules.push(rule);
                         }
                     }
                 }
+                if used {
+                    list_names.push(Box::from(name.as_str()));
+                }
             }
-        }
 
-        // Load custom block rules
-        let custom_blocks = self.db.get_custom_rules_by_type("block").await?;
-        for cr in &custom_blocks {
-            if let Some(rule) = parse_rule(&cr.rule) {
-                block_rules.push((rule, "Custom".to_string()));
+            // Custom rules sit under a synthetic "Custom" list. Only allocate
+            // the slot if at least one custom block rule lands in it.
+            let mut custom_idx: Option<u16> = None;
+            for rule_text in custom_block_rules {
+                if let Some(rule) = parse_rule(&rule_text) {
+                    let idx = *custom_idx.get_or_insert_with(|| {
+                        let i = list_names.len() as u16;
+                        list_names.push(Box::from("Custom"));
+                        i
+                    });
+                    block_rules.push((rule, idx));
+                }
             }
-        }
-
-        // Load custom allow rules
-        let custom_allows = self.db.get_custom_rules_by_type("allow").await?;
-        for cr in &custom_allows {
-            if let Some(rule) = parse_rule(&cr.rule) {
-                allow_rules.push(rule);
+            for rule_text in custom_allow_rules {
+                if let Some(rule) = parse_rule(&rule_text) {
+                    allow_rules.push(rule);
+                }
             }
-        }
 
-        let block_count = block_rules.len();
-        let allow_count = allow_rules.len();
-        // FilterEngine::new sorts + dedups + builds an FST + a flat trie; on
-        // a 100k+ rule blocklist this is hundreds of ms of pure CPU work.
-        // Push it onto the blocking pool so the runtime worker thread isn't
-        // pinned for that span — DNS queries served from other listener
-        // tasks keep moving while we rebuild.
-        let engine =
-            tokio::task::spawn_blocking(move || FilterEngine::new(block_rules, allow_rules))
-                .await?;
+            let block_count = block_rules.len();
+            let allow_count = allow_rules.len();
+            let engine = FilterEngine::new(list_names, block_rules, allow_rules);
+            (engine, block_count, allow_count)
+        })
+        .await?;
+        let (engine, block_count, allow_count) = engine;
         self.filter.store(Arc::new(engine));
 
         tracing::info!(
             block_count,
             allow_count,
+            parse_ms,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "filter engine rebuilt"
         );
