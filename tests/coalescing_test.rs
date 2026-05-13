@@ -83,7 +83,11 @@ async fn spawn_mock_upstream(delay: Duration) -> (SocketAddr, Arc<AtomicU64>) {
 async fn make_test_handler(
     upstream_addr: SocketAddr,
 ) -> (Arc<DnsHandler>, mpsc::Receiver<QueryContext>) {
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
     let cache = DnsCache::new(10_000);
     let config = UpstreamConfig {
         servers: vec![upstream_addr.to_string()],

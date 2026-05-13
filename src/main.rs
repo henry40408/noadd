@@ -54,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%url, "auto-set public_url from ACME domain");
     }
 
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
 
     let list_manager = Arc::new(ListManager::new(db.clone(), filter.clone()));
     list_manager.seed_default_lists().await?;

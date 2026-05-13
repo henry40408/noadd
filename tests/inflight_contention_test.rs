@@ -81,7 +81,11 @@ async fn spawn_mock_upstream() -> SocketAddr {
 }
 
 async fn make_test_handler(addr: SocketAddr) -> Arc<DnsHandler> {
-    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(vec![], vec![])));
+    let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
+        vec![],
+        vec![],
+        vec![],
+    )));
     let cache = DnsCache::new(100_000);
     let forwarder = Arc::new(
         UpstreamForwarder::new(UpstreamConfig {

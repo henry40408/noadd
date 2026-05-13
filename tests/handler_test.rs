@@ -33,7 +33,7 @@ async fn make_handler(
     block_rules: Vec<(ParsedRule, String)>,
     allow_rules: Vec<ParsedRule>,
 ) -> (DnsHandler, mpsc::Receiver<QueryContext>) {
-    let engine = FilterEngine::new(block_rules, allow_rules);
+    let engine = FilterEngine::from_named_rules(block_rules, allow_rules);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let config = UpstreamConfig::default();
@@ -196,7 +196,7 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
         },
         "test-list".to_string(),
     )];
-    let engine = FilterEngine::new(block_rules, vec![]);
+    let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
@@ -262,7 +262,7 @@ async fn test_handler_counts_dropped_log_events() {
         },
         "test-list".to_string(),
     )];
-    let engine = FilterEngine::new(block_rules, vec![]);
+    let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
@@ -296,7 +296,7 @@ async fn test_handler_inflight_limit_serves_all_queries() {
         },
         "test-list".to_string(),
     )];
-    let engine = FilterEngine::new(block_rules, vec![]);
+    let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
     let cache = DnsCache::new(100);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);

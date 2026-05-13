@@ -8,7 +8,7 @@ use noadd::filter::lists::{DEFAULT_LISTS, ListManager};
 
 async fn setup() -> (Database, ListManager) {
     let db = Database::open(":memory:").await.unwrap();
-    let engine = FilterEngine::new(vec![], vec![]);
+    let engine = FilterEngine::new(vec![], vec![], vec![]);
     let filter = Arc::new(ArcSwap::new(Arc::new(engine)));
     let manager = ListManager::new(db.clone(), filter.clone());
     (db, manager)
@@ -16,7 +16,7 @@ async fn setup() -> (Database, ListManager) {
 
 async fn setup_with_filter() -> (Database, ListManager, Arc<ArcSwap<FilterEngine>>) {
     let db = Database::open(":memory:").await.unwrap();
-    let engine = FilterEngine::new(vec![], vec![]);
+    let engine = FilterEngine::new(vec![], vec![], vec![]);
     let filter = Arc::new(ArcSwap::new(Arc::new(engine)));
     let manager = ListManager::new(db.clone(), filter.clone());
     (db, manager, filter)

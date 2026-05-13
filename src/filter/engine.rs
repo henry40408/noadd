@@ -115,15 +115,21 @@ impl FlatTrie {
 
 /// Temporary tree node used only during construction, then serialized into
 /// a `FlatTrie` and dropped.
+///
+/// Children live in a `HashMap` so insertion is O(1) — large blocklists
+/// concentrate tens of thousands of second-level domains under a single TLD
+/// node, and a sorted `Vec` made that the dominant cost of `rebuild_filter`
+/// (every `Vec::insert` shifted later siblings). Sorting happens once per
+/// node at serialize time instead.
 struct BuildNode {
-    children: Vec<(Box<str>, BuildNode)>,
+    children: HashMap<Box<str>, BuildNode>,
     terminal: u16,
 }
 
 impl BuildNode {
     fn new() -> Self {
         Self {
-            children: Vec::new(),
+            children: HashMap::new(),
             terminal: NOT_TERMINAL,
         }
     }
@@ -131,18 +137,10 @@ impl BuildNode {
     fn insert(&mut self, labels: &[&str], terminal: u16) {
         let mut node = self;
         for &label in labels {
-            let idx = match node
+            node = node
                 .children
-                .binary_search_by(|(k, _)| k.as_ref().cmp(label))
-            {
-                Ok(i) => i,
-                Err(i) => {
-                    node.children
-                        .insert(i, (Box::from(label), BuildNode::new()));
-                    i
-                }
-            };
-            node = &mut node.children[idx].1;
+                .entry(Box::from(label))
+                .or_insert_with(BuildNode::new);
         }
         node.terminal = terminal;
     }
@@ -174,15 +172,20 @@ impl BuildNode {
             *tc += 1;
         }
 
+        // Sort children by label — required for the binary-search lookup in
+        // FlatTrie. HashMap iteration order is otherwise nondeterministic.
+        let mut sorted: Vec<(&Box<str>, &BuildNode)> = node.children.iter().collect();
+        sorted.sort_unstable_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+
         // Header: terminal_value + child_count
         nodes.extend_from_slice(&node.terminal.to_le_bytes());
-        nodes.extend_from_slice(&(node.children.len() as u16).to_le_bytes());
+        nodes.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
 
         // Reserve space for child entries (filled after recursive serialization).
         let entries_start = nodes.len();
-        nodes.resize(entries_start + CHILD_ENTRY * node.children.len(), 0);
+        nodes.resize(entries_start + CHILD_ENTRY * sorted.len(), 0);
 
-        for (i, (label, child)) in node.children.iter().enumerate() {
+        for (i, (label, child)) in sorted.iter().enumerate() {
             let label_offset = labels.len() as u32;
             let label_len = label.len() as u8;
             labels.extend_from_slice(label.as_bytes());
@@ -245,41 +248,53 @@ pub struct FilterEngine {
 const ALLOW_MARKER: u16 = 0;
 
 impl FilterEngine {
-    /// Build a new engine from parsed rules.
-    pub fn new(block_rules: Vec<(ParsedRule, String)>, allow_rules: Vec<ParsedRule>) -> Self {
-        // Intern list names: name → index.
-        let mut list_names: Vec<Box<str>> = Vec::new();
-        let mut list_intern: HashMap<String, u16> = HashMap::new();
-
-        let mut exact_block_entries: Vec<(String, u16)> = Vec::new();
+    /// Build a new engine from rules with caller-interned list names.
+    ///
+    /// `block_rules` is `(ParsedRule, list_idx)` where `list_idx` indexes into
+    /// `list_names`. This is what `rebuild_filter` calls so the same list
+    /// name is interned once at the rebuild site instead of being cloned per
+    /// rule (a 500k× allocation cut on large blocklists).
+    ///
+    /// `ParsedRule.domain` is trusted to already be lowercase — `parser.rs`
+    /// guarantees this on every code path. The engine does not re-lowercase
+    /// rule domains; only the query passed to [`check`] is folded.
+    pub fn new(
+        list_names: Vec<Box<str>>,
+        block_rules: Vec<(ParsedRule, u16)>,
+        allow_rules: Vec<ParsedRule>,
+    ) -> Self {
+        let mut exact_block_entries: Vec<(String, u16)> = Vec::with_capacity(block_rules.len() / 4);
         let mut block_build = BuildNode::new();
-        let mut exact_allow_entries: Vec<String> = Vec::new();
+        let mut exact_allow_entries: Vec<String> = Vec::with_capacity(allow_rules.len() / 4);
         let mut allow_build = BuildNode::new();
 
-        for (rule, list_name) in block_rules {
+        for (rule, list_idx) in block_rules {
             debug_assert_eq!(rule.action, RuleAction::Block);
-            let domain = rule.domain.to_lowercase();
-            let list_idx = *list_intern.entry(list_name).or_insert_with_key(|k| {
-                let idx = list_names.len() as u16;
-                list_names.push(Box::from(k.as_str()));
-                idx
-            });
+            debug_assert!(
+                !rule.domain.bytes().any(|b| b.is_ascii_uppercase()),
+                "parser must lowercase rule domains; got `{}`",
+                rule.domain
+            );
             if rule.is_subdomain {
-                let labels = reversed_labels(&domain);
+                let labels = reversed_labels(&rule.domain);
                 block_build.insert(&labels, list_idx);
             } else {
-                exact_block_entries.push((domain, list_idx));
+                exact_block_entries.push((rule.domain, list_idx));
             }
         }
 
         for rule in allow_rules {
             debug_assert_eq!(rule.action, RuleAction::Allow);
-            let domain = rule.domain.to_lowercase();
+            debug_assert!(
+                !rule.domain.bytes().any(|b| b.is_ascii_uppercase()),
+                "parser must lowercase rule domains; got `{}`",
+                rule.domain
+            );
             if rule.is_subdomain {
-                let labels = reversed_labels(&domain);
+                let labels = reversed_labels(&rule.domain);
                 allow_build.insert(&labels, ALLOW_MARKER);
             } else {
-                exact_allow_entries.push(domain);
+                exact_allow_entries.push(rule.domain);
             }
         }
 
@@ -310,6 +325,28 @@ impl FilterEngine {
             exact_allow,
             allow_trie,
         }
+    }
+
+    /// Convenience constructor for tests and ad-hoc callers that don't want
+    /// to intern list names themselves. Production code on the rebuild path
+    /// should call [`FilterEngine::new`] directly to avoid cloning the same
+    /// list name once per rule.
+    pub fn from_named_rules(
+        block_rules: Vec<(ParsedRule, String)>,
+        allow_rules: Vec<ParsedRule>,
+    ) -> Self {
+        let mut list_names: Vec<Box<str>> = Vec::new();
+        let mut list_intern: HashMap<String, u16> = HashMap::new();
+        let mut indexed = Vec::with_capacity(block_rules.len());
+        for (rule, name) in block_rules {
+            let idx = *list_intern.entry(name).or_insert_with_key(|k| {
+                let i = list_names.len() as u16;
+                list_names.push(Box::from(k.as_str()));
+                i
+            });
+            indexed.push((rule, idx));
+        }
+        Self::new(list_names, indexed, allow_rules)
     }
 
     /// Check whether `domain` should be blocked.
