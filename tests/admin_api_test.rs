@@ -77,6 +77,7 @@ async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
         list_manager,
         rebuild,
         registry,
+        trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
     (router, token)
 }
@@ -729,6 +730,7 @@ async fn test_setup_initial_password() {
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
         registry: registry.clone(),
+        trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
 
     // Setup should succeed
@@ -763,6 +765,7 @@ async fn test_setup_initial_password() {
         list_manager,
         rebuild,
         registry,
+        trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
     let response = app2
         .oneshot(

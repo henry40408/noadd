@@ -65,6 +65,7 @@ async fn setup() -> (axum::Router, String) {
         list_manager,
         rebuild,
         registry,
+        trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
     (router, token)
 }

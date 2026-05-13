@@ -5,6 +5,7 @@ pub mod db;
 pub mod dns;
 pub mod filter;
 pub mod logger;
+pub mod net;
 pub mod registry;
 pub mod shutdown;
 pub mod tls;
