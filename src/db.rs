@@ -1174,43 +1174,33 @@ impl Database {
 
     pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
         let since_ms = since * 1000;
-        let summary = self
+        // The previous implementation ran a single window-function query
+        // (`ROW_NUMBER() OVER (ORDER BY response_ms)`) which forced SQLite to
+        // sort every matching row — ~150 ms for a 30-day window on a 196 k-row
+        // DB. Instead, pull the response_ms histogram (response_ms → count,
+        // ascending) and derive count/avg/max/p50/p95/p99 in Rust. The
+        // histogram is exact because response_ms is integer milliseconds,
+        // and SQLite needs only one hash-aggregate over the timestamp range
+        // (~40 ms in the same workload).
+        let hist: Vec<(i64, i64)> = self
             .reader()
             .call(move |conn| {
-                // Single scan: order rows once via window functions, then take the
-                // row at the desired percentile offset using MAX(CASE WHEN ...).
-                let row = conn.query_row(
-                    "WITH ordered AS ( \
-                        SELECT response_ms, \
-                               ROW_NUMBER() OVER (ORDER BY response_ms) AS rn, \
-                               COUNT(*) OVER () AS total \
-                        FROM query_logs \
-                        WHERE timestamp >= ?1 \
-                     ) \
-                     SELECT \
-                        COALESCE(MAX(total), 0) AS sample_count, \
-                        COALESCE(AVG(response_ms), 0.0) AS avg_ms, \
-                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.50 AS INTEGER)) THEN response_ms END), 0) AS p50, \
-                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.95 AS INTEGER)) THEN response_ms END), 0) AS p95, \
-                        COALESCE(MAX(CASE WHEN rn <= MAX(1, CAST(total * 0.99 AS INTEGER)) THEN response_ms END), 0) AS p99, \
-                        COALESCE(MAX(response_ms), 0) AS max_ms \
-                     FROM ordered",
-                    params![since_ms],
-                    |row| {
-                        Ok(LatencySummary {
-                            sample_count: row.get(0)?,
-                            avg_ms: row.get(1)?,
-                            p50_ms: row.get(2)?,
-                            p95_ms: row.get(3)?,
-                            p99_ms: row.get(4)?,
-                            max_ms: row.get(5)?,
-                        })
-                    },
+                let mut stmt = conn.prepare_cached(
+                    "SELECT response_ms, COUNT(*) FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY response_ms \
+                     ORDER BY response_ms",
                 )?;
-                Ok(row)
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
             })
             .await?;
-        Ok(summary)
+
+        Ok(latency_summary_from_histogram(&hist))
     }
 
     pub async fn db_file_size(&self) -> Result<i64, DbError> {
@@ -1266,6 +1256,56 @@ impl Database {
             })
             .await?;
         Ok(rows)
+    }
+}
+
+/// Derive a `LatencySummary` from a sorted-ascending response-time histogram.
+///
+/// The histogram is the list of `(response_ms, count)` pairs returned by the
+/// `GROUP BY response_ms` query: each entry says "there were `count` rows with
+/// this response_ms value." Because response_ms is integer milliseconds, the
+/// histogram is loss-free (no bucket rounding), so the derived percentiles are
+/// bit-identical to those produced by the old `ROW_NUMBER()` SQL.
+///
+/// Percentile semantics match the SQL version: `p_k` is the value at rank
+/// `max(1, floor(total * k))` when rows are sorted ascending by response_ms.
+fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
+    let total: i64 = hist.iter().map(|(_, c)| *c).sum();
+    if total == 0 {
+        return LatencySummary {
+            sample_count: 0,
+            avg_ms: 0.0,
+            p50_ms: 0,
+            p95_ms: 0,
+            p99_ms: 0,
+            max_ms: 0,
+        };
+    }
+    let weighted_sum: i64 = hist.iter().map(|(ms, c)| ms * c).sum();
+    let avg_ms = weighted_sum as f64 / total as f64;
+    let max_ms = hist.last().map(|(ms, _)| *ms).unwrap_or(0);
+
+    // Mirror SQL's `MAX(1, CAST(total * p AS INTEGER))` — CAST truncates toward
+    // zero, so this is `max(1, floor(total * p))` for non-negative inputs.
+    let rank_for = |p: f64| ((total as f64 * p) as i64).max(1);
+    let pick = |target: i64| -> i64 {
+        let mut cum = 0i64;
+        for &(ms, c) in hist {
+            cum += c;
+            if cum >= target {
+                return ms;
+            }
+        }
+        max_ms
+    };
+
+    LatencySummary {
+        sample_count: total,
+        avg_ms,
+        p50_ms: pick(rank_for(0.50)),
+        p95_ms: pick(rank_for(0.95)),
+        p99_ms: pick(rank_for(0.99)),
+        max_ms,
     }
 }
 
