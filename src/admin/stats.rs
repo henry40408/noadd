@@ -208,8 +208,10 @@ pub async fn compute_breakdowns(
 ) -> Result<Breakdowns, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    let query_types = db.query_type_breakdown_since(since).await?;
-    let outcomes = db.outcome_breakdown_since(since).await?;
+    let (query_types, outcomes) = tokio::try_join!(
+        db.query_type_breakdown_since(since),
+        db.outcome_breakdown_since(since),
+    )?;
     Ok(Breakdowns {
         query_types,
         outcomes,
@@ -229,8 +231,10 @@ pub async fn compute_highlights(
 ) -> Result<StatsHighlights, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    let unique_domains = db.unique_domains_since(since).await?;
-    let latency = db.latency_summary_since(since).await?;
+    let (unique_domains, latency) = tokio::try_join!(
+        db.unique_domains_since(since),
+        db.latency_summary_since(since),
+    )?;
     Ok(StatsHighlights {
         unique_domains,
         latency,
@@ -258,14 +262,14 @@ pub async fn compute_top_clients_ranged(
 }
 
 pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbError> {
-    let db_size_bytes = db.db_file_size().await?;
-    let total_log_count = db.total_log_count().await?;
-    let earliest_ms = db.earliest_log_timestamp().await?;
+    let (db_size_bytes, total_log_count, earliest_ms, retention_setting) = tokio::try_join!(
+        db.db_file_size(),
+        db.total_log_count(),
+        db.earliest_log_timestamp(),
+        db.get_setting("log_retention_days"),
+    )?;
     let oldest_log_timestamp = earliest_ms.map(|ms| ms / 1000);
-    let log_retention_days = db
-        .get_setting("log_retention_days")
-        .await?
-        .and_then(|s| s.parse::<i64>().ok());
+    let log_retention_days = retention_setting.and_then(|s| s.parse::<i64>().ok());
 
     let avg_new_rows_per_day = match oldest_log_timestamp {
         Some(oldest) if now > oldest => {
