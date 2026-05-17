@@ -145,6 +145,7 @@ async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
             "
             PRAGMA busy_timeout = 5000;
             PRAGMA cache_size = -20000;
+            PRAGMA mmap_size = 268435456;
             PRAGMA temp_store = MEMORY;
             ",
         )?;
@@ -205,6 +206,7 @@ impl Database {
                     PRAGMA foreign_keys = ON;
                     PRAGMA busy_timeout = 5000;
                     PRAGMA cache_size = -20000;
+                    PRAGMA mmap_size = 268435456;
                     PRAGMA temp_store = MEMORY;
                     ",
                 )?;
