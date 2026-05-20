@@ -109,6 +109,104 @@ async fn test_insert_and_query_logs() {
 }
 
 #[tokio::test]
+async fn test_query_logs_search_prefix_fastpath() {
+    let db = test_db().await;
+    let entries = vec![
+        QueryLogEntry {
+            timestamp: 1000000,
+            domain: "example.com".to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+        },
+        QueryLogEntry {
+            timestamp: 1000001,
+            domain: "api.example.com".to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+        },
+        QueryLogEntry {
+            timestamp: 1000002,
+            domain: "subexample.net".to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+        },
+        QueryLogEntry {
+            timestamp: 1000003,
+            domain: "tracker.io".to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+        },
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    // Plain term -> prefix match: "example" matches "example.com" but NOT
+    // "api.example.com" (no longer a substring match) and NOT "subexample.net".
+    let prefix = db
+        .query_logs(100, 0, Some("example"), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].domain, "example.com");
+    let prefix_total = db
+        .count_logs(Some("example"), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(prefix_total, 1);
+
+    // Case-insensitive: search term is lowercased before matching.
+    let mixed = db
+        .query_logs(100, 0, Some("ExAmPlE"), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(mixed.len(), 1);
+    assert_eq!(mixed[0].domain, "example.com");
+
+    // Wildcards -> substring LIKE fallback. "*example*" matches every domain
+    // containing "example".
+    let glob_substring = db
+        .query_logs(100, 0, Some("*example*"), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(glob_substring.len(), 3);
+    let like_substring = db
+        .query_logs(100, 0, Some("%example%"), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(like_substring.len(), 3);
+
+    // Empty / whitespace-only search behaves as "no filter".
+    let blank = db
+        .query_logs(100, 0, Some("   "), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(blank.len(), entries.len());
+}
+
+#[tokio::test]
 async fn test_query_logs_pagination() {
     let db = test_db().await;
     let mut entries = Vec::new();
