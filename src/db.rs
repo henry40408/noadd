@@ -1343,6 +1343,14 @@ fn add_column_if_missing(
 /// Both `query_logs` and `count_logs` share the same four optional filters
 /// (search, blocked, doh_token, query_type); centralising the builder keeps
 /// the two code paths from drifting.
+///
+/// Search semantics: a plain term (no wildcard metachars) does an index-backed
+/// prefix match via `GLOB 'term*'`. A term containing `%`, `_`, `*`, or `?`
+/// is treated as a user-supplied pattern: glob-style `*`/`?` are translated
+/// to LIKE's `%`/`_`, then matched with `LIKE` directly (no auto-wrap), so
+/// `*foo*` and `%foo%` both mean "contains foo". Domains are stored
+/// lowercase, so the term is lowercased to keep both branches
+/// case-insensitive against the column.
 fn append_log_filters(
     sql: &mut String,
     search: Option<&str>,
@@ -1352,8 +1360,24 @@ fn append_log_filters(
 ) -> Vec<Box<dyn rusqlite::types::ToSql>> {
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(s) = search {
-        sql.push_str(" AND domain LIKE ?");
-        values.push(Box::new(format!("%{s}%")));
+        let s = s.trim().to_lowercase();
+        if !s.is_empty() {
+            if s.contains(['%', '_', '*', '?']) {
+                let pattern: String = s
+                    .chars()
+                    .map(|c| match c {
+                        '*' => '%',
+                        '?' => '_',
+                        other => other,
+                    })
+                    .collect();
+                sql.push_str(" AND domain LIKE ?");
+                values.push(Box::new(pattern));
+            } else {
+                sql.push_str(" AND domain GLOB ?");
+                values.push(Box::new(format!("{s}*")));
+            }
+        }
     }
     if let Some(b) = blocked {
         sql.push_str(" AND blocked = ?");

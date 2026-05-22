@@ -2569,7 +2569,7 @@ class LogsPage extends HTMLElement {
     this.innerHTML = `
       <div class="page-header fade-in"><h2>Query Log</h2><p>DNS query history</p></div>
       <div class="filters-row fade-in">
-        <input type="text" id="log-search" placeholder="Search domain...">
+        <input type="text" id="log-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower).">
         <select id="log-action">
           <option value="">All</option>
           <option value="allowed">Allowed</option>
