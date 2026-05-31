@@ -329,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
     tcp_handle.abort();
     drop(handler); // drops log_tx
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), logger_handle).await;
+    db.close().await; // checkpoint WAL and close connections so -wal/-shm are removed
     tracing::info!("goodbye");
 
     Ok(())

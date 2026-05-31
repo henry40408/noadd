@@ -194,6 +194,29 @@ impl Database {
         self.read_pool.pick()
     }
 
+    /// Flush the WAL back into the main database file and close every
+    /// connection so SQLite can remove the `-wal`/`-shm` sidecar files.
+    ///
+    /// Read connections are closed first so the writer is the sole open
+    /// connection when the truncating checkpoint runs; closing that final
+    /// connection is what lets SQLite delete the sidecars. Errors are ignored
+    /// because this only runs on shutdown — there is nothing left to recover,
+    /// and an in-memory database (where readers share the writer connection)
+    /// has no files to clean up regardless.
+    pub async fn close(self) {
+        for c in &self.read_pool.conns {
+            let _ = c.clone().close().await;
+        }
+        let _: Result<(), tokio_rusqlite::Error> = self
+            .conn
+            .call(|conn| {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+                Ok(())
+            })
+            .await;
+        let _ = self.conn.clone().close().await;
+    }
+
     async fn init_schema(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
@@ -1392,4 +1415,42 @@ fn append_log_filters(
         values.push(Box::new(qt.to_string()));
     }
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn close_removes_wal_sidecar_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        // WAL-mode schema creation leaves the sidecar files in place while open.
+        let wal = format!("{path_str}-wal");
+        let shm = format!("{path_str}-shm");
+        assert!(
+            std::path::Path::new(&wal).exists(),
+            "-wal should exist while open"
+        );
+        assert!(
+            std::path::Path::new(&shm).exists(),
+            "-shm should exist while open"
+        );
+
+        db.close().await;
+
+        assert!(
+            !std::path::Path::new(&wal).exists(),
+            "-wal should be removed after close"
+        );
+        assert!(
+            !std::path::Path::new(&shm).exists(),
+            "-shm should be removed after close"
+        );
+        assert!(path.exists(), "main database file should remain");
+    }
 }
