@@ -39,6 +39,7 @@ time = "0.3.47"
 plist = "1.8.0"
 uuid = { version = "1.23.0", features = ["v5"] }
 fst = "0.4.7"
+mimalloc = "0.1"
 
 [build-dependencies]
 resvg = { version = "0.47", default-features = false }

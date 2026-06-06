@@ -25,6 +25,7 @@ Blocks ads and trackers at the DNS level using community-maintained filter lists
 - **TLS support** — manual certificates or automatic Let's Encrypt via ACME
 - **SQLite storage** — config, query logs, and stats in a single file
 - **Hot-swap filters** — update lists without restarting, zero query interruption
+- **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
 
 ## Quick Start
 
