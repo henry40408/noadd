@@ -16,6 +16,19 @@ pub fn user_agent() -> String {
     format!("noadd/{version} (DNS ad-blocker; +https://github.com/henry40408/noadd)")
 }
 
+/// Force the allocator to return freed pages to the OS.
+///
+/// The filter rebuild allocates a large transient `BuildNode` tree; once it is
+/// flattened and dropped, mimalloc would otherwise hold those pages for up to
+/// its purge delay (~10s). Calling this right after a rebuild collapses the
+/// resident spike to the steady-state footprint immediately, which matters on
+/// memory-constrained hosts (e.g. Raspberry Pi).
+pub fn reclaim_memory() {
+    // SAFETY: `mi_collect` is a thread-safe no-side-effect collection call;
+    // `true` forces it to also return memory to the OS.
+    unsafe { libmimalloc_sys::mi_collect(true) }
+}
+
 /// Current Unix timestamp in seconds. Returns 0 if the system clock is
 /// before the Unix epoch (effectively impossible on a healthy host).
 pub fn now_unix() -> i64 {
