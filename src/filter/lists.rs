@@ -139,6 +139,11 @@ impl ListManager {
         let (engine, block_count, allow_count) = engine;
         self.filter.store(Arc::new(engine));
 
+        // The build dropped its large transient trees on the blocking worker;
+        // return those freed pages to the OS now instead of waiting for the
+        // allocator's lazy purge, so the resident spike doesn't linger.
+        crate::reclaim_memory();
+
         tracing::info!(
             block_count,
             allow_count,

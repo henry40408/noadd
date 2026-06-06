@@ -1,6 +1,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+// Use mimalloc to keep resident memory low: the filter rebuild allocates a
+// large transient BuildNode tree, and the system glibc allocator tends to
+// retain those pages as RSS afterwards. mimalloc returns freed pages to the
+// OS far more aggressively.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use arc_swap::ArcSwap;
 use clap::Parser;
 
