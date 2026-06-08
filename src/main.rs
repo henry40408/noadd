@@ -113,21 +113,32 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let (shutdown_tx, shutdown_signal) = shutdown_signal();
+    // Convert the OS signal into the broadcast so the HTTP server, DNS
+    // listeners and background tasks all observe one shutdown event. A fatal
+    // DNS listener failure broadcasts on the same channel (see
+    // supervise_listener) so the whole process winds down instead of silently
+    // serving HTTP/DoH with dead plain-DNS.
+    tokio::spawn(shutdown_signal);
+    let listener_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Subscribe the HTTP server to the shutdown broadcast *before* spawning the
+    // DNS listeners. A listener can fail (and broadcast) within microseconds of
+    // being spawned; subscribing afterwards would race and miss that message,
+    // leaving HTTP serving until an OS signal arrives.
+    let mut http_shutdown = shutdown_tx.subscribe();
 
     let dns_addr: SocketAddr = args.dns_addr.parse()?;
-    let udp_handler = handler.clone();
-    let udp_handle = tokio::spawn(async move {
-        if let Err(e) = run_udp_listener(dns_addr, udp_handler).await {
-            tracing::error!(error = %e, "UDP listener failed");
-        }
-    });
-
-    let tcp_handler = handler.clone();
-    let tcp_handle = tokio::spawn(async move {
-        if let Err(e) = run_tcp_listener(dns_addr, tcp_handler).await {
-            tracing::error!(error = %e, "TCP listener failed");
-        }
-    });
+    let udp_handle = tokio::spawn(noadd::shutdown::supervise_listener(
+        "UDP",
+        run_udp_listener(dns_addr, handler.clone()),
+        shutdown_tx.clone(),
+        listener_failed.clone(),
+    ));
+    let tcp_handle = tokio::spawn(noadd::shutdown::supervise_listener(
+        "TCP",
+        run_tcp_listener(dns_addr, handler.clone()),
+        shutdown_tx.clone(),
+        listener_failed.clone(),
+    ));
 
     let trusted_proxies = Arc::new(TrustedProxies::parse(&args.trusted_proxies).map_err(|e| {
         anyhow::anyhow!("failed to parse --trusted-proxies / NOADD_TRUSTED_PROXIES: {e}")
@@ -293,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
         tokio::spawn(async move {
-            shutdown_signal.await;
+            let _ = http_shutdown.recv().await;
             server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
         });
         axum_server::bind(http_addr)
@@ -312,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
         tokio::spawn(async move {
-            shutdown_signal.await;
+            let _ = http_shutdown.recv().await;
             server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
         });
         axum_server::bind_rustls(http_addr, rustls_config)
@@ -327,7 +338,9 @@ async fn main() -> anyhow::Result<()> {
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal)
+        .with_graceful_shutdown(async move {
+            let _ = http_shutdown.recv().await;
+        })
         .await?;
     }
 
@@ -338,6 +351,13 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), logger_handle).await;
     db.close().await; // checkpoint WAL and close connections so -wal/-shm are removed
     tracing::info!("goodbye");
+
+    // If a DNS listener brought us down (rather than an OS signal), exit
+    // non-zero so orchestrators and health checks see the failure instead of a
+    // clean shutdown.
+    if listener_failed.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("DNS listener failed; exiting with non-zero status");
+    }
 
     Ok(())
 }
