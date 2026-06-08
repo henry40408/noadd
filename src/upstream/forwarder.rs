@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::ProtoErrorKind;
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, FirstAnswer, Protocol};
@@ -431,6 +432,31 @@ impl UpstreamForwarder {
                     }
                 }
                 Err(e) => {
+                    // NXDOMAIN / NoError-with-no-records is a valid authoritative
+                    // response, not an upstream failure.  hickory converts it to a
+                    // ProtoError so we reconstruct a proper DNS response and return
+                    // it immediately so the query gets logged by the handler.
+                    if e.is_no_records_found() {
+                        let rcode = match e.kind() {
+                            ProtoErrorKind::NoRecordsFound { response_code, .. } => *response_code,
+                            _ => ResponseCode::NXDomain,
+                        };
+                        let ms = start.elapsed().as_secs_f64() * 1000.0;
+                        self.update_latency(idx, ms);
+                        let mut response = Message::new();
+                        response.set_id(client_id);
+                        response.set_message_type(MessageType::Response);
+                        response.set_op_code(OpCode::Query);
+                        response.set_response_code(rcode);
+                        response.set_recursion_desired(true);
+                        response.set_recursion_available(true);
+                        for q in request_msg.queries() {
+                            response.add_query(q.clone());
+                        }
+                        if let Ok(bytes) = response.to_bytes() {
+                            return Ok((bytes, entry.label.clone()));
+                        }
+                    }
                     warn!(upstream = %entry.label, error = %e, "upstream forward failed");
                     continue;
                 }
