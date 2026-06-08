@@ -1,4 +1,4 @@
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -186,4 +186,86 @@ async fn test_health_check_reports_dead_upstream_as_fail() {
     assert!(!results[0].1, "dead upstream should report ok=false");
     assert_eq!(results[1].0, "1.1.1.1:53");
     assert!(results[1].1, "live upstream should report ok=true");
+}
+
+// Regression tests for the fix that converts hickory's ProtoErrorKind::NoRecordsFound
+// (NXDOMAIN / NODATA) from a forwarding error into a synthesized DNS response with
+// the real upstream response code, so callers receive Ok instead of an error.
+
+#[tokio::test]
+async fn test_forward_nxdomain_returns_response_not_error() {
+    // Query a guaranteed-nonexistent name under the .invalid TLD (RFC 6761).
+    // Before the fix, hickory's NoRecordsFound propagated as ForwardError,
+    // producing SERVFAIL to the client. After the fix, forward() returns Ok
+    // with a proper NXDOMAIN response message.
+    let config = UpstreamConfig::default();
+    let forwarder = UpstreamForwarder::new(config).await;
+
+    let query = build_query("nonexistent-noadd-probe.invalid.", RecordType::A);
+    let (response_bytes, upstream) = forwarder
+        .forward(&query)
+        .await
+        .expect("forward should return Ok for NXDOMAIN, not a forwarding error");
+
+    let response =
+        Message::from_vec(&response_bytes).expect("response must be valid DNS wire format");
+
+    assert_eq!(
+        response.response_code(),
+        ResponseCode::NXDomain,
+        "NXDOMAIN name must produce NXDomain response code, got {:?}",
+        response.response_code()
+    );
+    assert_eq!(
+        response.message_type(),
+        MessageType::Response,
+        "message_type must be Response"
+    );
+    assert_eq!(response.id(), 0x1234, "response id must echo the query id");
+    assert!(
+        !response.queries().is_empty(),
+        "question section must be present in the response"
+    );
+    assert!(
+        !upstream.is_empty(),
+        "upstream address must be reported even for NXDOMAIN"
+    );
+}
+
+#[tokio::test]
+async fn test_forward_nodata_returns_noerror() {
+    // Query example.com for MX records. example.com has no MX records
+    // (it is a reserved example domain per RFC 2606), so the upstream
+    // returns NoError with an empty answer section — NODATA. hickory
+    // converts this to a NoRecordsFound error; before the fix that
+    // propagated as ForwardError. After the fix, forward() returns Ok
+    // with a NoError response.
+    let config = UpstreamConfig::default();
+    let forwarder = UpstreamForwarder::new(config).await;
+
+    let query = build_query("example.com.", RecordType::MX);
+    let (response_bytes, upstream) = forwarder
+        .forward(&query)
+        .await
+        .expect("forward should return Ok for NODATA, not a forwarding error");
+
+    let response =
+        Message::from_vec(&response_bytes).expect("response must be valid DNS wire format");
+
+    assert_eq!(
+        response.response_code(),
+        ResponseCode::NoError,
+        "NODATA response must carry NoError response code, got {:?}",
+        response.response_code()
+    );
+    assert_eq!(
+        response.message_type(),
+        MessageType::Response,
+        "message_type must be Response"
+    );
+    assert_eq!(response.id(), 0x1234, "response id must echo the query id");
+    assert!(
+        !upstream.is_empty(),
+        "upstream address must be reported even for NODATA"
+    );
 }
