@@ -27,6 +27,18 @@ async fn setup_with_registry_url(url: String) -> (axum::Router, String) {
 }
 
 async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
+    build_app(registry_url, true).await
+}
+
+/// Build a router whose admin password is NOT set, so `/api/auth/setup`
+/// does not short-circuit with 409. Returns only the router (no session
+/// token is meaningful before setup).
+#[allow(dead_code)]
+async fn unconfigured_app() -> axum::Router {
+    build_app("http://127.0.0.1:1/filters.json", false).await.0
+}
+
+async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
@@ -51,9 +63,11 @@ async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
         log_tx,
     ));
 
-    // Set admin password
-    let hash = hash_password("admin").unwrap();
-    db.set_setting("admin_password_hash", &hash).await.unwrap();
+    // Set admin password (skipped for unconfigured apps that test setup)
+    if set_password {
+        let hash = hash_password("admin").unwrap();
+        db.set_setting("admin_password_hash", &hash).await.unwrap();
+    }
 
     let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
         db.clone(),
@@ -749,7 +763,7 @@ async fn test_setup_initial_password() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"newpass"}"#))
+                .body(Body::from(r#"{"password":"newpass1"}"#))
                 .unwrap(),
         )
         .await
@@ -999,5 +1013,69 @@ async fn test_apple_touch_icon_served_as_png() {
         body.len() > 500,
         "PNG body suspiciously small: {} bytes",
         body.len()
+    );
+}
+
+#[tokio::test]
+async fn setup_rejects_short_password_with_400() {
+    let app = unconfigured_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"password":"1234567"}"#)) // 7 chars
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("at least") || msg.contains("8"),
+        "expected a too-short error message mentioning the minimum, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn setup_accepts_eight_char_password_with_200() {
+    let app = unconfigured_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"password":"12345678"}"#)) // 8 chars
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body.get("success").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[tokio::test]
+async fn setup_already_configured_returns_409() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"password":"another-long-pw"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body.get("error").and_then(|v| v.as_str()).is_some(),
+        "expected a JSON error body for 409, got: {body}"
     );
 }

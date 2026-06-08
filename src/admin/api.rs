@@ -260,28 +260,60 @@ pub struct SetupResponse {
     pub success: bool,
 }
 
+/// Minimum length for the admin password set via `POST /api/auth/setup`.
+const MIN_PASSWORD_LENGTH: usize = 8;
+
+#[derive(Serialize)]
+struct SetupErrorResponse {
+    error: String,
+}
+
+fn setup_ise() -> (StatusCode, Json<SetupErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(SetupErrorResponse {
+            error: "internal error".to_string(),
+        }),
+    )
+}
+
 async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
-) -> Result<Json<SetupResponse>, StatusCode> {
-    // Only allow setup if no password exists
+) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
+    // Only allow setup if no password exists (check this first so a
+    // configured instance never reveals password-policy details).
     let existing = state
         .db
         .get_setting("admin_password_hash")
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| setup_ise())?;
 
     if existing.is_some() {
-        return Err(StatusCode::CONFLICT);
+        return Err((
+            StatusCode::CONFLICT,
+            Json(SetupErrorResponse {
+                error: "already configured".to_string(),
+            }),
+        ));
     }
 
-    let hash = hash_password(&body.password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if body.password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(SetupErrorResponse {
+                error: format!("password must be at least {MIN_PASSWORD_LENGTH} characters"),
+            }),
+        ));
+    }
+
+    let hash = hash_password(&body.password).map_err(|_| setup_ise())?;
 
     state
         .db
         .set_setting("admin_password_hash", &hash)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| setup_ise())?;
 
     Ok(Json(SetupResponse { success: true }))
 }
@@ -354,6 +386,7 @@ async fn get_settings(
         "log_retention_days",
         "doh_access_policy",
         "public_url",
+        "onboarding_banner_dismissed",
     ];
     let mut settings = std::collections::HashMap::new();
 
