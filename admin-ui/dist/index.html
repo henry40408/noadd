@@ -1698,12 +1698,14 @@ customElements.define('rebuild-banner', RebuildBanner);
 // dismissal persists server-side via PUT /api/settings.
 class NextStepBanner extends HTMLElement {
   connectedCallback() {
+    this._disconnected = false;
     this.timer = null;
     this.dnsAddr = '';
     this.innerHTML = '';   // render nothing until init decides
     this.init();
   }
   disconnectedCallback() {
+    this._disconnected = true;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
   async init() {
@@ -1731,6 +1733,7 @@ class NextStepBanner extends HTMLElement {
     if (await this.hasQueries()) {
       return;
     }
+    if (this._disconnected) return;
     this.show();
     this.timer = setInterval(() => this.poll(), 3000);
   }
