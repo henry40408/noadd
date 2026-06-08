@@ -122,6 +122,24 @@ cargo clippy -- -D warnings
 RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
 ```
 
+### End-to-end tests
+
+Browser-based BDD tests for the admin UI live in [`e2e/`](e2e/), built with
+[playwright-bdd](https://github.com/vitalets/playwright-bdd). Playwright starts
+the `noadd` binary itself (on throwaway ports and SQLite files), so build the
+binary first:
+
+```bash
+cargo build                       # embeds the admin UI into the binary
+cd e2e
+npm ci
+npx playwright install chromium
+npm test                          # generates step bindings, then runs the suite
+```
+
+Gherkin features are in `e2e/features/`; step definitions in `e2e/steps/`. The
+suite also runs in CI via the `e2e` job.
+
 ## License
 
 MIT
