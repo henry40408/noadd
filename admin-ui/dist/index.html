@@ -1482,12 +1482,12 @@ class SetupPage extends HTMLElement {
         <div class="login-box fade-in">
           <h1>no<span>add</span></h1>
           <p class="sub">Welcome! Set your admin password to get started.</p>
-          <div class="login-error" id="setup-error"></div>
+          <div class="login-error" id="setup-error" data-testid="setup-error"></div>
           <label for="setup-pw">Password</label>
-          <input type="password" id="setup-pw" placeholder="Choose a strong password" autofocus>
+          <input type="password" id="setup-pw" data-testid="setup-password" placeholder="Choose a strong password" autofocus>
           <label for="setup-pw2" style="margin-top:4px">Confirm Password</label>
-          <input type="password" id="setup-pw2" placeholder="Confirm password">
-          <button class="btn btn-primary" style="width:100%;justify-content:center" id="setup-btn">Create Account</button>
+          <input type="password" id="setup-pw2" data-testid="setup-password-confirm" placeholder="Confirm password">
+          <button class="btn btn-primary" style="width:100%;justify-content:center" id="setup-btn" data-testid="setup-submit">Create Account</button>
         </div>
       </div>`;
     const pw = this.querySelector('#setup-pw');
@@ -1530,10 +1530,10 @@ class LoginPage extends HTMLElement {
         <div class="login-box fade-in">
           <h1>no<span>add</span></h1>
           <p class="sub">DNS ad-blocker admin</p>
-          <div class="login-error" id="login-error"></div>
+          <div class="login-error" id="login-error" data-testid="login-error"></div>
           <label for="pw">Password</label>
-          <input type="password" id="pw" placeholder="Enter admin password" autofocus>
-          <button class="btn btn-primary" style="width:100%;justify-content:center" id="login-btn">Sign in</button>
+          <input type="password" id="pw" data-testid="login-password" placeholder="Enter admin password" autofocus>
+          <button class="btn btn-primary" style="width:100%;justify-content:center" id="login-btn" data-testid="login-submit">Sign in</button>
         </div>
       </div>`;
     const pw = this.querySelector('#pw');
@@ -1559,18 +1559,18 @@ customElements.define('login-page', LoginPage);
 class AppShell extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
-      <div class="app-shell">
+      <div class="app-shell" data-testid="app-shell">
         <nav class="sidebar">
           <div class="sidebar-brand">
             <h1>no<span>add</span></h1>
             <div class="tagline">dns ad-blocker</div>
           </div>
           <div class="sidebar-nav">
-            <button class="nav-item" data-route="#dashboard">${icons.dashboard}<span>Dashboard</span></button>
-            <button class="nav-item" data-route="#stats">${icons.stats}<span>Statistics</span></button>
-            <button class="nav-item" data-route="#logs">${icons.logs}<span>Query Log</span></button>
-            <button class="nav-item" data-route="#filters">${icons.filter}<span>Filters</span></button>
-            <button class="nav-item" data-route="#settings">${icons.settings}<span>Settings</span></button>
+            <button class="nav-item" data-route="#dashboard" data-testid="nav-dashboard">${icons.dashboard}<span>Dashboard</span></button>
+            <button class="nav-item" data-route="#stats" data-testid="nav-stats">${icons.stats}<span>Statistics</span></button>
+            <button class="nav-item" data-route="#logs" data-testid="nav-logs">${icons.logs}<span>Query Log</span></button>
+            <button class="nav-item" data-route="#filters" data-testid="nav-filters">${icons.filter}<span>Filters</span></button>
+            <button class="nav-item" data-route="#settings" data-testid="nav-settings">${icons.settings}<span>Settings</span></button>
           </div>
           <div class="sidebar-version">${window.__noadd_version || ''}</div>
         </nav>
@@ -1900,7 +1900,7 @@ class DashboardPage extends HTMLElement {
     this.innerHTML = `
       <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
         <div><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
-        <button class="live-toggle" id="live-btn" title="Auto-refresh every 10s. Click to toggle."><span class="live-dot"></span> LIVE</button>
+        <button class="live-toggle" id="live-btn" data-testid="live-toggle" title="Auto-refresh every 10s. Click to toggle."><span class="live-dot"></span> LIVE</button>
       </div>
       <div class="stat-grid fade-in" id="stats"></div>
       <div class="card fade-in" style="animation-delay:0.1s" id="chart-card">
@@ -1908,7 +1908,7 @@ class DashboardPage extends HTMLElement {
         <div class="chart-container" id="chart"></div>
       </div>
       <div class="dashboard-grid-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div class="card fade-in" style="animation-delay:0.15s" id="domains-card">
+        <div class="card fade-in" style="animation-delay:0.15s" id="domains-card" data-testid="top-domains-card">
           <div class="card-title">Top Queried Domains</div>
           <div id="top-domains"></div>
         </div>
@@ -2002,8 +2002,8 @@ class DashboardPage extends HTMLElement {
     const statsEl = this.querySelector('#stats');
     statsEl.innerHTML = `
       <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
-      <div class="stat-card" data-i="1"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
-      <div class="stat-card" data-i="2"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
+      <div class="stat-card" data-i="1" data-testid="stat-blocked-today"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
+      <div class="stat-card" data-i="2" data-testid="stat-block-rate"><div class="stat-label">Block Rate</div><div class="stat-value green">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value accent">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
       <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
       <div class="stat-card" data-i="5"><div class="stat-label">Throughput (1m)</div><div class="stat-value accent">${qps}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div></div>`;
@@ -2178,7 +2178,7 @@ class StatsPage extends HTMLElement {
           <div id="ranged-clients"><p style="color:var(--text-dim)">Loading…</p></div>
         </div>
       </div>
-      <div class="card fade-in" style="animation-delay:0.2s" id="health-card">
+      <div class="card fade-in" style="animation-delay:0.2s" id="health-card" data-testid="db-health-card">
         <div class="card-title">Database Health</div>
         <div class="stat-grid" id="health-grid"></div>
       </div>`;
@@ -2726,10 +2726,10 @@ class FiltersPage extends HTMLElement {
         <div class="card-title">Domain Test</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
         <div class="input-row">
-          <input type="text" id="test-domain" placeholder="ads.example.com">
-          <button class="btn btn-primary btn-sm" id="test-btn">${icons.refresh} Test</button>
+          <input type="text" id="test-domain" data-testid="domain-test-input" placeholder="ads.example.com">
+          <button class="btn btn-primary btn-sm" id="test-btn" data-testid="domain-test-submit">${icons.refresh} Test</button>
         </div>
-        <div id="test-result" style="margin-top:12px"></div>
+        <div id="test-result" data-testid="domain-test-result" style="margin-top:12px"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Filter Lists</div>
@@ -2743,18 +2743,18 @@ class FiltersPage extends HTMLElement {
         <div id="lists-cards" class="show-mobile"></div>
         <div class="card-title" style="margin-top:16px">Add Custom List</div>
         <div class="input-row">
-          <input type="text" id="list-name" placeholder="List name">
-          <input type="url" id="list-url" placeholder="https://...">
-          <button class="btn btn-primary btn-sm" id="add-list">${icons.plus} Add</button>
+          <input type="text" id="list-name" data-testid="list-name-input" placeholder="List name">
+          <input type="url" id="list-url" data-testid="list-url-input" placeholder="https://...">
+          <button class="btn btn-primary btn-sm" id="add-list" data-testid="list-add-submit">${icons.plus} Add</button>
         </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Custom Rules</div>
         <div class="input-row">
-          <input type="text" id="add-rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^">
-          <button class="btn btn-primary btn-sm" id="add-rule-btn">${icons.plus} Add</button>
+          <input type="text" id="add-rule-input" data-testid="rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^">
+          <button class="btn btn-primary btn-sm" id="add-rule-btn" data-testid="rule-submit">${icons.plus} Add</button>
         </div>
-        <div id="rules-list" style="margin-top:12px"></div>
+        <div id="rules-list" data-testid="rules-list" style="margin-top:12px"></div>
         <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
           <strong style="color:var(--text-secondary)">Syntax Reference</strong>
           <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
@@ -2845,10 +2845,10 @@ class FiltersPage extends HTMLElement {
 
       // Desktop table
       const body = this.querySelector('#lists-body');
-      body.innerHTML = lists.map(l => `<tr>
+      body.innerHTML = lists.map(l => `<tr data-testid="filter-list-row" data-name="${esc(l.name)}">
         <td>
           <label class="toggle">
-            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <input type="checkbox" data-testid="filter-list-toggle" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
             <div class="toggle-track"></div>
             <div class="toggle-thumb"></div>
           </label>
@@ -2972,10 +2972,10 @@ class FiltersPage extends HTMLElement {
         const badge = r.rule_type === 'allow'
           ? '<span class="badge badge-allowed">allow</span>'
           : '<span class="badge badge-blocked">block</span>';
-        html += `<tr>
+        html += `<tr data-testid="rule-row" data-rule="${esc(r.rule)}" data-type="${esc(r.rule_type)}">
           <td style="width:70px">${badge}</td>
           <td class="mono" style="color:var(--text-primary);font-size:0.85rem">${esc(r.rule)}</td>
-          <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-id="${r.id}">${icons.trash}</button></td>
+          <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-testid="rule-delete" data-id="${r.id}">${icons.trash}</button></td>
         </tr>`;
       }
       html += '</tbody></table>';
@@ -3054,7 +3054,7 @@ class SettingsPage extends HTMLElement {
       <div class="card fade-in" style="animation-delay:0.25s">
         <div class="card-title">Sessions</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Sessions expire after 7 days. Revoking logs out all devices.</p>
-        <button class="btn btn-danger" id="revoke-sessions">${icons.trash} Revoke All Sessions</button>
+        <button class="btn btn-danger" id="revoke-sessions" data-testid="revoke-sessions">${icons.trash} Revoke All Sessions</button>
       </div>`;
 
     this.load();
