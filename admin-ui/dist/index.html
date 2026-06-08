@@ -2007,6 +2007,7 @@ class DashboardPage extends HTMLElement {
     this._prevDomains = null;
     this._prevClients = null;
     this._prevUpstreams = null;
+    this._dnsAddr = '';
   }
 
   async connectedCallback() {
@@ -2015,6 +2016,7 @@ class DashboardPage extends HTMLElement {
         <div><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
         <button class="live-toggle" id="live-btn" data-testid="live-toggle" title="Auto-refresh every 10s. Click to toggle."><span class="live-dot"></span> LIVE</button>
       </div>
+      <div class="card fade-in" id="onboard-empty" data-testid="dashboard-empty-state" style="display:none"></div>
       <div class="stat-grid fade-in" id="stats"></div>
       <div class="card fade-in" style="animation-delay:0.1s" id="chart-card">
         <div class="card-title">Queries (24h)</div>
@@ -2046,7 +2048,13 @@ class DashboardPage extends HTMLElement {
       else this._stopPolling();
     };
 
-    await this._fetchAll();
+    try {
+        const info = await api.get('/api/server-info');
+        const port = (info && info.dns_addr ? String(info.dns_addr) : '').split(':').pop();
+        this._dnsAddr = port ? `${window.location.hostname}:${port}` : window.location.hostname;
+      } catch (e) { this._dnsAddr = window.location.hostname; }
+
+      await this._fetchAll();
     this._startPolling();
   }
 
@@ -2135,7 +2143,33 @@ class DashboardPage extends HTMLElement {
         }
       });
     }
-  }
+
+      this._renderOnboarding(s);
+    }
+
+    _renderOnboarding(s) {
+      const hasQueries = ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
+      const box = this.querySelector('#onboard-empty');
+      const chart = this.querySelector('#chart-card');
+      if (!box) return;
+      if (hasQueries) {
+        box.style.display = 'none';
+        if (chart) chart.style.display = '';
+        return;
+      }
+      box.innerHTML = `
+        <div class="card-title">Point a device at noadd to get started</div>
+        <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
+          noadd hasn't served any DNS queries yet. To start filtering, configure a device or
+          router to use this server as its DNS resolver, then send some traffic.
+        </p>
+        <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
+          Set the device's DNS server to:
+          <code class="mono" style="color:var(--text-primary)">${esc(this._dnsAddr)}</code>
+        </p>`;
+      box.style.display = '';
+      if (chart) chart.style.display = 'none';
+    }
 
   renderChart(rawData) {
     if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
@@ -2753,10 +2787,21 @@ class LogsPage extends HTMLElement {
   }
 
   renderLogs(logs) {
+    const noFilters = !this.search && !this.actionFilter && !this.tokenFilter && !this.typeFilter;
+    const emptyGuide = `<div style="text-align:center;color:var(--text-secondary);padding:24px 12px">
+        <div style="color:var(--text-primary);font-weight:600;margin-bottom:6px">No DNS queries logged yet</div>
+        <div style="font-size:0.9rem">Once a device uses noadd as its DNS resolver, its queries will appear here.</div>
+      </div>`;
+    const emptyGuideDesktop = `<div data-testid="logs-empty-state" style="text-align:center;color:var(--text-secondary);padding:24px 12px">
+        <div style="color:var(--text-primary);font-weight:600;margin-bottom:6px">No DNS queries logged yet</div>
+        <div style="font-size:0.9rem">Once a device uses noadd as its DNS resolver, its queries will appear here.</div>
+      </div>`;
     // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
+      body.innerHTML = (!logs.length && noFilters)
+        ? `<tr><td colspan="8" style="padding:0">${emptyGuideDesktop}</td></tr>`
+        : '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
@@ -2773,7 +2818,9 @@ class LogsPage extends HTMLElement {
     // Mobile card list
     const cards = this.querySelector('#log-cards');
     if (!logs.length) {
-      cards.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>';
+      cards.innerHTML = noFilters
+        ? emptyGuide
+        : '<p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>';
     } else {
       cards.innerHTML = logs.map(l => `<div class="log-card">
         <div class="log-card-row1">
@@ -2846,6 +2893,11 @@ class FiltersPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Filter Lists</div>
+        <div data-testid="filters-all-disabled-warning" style="display:none;margin-bottom:12px;padding:12px;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--red)">
+          <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">No filter list is enabled</div>
+          <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Every filter list is turned off, so noadd is not blocking anything. Enable a recommended list to start filtering.</div>
+          <button class="btn btn-primary btn-sm" data-testid="filters-enable-recommended" id="enable-recommended">Enable AdGuard DNS filter</button>
+        </div>
         <div class="filters-row" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
           <button class="btn btn-sm" id="browse-registry">${icons.search} Browse Registry</button>
@@ -2911,6 +2963,8 @@ class FiltersPage extends HTMLElement {
       modal.open();
     };
 
+    this.querySelector('#enable-recommended').onclick = () => this.enableRecommended();
+
     // --- Custom Rules ---
     this.querySelector('#add-rule-btn').onclick = async () => {
       const v = this.querySelector('#add-rule-input').value.trim();
@@ -2955,6 +3009,7 @@ class FiltersPage extends HTMLElement {
   async loadLists() {
     try {
       const lists = await api.get('/api/lists');
+      this._lists = lists;
 
       // Desktop table
       const body = this.querySelector('#lists-body');
@@ -2998,6 +3053,7 @@ class FiltersPage extends HTMLElement {
       this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
         cb.onchange = async () => {
           await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+          this._refreshAllDisabledWarning();
         };
       });
 
@@ -3013,6 +3069,26 @@ class FiltersPage extends HTMLElement {
       this.querySelectorAll('.edit-list').forEach(btn => {
         btn.onclick = () => this.showEditDialog(btn.dataset.id, btn.dataset.name, btn.dataset.url);
       });
+
+      this._refreshAllDisabledWarning();
+    } catch (e) { console.error(e); }
+  }
+
+  _refreshAllDisabledWarning() {
+    const warn = this.querySelector('[data-testid="filters-all-disabled-warning"]');
+    if (!warn) return;
+    const boxes = this.querySelectorAll('#lists-body input[type=checkbox]');
+    const allDisabled = boxes.length > 0 && Array.from(boxes).every(cb => !cb.checked);
+    warn.style.display = allDisabled ? '' : 'none';
+  }
+
+  async enableRecommended() {
+    const lists = this._lists || [];
+    if (!lists.length) return;
+    const pick = lists.find(l => l.name === 'AdGuard DNS filter') || lists[0];
+    try {
+      await api.put(`/api/lists/${pick.id}`, { enabled: true });
+      await this.loadLists();
     } catch (e) { console.error(e); }
   }
 
