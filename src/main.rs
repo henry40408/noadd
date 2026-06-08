@@ -214,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
                         .ok()
                         .flatten()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(7);
+                        .unwrap_or(noadd::admin::stats::DEFAULT_LOG_RETENTION_DAYS);
                     let cutoff = noadd::now_unix() - retention_days * 86400;
                     match prune_db.prune_logs_before(cutoff).await {
                         Ok(count) if count > 0 => tracing::info!(count, "pruned old query logs"),

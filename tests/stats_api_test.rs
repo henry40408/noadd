@@ -147,6 +147,11 @@ async fn stats_v2_health_returns_expected_fields() {
     assert!(body.get("db_size_bytes").is_some());
     assert!(body.get("total_log_count").is_some());
     assert!(body.get("oldest_log_timestamp").is_some());
-    assert!(body.get("log_retention_days").is_some());
+    // Retention falls back to the default when unconfigured, so the UI shows
+    // the policy actually in effect rather than a null/dash.
+    assert_eq!(
+        body.get("log_retention_days").and_then(|v| v.as_i64()),
+        Some(7)
+    );
     assert!(body.get("avg_new_rows_per_day").is_some());
 }
