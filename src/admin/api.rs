@@ -744,7 +744,7 @@ async fn get_registry_filters(
     match state.registry.list().await {
         Ok(data) => Ok(Json(data)),
         Err(e) => {
-            tracing::error!(error = %e, "registry fetch failed");
+            tracing::warn!(error = %e, "registry fetch failed");
             Err(StatusCode::BAD_GATEWAY)
         }
     }

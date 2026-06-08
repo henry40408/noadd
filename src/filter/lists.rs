@@ -204,18 +204,29 @@ impl ListManager {
                 (list.id, list.name, result)
             });
         }
+        // Per-list download failures are expected (transient network issues,
+        // upstream 5xx, list removed). Aggregate them into a single warn instead
+        // of one error per list so a flaky update does not flood the logs.
+        let mut failures: Vec<String> = Vec::new();
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok((list_id, name, Ok(rule_count))) => {
                     tracing::info!(list_id, name = %name, rule_count, "updated filter list");
                 }
-                Ok((list_id, name, Err(e))) => {
-                    tracing::error!(list_id, name = %name, error = %e, "failed to download list");
+                Ok((_list_id, name, Err(e))) => {
+                    failures.push(format!("{name} ({e})"));
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "list download task join failed");
+                    failures.push(format!("<join failed> ({e})"));
                 }
             }
+        }
+        if !failures.is_empty() {
+            tracing::warn!(
+                failed = failures.len(),
+                lists = %failures.join(", "),
+                "some filter lists failed to update; keeping previous data for those"
+            );
         }
 
         Ok(())

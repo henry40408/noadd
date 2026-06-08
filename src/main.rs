@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = update_manager.update_all_lists_no_rebuild().await {
-                        tracing::error!(error = %e, "failed to update filter lists");
+                        tracing::warn!(error = %e, "failed to update filter lists; keeping previous lists");
                     }
                     let mgr = update_manager.clone();
                     update_rebuild.clone().spawn_raw(move || async move {
@@ -207,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
                     let cutoff = noadd::now_unix() - retention_days * 86400;
                     match prune_db.prune_logs_before(cutoff).await {
                         Ok(count) if count > 0 => tracing::info!(count, "pruned old query logs"),
-                        Err(e) => tracing::error!(error = %e, "failed to prune logs"),
+                        Err(e) => tracing::warn!(error = %e, "failed to prune logs; will retry next cycle"),
                         _ => {}
                     }
                 }
