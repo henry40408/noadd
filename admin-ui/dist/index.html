@@ -1579,6 +1579,7 @@ class AppShell extends HTMLElement {
         </nav>
         <main class="main-content">
           <rebuild-banner></rebuild-banner>
+          <next-step-banner></next-step-banner>
           <div id="page-content"></div>
         </main>
       </div>`;
@@ -1689,6 +1690,87 @@ class RebuildBanner extends HTMLElement {
   }
 }
 customElements.define('rebuild-banner', RebuildBanner);
+
+// --- Next-Step Onboarding Banner ---
+// On a fresh install, tells the admin how to point a device's DNS at noadd
+// and shows the server's DNS address. Auto-hides once a real DNS query has
+// been served (polls /api/stats/summary every 3s). Can be dismissed; the
+// dismissal persists server-side via PUT /api/settings.
+class NextStepBanner extends HTMLElement {
+  connectedCallback() {
+    this.timer = null;
+    this.dnsAddr = '';
+    this.innerHTML = '';   // render nothing until init decides
+    this.init();
+  }
+  disconnectedCallback() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+  async init() {
+    // 1) Respect a prior dismissal — if dismissed, never show or poll.
+    let settings;
+    try {
+      settings = await api.get('/api/settings');
+    } catch (e) {
+      return;
+    }
+    if (settings && settings.onboarding_banner_dismissed === 'true') {
+      return;
+    }
+    // 2) Resolve the DNS address to display: location.hostname + the port
+    //    parsed from server-info's dns_addr (e.g. "0.0.0.0:53" -> "53").
+    try {
+      const info = await api.get('/api/server-info');
+      const raw = (info && info.dns_addr) || '';
+      const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : raw;
+      this.dnsAddr = `${window.location.hostname}:${port}`;
+    } catch (e) {
+      return;
+    }
+    // 3) If a query was already served, stay hidden; otherwise show + poll.
+    if (await this.hasQueries()) {
+      return;
+    }
+    this.show();
+    this.timer = setInterval(() => this.poll(), 3000);
+  }
+  async hasQueries() {
+    try {
+      const s = await api.get('/api/stats/summary');
+      return ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+  async poll() {
+    if (await this.hasQueries()) {
+      if (this.timer) { clearInterval(this.timer); this.timer = null; }
+      this.innerHTML = '';
+    }
+  }
+  show() {
+    this.innerHTML = `
+      <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
+        <span class="icon">${icons.dashboard}</span>
+        <span class="text">
+          <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${esc(this.dnsAddr)}</strong>.</span>
+        </span>
+        <button class="btn btn-ghost" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
+      </div>`;
+    const dismiss = this.querySelector('[data-testid="next-step-banner-dismiss"]');
+    dismiss.onclick = () => this.dismiss();
+  }
+  async dismiss() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.innerHTML = '';
+    try {
+      await api.put('/api/settings', { onboarding_banner_dismissed: 'true' });
+    } catch (e) {
+      // best-effort; UI already hidden for this session
+    }
+  }
+}
+customElements.define('next-step-banner', NextStepBanner);
 
 // --- Registry Modal ---
 // Browse AdGuard HostlistsRegistry and batch-add selected filter lists.
