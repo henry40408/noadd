@@ -2050,7 +2050,8 @@ class DashboardPage extends HTMLElement {
 
     try {
         const info = await api.get('/api/server-info');
-        const port = (info && info.dns_addr ? String(info.dns_addr) : '').split(':').pop();
+        const raw = (info && info.dns_addr) || '';
+        const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : '';
         this._dnsAddr = port ? `${window.location.hostname}:${port}` : window.location.hostname;
       } catch (e) { this._dnsAddr = window.location.hostname; }
 
@@ -2144,32 +2145,32 @@ class DashboardPage extends HTMLElement {
       });
     }
 
-      this._renderOnboarding(s);
-    }
+    this._renderOnboarding(s);
+  }
 
-    _renderOnboarding(s) {
-      const hasQueries = ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
-      const box = this.querySelector('#onboard-empty');
-      const chart = this.querySelector('#chart-card');
-      if (!box) return;
-      if (hasQueries) {
-        box.style.display = 'none';
-        if (chart) chart.style.display = '';
-        return;
-      }
-      box.innerHTML = `
-        <div class="card-title">Point a device at noadd to get started</div>
-        <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
-          noadd hasn't served any DNS queries yet. To start filtering, configure a device or
-          router to use this server as its DNS resolver, then send some traffic.
-        </p>
-        <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
-          Set the device's DNS server to:
-          <code class="mono" style="color:var(--text-primary)">${esc(this._dnsAddr)}</code>
-        </p>`;
-      box.style.display = '';
-      if (chart) chart.style.display = 'none';
+  _renderOnboarding(s) {
+    const hasQueries = ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
+    const box = this.querySelector('#onboard-empty');
+    const chart = this.querySelector('#chart-card');
+    if (!box) return;
+    if (hasQueries) {
+      box.style.display = 'none';
+      if (chart) chart.style.display = '';
+      return;
     }
+    box.innerHTML = `
+      <div class="card-title">Point a device at noadd to get started</div>
+      <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
+        noadd hasn't served any DNS queries yet. To start filtering, configure a device or
+        router to use this server as its DNS resolver, then send some traffic.
+      </p>
+      <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
+        Set the device's DNS server to:
+        <code class="mono" style="color:var(--text-primary)">${esc(this._dnsAddr)}</code>
+      </p>`;
+    box.style.display = '';
+    if (chart) chart.style.display = 'none';
+  }
 
   renderChart(rawData) {
     if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
@@ -2799,7 +2800,7 @@ class LogsPage extends HTMLElement {
     // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
-      body.innerHTML = (!logs.length && noFilters)
+      body.innerHTML = noFilters
         ? `<tr><td colspan="8" style="padding:0">${emptyGuideDesktop}</td></tr>`
         : '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
@@ -3053,6 +3054,10 @@ class FiltersPage extends HTMLElement {
       this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
         cb.onchange = async () => {
           await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+          if (this._lists) {
+            const l = this._lists.find((x) => String(x.id) === String(cb.dataset.id));
+            if (l) l.enabled = cb.checked;
+          }
           this._refreshAllDisabledWarning();
         };
       });
@@ -3077,8 +3082,8 @@ class FiltersPage extends HTMLElement {
   _refreshAllDisabledWarning() {
     const warn = this.querySelector('[data-testid="filters-all-disabled-warning"]');
     if (!warn) return;
-    const boxes = this.querySelectorAll('#lists-body input[type=checkbox]');
-    const allDisabled = boxes.length > 0 && Array.from(boxes).every(cb => !cb.checked);
+    const lists = this._lists || [];
+    const allDisabled = lists.length > 0 && lists.every((l) => !l.enabled);
     warn.style.display = allDisabled ? '' : 'none';
   }
 
