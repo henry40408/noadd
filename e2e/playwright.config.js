@@ -10,8 +10,14 @@ const BIN = process.env.NOADD_BIN || '../target/debug/noadd';
 //   - auth: dedicated fresh-DB instance for the destructive @auth lifecycle
 const APP = { http: 14100, dns: 15100 };
 const AUTH = { http: 14101, dns: 15101 };
+// Dedicated fresh-DB instance for the @onboarding new-install guidance flow.
+// ONBOARDING.dns (15102) is also hardcoded in steps/onboarding.steps.js, where
+// the "noadd resolves a real DNS query" step sends a UDP packet to that port.
+// These two MUST stay in sync.
+const ONBOARDING = { http: 14102, dns: 15102 };
 const APP_URL = `http://127.0.0.1:${APP.http}`;
 const AUTH_URL = `http://127.0.0.1:${AUTH.http}`;
+const ONBOARDING_URL = `http://127.0.0.1:${ONBOARDING.http}`;
 const STORAGE_STATE = '.auth/app.json';
 
 // Start a fresh noadd instance: wipe its DB so every run begins unconfigured,
@@ -48,6 +54,15 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 60_000,
     },
+    {
+      // Always fresh: the @onboarding scenarios depend on a pristine instance
+      // that has served zero DNS queries (empty states + banner), so it must
+      // never be reused across runs.
+      command: server('onboarding', ONBOARDING),
+      url: `${ONBOARDING_URL}/api/health`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
   ],
 
   projects: [
@@ -67,6 +82,17 @@ export default defineConfig({
         outputDir: '.features-gen/auth',
       }),
       use: { ...devices['Desktop Chrome'], baseURL: AUTH_URL },
+    },
+    {
+      // No storageState and no setup dependency: each onboarding scenario sets
+      // the password (idempotent) and signs in fresh against its own instance.
+      ...defineBddProject({
+        name: 'onboarding',
+        features: 'features/onboarding.feature',
+        steps: 'steps/*.js',
+        outputDir: '.features-gen/onboarding',
+      }),
+      use: { ...devices['Desktop Chrome'], baseURL: ONBOARDING_URL },
     },
     {
       ...defineBddProject({
