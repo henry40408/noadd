@@ -5,6 +5,11 @@ use crate::db::{
     TopUpstream,
 };
 
+/// Days of query-log history kept when `log_retention_days` is unset or
+/// unparseable. The hourly prune task and the DB health report both fall back
+/// to this, so the admin UI shows the retention that is actually in effect.
+pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
     pub total_today: i64,
@@ -269,7 +274,11 @@ pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbEr
         db.get_setting("log_retention_days"),
     )?;
     let oldest_log_timestamp = earliest_ms.map(|ms| ms / 1000);
-    let log_retention_days = retention_setting.and_then(|s| s.parse::<i64>().ok());
+    let log_retention_days = Some(
+        retention_setting
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(DEFAULT_LOG_RETENTION_DAYS),
+    );
 
     let avg_new_rows_per_day = match oldest_log_timestamp {
         Some(oldest) if now > oldest => {
@@ -286,4 +295,34 @@ pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbEr
         log_retention_days,
         avg_new_rows_per_day,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn db_health_retention_defaults_when_setting_absent() {
+        let db = Database::open(":memory:").await.unwrap();
+        let h = compute_db_health(&db, 0).await.unwrap();
+        assert_eq!(h.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
+    }
+
+    #[tokio::test]
+    async fn db_health_retention_reflects_configured_setting() {
+        let db = Database::open(":memory:").await.unwrap();
+        db.set_setting("log_retention_days", "30").await.unwrap();
+        let h = compute_db_health(&db, 0).await.unwrap();
+        assert_eq!(h.log_retention_days, Some(30));
+    }
+
+    #[tokio::test]
+    async fn db_health_retention_defaults_when_setting_unparseable() {
+        let db = Database::open(":memory:").await.unwrap();
+        db.set_setting("log_retention_days", "not-a-number")
+            .await
+            .unwrap();
+        let h = compute_db_health(&db, 0).await.unwrap();
+        assert_eq!(h.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
+    }
 }
