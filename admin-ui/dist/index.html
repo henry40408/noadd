@@ -1496,8 +1496,8 @@ class SetupPage extends HTMLElement {
     const err = this.querySelector('#setup-error');
     const doSetup = async () => {
       err.style.display = 'none';
-      if (!pw.value || pw.value.length < 4) {
-        err.textContent = 'Password must be at least 4 characters';
+      if (!pw.value || pw.value.length < 8) {
+        err.textContent = 'Password must be at least 8 characters';
         err.style.display = 'block';
         return;
       }
@@ -1510,6 +1510,9 @@ class SetupPage extends HTMLElement {
         await api.post('/api/auth/setup', { password: pw.value });
         // Auto-login after setup
         await api.post('/api/auth/login', { password: pw.value });
+        // Mark this session as just-set-up so the dashboard shows a one-time
+        // welcome message. Set before dispatching so AppShell sees it on render.
+        try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
         err.textContent = 'Setup failed. A password may already be set.';
@@ -1592,6 +1595,31 @@ class AppShell extends HTMLElement {
     };
     window.addEventListener('hashchange', updateActive);
     updateActive();
+
+    // One-time post-setup welcome strip. Shown once for the session that just
+    // completed first-run setup (flag set in SetupPage.doSetup), then cleared
+    // so it never reappears on later logins.
+    let justSetUp = false;
+    try {
+      justSetUp = sessionStorage.getItem('noadd_just_setup') === '1';
+      if (justSetUp) sessionStorage.removeItem('noadd_just_setup');
+    } catch (e) {}
+    if (justSetUp) {
+      const main = this.querySelector('.main-content');
+      const welcome = document.createElement('div');
+      welcome.className = 'rebuild-banner show done';
+      welcome.setAttribute('data-testid', 'setup-welcome');
+      welcome.innerHTML = `
+        <div class="icon">${icons.check || ''}</div>
+        <div class="text">
+          <span class="label">Setup complete — welcome to noadd!</span>
+          <span class="meta">Your admin password is set and you're signed in.</span>
+        </div>
+        <button class="btn btn-secondary" data-testid="setup-welcome-dismiss"
+                style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
+      welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
+      main.insertBefore(welcome, main.firstChild);
+    }
   }
 
   get pageContent() { return this.querySelector('#page-content'); }
