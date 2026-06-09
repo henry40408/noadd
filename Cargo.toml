@@ -3,6 +3,12 @@ name = "noadd"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "s"
+
 [dependencies]
 anyhow = "1"
 arc-swap = "1"
