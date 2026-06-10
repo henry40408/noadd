@@ -1423,6 +1423,11 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function showFormError(el, msg) {
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
 // ============================================================
 // Icons (inline SVG)
 // ============================================================
@@ -1468,16 +1473,8 @@ class SetupPage extends HTMLElement {
     const err = this.querySelector('#setup-error');
     const doSetup = async () => {
       err.style.display = 'none';
-      if (!pw.value || pw.value.length < 8) {
-        err.textContent = 'Password must be at least 8 characters';
-        err.style.display = 'block';
-        return;
-      }
-      if (pw.value !== pw2.value) {
-        err.textContent = 'Passwords do not match';
-        err.style.display = 'block';
-        return;
-      }
+      if (!pw.value || pw.value.length < 8) return showFormError(err, 'Password must be at least 8 characters');
+      if (pw.value !== pw2.value) return showFormError(err, 'Passwords do not match');
       try {
         await api.post('/api/auth/setup', { password: pw.value });
         // Auto-login after setup
@@ -1487,8 +1484,7 @@ class SetupPage extends HTMLElement {
         try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        err.textContent = 'Setup failed. A password may already be set.';
-        err.style.display = 'block';
+        showFormError(err, 'Setup failed. A password may already be set.');
       }
     };
     btn.onclick = doSetup;
@@ -1520,8 +1516,7 @@ class LoginPage extends HTMLElement {
         await api.post('/api/auth/login', { password: pw.value });
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        err.textContent = 'Invalid password';
-        err.style.display = 'block';
+        showFormError(err, 'Invalid password');
       }
     };
     btn.onclick = doLogin;
