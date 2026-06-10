@@ -188,6 +188,41 @@ async fn test_health_check_reports_dead_upstream_as_fail() {
     assert!(results[1].1, "live upstream should report ok=true");
 }
 
+#[tokio::test]
+async fn test_health_check_probe_retries_once_on_failure() {
+    // A persistent DoT/DoH connection can go stale between health checks;
+    // the probe retries the same upstream once so a single stale-connection
+    // failure doesn't report a live upstream as down. Use an unreachable
+    // TEST-NET-1 address (RFC 5737) that black-holes packets so each attempt
+    // burns the full timeout: two attempts must take noticeably longer than
+    // one, which is how we observe that the retry actually ran. The upstream
+    // is genuinely dead, so it must still report fail (the retry must not
+    // turn a dead upstream into a false positive).
+    //
+    // The per-attempt timeout is clamped to a 5000ms floor (MIN_TIMEOUT_MS in
+    // the forwarder), so `timeout_ms` below is effectively 5000ms/attempt
+    // regardless of the small value requested. One attempt therefore takes
+    // ~5s and two take ~10s; the 7500ms lower bound sits between them so it
+    // can only be reached if the retry actually ran.
+    const EFFECTIVE_TIMEOUT_MS: u64 = 5000;
+    let config = UpstreamConfig {
+        servers: vec!["192.0.2.1:53".into()],
+        timeout_ms: 1000,
+    };
+    let forwarder = UpstreamForwarder::new(config).await;
+    let results = forwarder.health_check().await;
+
+    assert_eq!(results.len(), 1);
+    let (server, ok, ms) = &results[0];
+    assert_eq!(server, "192.0.2.1:53");
+    assert!(!ok, "unreachable upstream must still report ok=false");
+    let two_attempt_floor = EFFECTIVE_TIMEOUT_MS + EFFECTIVE_TIMEOUT_MS / 2; // 7500ms
+    assert!(
+        *ms >= two_attempt_floor,
+        "probe should retry once: expected >= {two_attempt_floor}ms across two attempts, got {ms}ms",
+    );
+}
+
 // Regression tests for the fix that converts hickory's ProtoErrorKind::NoRecordsFound
 // (NXDOMAIN / NODATA) from a forwarding error into a synthesized DNS response with
 // the real upstream response code, so callers receive Ok instead of an error.
