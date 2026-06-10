@@ -1584,7 +1584,7 @@ class AppShell extends HTMLElement {
           <span class="label">Setup complete — welcome to noadd!</span>
           <span class="meta">Your admin password is set and you're signed in.</span>
         </div>
-        <button class="btn btn-secondary" data-testid="setup-welcome-dismiss"
+        <button class="btn" data-testid="setup-welcome-dismiss"
                 style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
       welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
       main.insertBefore(welcome, main.firstChild);
@@ -1726,7 +1726,7 @@ class NextStepBanner extends HTMLElement {
         <span class="text">
           <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${esc(this.dnsAddr)}</strong>.</span>
         </span>
-        <button class="btn btn-ghost" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
+        <button class="btn" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
       </div>`;
     const dismiss = this.querySelector('[data-testid="next-step-banner-dismiss"]');
     dismiss.onclick = () => this.dismiss();
