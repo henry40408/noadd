@@ -463,18 +463,15 @@ input:focus, select:focus { border-color: var(--border-focus); }
 .chart-col:hover .chart-bar.total { opacity: 0.5; }
 .chart-col:hover .chart-bar.blocked { opacity: 1; }
 
-.chart-tooltip {
+/* Shared tooltip base — also styles .heatmap-tooltip and .rate-tooltip (Statistics page) */
+.chart-tooltip,
+.heatmap-tooltip,
+.rate-tooltip {
   display: none;
   position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 6px 10px;
-  font-family: var(--font-sans);
-  font-size: 0.7rem;
   color: var(--text-primary);
   white-space: nowrap;
   z-index: 20;
@@ -482,8 +479,21 @@ input:focus, select:focus { border-color: var(--border-focus); }
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
+.chart-tooltip,
+.rate-tooltip {
+  padding: 6px 10px;
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+}
+
+.chart-tooltip {
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
 @media (prefers-color-scheme: light) {
-  .chart-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+  .chart-tooltip, .rate-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 }
 
 .chart-col:hover .chart-tooltip { display: block; }
@@ -886,22 +896,12 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   transform: none;
 }
 .heatmap-tooltip {
-  display: none;
-  position: absolute;
   bottom: calc(100% + 4px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
   padding: 4px 8px;
   font-family: var(--font-mono);
   font-size: 0.65rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  z-index: 20;
-  pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
 .bar-list { display: flex; flex-direction: column; gap: 6px; }
@@ -965,26 +965,10 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 .rate-cursor { display: none; pointer-events: none; }
 .rate-cursor.active { display: block; }
 .rate-tooltip {
-  display: none;
-  position: absolute;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 10px;
-  font-family: var(--font-sans);
-  font-size: 0.7rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  z-index: 20;
-  pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
   transform: translate(-50%, -100%);
   margin-top: -8px;
 }
 .rate-tooltip.active { display: block; }
-@media (prefers-color-scheme: light) {
-  .rate-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-}
 .rate-legend {
   display: flex;
   gap: 16px;
