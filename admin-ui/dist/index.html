@@ -1384,6 +1384,10 @@ function formatPct(n, total) {
   if (!total || total <= 0 || n == null || Number.isNaN(n)) return '';
   return `${(n / total * 100).toFixed(1)}%`;
 }
+function sharePctSpan(count, sum) {
+  const pct = formatPct(count, sum);
+  return pct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
+}
 
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
@@ -2070,6 +2074,22 @@ class DashboardPage extends HTMLElement {
     });
   }
 
+  _flashIfChanged(prevKey, sig, card) {
+    if (this[prevKey] && sig !== this[prevKey]) this._flashCard(card);
+    this[prevKey] = sig;
+  }
+
+  // head opens <table>...<tbody>; the matching '</tbody></table>' close is appended here.
+  _renderTopTable(data, { target, card, prevKey, sigFn, limit, head, row }) {
+    this._flashIfChanged(prevKey, data.map(sigFn).join(';'), card);
+    if (!data.length) { this.querySelector(target).innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const visible = limit ? data.slice(0, limit) : data;
+    const sumVal = visible.reduce((a, d) => a + d.count, 0);
+    let html = head;
+    for (const d of visible) html += row(d, sumVal);
+    this.querySelector(target).innerHTML = html + '</tbody></table>';
+  }
+
   renderStats(s) {
     const pct = (v) => ((v || 0) * 100).toFixed(1);
     const ms = (v) => (v || 0).toFixed(1);
@@ -2142,9 +2162,7 @@ class DashboardPage extends HTMLElement {
 
   renderChart(rawData) {
     if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
-    const sig = rawData.map(d => d.total + ',' + d.blocked).join(';');
-    if (this._prevChart && sig !== this._prevChart) this._flashCard('#chart-card');
-    this._prevChart = sig;
+    this._flashIfChanged('_prevChart', rawData.map(d => d.total + ',' + d.blocked).join(';'), '#chart-card');
 
     // On mobile, merge every 2 bars into 1 to reduce density
     let data = rawData;
@@ -2188,56 +2206,35 @@ class DashboardPage extends HTMLElement {
   }
 
   renderTopDomains(data) {
-    const sig = data.map(d => d.domain + d.count).join(';');
-    if (this._prevDomains && sig !== this._prevDomains) this._flashCard('#domains-card');
-    this._prevDomains = sig;
-    if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const visible = data.slice(0, 10);
-    const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of visible) {
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-domains').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-domains', card: '#domains-card', prevKey: '_prevDomains',
+      sigFn: d => d.domain + d.count, limit: 10,
+      head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>',
+      row: (d, sum) => `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`,
+    });
   }
 
   renderTopClients(data) {
-    const sig = data.map(d => d.client_ip + (d.doh_token||'') + d.count).join(';');
-    if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
-    this._prevClients = sig;
-    if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const visible = data.slice(0, 10);
-    const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of visible) {
-      const tokenLine = d.doh_token
-        ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
-        : '';
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-clients').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-clients', card: '#clients-card', prevKey: '_prevClients',
+      sigFn: d => d.client_ip + (d.doh_token || '') + d.count, limit: 10,
+      head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>',
+      row: (d, sum) => {
+        const tokenLine = d.doh_token
+          ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
+          : '';
+        return `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`;
+      },
+    });
   }
 
   renderTopUpstreams(data) {
-    const sig = data.map(d => d.upstream + d.count).join(';');
-    if (this._prevUpstreams && sig !== this._prevUpstreams) this._flashCard('#upstreams-card');
-    this._prevUpstreams = sig;
-    if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const sumVal = data.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>';
-    for (const d of data) {
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-upstreams').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-upstreams', card: '#upstreams-card', prevKey: '_prevUpstreams',
+      sigFn: d => d.upstream + d.count,
+      head: '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>',
+      row: (d, sum) => `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`,
+    });
   }
 }
 customElements.define('dashboard-page', DashboardPage);
