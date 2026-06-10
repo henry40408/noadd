@@ -503,23 +503,45 @@ impl UpstreamForwarder {
     /// error and makes every probe look like a failure. The root NS set
     /// is always populated on any recursive resolver, so NS gives a
     /// reliable liveness signal without hitting an authoritative zone.
+    ///
+    /// The send is retried once on failure. A persistent DoT/DoH connection
+    /// can be closed by the server's idle timeout (or invalidated by an
+    /// anycast reroute when the client's network changes), so the first send
+    /// on a connection that went stale between health checks fails before
+    /// hickory's `NameServer` transparently reconnects. The forward path
+    /// hides this behind cross-upstream failover; the single-upstream probe
+    /// has no such fallback, so it retries the same upstream once to give the
+    /// connection a chance to rebuild.
     async fn probe(&self, entry: &UpstreamEntry) -> Result<(), ()> {
-        let name = Name::root();
-        let mut msg = Message::new();
-        msg.set_id(rand::random::<u16>());
-        msg.set_message_type(MessageType::Query);
-        msg.set_op_code(OpCode::Query);
-        msg.set_recursion_desired(true);
-        msg.add_query(Query::query(name, RecordType::NS));
+        // 1 original send + 1 retry. `send` consumes the `DnsRequest`, so the
+        // query is rebuilt per attempt (cheap, and a fresh id avoids a late
+        // reply to the first attempt being matched against the second).
+        const PROBE_ATTEMPTS: usize = 2;
+        for attempt in 0..PROBE_ATTEMPTS {
+            let mut msg = Message::new();
+            msg.set_id(rand::random::<u16>());
+            msg.set_message_type(MessageType::Query);
+            msg.set_op_code(OpCode::Query);
+            msg.set_recursion_desired(true);
+            msg.add_query(Query::query(Name::root(), RecordType::NS));
 
-        let request = DnsRequest::new(msg, DnsRequestOptions::default());
-        entry
-            .name_server
-            .send(request)
-            .first_answer()
-            .await
-            .map(|_| ())
-            .map_err(|_| ())
+            let request = DnsRequest::new(msg, DnsRequestOptions::default());
+            match entry.name_server.send(request).first_answer().await {
+                Ok(_) => return Ok(()),
+                // Log the real transport error the old probe used to swallow.
+                // The first failed attempt is the expected stale-connection
+                // signal that the retry recovers from; only a failure on the
+                // final attempt actually marks the upstream down.
+                Err(e) => warn!(
+                    upstream = %entry.label,
+                    attempt = attempt + 1,
+                    attempts = PROBE_ATTEMPTS,
+                    error = %e,
+                    "upstream health probe attempt failed"
+                ),
+            }
+        }
+        Err(())
     }
 }
 
