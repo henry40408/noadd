@@ -2061,8 +2061,8 @@ class DashboardPage extends HTMLElement {
     } catch (e) { console.error(e); }
   }
 
-  _flashCard(id) {
-    const card = this.querySelector(id);
+  _flashCard(target) {
+    const card = typeof target === 'string' ? this.querySelector(target) : target;
     if (!card) return;
     // Add flash class (no transition) to snap to highlight
     card.classList.add('flash');
@@ -2122,14 +2122,7 @@ class DashboardPage extends HTMLElement {
     if (prevVals) {
       statsEl.querySelectorAll('.stat-card').forEach(card => {
         const i = parseInt(card.dataset.i);
-        if (String(vals[i]) !== String(prevVals[i])) {
-          card.classList.add('flash');
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              card.classList.remove('flash');
-            });
-          });
-        }
+        if (String(vals[i]) !== String(prevVals[i])) this._flashCard(card);
       });
     }
 
@@ -2541,22 +2534,11 @@ class StatsPage extends HTMLElement {
   }
 
   _renderRangedTopDomains(rows) {
-    const el = this.querySelector('#ranged-domains');
-    if (!rows || !rows.length) {
-      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
-      return;
-    }
-    const entries = rows.map(d => [d.domain, d.count]);
-    this._renderBarChart('#ranged-domains', entries, 'var(--accent)');
+    this._renderBarChart('#ranged-domains', (rows || []).map(d => [d.domain, d.count]), 'var(--accent)');
   }
 
   _renderRangedTopClients(rows) {
-    const el = this.querySelector('#ranged-clients');
-    if (!rows || !rows.length) {
-      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
-      return;
-    }
-    const entries = rows.map(d => {
+    const entries = (rows || []).map(d => {
       const label = d.doh_token ? `${d.client_ip} · ${d.doh_token}` : d.client_ip;
       return [label, d.count];
     });
