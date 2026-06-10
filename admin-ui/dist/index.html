@@ -308,7 +308,6 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .badge-blocked { background: var(--red-dim); color: var(--red); }
 .badge-allowed { background: var(--green-dim); color: var(--green); }
 .badge-cached { background: var(--accent-glow); color: var(--accent); }
-.badge-on { background: var(--green-dim); color: var(--green); }
 .badge-off { background: var(--bg-hover); color: var(--text-dim); }
 
 /* Buttons */
@@ -464,18 +463,15 @@ input:focus, select:focus { border-color: var(--border-focus); }
 .chart-col:hover .chart-bar.total { opacity: 0.5; }
 .chart-col:hover .chart-bar.blocked { opacity: 1; }
 
-.chart-tooltip {
+/* Shared tooltip base — also styles .heatmap-tooltip and .rate-tooltip (Statistics page) */
+.chart-tooltip,
+.heatmap-tooltip,
+.rate-tooltip {
   display: none;
   position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 6px 10px;
-  font-family: var(--font-sans);
-  font-size: 0.7rem;
   color: var(--text-primary);
   white-space: nowrap;
   z-index: 20;
@@ -483,8 +479,21 @@ input:focus, select:focus { border-color: var(--border-focus); }
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
+.chart-tooltip,
+.rate-tooltip {
+  padding: 6px 10px;
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+}
+
+.chart-tooltip {
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
 @media (prefers-color-scheme: light) {
-  .chart-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+  .chart-tooltip, .rate-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 }
 
 .chart-col:hover .chart-tooltip { display: block; }
@@ -802,9 +811,6 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 
   /* Dashboard: stack top domains / clients */
   .dashboard-grid-2col { grid-template-columns: 1fr !important; }
-
-  /* Filters: stack block/allow columns */
-  .rules-grid { grid-template-columns: 1fr !important; }
 }
 
 /* Statistics page */
@@ -890,22 +896,12 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   transform: none;
 }
 .heatmap-tooltip {
-  display: none;
-  position: absolute;
   bottom: calc(100% + 4px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
   padding: 4px 8px;
   font-family: var(--font-mono);
   font-size: 0.65rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  z-index: 20;
-  pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
 .bar-list { display: flex; flex-direction: column; gap: 6px; }
@@ -969,26 +965,10 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 .rate-cursor { display: none; pointer-events: none; }
 .rate-cursor.active { display: block; }
 .rate-tooltip {
-  display: none;
-  position: absolute;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 10px;
-  font-family: var(--font-sans);
-  font-size: 0.7rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  z-index: 20;
-  pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
   transform: translate(-50%, -100%);
   margin-top: -8px;
 }
 .rate-tooltip.active { display: block; }
-@media (prefers-color-scheme: light) {
-  .rate-tooltip { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-}
 .rate-legend {
   display: flex;
   gap: 16px;
@@ -1250,14 +1230,18 @@ rebuild-banner { display: block; }
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.registry-row .group-pill {
-  display: inline-block;
+.registry-row .group-pill,
+.registry-row .added-pill,
+.registry-row .dep-pill {
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 0.65rem;
   font-family: var(--font-sans);
-  letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+.registry-row .group-pill {
+  display: inline-block;
+  letter-spacing: 0.05em;
   background: var(--bg-input);
   color: var(--text-secondary);
   border: 1px solid var(--border);
@@ -1265,26 +1249,10 @@ rebuild-banner { display: block; }
 .registry-row .group-pill.general { background: var(--accent-glow); color: var(--accent); border-color: transparent; }
 .registry-row .group-pill.security { background: var(--red-dim); color: var(--red); border-color: transparent; }
 .registry-row .group-pill.regional { background: var(--orange-dim); color: var(--orange); border-color: transparent; }
-.registry-row .added-pill {
-  background: var(--green-dim);
-  color: var(--green);
-  font-family: var(--font-sans);
-  font-size: 0.65rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 1px 8px;
-  border-radius: 10px;
-}
-.registry-row .dep-pill {
-  background: var(--red-dim);
-  color: var(--red);
-  font-family: var(--font-sans);
-  font-size: 0.65rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 1px 8px;
-  border-radius: 10px;
-}
+.registry-row .added-pill,
+.registry-row .dep-pill { letter-spacing: 0.06em; }
+.registry-row .added-pill { background: var(--green-dim); color: var(--green); }
+.registry-row .dep-pill { background: var(--red-dim); color: var(--red); }
 .registry-row .home {
   color: var(--text-dim);
   text-decoration: none;
@@ -1416,6 +1384,10 @@ function formatPct(n, total) {
   if (!total || total <= 0 || n == null || Number.isNaN(n)) return '';
   return `${(n / total * 100).toFixed(1)}%`;
 }
+function sharePctSpan(count, sum) {
+  const pct = formatPct(count, sum);
+  return pct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
+}
 
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
@@ -1449,6 +1421,11 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+function showFormError(el, msg) {
+  el.textContent = msg;
+  el.style.display = 'block';
 }
 
 // ============================================================
@@ -1496,16 +1473,8 @@ class SetupPage extends HTMLElement {
     const err = this.querySelector('#setup-error');
     const doSetup = async () => {
       err.style.display = 'none';
-      if (!pw.value || pw.value.length < 8) {
-        err.textContent = 'Password must be at least 8 characters';
-        err.style.display = 'block';
-        return;
-      }
-      if (pw.value !== pw2.value) {
-        err.textContent = 'Passwords do not match';
-        err.style.display = 'block';
-        return;
-      }
+      if (!pw.value || pw.value.length < 8) return showFormError(err, 'Password must be at least 8 characters');
+      if (pw.value !== pw2.value) return showFormError(err, 'Passwords do not match');
       try {
         await api.post('/api/auth/setup', { password: pw.value });
         // Auto-login after setup
@@ -1515,8 +1484,7 @@ class SetupPage extends HTMLElement {
         try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        err.textContent = 'Setup failed. A password may already be set.';
-        err.style.display = 'block';
+        showFormError(err, 'Setup failed. A password may already be set.');
       }
     };
     btn.onclick = doSetup;
@@ -1548,8 +1516,7 @@ class LoginPage extends HTMLElement {
         await api.post('/api/auth/login', { password: pw.value });
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        err.textContent = 'Invalid password';
-        err.style.display = 'block';
+        showFormError(err, 'Invalid password');
       }
     };
     btn.onclick = doLogin;
@@ -1616,7 +1583,7 @@ class AppShell extends HTMLElement {
           <span class="label">Setup complete — welcome to noadd!</span>
           <span class="meta">Your admin password is set and you're signed in.</span>
         </div>
-        <button class="btn btn-secondary" data-testid="setup-welcome-dismiss"
+        <button class="btn" data-testid="setup-welcome-dismiss"
                 style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
       welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
       main.insertBefore(welcome, main.firstChild);
@@ -1758,7 +1725,7 @@ class NextStepBanner extends HTMLElement {
         <span class="text">
           <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${esc(this.dnsAddr)}</strong>.</span>
         </span>
-        <button class="btn btn-ghost" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
+        <button class="btn" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
       </div>`;
     const dismiss = this.querySelector('[data-testid="next-step-banner-dismiss"]');
     dismiss.onclick = () => this.dismiss();
@@ -2089,8 +2056,8 @@ class DashboardPage extends HTMLElement {
     } catch (e) { console.error(e); }
   }
 
-  _flashCard(id) {
-    const card = this.querySelector(id);
+  _flashCard(target) {
+    const card = typeof target === 'string' ? this.querySelector(target) : target;
     if (!card) return;
     // Add flash class (no transition) to snap to highlight
     card.classList.add('flash');
@@ -2100,6 +2067,22 @@ class DashboardPage extends HTMLElement {
         card.classList.remove('flash');
       });
     });
+  }
+
+  _flashIfChanged(prevKey, sig, card) {
+    if (this[prevKey] && sig !== this[prevKey]) this._flashCard(card);
+    this[prevKey] = sig;
+  }
+
+  // head opens <table>...<tbody>; the matching '</tbody></table>' close is appended here.
+  _renderTopTable(data, { target, card, prevKey, sigFn, limit, head, row }) {
+    this._flashIfChanged(prevKey, data.map(sigFn).join(';'), card);
+    if (!data.length) { this.querySelector(target).innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    const visible = limit ? data.slice(0, limit) : data;
+    const sumVal = visible.reduce((a, d) => a + d.count, 0);
+    let html = head;
+    for (const d of visible) html += row(d, sumVal);
+    this.querySelector(target).innerHTML = html + '</tbody></table>';
   }
 
   renderStats(s) {
@@ -2134,14 +2117,7 @@ class DashboardPage extends HTMLElement {
     if (prevVals) {
       statsEl.querySelectorAll('.stat-card').forEach(card => {
         const i = parseInt(card.dataset.i);
-        if (String(vals[i]) !== String(prevVals[i])) {
-          card.classList.add('flash');
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              card.classList.remove('flash');
-            });
-          });
-        }
+        if (String(vals[i]) !== String(prevVals[i])) this._flashCard(card);
       });
     }
 
@@ -2174,9 +2150,7 @@ class DashboardPage extends HTMLElement {
 
   renderChart(rawData) {
     if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
-    const sig = rawData.map(d => d.total + ',' + d.blocked).join(';');
-    if (this._prevChart && sig !== this._prevChart) this._flashCard('#chart-card');
-    this._prevChart = sig;
+    this._flashIfChanged('_prevChart', rawData.map(d => d.total + ',' + d.blocked).join(';'), '#chart-card');
 
     // On mobile, merge every 2 bars into 1 to reduce density
     let data = rawData;
@@ -2220,56 +2194,35 @@ class DashboardPage extends HTMLElement {
   }
 
   renderTopDomains(data) {
-    const sig = data.map(d => d.domain + d.count).join(';');
-    if (this._prevDomains && sig !== this._prevDomains) this._flashCard('#domains-card');
-    this._prevDomains = sig;
-    if (!data.length) { this.querySelector('#top-domains').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const visible = data.slice(0, 10);
-    const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of visible) {
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-domains').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-domains', card: '#domains-card', prevKey: '_prevDomains',
+      sigFn: d => d.domain + d.count, limit: 10,
+      head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>',
+      row: (d, sum) => `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`,
+    });
   }
 
   renderTopClients(data) {
-    const sig = data.map(d => d.client_ip + (d.doh_token||'') + d.count).join(';');
-    if (this._prevClients && sig !== this._prevClients) this._flashCard('#clients-card');
-    this._prevClients = sig;
-    if (!data.length) { this.querySelector('#top-clients').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const visible = data.slice(0, 10);
-    const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>';
-    for (const d of visible) {
-      const tokenLine = d.doh_token
-        ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
-        : '';
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-clients').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-clients', card: '#clients-card', prevKey: '_prevClients',
+      sigFn: d => d.client_ip + (d.doh_token || '') + d.count, limit: 10,
+      head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>',
+      row: (d, sum) => {
+        const tokenLine = d.doh_token
+          ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
+          : '';
+        return `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`;
+      },
+    });
   }
 
   renderTopUpstreams(data) {
-    const sig = data.map(d => d.upstream + d.count).join(';');
-    if (this._prevUpstreams && sig !== this._prevUpstreams) this._flashCard('#upstreams-card');
-    this._prevUpstreams = sig;
-    if (!data.length) { this.querySelector('#top-upstreams').innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
-    const sumVal = data.reduce((a, d) => a + d.count, 0);
-    let html = '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>';
-    for (const d of data) {
-      const sharePct = formatPct(d.count, sumVal);
-      const pctSpan = sharePct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${sharePct})</span>` : '';
-      html += `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${pctSpan}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`;
-    }
-    html += '</tbody></table>';
-    this.querySelector('#top-upstreams').innerHTML = html;
+    this._renderTopTable(data, {
+      target: '#top-upstreams', card: '#upstreams-card', prevKey: '_prevUpstreams',
+      sigFn: d => d.upstream + d.count,
+      head: '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>',
+      row: (d, sum) => `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`,
+    });
   }
 }
 customElements.define('dashboard-page', DashboardPage);
@@ -2576,22 +2529,11 @@ class StatsPage extends HTMLElement {
   }
 
   _renderRangedTopDomains(rows) {
-    const el = this.querySelector('#ranged-domains');
-    if (!rows || !rows.length) {
-      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
-      return;
-    }
-    const entries = rows.map(d => [d.domain, d.count]);
-    this._renderBarChart('#ranged-domains', entries, 'var(--accent)');
+    this._renderBarChart('#ranged-domains', (rows || []).map(d => [d.domain, d.count]), 'var(--accent)');
   }
 
   _renderRangedTopClients(rows) {
-    const el = this.querySelector('#ranged-clients');
-    if (!rows || !rows.length) {
-      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
-      return;
-    }
-    const entries = rows.map(d => {
+    const entries = (rows || []).map(d => {
       const label = d.doh_token ? `${d.client_ip} · ${d.doh_token}` : d.client_ip;
       return [label, d.count];
     });
