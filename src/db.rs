@@ -19,6 +19,11 @@ pub enum DbError {
 /// admin/stats queries. WAL lets readers proceed without blocking each other.
 const READ_POOL_SIZE: usize = 4;
 
+/// `run_maintenance` only triggers a full `VACUUM` once free pages reach this
+/// fraction of the database file. Below it, reclaiming space is not worth the
+/// whole-file rewrite and the write lock VACUUM holds.
+const VACUUM_FREELIST_RATIO: f64 = 0.2;
+
 #[derive(Clone)]
 pub struct Database {
     conn: Connection,
@@ -255,7 +260,7 @@ impl Database {
                         result TEXT
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
-                    CREATE INDEX IF NOT EXISTS idx_query_logs_domain ON query_logs(domain);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -322,7 +327,22 @@ impl Database {
             add_column_if_missing(conn, "query_logs", "result", "TEXT")?;
         }
 
-        const LATEST_VERSION: i64 = 4;
+        if version < 5 {
+            // Replace the single-column domain index with a composite
+            // (domain, timestamp) index: dashboard aggregations (top_domains,
+            // unique_domains) are then served by a covering index with the
+            // timestamp filter pushed in, instead of scanning the whole domain
+            // index and looking up rows. ANALYZE is REQUIRED here — without
+            // fresh sqlite_stat1 the planner keeps the old plan and the new
+            // index yields no benefit.
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_query_logs_domain;
+                 CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 5;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -521,6 +541,39 @@ impl Database {
             })
             .await?;
         Ok(count)
+    }
+
+    /// Periodic database maintenance, run after the hourly retention prune.
+    ///
+    /// - `PRAGMA optimize` refreshes the query planner's statistics so index
+    ///   choices stay sane as the data distribution shifts (also what keeps
+    ///   the composite `(domain, timestamp)` index getting picked).
+    /// - A `VACUUM` reclaims pages freed by pruning, but only when the free
+    ///   list has grown past [`VACUUM_FREELIST_RATIO`] of the file — VACUUM
+    ///   rewrites the whole database and briefly holds a write lock, so it is
+    ///   not worth doing for the handful of pages a typical hourly prune frees.
+    /// - A `wal_checkpoint(TRUNCATE)` truncates the WAL, which a large prune
+    ///   (or the VACUUM) can otherwise inflate until the next checkpoint.
+    ///
+    /// All three are individually cheap (~10ms) except the gated VACUUM.
+    pub async fn run_maintenance(&self) -> Result<(), DbError> {
+        self.conn
+            .call(|conn| {
+                conn.execute_batch("PRAGMA optimize;")?;
+
+                let page_count: i64 =
+                    conn.pragma_query_value(None, "page_count", |row| row.get(0))?;
+                let freelist: i64 =
+                    conn.pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+                if page_count > 0 && freelist as f64 / page_count as f64 >= VACUUM_FREELIST_RATIO {
+                    conn.execute_batch("VACUUM;")?;
+                }
+
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
     }
 
     // --- Filter Lists ---
@@ -1452,5 +1505,119 @@ mod tests {
             "-shm should be removed after close"
         );
         assert!(path.exists(), "main database file should remain");
+    }
+
+    fn sample_entry(timestamp: i64, domain: &str) -> QueryLogEntry {
+        QueryLogEntry {
+            timestamp,
+            domain: domain.to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            response_ms: 5,
+            upstream: None,
+            doh_token: None,
+            result: None,
+        }
+    }
+
+    async fn query_log_index_names(db: &Database) -> Vec<String> {
+        db.reader()
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='query_logs'",
+                )?;
+                let names = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, tokio_rusqlite::Error>(names)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fresh_schema_uses_composite_domain_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_domain_ts"),
+            "composite (domain, timestamp) index should exist: {indexes:?}"
+        );
+        assert!(
+            !indexes.iter().any(|n| n == "idx_query_logs_domain"),
+            "legacy single-column domain index should not exist: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_replaces_legacy_domain_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // Simulate a pre-v5 database: the old single-column domain index with
+        // user_version = 4.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    response_ms INTEGER NOT NULL DEFAULT 0,
+                    upstream TEXT,
+                    doh_token TEXT,
+                    result TEXT
+                );
+                CREATE INDEX idx_query_logs_domain ON query_logs(domain);
+                PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            !indexes.iter().any(|n| n == "idx_query_logs_domain"),
+            "legacy index should be dropped after migration: {indexes:?}"
+        );
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_domain_ts"),
+            "composite index should be created by migration: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_maintenance_keeps_data_queryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let entries: Vec<QueryLogEntry> = (0..100)
+            .map(|i| sample_entry(1_700_000_000_000 + i, "example.com"))
+            .collect();
+        db.insert_query_logs(&entries).await.unwrap();
+
+        // Nothing is old enough to prune; maintenance should still succeed
+        // (PRAGMA optimize + WAL checkpoint; VACUUM stays below threshold).
+        db.prune_logs_before(0).await.unwrap();
+        db.run_maintenance().await.unwrap();
+
+        let logs = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+        assert_eq!(
+            logs.len(),
+            10,
+            "data should remain queryable after maintenance"
+        );
     }
 }

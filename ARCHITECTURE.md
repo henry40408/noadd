@@ -105,6 +105,12 @@ Everything is in a single SQLite file (`noadd.db` by default):
 | `custom_rules` | User-defined allow/block rules |
 | `doh_tokens` | DoH access tokens |
 
+`query_logs` is indexed on `timestamp` and on the composite `(domain, timestamp)`. The composite index lets the dashboard's domain aggregations (top domains, unique domains) be served from a covering index with the time-window filter pushed in, instead of scanning the whole domain index.
+
+### Retention & Maintenance
+
+A background task runs hourly: it prunes query logs older than the configured retention window, then runs maintenance — `PRAGMA optimize` to keep planner statistics fresh, a truncating WAL checkpoint, and a `VACUUM` (only when freed pages exceed 20% of the file, since VACUUM rewrites the whole database under a write lock).
+
 ## Dependencies
 
 Key crates:

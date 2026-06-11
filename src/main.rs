@@ -217,9 +217,15 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or(noadd::admin::stats::DEFAULT_LOG_RETENTION_DAYS);
                     let cutoff = noadd::now_unix() - retention_days * 86400;
                     match prune_db.prune_logs_before(cutoff).await {
-                        Ok(count) if count > 0 => tracing::info!(count, "pruned old query logs"),
+                        Ok(count) => {
+                            if count > 0 {
+                                tracing::info!(count, "pruned old query logs");
+                            }
+                            if let Err(e) = prune_db.run_maintenance().await {
+                                tracing::warn!(error = %e, "database maintenance failed; will retry next cycle");
+                            }
+                        }
                         Err(e) => tracing::warn!(error = %e, "failed to prune logs; will retry next cycle"),
-                        _ => {}
                     }
                 }
                 _ = shutdown_rx.recv() => break,
