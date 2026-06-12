@@ -59,6 +59,12 @@ Then('I remain on the sign-in screen', async ({ page }) => {
   await expect(page.getByTestId('login-submit')).toBeVisible();
 });
 
+Then('I see a sign-in error telling me the password is incorrect', async ({ page }) => {
+  const err = page.getByTestId('login-error');
+  await expect(err).toBeVisible();
+  await expect(err).toContainText(/incorrect password/i);
+});
+
 When('I revoke all sessions', async ({ page }) => {
   page.once('dialog', (d) => d.accept());
   await page.getByTestId('revoke-sessions').click();

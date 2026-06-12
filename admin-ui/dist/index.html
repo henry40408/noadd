@@ -676,10 +676,16 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
 }
 
 .login-error {
-  color: var(--red);
-  font-size: 0.8rem;
-  margin-bottom: 12px;
   display: none;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--red);
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  box-shadow: var(--glow-red);
 }
 
 /* Pagination */
@@ -1432,7 +1438,7 @@ const api = {
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(path, opts);
-    if (res.status === 401) {
+    if (res.status === 401 && path !== '/api/auth/login') {
       window.dispatchEvent(new CustomEvent('auth-required'));
       throw new Error('Unauthorized');
     }
@@ -1633,7 +1639,7 @@ class LoginPage extends HTMLElement {
             admin console ............ <span class="ok">ok</span><br>
             session .................. <span class="ok">awaiting operator</span><br>
           </div>
-          <div class="login-error" id="login-error" data-testid="login-error"></div>
+          <div class="login-error" id="login-error" data-testid="login-error" role="alert"></div>
           <div class="login-line">
             <label for="pw">password:</label>
             <input type="password" id="pw" data-testid="login-password" autofocus>
@@ -1650,7 +1656,12 @@ class LoginPage extends HTMLElement {
         await api.post('/api/auth/login', { password: pw.value });
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        showFormError(err, 'Invalid password');
+        const limited = /^429\b/.test((e && e.message) || '');
+        showFormError(err, limited
+          ? 'ERR: too many attempts — wait a minute, then retry'
+          : 'ERR: incorrect password — access denied');
+        pw.focus();
+        pw.select();
       }
     };
     btn.onclick = doLogin;
@@ -2119,8 +2130,9 @@ customElements.define('registry-modal', RegistryModal);
 // Modeled on StatsPage._renderRateTrend (same cursor/tooltip interaction).
 // el      — a .chart-container (position:relative, 200px tall)
 // data    — raw API rows; series[0].key must be 'total': it sets the y-scale
-//           and gets the area fill
-// series  — [{ key, color }] drawn in order (total first, underneath)
+// series  — [{ key, color }] drawn in order (total first, underneath); every
+//           series gets a translucent area fill (same flat fill-opacity style
+//           as StatsPage._renderRateTrend — no gradients, theme-safe)
 // fmtX    — (row) => x-axis label HTML (must be pre-escaped)
 // fmtTooltip — (row) => tooltip HTML (must be pre-escaped)
 function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
@@ -2145,7 +2157,10 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     points.push({ x, d, yByKey });
   }
   const baseline = (padY + innerH).toFixed(1);
-  const totalArea = `${paths[0].join(' ')} L${xs(len - 1).toFixed(1)},${baseline} L${xs(0).toFixed(1)},${baseline} Z`;
+  const areaClose = ` L${xs(len - 1).toFixed(1)},${baseline} L${xs(0).toFixed(1)},${baseline} Z`;
+  const areas = series.map((s, si) =>
+    `<path d="${paths[si].join(' ')}${areaClose}" fill="${s.color}" fill-opacity="0.12"/>`
+  ).join('');
   // Gridlines stay inside the stretched SVG (geometry should stretch). The
   // numeric labels are real HTML in a .tl-yticks overlay so they are never
   // distorted by preserveAspectRatio="none" (SVG <text> glyphs get the same
@@ -2174,7 +2189,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="tl-svg">
       ${ticks}
-      <path d="${totalArea}" fill="${series[0].color}" fill-opacity="0.10"/>
+      ${areas}
       ${lines}${single}
       <g class="rate-cursor">
         <line x1="0" y1="${padY}" x2="0" y2="${padY + innerH}" stroke="var(--text-dim)" stroke-width="0.5" stroke-dasharray="2 3"/>

@@ -45,9 +45,8 @@ Feature: First-run setup and authentication
     Given the admin password has been set to "correct horse battery staple"
     When I open the admin UI
     And I sign in with the password "wrong password"
-    # A rejected login re-renders the sign-in screen rather than showing an
-    # inline error, so the observable outcome is simply staying signed out.
-    Then I remain on the sign-in screen
+    Then I see a sign-in error telling me the password is incorrect
+    And I remain on the sign-in screen
 
   Scenario: Sign in succeeds with the correct password
     Given the admin password has been set to "correct horse battery staple"
