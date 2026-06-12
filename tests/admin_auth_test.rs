@@ -1,8 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
-    RateLimiter, create_session, hash_password, new_session_store, validate_session,
-    verify_password,
+    RateLimiter, create_session, hash_password, new_session_store, revoke_session,
+    validate_session, verify_password,
 };
 
 #[test]
@@ -44,6 +44,25 @@ fn test_session_create_and_validate() {
     assert!(validate_session(&store, &token));
     assert!(validate_session(&store, &token2));
     assert_ne!(token, token2);
+}
+
+#[test]
+fn test_revoke_session_removes_only_that_token() {
+    let store = new_session_store();
+    let a = create_session(&store);
+    let b = create_session(&store);
+    assert!(validate_session(&store, &a));
+    assert!(validate_session(&store, &b));
+
+    // Logging out one device revokes only that token...
+    revoke_session(&store, &a);
+    assert!(!validate_session(&store, &a));
+    // ...and leaves every other session intact.
+    assert!(validate_session(&store, &b));
+
+    // Revoking an unknown token is a no-op.
+    revoke_session(&store, "nonexistent_token");
+    assert!(validate_session(&store, &b));
 }
 
 #[test]

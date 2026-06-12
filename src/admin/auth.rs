@@ -95,6 +95,14 @@ pub async fn revoke_all_sessions(
     db.set_setting("sessions", "").await
 }
 
+/// Revoke a single session token (logout this device only).
+///
+/// Leaves every other session intact. Persistence to the database is the
+/// caller's responsibility (see `save_sessions_to_db`).
+pub fn revoke_session(store: &SessionStore, token: &str) {
+    store.lock().remove(token);
+}
+
 /// Hash a password using Argon2 with a random salt.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRngCompat);
