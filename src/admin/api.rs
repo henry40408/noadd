@@ -67,6 +67,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/revoke-all", post(revoke_all))
+        .route("/api/auth/logout", post(logout))
         // Health + server info (no auth required for health)
         .route("/api/health", get(health))
         .route("/api/server-info", get(get_server_info))
@@ -327,6 +328,22 @@ async fn revoke_all(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+/// Log out the current session only: revoke this token, persist, and expire
+/// the client's session cookie. Other devices' sessions are untouched.
+async fn logout(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<(CookieJar, StatusCode), StatusCode> {
+    require_auth(&state, &jar)?;
+    if let Some(c) = jar.get("session") {
+        let token = c.value().to_string();
+        crate::admin::auth::revoke_session(&state.sessions, &token);
+        let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+    }
+    let removal = Cookie::build(("session", "")).path("/").build();
+    Ok((jar.remove(removal), StatusCode::OK))
 }
 
 // --- Health ---

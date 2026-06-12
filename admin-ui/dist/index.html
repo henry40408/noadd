@@ -150,6 +150,8 @@ body::after {
   color: var(--text-dim);
   border-left: 1px solid var(--border);
 }
+#topbar-logout { border-left: 1px solid var(--border); border-right: none; }
+#topbar-logout:hover { color: var(--red); background: var(--red-dim); }
 
 .statusbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
@@ -780,12 +782,26 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
 .log-card-row2 {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 2px;
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--text-dim);
   letter-spacing: -0.01em;
 }
+.log-card-row2 > span { white-space: nowrap; }
+/* divider only between two visible, adjacent fields → no orphan separators */
+.log-card-row2 > span + span::before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--border);
+}
+.log-card-row2 .lc-type   { color: var(--accent); font-weight: 600; }
+.log-card-row2 .lc-up     { color: var(--text-secondary); }
+.log-card-row2 .lc-cached { color: var(--orange); }
+.log-card-row2 .lc-token  { color: var(--accent); }
+.log-card-row2 .lc-ms     { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
 /* Query-log specific bumps — table is for scanning, not specimen-style display.
    Primary rows sit at body size (1rem ≈ 14 px); th sized down 1 step to keep
@@ -861,6 +877,8 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 @media (max-width: 768px) {
   /* Hide desktop chrome, show mobile F-key bar */
   .nav-strip, .topbar-meta, .statusbar { display: none; }
+  /* topbar keeps brand + logout on mobile; push logout to the right edge */
+  #topbar-logout { margin-left: auto; }
   .fnbar {
     display: flex;
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 60;
@@ -1034,7 +1052,7 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   font-size: 0.75rem;
   color: var(--text-dim);
   text-align: right;
-  line-height: 1.15;
+  line-height: 1.2; /* 1.15 produced a 1px sub-pixel overflow -> phantom scrollbar in .bar-list */
   letter-spacing: -0.01em;
 }
 .bar-row-pct {
@@ -1092,7 +1110,14 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   margin-bottom: 12px;
 }
 .stats-row-2col > .card { margin-bottom: 0; }
-stats-page .chart-container { height: 160px; }
+stats-page .chart-container { height: 200px; }
+/* Statistics timeline has up to 90 bars; a 3px inter-bar gap would dilute each
+   column to near-zero. Tighten the gap and floor the column width (scoped to
+   stats-page so the Dashboard 24h chart is untouched). No overflow-x — that
+   would force overflow-y:auto and clip the hover tooltips. */
+stats-page .chart-area { gap: 1px; }
+stats-page .chart-col { min-width: 3px; }
+stats-page .chart-bar.total { background: var(--text-dim); }
 stats-page .heatmap-cell { height: 14px; }
 stats-page .heatmap-table,
 stats-page .heatmap-col-labels {
@@ -1666,6 +1691,7 @@ class AppShell extends HTMLElement {
             <button class="nav-item" data-route="#settings" data-testid="nav-settings"><b>5:</b>settings</button>
           </nav>
           <div class="topbar-meta">dns sinkhole</div>
+          <button class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
         </header>
         <main class="main-content">
           <rebuild-banner></rebuild-banner>
@@ -1686,13 +1712,20 @@ class AppShell extends HTMLElement {
         </nav>
       </div>`;
 
-    this.querySelectorAll('.nav-item').forEach(btn => {
+    this.querySelectorAll('.nav-item[data-route]').forEach(btn => {
       btn.onclick = () => { location.hash = btn.dataset.route; };
     });
 
+    this.querySelector('#topbar-logout').onclick = async () => {
+      try {
+        await api.post('/api/auth/logout');
+      } catch (e) { /* clear client state regardless of response */ }
+      window.dispatchEvent(new CustomEvent('auth-required'));
+    };
+
     const updateActive = () => {
       const hash = location.hash || '#dashboard';
-      this.querySelectorAll('.nav-item').forEach(b => {
+      this.querySelectorAll('.nav-item[data-route]').forEach(b => {
         b.classList.toggle('active', b.dataset.route === hash);
       });
     };
@@ -2908,11 +2941,11 @@ class LogsPage extends HTMLElement {
         </div>
         ${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
-          <span>${timeAgo(l.timestamp)}</span>
-          <span>${esc(l.query_type)}</span>
-          <span>${l.cached ? 'cached' : l.upstream ? esc(l.upstream) : ''}</span>
-          ${l.doh_token ? '<span style="color:var(--accent)">' + esc(l.doh_token) + '</span>' : ''}
-          <span>${l.response_ms}ms</span>
+          <span class="lc-time">${timeAgo(l.timestamp)}</span>
+          <span class="lc-type">${esc(l.query_type)}</span>
+          ${l.cached ? '<span class="lc-cached">cached</span>' : l.upstream ? '<span class="lc-up">' + esc(l.upstream) + '</span>' : ''}
+          ${l.doh_token ? '<span class="lc-token">' + esc(l.doh_token) + '</span>' : ''}
+          <span class="lc-ms">${l.response_ms}ms</span>
         </div>
       </div>`).join('');
     }
@@ -3350,14 +3383,14 @@ class SettingsPage extends HTMLElement {
       btn.innerHTML = icons.refresh + ' Checking...';
       try {
         const results = await api.get('/api/upstream/health');
-        let html = '<table><thead><tr><th>Server</th><th>Status</th><th>Latency</th></tr></thead><tbody>';
+        let html = '<div class="table-wrap"><table><thead><tr><th>Server</th><th>Status</th><th>Latency</th></tr></thead><tbody>';
         for (const r of results) {
           const status = r.ok
             ? '<span class="badge badge-allowed">OK</span>'
             : '<span class="badge badge-blocked">FAIL</span>';
           html += `<tr><td class="mono">${esc(r.server)}</td><td>${status}</td><td class="mono">${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
         }
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
         el.innerHTML = html;
       } catch (e) {
         el.innerHTML = '<p style="color:var(--red)">Failed to check upstream health</p>';
@@ -3425,7 +3458,7 @@ class SettingsPage extends HTMLElement {
         el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No tokens configured</p>';
         return;
       }
-      let html = '<table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
+      let html = '<div class="table-wrap"><table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
       for (const t of tokens) {
         html += `<tr>
           <td class="mono" style="color:var(--text-primary)">${esc(t.token)}</td>
@@ -3433,7 +3466,7 @@ class SettingsPage extends HTMLElement {
           <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${esc(t.token)}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
       }
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
       el.innerHTML = html;
       el.querySelectorAll('.del-token').forEach(btn => {
         btn.onclick = async () => {
@@ -3459,12 +3492,12 @@ class SettingsPage extends HTMLElement {
         el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No latency data yet. Data will appear after queries are processed.</p>';
         return;
       }
-      let html = '<table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
+      let html = '<div class="table-wrap"><table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
       for (const d of data) {
         const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
         html += `<tr><td class="mono">${esc(d.server)}</td><td class="mono">${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
       }
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
       el.innerHTML = html;
     } catch (e) {
       el.innerHTML = '';
