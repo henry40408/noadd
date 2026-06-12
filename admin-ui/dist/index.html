@@ -657,6 +657,11 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
 .login-line input {
   flex: 1;
   width: auto;
+  /* allow the field to shrink below its intrinsic width inside the flex row —
+     without this, the default min-width:auto makes the password input overflow
+     the box on narrow viewports (e.g. 375px), forcing a horizontal scrollbar
+     (which in turn pushes out a spurious vertical one). */
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
