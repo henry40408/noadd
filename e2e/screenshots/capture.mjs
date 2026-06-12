@@ -90,12 +90,14 @@ const WAITS = {
 const DESKTOP = { viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 };
 const MOBILE = { viewport: { width: 375, height: 812 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true };
 
+// Viewport-only captures: each shot is exactly the visible viewport (a clean
+// "above the fold" single-screen composition), not the entire scrolling page.
 const SHOTS = [
-  { file: 'dashboard-dark.png',    route: '#dashboard', wait: WAITS.dashboard, scheme: 'dark',  ...DESKTOP, fullPage: true },
-  { file: 'statistics-dark.png',   route: '#stats',     wait: WAITS.stats,     scheme: 'dark',  ...DESKTOP, fullPage: true },
-  { file: 'query-log-dark.png',    route: '#logs',      wait: WAITS.logs,      scheme: 'dark',  ...DESKTOP, fullPage: true },
-  { file: 'filters-dark.png',      route: '#filters',   wait: WAITS.filters,   scheme: 'dark',  ...DESKTOP, fullPage: true },
-  { file: 'statistics-light.png',  route: '#stats',     wait: WAITS.stats,     scheme: 'light', ...DESKTOP, fullPage: true },
+  { file: 'dashboard-dark.png',    route: '#dashboard', wait: WAITS.dashboard, scheme: 'dark',  ...DESKTOP, fullPage: false },
+  { file: 'statistics-dark.png',   route: '#stats',     wait: WAITS.stats,     scheme: 'dark',  ...DESKTOP, fullPage: false },
+  { file: 'query-log-dark.png',    route: '#logs',      wait: WAITS.logs,      scheme: 'dark',  ...DESKTOP, fullPage: false },
+  { file: 'filters-dark.png',      route: '#filters',   wait: WAITS.filters,   scheme: 'dark',  ...DESKTOP, fullPage: false },
+  { file: 'statistics-light.png',  route: '#stats',     wait: WAITS.stats,     scheme: 'light', ...DESKTOP, fullPage: false },
   { file: 'dashboard-mobile.png',  route: '#dashboard', wait: WAITS.dashboard, scheme: 'dark',  ...MOBILE,  fullPage: false },
   { file: 'query-log-mobile.png',  route: '#logs',      wait: WAITS.logsMobile, scheme: 'dark', ...MOBILE,  fullPage: false },
 ];
@@ -158,13 +160,12 @@ async function main() {
       // `.fade-in` cards (animation: fadeIn 0.3s both; animation-delay 0.1–0.25s)
       // finish instantly at their opacity:1 end-state instead of being caught
       // mid-delay at the opacity:0 `from` state when the screenshot fires.
-      let freeze = '*{animation-duration:0s !important;animation-delay:0s !important;'
+      const freeze = '*{animation-duration:0s !important;animation-delay:0s !important;'
         + 'transition:none !important;caret-color:transparent !important}';
-      // The desktop status bar is `position: fixed; bottom: 0`, so in fullPage
-      // captures it paints over real content at the viewport-bottom band. Hide it
-      // for fullPage shots only. (Mobile uses `nav.fnbar` — a different element —
-      // and mobile shots are fullPage:false, so the F1–F5 bar is untouched.)
-      if (shot.fullPage) freeze += '\n.statusbar{display:none !important}';
+      // Viewport-only captures: the `position: fixed; bottom: 0` status bar
+      // legitimately sits at the bottom edge of the viewport (part of the
+      // vim/terminal aesthetic, exactly how the live app renders), so it is kept
+      // visible and no longer hidden.
       await page.addStyleTag({ content: freeze });
       await shot.wait(page);
       await page.evaluate(() => document.fonts.ready);
