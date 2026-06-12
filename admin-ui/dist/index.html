@@ -493,12 +493,37 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
 /* Timeline line-chart SVG (Dashboard 24h + Statistics Nd). Sits inside the
    200px .chart-container; 28px is the .chart-labels row (20px + 4px margin
    + 4px padding). preserveAspectRatio="none" stretches the 600×180 viewBox
-   to the container, same approach as .rate-svg. */
+   to the container, same approach as .rate-svg. Y-axis numbers must NOT live
+   inside this SVG (non-uniform scaling distorts glyphs) — they render in the
+   .tl-yticks HTML overlay below. */
 .tl-svg {
   width: 100%;
   height: calc(100% - 28px);
   display: block;
   touch-action: none;
+}
+
+/* Y-axis tick labels as real HTML so preserveAspectRatio="none" never
+   distorts the digits. The overlay tracks the .tl-svg box exactly
+   (bottom 28px = the .chart-labels row). pointer-events:none keeps the
+   SVG's hover/tooltip interaction working underneath. */
+.tl-yticks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  pointer-events: none;
+}
+
+.tl-ytick {
+  position: absolute;
+  left: 6px;
+  transform: translateY(calc(-100% - 2px)); /* bottom edge 2px above gridline */
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  line-height: 1;
+  color: var(--text-dim);
 }
 
 /* Shared tooltip base — .heatmap-tooltip and .rate-tooltip */
@@ -2121,11 +2146,19 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   }
   const baseline = (padY + innerH).toFixed(1);
   const totalArea = `${paths[0].join(' ')} L${xs(len - 1).toFixed(1)},${baseline} L${xs(0).toFixed(1)},${baseline} Z`;
+  // Gridlines stay inside the stretched SVG (geometry should stretch). The
+  // numeric labels are real HTML in a .tl-yticks overlay so they are never
+  // distorted by preserveAspectRatio="none" (SVG <text> glyphs get the same
+  // non-uniform scale as paths; vector-effect can't opt text out of it).
   const ticks = [0.25, 0.5, 0.75].map(p => {
     const y = ys(max * p).toFixed(1);
-    return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/>` +
-      `<text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-sans)">${formatNum(Math.round(max * p))}</text>`;
+    return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/>`;
   }).join('');
+  const yTicks = '<div class="tl-yticks" aria-hidden="true">' +
+    [0.25, 0.5, 0.75].map(p =>
+      `<span class="tl-ytick" style="top:${((ys(max * p) / h) * 100).toFixed(2)}%">${formatNum(Math.round(max * p))}</span>`
+    ).join('') +
+    '</div>';
   const lines = series.map((s, si) =>
     `<path d="${paths[si].join(' ')}" fill="none" stroke="${s.color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`
   ).join('');
@@ -2148,6 +2181,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
         ${dots}
       </g>
     </svg>
+    ${yTicks}
     <div class="rate-tooltip"></div>
     ${labels}`;
 
