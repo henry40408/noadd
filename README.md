@@ -27,6 +27,30 @@ Blocks ads and trackers at the DNS level using community-maintained filter lists
 - **Hot-swap filters** — update lists without restarting, zero query interruption
 - **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
 
+## Screenshots
+
+The admin UI is embedded in the binary — dark/light follows your OS preference, and the layout adapts to phones with a bottom tab bar.
+
+![Dashboard — live stat cards, 24h query timeline, top domains, sources and upstreams (dark theme)](docs/screenshots/dashboard-dark.png)
+
+![Statistics — 7d/30d/90d query trends, block & cache rate, weekday-by-hour activity heatmap, query type and outcome breakdowns, database health (dark theme)](docs/screenshots/statistics-dark.png)
+
+![Query log — searchable DNS history with per-query outcome, latency and one-click Allow/Block (dark theme)](docs/screenshots/query-log-dark.png)
+
+![Filters — filter list management with rule counts, custom allow/block rules and a live domain test (dark theme)](docs/screenshots/filters-dark.png)
+
+<table>
+  <tr>
+    <td width="56%"><img src="docs/screenshots/statistics-light.png" alt="Statistics page in the light theme"></td>
+    <td width="22%"><img src="docs/screenshots/dashboard-mobile.png" alt="Dashboard on a 375px phone viewport with bottom tab navigation"></td>
+    <td width="22%"><img src="docs/screenshots/query-log-mobile.png" alt="Query log on mobile, rows rendered as cards"></td>
+  </tr>
+  <tr>
+    <td align="center">Light theme</td>
+    <td align="center" colspan="2">Mobile layout with bottom tab bar</td>
+  </tr>
+</table>
+
 ## Quick Start
 
 ```bash
@@ -139,6 +163,20 @@ npm test                          # generates step bindings, then runs the suite
 
 Gherkin features are in `e2e/features/`; step definitions in `e2e/steps/`. The
 suite also runs in CI via the `e2e` job.
+
+### Regenerating README screenshots
+
+The images in `docs/screenshots/` are produced by a repeatable pipeline that
+seeds a throwaway database with ~90 days of fake traffic, boots `noadd` on
+throwaway ports, and re-captures every page with Playwright. Re-run it after
+any admin-UI change and commit the updated PNGs:
+
+```bash
+cargo build                       # embeds the current admin UI into the binary
+cd e2e
+npm ci && npx playwright install chromium   # first time only
+npm run screenshots
+```
 
 ## License
 
