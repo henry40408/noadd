@@ -2268,13 +2268,16 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     cursor.classList.add('active');
     dotsBox.classList.add('active');
     tooltip.innerHTML = fmtTooltip(best.d);
+    tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
     const containerRect = el.getBoundingClientRect();
     const pxX = (best.x / w) * rect.width;
     const topY = Math.min(...series.map(s => best.yByKey[s.key]));
     const pxY = (rect.top - containerRect.top) + (topY / h) * rect.height;
-    tooltip.style.left = `${pxX}px`;
+    // Tooltip is centered on `left` via translate(-50%); clamp so it never
+    // spills past the container (the .card has overflow:hidden and clips it).
+    const half = tooltip.offsetWidth / 2;
+    tooltip.style.left = `${Math.max(half, Math.min(pxX, el.clientWidth - half))}px`;
     tooltip.style.top = `${pxY}px`;
-    tooltip.classList.add('active');
   };
   const onLeave = () => { cursor.classList.remove('active'); if (len !== 1) dotsBox.classList.remove('active'); tooltip.classList.remove('active'); };
   svg.addEventListener('pointermove', onMove);
@@ -2890,13 +2893,16 @@ class StatsPage extends HTMLElement {
       dotBlocked.setAttribute('cy', best.yb.toFixed(1));
       cursor.classList.add('active');
       tooltip.innerHTML = `${fmtDay(best.d)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
+      tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
       const pxX = (best.x / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
       const svgTop = rect.top - containerRect.top;
       const pxY = svgTop + (best.yb / h) * rect.height;
-      tooltip.style.left = `${pxX}px`;
+      // Tooltip is centered on `left` via translate(-50%); clamp so it never
+      // spills past the container (the .card has overflow:hidden and clips it).
+      const half = tooltip.offsetWidth / 2;
+      tooltip.style.left = `${Math.max(half, Math.min(pxX, el.clientWidth - half))}px`;
       tooltip.style.top = `${pxY}px`;
-      tooltip.classList.add('active');
     };
     const onLeave = () => {
       cursor.classList.remove('active');
