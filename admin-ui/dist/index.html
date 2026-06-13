@@ -491,28 +491,29 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
 }
 
 /* Timeline line-chart SVG (Dashboard 24h + Statistics Nd). Sits inside the
-   200px .chart-container; 28px is the .chart-labels row (20px + 4px margin
-   + 4px padding). preserveAspectRatio="none" stretches the 600×180 viewBox
-   to the container, same approach as .rate-svg. Y-axis numbers must NOT live
-   inside this SVG (non-uniform scaling distorts glyphs) — they render in the
-   .tl-yticks HTML overlay below. */
+   200px .chart-container; 50px is reserved below the plot = the 28px
+   .chart-labels row (20px + 4px margin + 4px padding) plus the 22px legend
+   (14px .tl-legend + 8px margin-top). preserveAspectRatio="none" stretches
+   the 600×180 viewBox to the container, same approach as .rate-svg. Y-axis
+   numbers must NOT live inside this SVG (non-uniform scaling distorts glyphs)
+   — they render in the .tl-yticks HTML overlay below. */
 .tl-svg {
   width: 100%;
-  height: calc(100% - 28px);
+  height: calc(100% - 50px);
   display: block;
   touch-action: none;
 }
 
 /* Y-axis tick labels as real HTML so preserveAspectRatio="none" never
    distorts the digits. The overlay tracks the .tl-svg box exactly
-   (bottom 28px = the .chart-labels row). pointer-events:none keeps the
-   SVG's hover/tooltip interaction working underneath. */
+   (bottom 50px = the 28px .chart-labels row + 22px legend). pointer-events:none
+   keeps the SVG's hover/tooltip interaction working underneath. */
 .tl-yticks {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  bottom: 28px;
+  bottom: 50px;
   pointer-events: none;
 }
 
@@ -565,6 +566,14 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
   font-family: var(--font-mono);
   font-size: 0.72rem;
   color: var(--text-dim);
+}
+
+/* Legend for the timeline charts (reuses .rate-legend styling). Sized to fit
+   the 50px reserved below .tl-svg: 14px box + 8px margin-top = 22px. */
+.tl-legend {
+  height: 14px;
+  margin-top: 8px;
+  align-items: center;
 }
 
 /* Filters row */
@@ -1067,6 +1076,9 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   display: block;
   touch-action: none;
 }
+/* Tracks the 160px .rate-svg box exactly so % labels are real HTML and
+   never distorted by preserveAspectRatio="none" (same fix as .tl-yticks). */
+.rate-yticks { position: absolute; top: 0; left: 0; right: 0; height: 160px; pointer-events: none; }
 .rate-cursor { display: none; pointer-events: none; }
 .rate-cursor.active { display: block; }
 .rate-tooltip {
@@ -2130,9 +2142,10 @@ customElements.define('registry-modal', RegistryModal);
 // Modeled on StatsPage._renderRateTrend (same cursor/tooltip interaction).
 // el      — a .chart-container (position:relative, 200px tall)
 // data    — raw API rows; series[0].key must be 'total': it sets the y-scale
-// series  — [{ key, color }] drawn in order (total first, underneath); every
-//           series gets a translucent area fill (same flat fill-opacity style
-//           as StatsPage._renderRateTrend — no gradients, theme-safe)
+// series  — [{ key, color, label }] drawn in order (total first, underneath);
+//           every series gets a translucent area fill (same flat fill-opacity
+//           style as StatsPage._renderRateTrend — no gradients, theme-safe).
+//           `label` is the legend caption (shown in the .tl-legend row below).
 // fmtX    — (row) => x-axis label HTML (must be pre-escaped)
 // fmtTooltip — (row) => tooltip HTML (must be pre-escaped)
 function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
@@ -2186,6 +2199,10 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   for (let i = 0; i < len; i += labelEvery) labels += `<div class="chart-label">${fmtX(data[i])}</div>`;
   labels += '</div>';
 
+  const legend = '<div class="rate-legend tl-legend">' +
+    series.map(s => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join('') +
+    '</div>';
+
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="tl-svg">
       ${ticks}
@@ -2198,7 +2215,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     </svg>
     ${yTicks}
     <div class="rate-tooltip"></div>
-    ${labels}`;
+    ${labels}${legend}`;
 
   const svg = el.querySelector('.tl-svg');
   const cursor = el.querySelector('.rate-cursor');
@@ -2419,8 +2436,8 @@ class DashboardPage extends HTMLElement {
     if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
     this._flashIfChanged('_prevChart', rawData.map(d => d.total + ',' + d.blocked).join(';'), '#chart-card');
     renderTimelineChart(this.querySelector('#chart'), rawData, [
-      { key: 'total', color: 'var(--accent)' },
-      { key: 'blocked', color: 'var(--red)' },
+      { key: 'total', color: 'var(--accent)', label: 'total' },
+      { key: 'blocked', color: 'var(--red)', label: 'blocked' },
     ],
     (d) => formatTime(d.timestamp),
     (d) => {
@@ -2598,9 +2615,9 @@ class StatsPage extends HTMLElement {
     }
     const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
     renderTimelineChart(el, rawData, [
-      { key: 'total', color: 'var(--accent)' },
-      { key: 'cached', color: 'var(--orange)' },
-      { key: 'blocked', color: 'var(--red)' },
+      { key: 'total', color: 'var(--accent)', label: 'total' },
+      { key: 'cached', color: 'var(--orange)', label: 'cached' },
+      { key: 'blocked', color: 'var(--red)', label: 'blocked' },
     ],
     fmtDay,
     (d) => {
@@ -2775,10 +2792,22 @@ class StatsPage extends HTMLElement {
     }
     const blockedArea = `${blockedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
     const cachedArea = `${cachedPath.join(' ')} L${xs(len - 1).toFixed(1)},${(padY + innerH).toFixed(1)} L${xs(0).toFixed(1)},${(padY + innerH).toFixed(1)} Z`;
+    // Gridlines stay inside the stretched SVG (geometry should stretch). The
+    // numeric % labels are real HTML in a .rate-yticks overlay so they are
+    // never distorted by preserveAspectRatio="none" (same fix as .tl-yticks).
     const ticks = [25, 50, 75].map(p => {
       const y = ys(p).toFixed(1);
-      return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/><text x="${padX + 2}" y="${(parseFloat(y) - 2).toFixed(1)}" fill="var(--text-dim)" font-size="8" font-family="var(--font-sans)">${p}%</text>`;
+      return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/>`;
     }).join('');
+    const yTicks = '<div class="rate-yticks" aria-hidden="true">' +
+      [25, 50, 75].map(p =>
+        `<span class="tl-ytick" style="top:${((ys(p) / h) * 100).toFixed(2)}%">${p}%</span>`
+      ).join('') + '</div>';
+    const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    const labelEvery = Math.max(1, Math.floor(len / 6));
+    let labels = '<div class="chart-labels">';
+    for (let i = 0; i < len; i += labelEvery) labels += `<div class="chart-label">${fmtDay(rawData[i])}</div>`;
+    labels += '</div>';
     el.innerHTML = `
       <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="rate-svg">
         ${ticks}
@@ -2792,7 +2821,9 @@ class StatsPage extends HTMLElement {
           <circle class="rate-dot-blocked" cx="0" cy="0" r="3" fill="var(--red)" stroke="var(--bg-panel)" stroke-width="1"/>
         </g>
       </svg>
+      ${yTicks}
       <div class="rate-tooltip"></div>
+      ${labels}
       <div class="rate-legend">
         <span><i style="background:var(--red)"></i>blocked %</span>
         <span><i style="background:var(--green)"></i>cached %</span>
@@ -2823,8 +2854,7 @@ class StatsPage extends HTMLElement {
       dotBlocked.setAttribute('cx', best.x.toFixed(1));
       dotBlocked.setAttribute('cy', best.yb.toFixed(1));
       cursor.classList.add('active');
-      const ts = new Date(best.d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-      tooltip.innerHTML = `${esc(ts)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
+      tooltip.innerHTML = `${fmtDay(best.d)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
       const pxX = (best.x / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
       const svgTop = rect.top - containerRect.top;
