@@ -186,15 +186,30 @@ fn static_response(file: &File<'_>, headers: &HeaderMap) -> Response {
 
 static APPLE_TOUCH_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apple-touch-icon.png"));
 
-async fn serve_apple_touch_icon() -> impl IntoResponse {
+fn apple_touch_icon_etag() -> &'static str {
+    static ETAG: OnceLock<String> = OnceLock::new();
+    ETAG.get_or_init(|| etag_for(APPLE_TOUCH_ICON))
+}
+
+async fn serve_apple_touch_icon(headers: HeaderMap) -> impl IntoResponse {
+    let etag = apple_touch_icon_etag();
+    if if_none_match_matches(&headers, etag) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", etag), ("cache-control", "no-cache")],
+        )
+            .into_response();
+    }
     (
         StatusCode::OK,
         [
             ("content-type", "image/png"),
-            ("cache-control", "public, max-age=86400"),
+            ("etag", etag),
+            ("cache-control", "no-cache"),
         ],
         APPLE_TOUCH_ICON,
     )
+        .into_response()
 }
 
 async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {

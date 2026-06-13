@@ -1165,3 +1165,62 @@ async fn test_favicon_svg_has_etag() {
         "favicon.svg missing etag"
     );
 }
+
+#[tokio::test]
+async fn test_apple_touch_icon_has_etag_and_no_cache() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("etag").is_some(), "missing etag");
+    let cc = response
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-cache");
+}
+
+#[tokio::test]
+async fn test_apple_touch_icon_conditional_request_returns_304() {
+    let (app, _token) = setup().await;
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = first
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .header("if-none-match", &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+}
