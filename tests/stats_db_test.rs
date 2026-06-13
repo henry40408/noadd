@@ -41,7 +41,7 @@ async fn timeline_multi_buckets_total_blocked_cached() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let points = db.timeline_multi_since(0, 60).await.unwrap();
+    let points = db.timeline_multi_since(0, 60, 0).await.unwrap();
     assert_eq!(points.len(), 2);
     assert_eq!(points[0].total, 3);
     assert_eq!(points[0].blocked, 1);
@@ -54,8 +54,34 @@ async fn timeline_multi_buckets_total_blocked_cached() {
 #[tokio::test]
 async fn timeline_multi_empty_db() {
     let db = test_db().await;
-    let points = db.timeline_multi_since(0, 60).await.unwrap();
+    let points = db.timeline_multi_since(0, 60, 0).await.unwrap();
     assert!(points.is_empty());
+}
+
+#[tokio::test]
+async fn timeline_multi_offset_aligns_day_buckets_to_local_midnight() {
+    let db = test_db().await;
+    // UTC+8 viewer (offset 8h). A query at 2026-06-13 00:00 UTC is local 08:00,
+    // so its day bucket starts at the prior local midnight = 2026-06-12 16:00
+    // UTC (1_781_280_000). A query 9h later (local 17:00 same day) shares it; a
+    // query at 2026-06-13 16:00 UTC (next local midnight) starts a new bucket.
+    let utc_midnight = 1_781_280_000 + 8 * 3600; // 2026-06-13 00:00 UTC
+    let entries = vec![
+        entry(utc_midnight, "A", false, false, None),
+        entry(utc_midnight + 9 * 3600, "A", true, false, None),
+        entry(utc_midnight + 16 * 3600, "A", false, true, None), // next local day
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let offset = 8 * 3600;
+    let points = db.timeline_multi_since(0, 86400, offset).await.unwrap();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0].timestamp, 1_781_280_000); // local midnight 6/13
+    assert_eq!(points[0].total, 2);
+    assert_eq!(points[0].blocked, 1);
+    assert_eq!(points[1].timestamp, 1_781_280_000 + 86400);
+    assert_eq!(points[1].total, 1);
+    assert_eq!(points[1].cached, 1);
 }
 
 #[tokio::test]

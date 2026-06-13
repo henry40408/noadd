@@ -196,9 +196,10 @@ pub async fn compute_stats_timeline(
     db: &Database,
     now: i64,
     range: StatsRange,
+    tz_offset_secs: i64,
 ) -> Result<Vec<TimelineMultiPoint>, DbError> {
     let (window_secs, bucket_secs) = range.window();
-    db.timeline_multi_since(now - window_secs, bucket_secs)
+    db.timeline_multi_since(now - window_secs, bucket_secs, tz_offset_secs)
         .await
 }
 
