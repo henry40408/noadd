@@ -1079,3 +1079,156 @@ async fn setup_already_configured_returns_409() {
         "expected a JSON error body for 409, got: {body}"
     );
 }
+
+#[tokio::test]
+async fn test_index_served_with_etag_and_no_cache() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "etag not quoted: {etag}"
+    );
+    let cc = response
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-cache");
+}
+
+#[tokio::test]
+async fn test_index_conditional_request_returns_304() {
+    let (app, _token) = setup().await;
+
+    let first = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let etag = first
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("if-none-match", &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        body.is_empty(),
+        "304 body should be empty, got {} bytes",
+        body.len()
+    );
+}
+
+#[tokio::test]
+async fn test_favicon_svg_has_etag() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("etag").is_some(),
+        "favicon.svg missing etag"
+    );
+}
+
+#[tokio::test]
+async fn test_apple_touch_icon_has_etag_and_no_cache() {
+    let (app, _token) = setup().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("etag").is_some(), "missing etag");
+    let cc = response
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-cache");
+}
+
+#[tokio::test]
+async fn test_apple_touch_icon_conditional_request_returns_304() {
+    let (app, _token) = setup().await;
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = first
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .uri("/apple-touch-icon.png")
+                .header("if-none-match", &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        body.is_empty(),
+        "304 body should be empty, got {} bytes",
+        body.len()
+    );
+}

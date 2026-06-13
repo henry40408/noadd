@@ -1,15 +1,20 @@
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::response::{Html, IntoResponse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
-use include_dir::{Dir, include_dir};
+use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::auth::{
@@ -118,33 +123,101 @@ pub fn admin_router(state: AppState) -> Router {
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
 
+/// Strong, quoted ETag derived from a content hash. `DefaultHasher` seeds with
+/// fixed keys, so the digest is deterministic across process restarts of the
+/// same binary — exactly what a content-addressed validator needs, and with no
+/// extra dependency.
+fn etag_for(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("\"{:016x}\"", hasher.finish())
+}
+
+/// Per-path ETags for the embedded admin UI, computed once. Assets are fixed at
+/// compile time, so the map never needs invalidation.
+fn ui_etags() -> &'static HashMap<PathBuf, String> {
+    static ETAGS: OnceLock<HashMap<PathBuf, String>> = OnceLock::new();
+    ETAGS.get_or_init(|| {
+        ADMIN_UI
+            .files()
+            .map(|f| (f.path().to_path_buf(), etag_for(f.contents())))
+            .collect()
+    })
+}
+
+/// True when `If-None-Match` lists the given ETag (browsers echo back exactly
+/// what we sent; we also tolerate a comma-separated list).
+fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').any(|t| t.trim() == etag))
+        .unwrap_or(false)
+}
+
+/// Build a `200` (with body) or `304` response for an embedded file, always
+/// carrying an `ETag` and `Cache-Control: no-cache`.
+fn static_response(file: &File<'_>, headers: &HeaderMap) -> Response {
+    let etag = ui_etags()
+        .get(file.path())
+        .cloned()
+        .unwrap_or_else(|| etag_for(file.contents()));
+
+    if if_none_match_matches(headers, &etag) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", etag), ("cache-control", "no-cache".to_string())],
+        )
+            .into_response();
+    }
+
+    let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
+    (
+        StatusCode::OK,
+        [
+            ("content-type", mime.to_string()),
+            ("etag", etag),
+            ("cache-control", "no-cache".to_string()),
+        ],
+        file.contents().to_vec(),
+    )
+        .into_response()
+}
+
 static APPLE_TOUCH_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apple-touch-icon.png"));
 
-async fn serve_apple_touch_icon() -> impl IntoResponse {
+fn apple_touch_icon_etag() -> &'static str {
+    static ETAG: OnceLock<String> = OnceLock::new();
+    ETAG.get_or_init(|| etag_for(APPLE_TOUCH_ICON))
+}
+
+async fn serve_apple_touch_icon(headers: HeaderMap) -> impl IntoResponse {
+    let etag = apple_touch_icon_etag();
+    if if_none_match_matches(&headers, etag) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", etag), ("cache-control", "no-cache")],
+        )
+            .into_response();
+    }
     (
         StatusCode::OK,
         [
             ("content-type", "image/png"),
-            ("cache-control", "public, max-age=86400"),
+            ("etag", etag),
+            ("cache-control", "no-cache"),
         ],
         APPLE_TOUCH_ICON,
     )
+        .into_response()
 }
 
-async fn serve_static(uri: Uri) -> impl IntoResponse {
+async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
     match ADMIN_UI.get_file(path) {
-        Some(file) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (
-                StatusCode::OK,
-                [("content-type", mime.to_string())],
-                file.contents().to_vec(),
-            )
-                .into_response()
-        }
+        Some(file) => static_response(file, &headers),
         None => {
             // Only fall back to index.html for extension-less paths (SPA
             // client-side routes like /dashboard, /settings). Requests for
@@ -154,9 +227,7 @@ async fn serve_static(uri: Uri) -> impl IntoResponse {
                 return (StatusCode::NOT_FOUND, "not found").into_response();
             }
             match ADMIN_UI.get_file("index.html") {
-                Some(file) => {
-                    Html(String::from_utf8_lossy(file.contents()).to_string()).into_response()
-                }
+                Some(file) => static_response(file, &headers),
                 None => (StatusCode::NOT_FOUND, "not found").into_response(),
             }
         }

@@ -90,7 +90,7 @@ DoH access can be restricted with user-defined tokens. Each token becomes a URL 
 
 ### Admin UI
 
-A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. The dashboard polls the API every 10 seconds with a toggleable LIVE mode.
+A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. Embedded assets are served with a content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate on each load and receive `304 Not Modified` when nothing changed — reloads avoid re-transferring the ~146 KB page, while a rebuilt binary (new content, new ETag) updates clients immediately. The dashboard polls the API every 10 seconds with a toggleable LIVE mode.
 
 ## Data Storage
 
