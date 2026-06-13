@@ -1578,6 +1578,16 @@ function formatTime(ts) {
   return new Date(normalizeTs(ts)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+// Tooltip label for the statistics Nd timeline / rate charts. Date for day
+// buckets; date + HH:mm for sub-day buckets (7d→1h, 30d→6h) so hourly points
+// sharing a date are distinguishable. tsSeconds is epoch seconds (charts 2/3);
+// no timeZone option ⇒ browser-local, same as the rest of the chart formatting.
+function fmtBucketLabel(tsSeconds, withTime) {
+  const d = new Date(tsSeconds * 1000);
+  const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return withTime ? `${date} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : date;
+}
+
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
@@ -2662,6 +2672,8 @@ class StatsPage extends HTMLElement {
       el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
       return;
     }
+    // x-axis labels stay date-only; tooltips add HH:mm on sub-day buckets.
+    const subDay = this._range !== '90d';
     const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
     renderTimelineChart(el, rawData, [
       { key: 'total', color: 'var(--accent)', label: 'total' },
@@ -2676,7 +2688,7 @@ class StatsPage extends HTMLElement {
       const cachedPct = formatPct(cached, d.total);
       const blockedStr = blockedPct ? `${formatFull(blocked)} blocked (${blockedPct})` : `${formatFull(blocked)} blocked`;
       const cachedStr = cachedPct ? `${formatFull(cached)} cached (${cachedPct})` : `${formatFull(cached)} cached`;
-      return `${fmtDay(d)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--orange)">${cachedStr}</span>`;
+      return `${esc(fmtBucketLabel(d.timestamp, subDay))}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--orange)">${cachedStr}</span>`;
     });
   }
 
@@ -2852,6 +2864,8 @@ class StatsPage extends HTMLElement {
       [25, 50, 75].map(p =>
         `<span class="tl-ytick" style="top:${((ys(p) / h) * 100).toFixed(2)}%">${p}%</span>`
       ).join('') + '</div>';
+    // x-axis labels stay date-only; tooltips add HH:mm on sub-day buckets.
+    const subDay = this._range !== '90d';
     const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
     const labelEvery = Math.max(1, Math.floor(len / 6));
     let labels = '<div class="chart-labels">';
@@ -2908,7 +2922,7 @@ class StatsPage extends HTMLElement {
       dotBlocked.style.top = `${(best.yb / h * 100).toFixed(2)}%`;
       cursor.classList.add('active');
       dotsBox.classList.add('active');
-      tooltip.innerHTML = `${fmtDay(best.d)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
+      tooltip.innerHTML = `${esc(fmtBucketLabel(best.d.timestamp, subDay))}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
       tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
       const pxX = (best.x / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
