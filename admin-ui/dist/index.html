@@ -527,6 +527,31 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
   color: var(--text-dim);
 }
 
+/* Hover marker dots as real HTML so preserveAspectRatio="none" never squashes
+   them into ellipses (the line/area paths are meant to stretch; round markers
+   are not — same overlay fix as .tl-yticks). The overlay tracks the .tl-svg
+   box exactly, so dots position with left/top as a % of that box. */
+.tl-dots {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 50px;
+  pointer-events: none;
+}
+
+.tl-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -4px 0 0 -4px; /* center the 8px box (6px + 1px border each side) on the point */
+  border-radius: 50%;
+  border: 1px solid var(--bg-panel);
+  display: none;
+}
+
+.tl-dots.active .tl-dot { display: block; }
+
 /* Shared tooltip base — .heatmap-tooltip and .rate-tooltip */
 .heatmap-tooltip,
 .rate-tooltip {
@@ -2190,9 +2215,9 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   const lines = series.map((s, si) =>
     `<path d="${paths[si].join(' ')}" fill="none" stroke="${s.color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`
   ).join('');
-  const dots = series.map(s => `<circle class="tl-dot" data-key="${s.key}" cx="0" cy="0" r="3" fill="${s.color}" stroke="var(--bg-panel)" stroke-width="1"/>`).join('');
-  // A single data point draws no path — mark it with static dots instead.
-  const single = len === 1 ? series.map(s => `<circle cx="${xs(0).toFixed(1)}" cy="${points[0].yByKey[s.key].toFixed(1)}" r="2.5" fill="${s.color}"/>`).join('') : '';
+  // Marker dots live in an HTML overlay (.tl-dots), not the stretched SVG, so
+  // they stay round (see .tl-dot CSS). Positioned with left/top in onMove.
+  const dots = series.map(s => `<i class="tl-dot" data-key="${s.key}" style="background:${s.color}"></i>`).join('');
 
   const labelEvery = Math.max(1, Math.floor(len / 6));
   let labels = '<div class="chart-labels">';
@@ -2207,13 +2232,13 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="tl-svg">
       ${ticks}
       ${areas}
-      ${lines}${single}
+      ${lines}
       <g class="rate-cursor">
         <line x1="0" y1="${padY}" x2="0" y2="${padY + innerH}" stroke="var(--text-dim)" stroke-width="0.5" stroke-dasharray="2 3"/>
-        ${dots}
       </g>
     </svg>
     ${yTicks}
+    <div class="tl-dots" aria-hidden="true">${dots}</div>
     <div class="rate-tooltip"></div>
     ${labels}${legend}`;
 
@@ -2221,7 +2246,16 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   const cursor = el.querySelector('.rate-cursor');
   const cursorLine = cursor.querySelector('line');
   const tooltip = el.querySelector('.rate-tooltip');
-  const dotEls = [...cursor.querySelectorAll('.tl-dot')];
+  const dotsBox = el.querySelector('.tl-dots');
+  const dotEls = [...dotsBox.querySelectorAll('.tl-dot')];
+  // Place a dot on each series, with left/top as a % of the .tl-dots box
+  // (which tracks the SVG box) so markers stay round at any container size.
+  const placeDots = (p) => dotEls.forEach(c => {
+    c.style.left = `${(p.x / w * 100).toFixed(2)}%`;
+    c.style.top = `${(p.yByKey[c.dataset.key] / h * 100).toFixed(2)}%`;
+  });
+  // A single data point draws no path/cursor — show its markers statically.
+  if (len === 1) { placeDots(points[0]); dotsBox.classList.add('active'); }
   const onMove = (evt) => {
     const rect = svg.getBoundingClientRect();
     if (rect.width === 0) return;
@@ -2230,8 +2264,9 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     for (const p of points) if (Math.abs(p.x - svgX) < Math.abs(best.x - svgX)) best = p;
     cursorLine.setAttribute('x1', best.x.toFixed(1));
     cursorLine.setAttribute('x2', best.x.toFixed(1));
-    dotEls.forEach(c => { c.setAttribute('cx', best.x.toFixed(1)); c.setAttribute('cy', best.yByKey[c.dataset.key].toFixed(1)); });
+    placeDots(best);
     cursor.classList.add('active');
+    dotsBox.classList.add('active');
     tooltip.innerHTML = fmtTooltip(best.d);
     const containerRect = el.getBoundingClientRect();
     const pxX = (best.x / w) * rect.width;
@@ -2241,7 +2276,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     tooltip.style.top = `${pxY}px`;
     tooltip.classList.add('active');
   };
-  const onLeave = () => { cursor.classList.remove('active'); tooltip.classList.remove('active'); };
+  const onLeave = () => { cursor.classList.remove('active'); if (len !== 1) dotsBox.classList.remove('active'); tooltip.classList.remove('active'); };
   svg.addEventListener('pointermove', onMove);
   svg.addEventListener('pointerleave', onLeave);
   svg.addEventListener('pointercancel', onLeave);
