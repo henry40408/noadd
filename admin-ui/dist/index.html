@@ -544,7 +544,7 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
   position: absolute;
   width: 6px;
   height: 6px;
-  margin: -4px 0 0 -4px; /* center the 8px box (6px + 1px border each side) on the point */
+  margin: -3px 0 0 -3px; /* center the 6px box (border-box: border included) on the point */
   border-radius: 50%;
   border: 1px solid var(--bg-panel);
   display: none;
@@ -1110,6 +1110,11 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 /* Tracks the 160px .rate-svg box exactly so % labels are real HTML and
    never distorted by preserveAspectRatio="none" (same fix as .tl-yticks). */
 .rate-yticks { position: absolute; top: 0; left: 0; right: 0; height: 160px; pointer-events: none; }
+/* Marker dots as HTML so preserveAspectRatio="none" never squashes them into
+   ellipses (same overlay fix as .tl-dots). Tracks the 160px .rate-svg box;
+   dots position with left/top as a % of it. Reuses .tl-dot styling. */
+.rate-dots { position: absolute; top: 0; left: 0; right: 0; height: 160px; pointer-events: none; }
+.rate-dots.active .tl-dot { display: block; }
 .rate-cursor { display: none; pointer-events: none; }
 .rate-cursor.active { display: block; }
 .rate-tooltip {
@@ -2861,11 +2866,13 @@ class StatsPage extends HTMLElement {
         <path d="${blockedPath.join(' ')}" fill="none" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         <g class="rate-cursor">
           <line x1="0" y1="${padY}" x2="0" y2="${padY + innerH}" stroke="var(--text-dim)" stroke-width="0.5" stroke-dasharray="2 3"/>
-          <circle class="rate-dot-cached" cx="0" cy="0" r="3" fill="var(--green)" stroke="var(--bg-panel)" stroke-width="1"/>
-          <circle class="rate-dot-blocked" cx="0" cy="0" r="3" fill="var(--red)" stroke="var(--bg-panel)" stroke-width="1"/>
         </g>
       </svg>
       ${yTicks}
+      <div class="rate-dots" aria-hidden="true">
+        <i class="tl-dot" data-key="cached" style="background:var(--green)"></i>
+        <i class="tl-dot" data-key="blocked" style="background:var(--red)"></i>
+      </div>
       <div class="rate-tooltip"></div>
       ${labels}
       <div class="rate-legend">
@@ -2876,8 +2883,9 @@ class StatsPage extends HTMLElement {
     const svg = el.querySelector('.rate-svg');
     const cursor = el.querySelector('.rate-cursor');
     const line = cursor.querySelector('line');
-    const dotCached = cursor.querySelector('.rate-dot-cached');
-    const dotBlocked = cursor.querySelector('.rate-dot-blocked');
+    const dotsBox = el.querySelector('.rate-dots');
+    const dotCached = dotsBox.querySelector('[data-key="cached"]');
+    const dotBlocked = dotsBox.querySelector('[data-key="blocked"]');
     const tooltip = el.querySelector('.rate-tooltip');
 
     const onMove = (evt) => {
@@ -2893,11 +2901,13 @@ class StatsPage extends HTMLElement {
       }
       line.setAttribute('x1', best.x.toFixed(1));
       line.setAttribute('x2', best.x.toFixed(1));
-      dotCached.setAttribute('cx', best.x.toFixed(1));
-      dotCached.setAttribute('cy', best.yc.toFixed(1));
-      dotBlocked.setAttribute('cx', best.x.toFixed(1));
-      dotBlocked.setAttribute('cy', best.yb.toFixed(1));
+      const lx = `${(best.x / w * 100).toFixed(2)}%`;
+      dotCached.style.left = lx;
+      dotCached.style.top = `${(best.yc / h * 100).toFixed(2)}%`;
+      dotBlocked.style.left = lx;
+      dotBlocked.style.top = `${(best.yb / h * 100).toFixed(2)}%`;
       cursor.classList.add('active');
+      dotsBox.classList.add('active');
       tooltip.innerHTML = `${fmtDay(best.d)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
       tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
       const pxX = (best.x / w) * rect.width;
@@ -2912,6 +2922,7 @@ class StatsPage extends HTMLElement {
     };
     const onLeave = () => {
       cursor.classList.remove('active');
+      dotsBox.classList.remove('active');
       tooltip.classList.remove('active');
     };
     svg.addEventListener('pointermove', onMove);
