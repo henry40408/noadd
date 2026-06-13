@@ -583,6 +583,12 @@ input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(-
   height: 20px;
   align-items: center;
   margin-top: 4px;
+  /* Inset by padX so the dashed separator and the first/last x-labels line up
+     with the plotted data, not the full SVG box. The data spans viewBox x=8..592
+     of w=600 (preserveAspectRatio="none", svg is width:100%), so the inset is
+     8/600 = 100%/75 of the container width on each side. Shared by all 3 charts. */
+  margin-left: calc(100% / 75);
+  margin-right: calc(100% / 75);
   border-top: 1px dashed var(--border);
   padding-top: 4px;
 }
