@@ -1116,11 +1116,22 @@ async fn get_stats_top_upstreams(
 #[derive(Deserialize)]
 pub struct StatsRangeQuery {
     pub range: Option<String>,
+    /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), used
+    /// to align timeline buckets to their local calendar. Only the timeline
+    /// endpoint reads it; other handlers sharing this struct ignore it. Clamped
+    /// to ±14h; missing ⇒ 0 (UTC-aligned).
+    pub tz_offset: Option<i64>,
 }
 
 fn parse_stats_range(q: &StatsRangeQuery) -> Result<stats::StatsRange, StatusCode> {
     let raw = q.range.as_deref().unwrap_or("7d");
     stats::StatsRange::parse(raw).ok_or(StatusCode::BAD_REQUEST)
+}
+
+/// Resolve the viewer's UTC offset to seconds, clamped to the real-world range
+/// (±14h) so a malformed value can't shift buckets to nonsense.
+fn resolve_tz_offset_secs(q: &StatsRangeQuery) -> i64 {
+    q.tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60) * 60
 }
 
 async fn get_stats_v2_timeline(
@@ -1130,8 +1141,9 @@ async fn get_stats_v2_timeline(
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
+    let tz_offset = resolve_tz_offset_secs(&query);
     let now = crate::now_unix();
-    let timeline = stats::compute_stats_timeline(&state.db, now, range)
+    let timeline = stats::compute_stats_timeline(&state.db, now, range, tz_offset)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(timeline))
@@ -1203,6 +1215,7 @@ async fn get_stats_v2_top_domains(
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
+        tz_offset: None,
     })?;
     let limit = query.limit.unwrap_or(15);
     let now = crate::now_unix();
@@ -1220,6 +1233,7 @@ async fn get_stats_v2_top_clients(
     require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
+        tz_offset: None,
     })?;
     let limit = query.limit.unwrap_or(15);
     let now = crate::now_unix();

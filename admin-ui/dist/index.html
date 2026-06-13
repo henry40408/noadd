@@ -2628,8 +2628,12 @@ class StatsPage extends HTMLElement {
   async _fetchRanged() {
     this._updateRangedTitles();
     try {
+      // Pass the browser's east-positive UTC offset (minutes) so the server
+      // aligns timeline buckets to the viewer's local calendar (local midnight
+      // / hour), not UTC-epoch boundaries. getTimezoneOffset() is UTC-minus-local.
+      const tzOffset = -new Date().getTimezoneOffset();
       const [timeline, breakdown, highlights, topDomains, topClients] = await Promise.all([
-        api.get(`/api/stats/v2/timeline?range=${this._range}`),
+        api.get(`/api/stats/v2/timeline?range=${this._range}&tz_offset=${tzOffset}`),
         api.get(`/api/stats/v2/breakdown?range=${this._range}`),
         api.get(`/api/stats/v2/highlights?range=${this._range}`),
         api.get(`/api/stats/v2/top-domains?range=${this._range}`),

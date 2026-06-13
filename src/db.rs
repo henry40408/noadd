@@ -1110,18 +1110,27 @@ impl Database {
         Ok(rows)
     }
 
+    /// Aggregate query counts into `bucket_secs`-wide time buckets, aligned to
+    /// the viewer's local calendar by shifting the epoch by `tz_offset_secs`
+    /// (their east-positive UTC offset) before truncating, then shifting back.
+    /// The returned `timestamp` is each bucket's start in unix seconds, which a
+    /// browser in the same zone renders as the local boundary. A single offset
+    /// approximates DST (a bucket spanning a transition can be off by the DST
+    /// delta); pass 0 for plain UTC-aligned buckets.
     pub async fn timeline_multi_since(
         &self,
         since: i64, // unix seconds
         bucket_secs: i64,
+        tz_offset_secs: i64,
     ) -> Result<Vec<TimelineMultiPoint>, DbError> {
         let since_ms = since * 1000;
         let bucket_ms = bucket_secs * 1000;
+        let offset_ms = tz_offset_secs * 1000;
         let result = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT (timestamp / ?1) * ?1 AS bucket, \
+                    "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, \
                             COUNT(*), \
                             COALESCE(SUM(blocked), 0), \
                             COALESCE(SUM(cached), 0) \
@@ -1131,7 +1140,7 @@ impl Database {
                      ORDER BY bucket",
                 )?;
                 let rows = stmt
-                    .query_map(params![bucket_ms, since_ms], |row| {
+                    .query_map(params![bucket_ms, since_ms, offset_ms], |row| {
                         Ok(TimelineMultiPoint {
                             timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
                             total: row.get(1)?,

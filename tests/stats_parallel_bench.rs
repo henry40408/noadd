@@ -22,7 +22,7 @@ use noadd::db::Database;
 use noadd::now_unix;
 
 async fn run_sequential(db: &Database, now: i64, range: StatsRange) {
-    compute_stats_timeline(db, now, range).await.unwrap();
+    compute_stats_timeline(db, now, range, 0).await.unwrap();
     compute_heatmap(db, now).await.unwrap();
     compute_breakdowns(db, now, range).await.unwrap();
     compute_db_health(db, now).await.unwrap();
@@ -45,7 +45,7 @@ async fn run_parallel(db: &Database, now: i64, range: StatsRange) -> [Duration; 
         t.elapsed()
     }
     let (a, b, c, d, e, f, g) = tokio::join!(
-        timed(compute_stats_timeline(db, now, range)),
+        timed(compute_stats_timeline(db, now, range, 0)),
         timed(compute_heatmap(db, now)),
         timed(compute_breakdowns(db, now, range)),
         timed(compute_db_health(db, now)),
