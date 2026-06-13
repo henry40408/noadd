@@ -1223,4 +1223,12 @@ async fn test_apple_touch_icon_conditional_request_returns_304() {
         .unwrap();
 
     assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        body.is_empty(),
+        "304 body should be empty, got {} bytes",
+        body.len()
+    );
 }
