@@ -1023,7 +1023,8 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   position: relative;
   cursor: default;
 }
-.heatmap-cell:hover .heatmap-tooltip { display: block; }
+.heatmap-cell:hover .heatmap-tooltip,
+.heatmap-cell.touch-active .heatmap-tooltip { display: block; }
 
 /* Edge anchoring so heatmap tooltips stay inside the viewport */
 .heatmap-cell.edge-top .heatmap-tooltip {
@@ -2183,6 +2184,39 @@ class RegistryModal extends HTMLElement {
 }
 customElements.define('registry-modal', RegistryModal);
 
+// --- Shared touch support for charts ---
+// Pointer events fire for touch too, but a single tap doesn't reliably produce a
+// `pointermove`, and `pointerleave` fires the instant the finger lifts — so on
+// mobile the hover-driven tooltip never shows. addChartTouch() adds tap-to-show
+// and drag-to-scrub for touch/pen while leaving mouse hover untouched. A single
+// document-level "tap outside dismisses" listener (registered once, keyed by the
+// persistent chart host so it never accumulates across re-renders) clears the
+// tooltip — touch keeps it visible until then, matching native mobile tooltips.
+const _chartTouchDismissers = new Map(); // persistent host element -> dismiss fn
+document.addEventListener('pointerdown', (e) => {
+  for (const [host, dismiss] of [..._chartTouchDismissers]) {
+    if (!host.contains(e.target)) dismiss();
+  }
+}, true);
+
+// svg    — the chart's <svg> (has touch-action:none so scrubbing won't scroll)
+// host   — persistent container that survives re-renders (for outside-tap dismiss)
+// onMove — chart's existing hover handler (positions cursor/tooltip from evt.clientX)
+// onLeave— chart's existing handler that clears cursor/tooltip
+function addChartTouch(svg, host, onMove, onLeave) {
+  const dismiss = () => { _chartTouchDismissers.delete(host); onLeave(); };
+  svg.addEventListener('pointerdown', (evt) => {
+    if (evt.pointerType === 'mouse') return; // mouse keeps pure hover behavior
+    try { svg.setPointerCapture(evt.pointerId); } catch (_) {}
+    _chartTouchDismissers.set(host, dismiss);
+    onMove(evt);
+  });
+  svg.addEventListener('pointermove', onMove);
+  // Mouse dismisses on leave; touch/pen keep the tooltip until a tap outside.
+  svg.addEventListener('pointerleave', (evt) => { if (evt.pointerType === 'mouse') onLeave(); });
+  svg.addEventListener('pointercancel', dismiss);
+}
+
 // --- Shared SVG line chart for query-volume timelines ---
 // Used by Dashboard "Queries (24h)" and Statistics "Queries (last Nd)".
 // Modeled on StatsPage._renderRateTrend (same cursor/tooltip interaction).
@@ -2301,9 +2335,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     tooltip.style.top = `${pxY}px`;
   };
   const onLeave = () => { cursor.classList.remove('active'); if (len !== 1) dotsBox.classList.remove('active'); tooltip.classList.remove('active'); };
-  svg.addEventListener('pointermove', onMove);
-  svg.addEventListener('pointerleave', onLeave);
-  svg.addEventListener('pointercancel', onLeave);
+  addChartTouch(svg, el, onMove, onLeave);
 }
 
 // --- Dashboard Page ---
@@ -2747,6 +2779,20 @@ class StatsPage extends HTMLElement {
     }
     html += '</div></div>';
     el.innerHTML = html;
+
+    // Touch: CSS :hover never fires on mobile, so tap a cell to show its tooltip,
+    // tap another to switch, tap outside to dismiss. The listener lives on the
+    // freshly-built .heatmap-wrap (GC'd with the next re-render — no accumulation).
+    const wrap = el.querySelector('.heatmap-wrap');
+    const clearActive = () => { _chartTouchDismissers.delete(el); wrap.querySelectorAll('.heatmap-cell.touch-active').forEach(c => c.classList.remove('touch-active')); };
+    wrap.addEventListener('pointerup', (evt) => {
+      if (evt.pointerType === 'mouse') return; // mouse keeps pure hover behavior
+      const cell = evt.target.closest('.heatmap-cell');
+      if (!cell) return;
+      const wasActive = cell.classList.contains('touch-active');
+      clearActive();
+      if (!wasActive) { cell.classList.add('touch-active'); _chartTouchDismissers.set(el, clearActive); }
+    });
   }
 
   _renderBarChart(containerId, entries, color) {
@@ -2943,9 +2989,7 @@ class StatsPage extends HTMLElement {
       dotsBox.classList.remove('active');
       tooltip.classList.remove('active');
     };
-    svg.addEventListener('pointermove', onMove);
-    svg.addEventListener('pointerleave', onLeave);
-    svg.addEventListener('pointercancel', onLeave);
+    addChartTouch(svg, el, onMove, onLeave);
   }
 }
 customElements.define('stats-page', StatsPage);
