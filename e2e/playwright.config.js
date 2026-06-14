@@ -112,5 +112,15 @@ export default defineConfig({
         storageState: STORAGE_STATE,
       },
     },
+    {
+      // Mobile touch interaction for the Statistics charts. Plain Playwright
+      // spec (not BDD): it seeds and drives its own noadd instance, so it needs
+      // no shared server, storageState, or webServer entry. Runs in a Pixel 5
+      // (hasTouch) context so tap()/touchscreen dispatch real touch events.
+      name: 'touch',
+      testDir: 'specs',
+      testMatch: /chart-touch\.spec\.js$/,
+      use: { ...devices['Pixel 5'] },
+    },
   ],
 });
