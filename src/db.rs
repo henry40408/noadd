@@ -56,6 +56,12 @@ pub struct QueryLogEntry {
     pub result: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StorageStats {
+    pub main_bytes: i64,
+    pub reclaimable_bytes: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TopUpstream {
     pub upstream: String,
@@ -898,6 +904,24 @@ impl Database {
         Ok(result)
     }
 
+    /// Returns the latest log timestamp in milliseconds, or None if no logs.
+    /// Paired with [`Database::earliest_log_timestamp`] it gives the actual span
+    /// of retained data ("Log Coverage").
+    pub async fn latest_log_timestamp(&self) -> Result<Option<i64>, DbError> {
+        let result = self
+            .reader()
+            .call(|conn| {
+                let ts: Option<i64> = conn
+                    .query_row("SELECT MAX(timestamp) FROM query_logs", [], |row| {
+                        row.get(0)
+                    })
+                    .ok();
+                Ok(ts)
+            })
+            .await?;
+        Ok(result)
+    }
+
     /// `since` is in seconds (epoch). Internally converts to ms to match stored timestamps.
     pub async fn count_queries_since(&self, since: i64) -> Result<(i64, i64), DbError> {
         let since_ms = since * 1000;
@@ -1290,16 +1314,30 @@ impl Database {
         Ok(latency_summary_from_histogram(&hist))
     }
 
-    pub async fn db_file_size(&self) -> Result<i64, DbError> {
-        let result = self
+    /// On-disk storage breakdown for the Database Health card. Both figures come
+    /// from built-in PRAGMAs (no filesystem stat), so they work uniformly for
+    /// file-backed and in-memory databases.
+    ///
+    /// - `main_bytes`: the main database file (`page_count * page_size`).
+    /// - `reclaimable_bytes`: free pages SQLite holds but is not using
+    ///   (`freelist_count * page_size`); a `VACUUM` would return these to the
+    ///   OS. This mirrors the freelist ratio that gates
+    ///   [`Database::run_maintenance`].
+    pub async fn db_storage_stats(&self) -> Result<StorageStats, DbError> {
+        let stats = self
             .reader()
             .call(|conn| {
                 let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
                 let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-                Ok(page_count * page_size)
+                let freelist: i64 =
+                    conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+                Ok(StorageStats {
+                    main_bytes: page_count * page_size,
+                    reclaimable_bytes: freelist * page_size,
+                })
             })
             .await?;
-        Ok(result)
+        Ok(stats)
     }
 
     pub async fn total_log_count(&self) -> Result<i64, DbError> {
