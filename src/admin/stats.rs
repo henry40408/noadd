@@ -185,11 +185,27 @@ pub struct Breakdowns {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DbHealth {
+    /// Main database file size (`page_count * page_size`).
     pub db_size_bytes: i64,
+    /// Free pages a `VACUUM` would return to the OS (subset of the main file).
+    pub reclaimable_bytes: i64,
+    /// Reclaimable share of the main file, 0.0–1.0. Mirrors the freelist ratio
+    /// that gates the background `VACUUM`.
+    pub fragmentation_ratio: f64,
     pub total_log_count: i64,
     pub oldest_log_timestamp: Option<i64>, // unix seconds
     pub log_retention_days: Option<i64>,
     pub avg_new_rows_per_day: f64,
+    /// Average on-disk bytes per log row (`db_size_bytes / total_log_count`),
+    /// 0.0 when there are no logs.
+    pub bytes_per_log: f64,
+    /// Actual span of retained data in days (newest − oldest log), 0.0 when
+    /// fewer than two logs exist.
+    pub log_coverage_days: f64,
+    /// Projected steady-state main-file size once retention is full:
+    /// `bytes_per_log × avg_new_rows_per_day × log_retention_days`. 0 when any
+    /// input is unavailable.
+    pub projected_full_bytes: i64,
 }
 
 pub async fn compute_stats_timeline(
@@ -268,12 +284,19 @@ pub async fn compute_top_clients_ranged(
 }
 
 pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbError> {
-    let (db_size_bytes, total_log_count, earliest_ms, retention_setting) = tokio::try_join!(
-        db.db_file_size(),
+    let (storage, total_log_count, earliest_ms, latest_ms, retention_setting) = tokio::try_join!(
+        db.db_storage_stats(),
         db.total_log_count(),
         db.earliest_log_timestamp(),
+        db.latest_log_timestamp(),
         db.get_setting("log_retention_days"),
     )?;
+    let db_size_bytes = storage.main_bytes;
+    let fragmentation_ratio = if storage.main_bytes > 0 {
+        storage.reclaimable_bytes as f64 / storage.main_bytes as f64
+    } else {
+        0.0
+    };
     let oldest_log_timestamp = earliest_ms.map(|ms| ms / 1000);
     let log_retention_days = Some(
         retention_setting
@@ -289,12 +312,37 @@ pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbEr
         _ => 0.0,
     };
 
+    let bytes_per_log = if total_log_count > 0 {
+        db_size_bytes as f64 / total_log_count as f64
+    } else {
+        0.0
+    };
+
+    // Actual span of retained data (newest − oldest). Reported in days.
+    let log_coverage_days = match (earliest_ms, latest_ms) {
+        (Some(min_ms), Some(max_ms)) if max_ms > min_ms => (max_ms - min_ms) as f64 / 86_400_000.0,
+        _ => 0.0,
+    };
+
+    // Steady-state estimate: per-row cost × expected rows held at full retention.
+    let projected_full_bytes = match log_retention_days {
+        Some(days) if days > 0 && avg_new_rows_per_day > 0.0 && bytes_per_log > 0.0 => {
+            (bytes_per_log * avg_new_rows_per_day * days as f64) as i64
+        }
+        _ => 0,
+    };
+
     Ok(DbHealth {
         db_size_bytes,
+        reclaimable_bytes: storage.reclaimable_bytes,
+        fragmentation_ratio,
         total_log_count,
         oldest_log_timestamp,
         log_retention_days,
         avg_new_rows_per_day,
+        bytes_per_log,
+        log_coverage_days,
+        projected_full_bytes,
     })
 }
 
@@ -325,5 +373,47 @@ mod tests {
             .unwrap();
         let h = compute_db_health(&db, 0).await.unwrap();
         assert_eq!(h.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
+    }
+
+    fn log_at(ms: i64) -> crate::db::QueryLogEntry {
+        crate::db::QueryLogEntry {
+            timestamp: ms,
+            domain: "example.com".into(),
+            query_type: "A".into(),
+            client_ip: "127.0.0.1".into(),
+            blocked: false,
+            cached: false,
+            response_ms: 1,
+            upstream: None,
+            doh_token: None,
+            result: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn db_health_derived_fields_zero_on_empty_db() {
+        let db = Database::open(":memory:").await.unwrap();
+        let h = compute_db_health(&db, 1_000_000).await.unwrap();
+        assert_eq!(h.bytes_per_log, 0.0);
+        assert_eq!(h.log_coverage_days, 0.0);
+        assert_eq!(h.projected_full_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn db_health_derived_fields_reflect_logged_span() {
+        let db = Database::open(":memory:").await.unwrap();
+        let day_ms = 86_400_000;
+        // Two logs three days apart (timestamps stored in ms).
+        db.insert_query_logs(&[log_at(day_ms), log_at(4 * day_ms)])
+            .await
+            .unwrap();
+        let now = 5 * 86_400; // seconds
+        let h = compute_db_health(&db, now).await.unwrap();
+
+        assert!(h.bytes_per_log > 0.0);
+        // Span is exactly three days.
+        assert!((h.log_coverage_days - 3.0).abs() < 1e-6);
+        // Projection requires positive avg/day, retention, and bytes/log.
+        assert!(h.projected_full_bytes > 0);
     }
 }

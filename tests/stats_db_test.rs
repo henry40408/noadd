@@ -159,10 +159,12 @@ async fn outcome_breakdown_categorizes_by_action() {
 }
 
 #[tokio::test]
-async fn db_file_size_is_positive() {
+async fn db_storage_stats_are_sane() {
     let db = test_db().await;
-    let size = db.db_file_size().await.unwrap();
-    assert!(size > 0);
+    let s = db.db_storage_stats().await.unwrap();
+    assert!(s.main_bytes > 0);
+    // Reclaimable (freelist) pages cannot exceed the whole file.
+    assert!(s.reclaimable_bytes >= 0 && s.reclaimable_bytes <= s.main_bytes);
 }
 
 #[tokio::test]
