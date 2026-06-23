@@ -1454,3 +1454,33 @@ async fn create_operator_rejects_short_password() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn delete_operator_succeeds_and_missing_returns_404() {
+    let (app, token) = setup().await;
+    // admin is id 1; add two more so the last-operator guard does not fire.
+    for u in ["bob", "carol"] {
+        app.clone()
+            .oneshot(authed(
+                "POST",
+                "/api/users",
+                &token,
+                Some(&format!(r#"{{"username":"{u}","password":"longpass1"}}"#)),
+            ))
+            .await
+            .unwrap();
+    }
+    // Delete bob (id 2) → 204.
+    let res = app
+        .clone()
+        .oneshot(authed("DELETE", "/api/users/2", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    // A non-existent id while more than one operator remains → 404.
+    let res = app
+        .oneshot(authed("DELETE", "/api/users/999", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

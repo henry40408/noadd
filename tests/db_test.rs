@@ -1,4 +1,4 @@
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, DeleteUserOutcome, QueryLogEntry};
 use tempfile::tempdir;
 
 async fn test_db() -> Database {
@@ -501,8 +501,28 @@ async fn test_users_crud() {
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].username, "alice");
 
-    db.delete_user(id).await.unwrap();
-    assert_eq!(db.count_users().await.unwrap(), 0);
+    // The last remaining operator cannot be deleted.
+    assert_eq!(
+        db.delete_user(id).await.unwrap(),
+        DeleteUserOutcome::LastOperator
+    );
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    // With a second operator present, a non-last operator can be deleted.
+    let id2 = db.create_user("bob", "hash-b2", 2000).await.unwrap();
+    assert_eq!(
+        db.delete_user(id2).await.unwrap(),
+        DeleteUserOutcome::Deleted
+    );
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    // A non-existent id (while more than one operator remains) reports NotFound.
+    db.create_user("carol", "hash-c", 3000).await.unwrap();
+    assert_eq!(
+        db.delete_user(99999).await.unwrap(),
+        DeleteUserOutcome::NotFound
+    );
+    assert_eq!(db.count_users().await.unwrap(), 2);
 }
 
 #[tokio::test]
@@ -536,11 +556,16 @@ async fn test_sessions_crud_and_cascade() {
     assert!(db.list_sessions().await.unwrap().is_empty());
     assert!(db.delete_session_by_id(sid).await.unwrap().is_none());
 
-    // Deleting the user cascades to their sessions.
+    // Deleting the user cascades to their sessions. Add a second operator first
+    // so carol is not the last one (which would be refused).
     db.insert_session("tok-2", uid, 100, 100, None, None)
         .await
         .unwrap();
-    db.delete_user(uid).await.unwrap();
+    db.create_user("carol2", "h", 200).await.unwrap();
+    assert_eq!(
+        db.delete_user(uid).await.unwrap(),
+        DeleteUserOutcome::Deleted
+    );
     assert!(db.list_sessions().await.unwrap().is_empty());
 }
 

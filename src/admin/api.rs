@@ -526,32 +526,33 @@ async fn delete_user_handler(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
     require_auth(&state, &jar)?;
-    let count = state
-        .db
-        .count_users()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if count <= 1 {
-        return Err(StatusCode::CONFLICT);
-    }
-    // Evict the deleted operator's sessions from the in-memory store before the
-    // DB cascade removes the rows.
-    let tokens: Vec<String> = state
-        .sessions
-        .lock()
-        .iter()
-        .filter(|(_, info)| info.user_id == id)
-        .map(|(t, _)| t.clone())
-        .collect();
-    for t in &tokens {
-        crate::admin::auth::revoke_session(&state.sessions, t);
-    }
-    state
+    // The last-operator guard and the delete run atomically inside the DB layer,
+    // so two concurrent deletes can never drop the instance to zero operators.
+    match state
         .db
         .delete_user(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::NO_CONTENT)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        crate::db::DeleteUserOutcome::LastOperator => Err(StatusCode::CONFLICT),
+        crate::db::DeleteUserOutcome::NotFound => Err(StatusCode::NOT_FOUND),
+        crate::db::DeleteUserOutcome::Deleted => {
+            // The DB `ON DELETE CASCADE` removed this operator's session rows;
+            // evict the matching in-memory entries now that the durable delete
+            // has succeeded (so a failed delete never logs a live user out).
+            let tokens: Vec<String> = state
+                .sessions
+                .lock()
+                .iter()
+                .filter(|(_, info)| info.user_id == id)
+                .map(|(t, _)| t.clone())
+                .collect();
+            for t in &tokens {
+                crate::admin::auth::revoke_session(&state.sessions, t);
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+    }
 }
 
 #[derive(Deserialize)]

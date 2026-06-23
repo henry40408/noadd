@@ -108,6 +108,17 @@ pub struct UserAuth {
     pub password_hash: String,
 }
 
+/// Result of attempting to delete an operator.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteUserOutcome {
+    /// The operator was deleted.
+    Deleted,
+    /// Refused: this is the last remaining operator (would lock everyone out).
+    LastOperator,
+    /// No operator with the given id exists.
+    NotFound,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub id: i64,
@@ -1075,14 +1086,27 @@ impl Database {
         Ok(n)
     }
 
-    pub async fn delete_user(&self, id: i64) -> Result<(), DbError> {
-        self.conn
+    pub async fn delete_user(&self, id: i64) -> Result<DeleteUserOutcome, DbError> {
+        let outcome = self
+            .conn
             .call(move |conn| {
-                conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
-                Ok(())
+                // Guard and delete in one writer closure so the count and the
+                // delete cannot interleave with a concurrent deletion — that
+                // race could otherwise remove the last two operators at once and
+                // lock everyone out of the instance.
+                let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+                if count <= 1 {
+                    return Ok(DeleteUserOutcome::LastOperator);
+                }
+                let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+                Ok(if n > 0 {
+                    DeleteUserOutcome::Deleted
+                } else {
+                    DeleteUserOutcome::NotFound
+                })
             })
             .await?;
-        Ok(())
+        Ok(outcome)
     }
 
     pub async fn get_username(&self, id: i64) -> Result<Option<String>, DbError> {
