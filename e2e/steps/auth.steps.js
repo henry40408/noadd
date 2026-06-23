@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test';
-import { Given, When, Then } from './fixtures.js';
+import { Given, When, Then, ADMIN_USERNAME } from './fixtures.js';
 
 Given('the admin UI has never been configured', async ({ page, baseURL }) => {
   const res = await page.request.get(`${baseURL}/api/health`);
@@ -12,7 +12,11 @@ When('I open the admin UI', async ({ page }) => {
 });
 
 Then('I am shown the first-run setup screen', async ({ page }) => {
-  await expect(page.getByTestId('setup-password')).toBeVisible();
+  await expect(page.getByTestId('setup-username')).toBeVisible();
+});
+
+When('I enter {string} as the username', async ({ page }, username) => {
+  await page.getByTestId('setup-username').fill(username);
 });
 
 When('I enter {string} as the new password', async ({ page }, pw) => {
@@ -43,14 +47,15 @@ Then('I land on the dashboard', async ({ page }) => {
 });
 
 Given('the admin password has been set to {string}', async ({ page, baseURL }, pw) => {
-  // Idempotent: 409 means a password is already configured, which is fine.
+  // Idempotent: 409 means an account is already configured, which is fine.
   const res = await page.request.post(`${baseURL}/api/auth/setup`, {
-    data: { password: pw },
+    data: { username: ADMIN_USERNAME, password: pw },
   });
   expect([200, 409]).toContain(res.status());
 });
 
 When('I sign in with the password {string}', async ({ page }, pw) => {
+  await page.getByTestId('login-username').fill(ADMIN_USERNAME);
   await page.getByTestId('login-password').fill(pw);
   await page.getByTestId('login-submit').click();
 });

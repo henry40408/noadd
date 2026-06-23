@@ -63,7 +63,7 @@ sudo ./target/release/noadd
 ./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
 ```
 
-Open `http://127.0.0.1:3000` to set up your admin password and access the dashboard.
+Open `http://127.0.0.1:3000` to create your operator account (username + password) and access the dashboard. Additional operators and active sessions are managed from the Account page.
 
 ### Docker
 

@@ -90,7 +90,7 @@ DoH access can be restricted with user-defined tokens. Each token becomes a URL 
 
 ### Admin UI
 
-A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. Embedded assets are served with a content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate on each load and receive `304 Not Modified` when nothing changed — reloads avoid re-transferring the ~146 KB page, while a rebuilt binary (new content, new ETag) updates clients immediately. The dashboard polls the API every 10 seconds with a toggleable LIVE mode.
+A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. Embedded assets are served with a content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate on each load and receive `304 Not Modified` when nothing changed — reloads avoid re-transferring the ~146 KB page, while a rebuilt binary (new content, new ETag) updates clients immediately. The dashboard polls the API every 10 seconds with a toggleable LIVE mode. Login is username + password; sessions are bound to a user and individually revocable.
 
 ## Data Storage
 
@@ -98,12 +98,14 @@ Everything is in a single SQLite file (`noadd.db` by default):
 
 | Table | Purpose |
 |-------|---------|
-| `settings` | Key-value config (upstream DNS, log retention, access policy, sessions) |
+| `settings` | Key-value config (upstream DNS, log retention, access policy) |
 | `query_logs` | DNS query history with timestamps, domains, actions, cache hits |
 | `filter_lists` | Registered filter lists (name, URL, enabled, rule count) |
 | `filter_list_content` | Raw downloaded list content |
 | `custom_rules` | User-defined allow/block rules |
 | `doh_tokens` | DoH access tokens |
+| `users` | Operator accounts (username, Argon2 password hash) |
+| `sessions` | Active admin sessions (token, user_id, ip, user agent, timestamps) |
 
 `query_logs` is indexed on `timestamp` and on the composite `(domain, timestamp)`. The composite index lets the dashboard's domain aggregations (top domains, unique domains) be served from a covering index with the time-window filter pushed in, instead of scanning the whole domain index.
 

@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ADMIN_PASSWORD, generateSeedSql } from '../screenshots/seed.mjs';
+import { ADMIN_USERNAME, ADMIN_PASSWORD, generateSeedSql } from '../screenshots/seed.mjs';
 
 const E2E_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.NOADD_BIN || resolve(E2E_DIR, '../target/debug/noadd');
@@ -64,14 +64,14 @@ test.beforeAll(async () => {
   mkdirSync(resolve(E2E_DIR, '.tmp'), { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB}${suffix}`, { force: true });
 
-  // Boot #1: create schema + defaults, set the admin password, stop.
+  // Boot #1: create schema + defaults, create operator account, stop.
   server = startNoadd();
   try {
     await waitHealthy();
     const res = await fetch(`${BASE}/api/auth/setup`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD }),
     });
     if (!res.ok) throw new Error(`setup failed: ${res.status}`);
   } finally {
@@ -95,6 +95,7 @@ test.use({ ...devices['Pixel 5'], baseURL: BASE });
 test.describe('Statistics charts respond to touch', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await page.getByTestId('login-username').fill(ADMIN_USERNAME);
     await page.getByTestId('login-password').fill(ADMIN_PASSWORD);
     await page.getByTestId('login-submit').click();
     await expect(page.getByTestId('app-shell')).toBeVisible();
