@@ -511,3 +511,72 @@ async fn test_duplicate_username_rejected() {
     db.create_user("bob", "h", 1).await.unwrap();
     assert!(db.create_user("bob", "h2", 2).await.is_err());
 }
+
+#[tokio::test]
+async fn test_sessions_crud_and_cascade() {
+    let db = test_db().await;
+    let uid = db.create_user("carol", "h", 100).await.unwrap();
+
+    let sid = db
+        .insert_session("tok-1", uid, 100, 100, Some("1.2.3.4"), Some("UA"))
+        .await
+        .unwrap();
+
+    let list = db.list_sessions().await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].username, "carol");
+    assert_eq!(list[0].token, "tok-1");
+    assert_eq!(list[0].ip.as_deref(), Some("1.2.3.4"));
+
+    // delete_session_by_id returns the token for in-memory eviction
+    assert_eq!(
+        db.delete_session_by_id(sid).await.unwrap().as_deref(),
+        Some("tok-1")
+    );
+    assert!(db.list_sessions().await.unwrap().is_empty());
+    assert!(db.delete_session_by_id(sid).await.unwrap().is_none());
+
+    // Deleting the user cascades to their sessions.
+    db.insert_session("tok-2", uid, 100, 100, None, None)
+        .await
+        .unwrap();
+    db.delete_user(uid).await.unwrap();
+    assert!(db.list_sessions().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_load_sessions_drops_expired() {
+    let db = test_db().await;
+    let uid = db.create_user("dave", "h", 0).await.unwrap();
+    db.insert_session("fresh", uid, 1_000, 1_000, None, None)
+        .await
+        .unwrap();
+    db.insert_session("stale", uid, 1, 1, None, None)
+        .await
+        .unwrap();
+
+    // max_age 100, now 1100 → cutoff 1000; "stale" (created_at 1) is purged.
+    let loaded = db.load_sessions(100, 1_100).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].token, "fresh");
+    assert!(
+        db.list_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.token == "fresh")
+    );
+}
+
+#[tokio::test]
+async fn test_flush_last_seen() {
+    let db = test_db().await;
+    let uid = db.create_user("erin", "h", 0).await.unwrap();
+    db.insert_session("tok", uid, 0, 0, None, None)
+        .await
+        .unwrap();
+    db.flush_sessions_last_seen(&[("tok".to_string(), 555)])
+        .await
+        .unwrap();
+    assert_eq!(db.list_sessions().await.unwrap()[0].last_seen, 555);
+}

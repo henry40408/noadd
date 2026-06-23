@@ -88,6 +88,27 @@ pub struct UserAuth {
     pub password_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub created_at: i64,
+    pub last_seen: i64,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedSession {
+    pub token: String,
+    pub id: i64,
+    pub user_id: i64,
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FilterListRow {
     pub id: i64,
@@ -1056,6 +1077,158 @@ impl Database {
             })
             .await?;
         Ok(val)
+    }
+
+    // --- Sessions ---
+
+    pub async fn insert_session(
+        &self,
+        token: &str,
+        user_id: i64,
+        created_at: i64,
+        last_seen: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let token = token.to_string();
+        let ip = ip.map(|s| s.to_string());
+        let user_agent = user_agent.map(|s| s.to_string());
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO sessions (token, user_id, created_at, last_seen, ip, user_agent)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![token, user_id, created_at, last_seen, ip, user_agent],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn delete_session_by_token(&self, token: &str) -> Result<(), DbError> {
+        let token = token.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_session_by_id(&self, id: i64) -> Result<Option<String>, DbError> {
+        let token = self
+            .conn
+            .call(move |conn| {
+                let tok: Option<String> = conn
+                    .query_row(
+                        "SELECT token FROM sessions WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if tok.is_some() {
+                    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+                }
+                Ok(tok)
+            })
+            .await?;
+        Ok(token)
+    }
+
+    pub async fn delete_all_sessions(&self) -> Result<(), DbError> {
+        self.conn
+            .call(|conn| {
+                conn.execute("DELETE FROM sessions", [])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
+        let rows = self
+            .reader()
+            .call(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT s.id, s.user_id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token
+                     FROM sessions s JOIN users u ON u.id = s.user_id
+                     ORDER BY s.last_seen DESC",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(SessionRow {
+                            id: row.get(0)?,
+                            user_id: row.get(1)?,
+                            username: row.get(2)?,
+                            created_at: row.get(3)?,
+                            last_seen: row.get(4)?,
+                            ip: row.get(5)?,
+                            user_agent: row.get(6)?,
+                            token: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn load_sessions(
+        &self,
+        max_age_secs: i64,
+        now: i64,
+    ) -> Result<Vec<LoadedSession>, DbError> {
+        let cutoff = now - max_age_secs;
+        let rows = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM sessions WHERE created_at < ?1",
+                    params![cutoff],
+                )?;
+                let mut stmt =
+                    conn.prepare("SELECT token, id, user_id, created_at, last_seen FROM sessions")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(LoadedSession {
+                            token: row.get(0)?,
+                            id: row.get(1)?,
+                            user_id: row.get(2)?,
+                            created_at: row.get(3)?,
+                            last_seen: row.get(4)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn flush_sessions_last_seen(&self, entries: &[(String, i64)]) -> Result<(), DbError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entries: Vec<(String, i64)> = entries.to_vec();
+        self.conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt =
+                        tx.prepare_cached("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")?;
+                    for (token, last_seen) in &entries {
+                        stmt.execute(params![last_seen, token])?;
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
     }
 
     // --- Stats ---
