@@ -153,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
+    let session_store_for_flush = session_store.clone();
+    let db_for_flush = db.clone();
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let server_info = ServerInfo {
         dns_addr: args.dns_addr.clone(),
@@ -173,6 +175,18 @@ async fn main() -> anyhow::Result<()> {
         registry: registry.clone(),
         trusted_proxies: trusted_proxies.clone(),
     });
+
+    // Periodically persist session last_seen so it survives restarts.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.tick().await; // skip immediate fire
+        loop {
+            tick.tick().await;
+            let _ =
+                noadd::admin::auth::flush_last_seen(&session_store_for_flush, &db_for_flush).await;
+        }
+    });
+
     let app = doh_routes.merge(admin_routes);
 
     let http_addr: SocketAddr = args.http_addr.parse()?;

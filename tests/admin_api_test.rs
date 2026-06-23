@@ -6,7 +6,9 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
-use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
+use noadd::admin::auth::{
+    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
 use noadd::dns::handler::DnsHandler;
@@ -46,7 +48,6 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
 
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();
-    let token = create_session(&sessions);
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
         vec![],
         vec![],
@@ -63,10 +64,29 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         log_tx,
     ));
 
-    // Set admin password (skipped for unconfigured apps that test setup)
+    let token = generate_token();
+    // Create an operator user + bound session (skipped for unconfigured apps that test setup)
     if set_password {
         let hash = hash_password("admin").unwrap();
-        db.set_setting("admin_password_hash", &hash).await.unwrap();
+        let uid = db
+            .create_user("admin", &hash, noadd::now_unix())
+            .await
+            .unwrap();
+        let now = noadd::now_unix();
+        let sid = db
+            .insert_session(&token, uid, now, now, None, None)
+            .await
+            .unwrap();
+        store_session(
+            &sessions,
+            &token,
+            SessionInfo {
+                session_id: sid,
+                user_id: uid,
+                created_at: now,
+                last_seen: now,
+            },
+        );
     }
 
     let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
@@ -382,7 +402,7 @@ async fn test_login_rate_limit_is_per_connect_info_ip() {
             .method("POST")
             .uri("/api/auth/login")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"password":"wrong"}"#))
+            .body(Body::from(r#"{"username":"admin","password":"wrong"}"#))
             .unwrap();
         req.extensions_mut().insert(ConnectInfo(addr));
         req
@@ -468,7 +488,7 @@ async fn test_login_success() {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"admin"}"#))
+                .body(Body::from(r#"{"username":"admin","password":"admin"}"#))
                 .unwrap(),
         )
         .await
@@ -500,7 +520,7 @@ async fn test_login_wrong_password() {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"wrong"}"#))
+                .body(Body::from(r#"{"username":"admin","password":"wrong"}"#))
                 .unwrap(),
         )
         .await
@@ -735,7 +755,7 @@ async fn test_setup_initial_password() {
         std::time::Duration::from_secs(3600),
     );
 
-    // No password set initially
+    // No user set initially
     let app = admin_router(AppState {
         db: db.clone(),
         sessions: sessions.clone(),
@@ -763,14 +783,14 @@ async fn test_setup_initial_password() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"newpass1"}"#))
+                .body(Body::from(r#"{"username":"admin","password":"newpass1"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Setup again should fail (password already exists)
+    // Setup again should fail (user already exists)
     let app2 = admin_router(AppState {
         db,
         sessions,
@@ -795,7 +815,7 @@ async fn test_setup_initial_password() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"another"}"#))
+                .body(Body::from(r#"{"username":"admin","password":"another12"}"#))
                 .unwrap(),
         )
         .await
@@ -1023,7 +1043,7 @@ async fn setup_rejects_short_password_with_400() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"password":"1234567"}"#)) // 7 chars
+        .body(Body::from(r#"{"username":"admin","password":"1234567"}"#)) // 7 chars
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1046,7 +1066,7 @@ async fn setup_accepts_eight_char_password_with_200() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"password":"12345678"}"#)) // 8 chars
+        .body(Body::from(r#"{"username":"admin","password":"12345678"}"#)) // 8 chars
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1065,7 +1085,9 @@ async fn setup_already_configured_returns_409() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"password":"another-long-pw"}"#))
+        .body(Body::from(
+            r#"{"username":"admin","password":"another-long-pw"}"#,
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -1231,4 +1253,40 @@ async fn test_apple_touch_icon_conditional_request_returns_304() {
         "304 body should be empty, got {} bytes",
         body.len()
     );
+}
+
+#[tokio::test]
+async fn login_with_wrong_username_is_unauthorized() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"username":"ghost","password":"admin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn setup_creates_first_operator_when_empty() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"root","password":"hunter2pass"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }

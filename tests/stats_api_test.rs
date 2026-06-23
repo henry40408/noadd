@@ -6,7 +6,9 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
-use noadd::admin::auth::{RateLimiter, create_session, hash_password, new_session_store};
+use noadd::admin::auth::{
+    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+};
 use noadd::cache::DnsCache;
 use noadd::db::Database;
 use noadd::dns::handler::DnsHandler;
@@ -22,7 +24,6 @@ async fn setup() -> (axum::Router, String) {
 
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();
-    let token = create_session(&sessions);
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
         vec![],
         vec![],
@@ -39,9 +40,28 @@ async fn setup() -> (axum::Router, String) {
         log_tx,
     ));
 
-    // Set admin password
+    // Create an operator user + bound session token
     let hash = hash_password("admin").unwrap();
-    db.set_setting("admin_password_hash", &hash).await.unwrap();
+    let uid = db
+        .create_user("admin", &hash, noadd::now_unix())
+        .await
+        .unwrap();
+    let now = noadd::now_unix();
+    let token = generate_token();
+    let sid = db
+        .insert_session(&token, uid, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token,
+        SessionInfo {
+            session_id: sid,
+            user_id: uid,
+            created_at: now,
+            last_seen: now,
+        },
+    );
 
     let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
         db.clone(),

@@ -18,7 +18,8 @@ use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::auth::{
-    RateLimiter, SessionStore, create_session, hash_password, validate_session, verify_password,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, store_session,
+    validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -251,22 +252,27 @@ fn client_ip(
 
 // --- Auth helper ---
 
-fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
+/// Returns `(user_id, token)` for the current authenticated session, or 401.
+fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
     let token = jar
         .get("session")
         .map(|c| c.value().to_string())
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if validate_session(&state.sessions, &token) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    match validate_session(&state.sessions, &token) {
+        Some(user_id) => Ok((user_id, token)),
+        None => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
+    current_session(state, jar).map(|_| ())
 }
 
 // --- Auth endpoints ---
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
+    pub username: String,
     pub password: String,
 }
 
@@ -289,26 +295,42 @@ async fn login(
     }
     state.rate_limiter.record(ip);
 
-    let hash = state
+    // Generic 401 whether the username is unknown or the password is wrong.
+    let auth = state
         .db
-        .get_setting("admin_password_hash")
+        .get_user_auth(body.username.trim())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let valid =
-        verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    let valid = verify_password(&body.password, &auth.password_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
-        tracing::warn!("login failed: invalid password");
+        tracing::warn!("login failed: invalid credentials");
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    tracing::info!("login successful");
-    let token = create_session(&state.sessions);
-
-    // Persist sessions to DB so they survive restarts
-    let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+    let now = crate::now_unix();
+    let token = generate_token();
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    let session_id = state
+        .db
+        .insert_session(&token, auth.id, now, now, Some(&ip.to_string()), user_agent)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store_session(
+        &state.sessions,
+        &token,
+        SessionInfo {
+            session_id,
+            user_id: auth.id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+    tracing::info!(user_id = auth.id, "login successful");
 
     let cookie = Cookie::build(("session", token))
         .path("/")
@@ -324,6 +346,7 @@ async fn login(
 
 #[derive(Deserialize)]
 pub struct SetupRequest {
+    pub username: String,
     pub password: String,
 }
 
@@ -353,15 +376,8 @@ async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
-    // Only allow setup if no password exists (check this first so a
-    // configured instance never reveals password-policy details).
-    let existing = state
-        .db
-        .get_setting("admin_password_hash")
-        .await
-        .map_err(|_| setup_ise())?;
-
-    if existing.is_some() {
+    let count = state.db.count_users().await.map_err(|_| setup_ise())?;
+    if count > 0 {
         return Err((
             StatusCode::CONFLICT,
             Json(SetupErrorResponse {
@@ -369,7 +385,15 @@ async fn setup(
             }),
         ));
     }
-
+    let username = body.username.trim();
+    if username.is_empty() || username.chars().count() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(SetupErrorResponse {
+                error: "invalid username".to_string(),
+            }),
+        ));
+    }
     if body.password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -378,15 +402,12 @@ async fn setup(
             }),
         ));
     }
-
     let hash = hash_password(&body.password).map_err(|_| setup_ise())?;
-
     state
         .db
-        .set_setting("admin_password_hash", &hash)
+        .create_user(username, &hash, crate::now_unix())
         .await
         .map_err(|_| setup_ise())?;
-
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -401,8 +422,8 @@ async fn revoke_all(
     Ok(StatusCode::OK)
 }
 
-/// Log out the current session only: revoke this token, persist, and expire
-/// the client's session cookie. Other devices' sessions are untouched.
+/// Log out the current session only: revoke this token, delete from DB, and
+/// expire the client's session cookie. Other devices' sessions are untouched.
 async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -411,7 +432,7 @@ async fn logout(
     if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
-        let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+        let _ = state.db.delete_session_by_token(&token).await;
     }
     let removal = Cookie::build(("session", "")).path("/").build();
     Ok((jar.remove(removal), StatusCode::OK))
@@ -432,11 +453,10 @@ pub struct HealthResponse {
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let needs_setup = state
         .db
-        .get_setting("admin_password_hash")
+        .count_users()
         .await
-        .ok()
-        .flatten()
-        .is_none();
+        .map(|n| n == 0)
+        .unwrap_or(false);
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,
