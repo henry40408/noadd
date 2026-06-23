@@ -1360,3 +1360,38 @@ async fn setup_creates_first_operator_when_empty() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn list_sessions_marks_current_and_hides_token() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/sessions", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("\"is_current\":true"));
+    assert!(
+        !text.contains(&token),
+        "raw token must never appear in the response"
+    );
+}
+
+#[tokio::test]
+async fn revoke_current_session_clears_cookie() {
+    let (app, token) = setup().await;
+    // The seeded session has id 1.
+    let res = app
+        .oneshot(authed("DELETE", "/api/sessions/1", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .map(|v| v.to_str().unwrap().to_string());
+    assert!(set_cookie.unwrap_or_default().contains("session="));
+}

@@ -104,6 +104,9 @@ pub fn admin_router(state: AppState) -> Router {
         )
         .route("/api/users/{id}", delete(delete_user_handler))
         .route("/api/users/me/password", post(change_own_password))
+        // Session management
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/{id}", delete(revoke_session_by_id))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -583,6 +586,74 @@ async fn change_own_password(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    id: i64,
+    username: String,
+    created_at: i64,
+    last_seen: i64,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    is_current: bool,
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
+    let (_user_id, token) = current_session(&state, &jar)?;
+    let rows = state
+        .db
+        .list_sessions()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Prefer the fresher in-memory last_seen when present.
+    let live = state.sessions.lock();
+    let out = rows
+        .into_iter()
+        .map(|r| {
+            let last_seen = live
+                .get(&r.token)
+                .map(|i| i.last_seen)
+                .unwrap_or(r.last_seen);
+            SessionResponse {
+                id: r.id,
+                username: r.username,
+                created_at: r.created_at,
+                last_seen,
+                ip: r.ip,
+                user_agent: r.user_agent,
+                is_current: r.token == token,
+            }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn revoke_session_by_id(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<(CookieJar, StatusCode), StatusCode> {
+    let (_user_id, current_token) = current_session(&state, &jar)?;
+    let removed = state
+        .db
+        .delete_session_by_id(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match removed {
+        Some(token) => {
+            crate::admin::auth::revoke_session(&state.sessions, &token);
+            if token == current_token {
+                let removal = Cookie::build(("session", "")).path("/").build();
+                return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
+            }
+            Ok((jar, StatusCode::NO_CONTENT))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // --- Health ---
