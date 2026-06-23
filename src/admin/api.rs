@@ -96,6 +96,14 @@ pub fn admin_router(state: AppState) -> Router {
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
+        // Operator management
+        .route("/api/auth/me", get(get_me))
+        .route(
+            "/api/users",
+            get(list_users_handler).post(create_user_handler),
+        )
+        .route("/api/users/{id}", delete(delete_user_handler))
+        .route("/api/users/me/password", post(change_own_password))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -436,6 +444,145 @@ async fn logout(
     }
     let removal = Cookie::build(("session", "")).path("/").build();
     Ok((jar.remove(removal), StatusCode::OK))
+}
+
+// --- Operator management ---
+
+#[derive(Serialize)]
+struct MeResponse {
+    id: i64,
+    username: String,
+}
+
+async fn get_me(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<MeResponse>, StatusCode> {
+    let (user_id, _token) = current_session(&state, &jar)?;
+    let username = state
+        .db
+        .get_username(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Json(MeResponse {
+        id: user_id,
+        username,
+    }))
+}
+
+async fn list_users_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::UserRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let users = state
+        .db
+        .list_users()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(users))
+}
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    username: String,
+    password: String,
+}
+
+async fn create_user_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    let username = body.username.trim();
+    if username.is_empty() || username.chars().count() > 64 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if body.password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = hash_password(&body.password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match state
+        .db
+        .create_user(username, &hash, crate::now_unix())
+        .await
+    {
+        Ok(_) => Ok(StatusCode::CREATED),
+        // UNIQUE violation → duplicate username.
+        Err(_) => Err(StatusCode::CONFLICT),
+    }
+}
+
+async fn delete_user_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    let count = state
+        .db
+        .count_users()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if count <= 1 {
+        return Err(StatusCode::CONFLICT);
+    }
+    // Evict the deleted operator's sessions from the in-memory store before the
+    // DB cascade removes the rows.
+    let tokens: Vec<String> = state
+        .sessions
+        .lock()
+        .iter()
+        .filter(|(_, info)| info.user_id == id)
+        .map(|(t, _)| t.clone())
+        .collect();
+    for t in &tokens {
+        crate::admin::auth::revoke_session(&state.sessions, t);
+    }
+    state
+        .db
+        .delete_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_own_password(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let (user_id, _token) = current_session(&state, &jar)?;
+    if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = state
+        .db
+        .get_user_password_hash(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let ok = verify_password(&body.current_password, &hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let new_hash =
+        hash_password(&body.new_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .db
+        .update_user_password(user_id, &new_hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Health ---

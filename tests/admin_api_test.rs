@@ -1272,6 +1272,76 @@ async fn login_with_wrong_username_is_unauthorized() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("cookie", format!("session={token}"));
+    if body.is_some() {
+        b = b.header("content-type", "application/json");
+    }
+    b.body(
+        body.map(|s| Body::from(s.to_string()))
+            .unwrap_or(Body::empty()),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn create_and_list_operators() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bob","password":"longpass1"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // Duplicate → 409
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bob","password":"longpass1"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn cannot_delete_last_operator() {
+    let (app, token) = setup().await;
+    // Only "admin" (id 1) exists.
+    let res = app
+        .oneshot(authed("DELETE", "/api/users/1", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn change_own_password_requires_correct_current() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token,
+            Some(r#"{"current_password":"wrong","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn setup_creates_first_operator_when_empty() {
     let app = unconfigured_app().await;
