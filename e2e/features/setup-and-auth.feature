@@ -1,7 +1,7 @@
 @auth
 Feature: First-run setup and authentication
   As an administrator opening noadd for the first time
-  I want to set an admin password and sign in
+  I want to create an operator account and sign in
   So that the admin UI is protected from unauthorized access
 
   # These scenarios run against a dedicated noadd instance with a fresh,
@@ -14,7 +14,8 @@ Feature: First-run setup and authentication
     Given the admin UI has never been configured
     When I open the admin UI
     Then I am shown the first-run setup screen
-    When I enter "correct horse battery staple" as the new password
+    When I enter "testuser" as the username
+    And I enter "correct horse battery staple" as the new password
     And I enter "a different password" as the confirmation
     And I submit the setup form
     Then I see a setup error about the passwords not matching
@@ -24,17 +25,19 @@ Feature: First-run setup and authentication
     Given the admin UI has never been configured
     When I open the admin UI
     Then I am shown the first-run setup screen
-    When I enter "hunter2" as the new password
+    When I enter "testuser" as the username
+    And I enter "hunter2" as the new password
     And I enter "hunter2" as the confirmation
     And I submit the setup form
     Then I see a setup error about the password being too short
     And the admin password has still not been set
 
-  Scenario: First-run setup creates the admin password and signs in
+  Scenario: First-run setup creates the operator account and signs in
     Given the admin UI has never been configured
     When I open the admin UI
     Then I am shown the first-run setup screen
-    When I enter "correct horse battery staple" as the new password
+    When I enter "testuser" as the username
+    And I enter "correct horse battery staple" as the new password
     And I enter "correct horse battery staple" as the confirmation
     And I submit the setup form
     # Setup auto-logs-in, so a successful setup lands directly on the dashboard.
@@ -70,7 +73,7 @@ Feature: First-run setup and authentication
 
   Scenario: Revoking all sessions returns to the sign-in screen
     Given I am signed in to the admin UI
-    When I go to the "Settings" tab
+    When I go to the "Account" tab
     And I revoke all sessions
     Then I am returned to the sign-in screen
     And reloading the admin UI still shows the sign-in screen

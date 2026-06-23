@@ -37,8 +37,18 @@ impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 /// Session expiry in seconds (7 days).
 pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 
-/// Thread-safe session store. Maps token -> created_at (unix seconds).
-pub type SessionStore = Arc<Mutex<HashMap<String, i64>>>;
+/// In-memory session metadata. Persisted to the `sessions` table on creation
+/// and revocation; `last_seen` is flushed periodically (see `flush_last_seen`).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionInfo {
+    pub session_id: i64,
+    pub user_id: i64,
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
+/// Thread-safe session store. Maps token -> session metadata.
+pub type SessionStore = Arc<Mutex<HashMap<String, SessionInfo>>>;
 
 /// Create a new, empty session store.
 pub fn new_session_store() -> SessionStore {
@@ -47,60 +57,86 @@ pub fn new_session_store() -> SessionStore {
 
 use crate::now_unix as now_secs;
 
-/// Load persisted sessions from the database into the session store.
-/// Expired sessions are discarded during load.
-pub async fn load_sessions_from_db(
-    store: &SessionStore,
-    db: &crate::db::Database,
-) -> Result<(), crate::db::DbError> {
-    if let Some(data) = db.get_setting("sessions").await? {
-        let now = now_secs();
-        let mut map = store.lock();
-        for entry in data.split(';') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            // Format: "token:created_at"
-            if let Some((token, ts_str)) = entry.split_once(':')
-                && let Ok(ts) = ts_str.parse::<i64>()
-                && now - ts < SESSION_MAX_AGE_SECS
-            {
-                map.insert(token.to_string(), ts);
-            }
+/// Generate a fresh 64-character alphanumeric session token.
+pub fn generate_token() -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect()
+}
+
+/// Record a session in the in-memory store.
+pub fn store_session(store: &SessionStore, token: &str, info: SessionInfo) {
+    store.lock().insert(token.to_string(), info);
+}
+
+/// Validate a token. Returns the owning `user_id` and refreshes `last_seen`,
+/// or `None` if missing/expired (expired entries are dropped).
+pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
+    let now = now_secs();
+    let mut map = store.lock();
+    if let Some(info) = map.get_mut(token) {
+        if now - info.created_at < SESSION_MAX_AGE_SECS {
+            info.last_seen = now;
+            return Some(info.user_id);
         }
+        map.remove(token);
     }
-    Ok(())
-}
-
-/// Persist all sessions from the store to the database.
-pub async fn save_sessions_to_db(
-    store: &SessionStore,
-    db: &crate::db::Database,
-) -> Result<(), crate::db::DbError> {
-    let entries: Vec<String> = store
-        .lock()
-        .iter()
-        .map(|(token, ts)| format!("{token}:{ts}"))
-        .collect();
-    db.set_setting("sessions", &entries.join(";")).await
-}
-
-/// Revoke all sessions (logout everywhere).
-pub async fn revoke_all_sessions(
-    store: &SessionStore,
-    db: &crate::db::Database,
-) -> Result<(), crate::db::DbError> {
-    store.lock().clear();
-    db.set_setting("sessions", "").await
+    None
 }
 
 /// Revoke a single session token (logout this device only).
 ///
 /// Leaves every other session intact. Persistence to the database is the
-/// caller's responsibility (see `save_sessions_to_db`).
+/// caller's responsibility (see `delete_session_by_token`).
 pub fn revoke_session(store: &SessionStore, token: &str) {
     store.lock().remove(token);
+}
+
+/// Load persisted sessions from the `sessions` table into the store.
+/// Expired rows are purged by `Database::load_sessions`.
+pub async fn load_sessions_from_db(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    let now = now_secs();
+    let loaded = db.load_sessions(SESSION_MAX_AGE_SECS, now).await?;
+    let mut map = store.lock();
+    for s in loaded {
+        map.insert(
+            s.token,
+            SessionInfo {
+                session_id: s.id,
+                user_id: s.user_id,
+                created_at: s.created_at,
+                last_seen: s.last_seen,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Flush in-memory `last_seen` values to the database.
+pub async fn flush_last_seen(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    let entries: Vec<(String, i64)> = store
+        .lock()
+        .iter()
+        .map(|(token, info)| (token.clone(), info.last_seen))
+        .collect();
+    db.flush_sessions_last_seen(&entries).await
+}
+
+/// Revoke all sessions (logout everywhere): clear the store and the table.
+pub async fn revoke_all_sessions(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DbError> {
+    store.lock().clear();
+    db.delete_all_sessions().await
 }
 
 /// Hash a password using Argon2 with a random salt.
@@ -120,31 +156,6 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
         Err(argon2::password_hash::Error::Password) => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-/// Create a new session, storing it in the session store.
-/// Returns a 64-character alphanumeric token.
-pub fn create_session(store: &SessionStore) -> String {
-    let token: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-    store.lock().insert(token.clone(), now_secs());
-    token
-}
-
-/// Validate whether a session token exists and is not expired.
-pub fn validate_session(store: &SessionStore, token: &str) -> bool {
-    let mut map = store.lock();
-    if let Some(&created_at) = map.get(token) {
-        if now_secs() - created_at < SESSION_MAX_AGE_SECS {
-            return true;
-        }
-        // Expired — remove it
-        map.remove(token);
-    }
-    false
 }
 
 /// Simple IP-based rate limiter for login attempts.

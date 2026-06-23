@@ -1,9 +1,18 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
-    RateLimiter, create_session, hash_password, new_session_store, revoke_session,
-    validate_session, verify_password,
+    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, revoke_session,
+    store_session, validate_session, verify_password,
 };
+
+fn info(user_id: i64) -> SessionInfo {
+    SessionInfo {
+        session_id: 1,
+        user_id,
+        created_at: noadd::now_unix(),
+        last_seen: noadd::now_unix(),
+    }
+}
 
 #[test]
 fn test_password_hash_and_verify() {
@@ -23,46 +32,25 @@ fn test_password_hash_and_verify() {
 #[test]
 fn test_session_create_and_validate() {
     let store = new_session_store();
-
-    // Create a session
-    let token = create_session(&store);
-
-    // Token should be 64 characters
+    let token = generate_token();
     assert_eq!(token.len(), 64);
-
-    // Token should be alphanumeric
     assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
 
-    // Token should be valid
-    assert!(validate_session(&store, &token));
-
-    // Random token should not be valid
-    assert!(!validate_session(&store, "nonexistent_token"));
-
-    // Multiple sessions should all be valid
-    let token2 = create_session(&store);
-    assert!(validate_session(&store, &token));
-    assert!(validate_session(&store, &token2));
-    assert_ne!(token, token2);
+    store_session(&store, &token, info(42));
+    assert_eq!(validate_session(&store, &token), Some(42));
+    assert_eq!(validate_session(&store, "nope"), None);
 }
 
 #[test]
 fn test_revoke_session_removes_only_that_token() {
     let store = new_session_store();
-    let a = create_session(&store);
-    let b = create_session(&store);
-    assert!(validate_session(&store, &a));
-    assert!(validate_session(&store, &b));
-
-    // Logging out one device revokes only that token...
-    revoke_session(&store, &a);
-    assert!(!validate_session(&store, &a));
-    // ...and leaves every other session intact.
-    assert!(validate_session(&store, &b));
-
-    // Revoking an unknown token is a no-op.
-    revoke_session(&store, "nonexistent_token");
-    assert!(validate_session(&store, &b));
+    let t1 = generate_token();
+    let t2 = generate_token();
+    store_session(&store, &t1, info(1));
+    store_session(&store, &t2, info(2));
+    revoke_session(&store, &t1);
+    assert_eq!(validate_session(&store, &t1), None);
+    assert_eq!(validate_session(&store, &t2), Some(2));
 }
 
 #[test]

@@ -14,6 +14,26 @@ pub enum DbError {
     Rusqlite(#[from] rusqlite::Error),
 }
 
+impl DbError {
+    /// True when the error is a SQLite constraint violation (e.g. inserting a
+    /// duplicate `users.username`, which is the only UNIQUE constraint on that
+    /// table). Callers use this to distinguish a duplicate-key conflict (HTTP
+    /// 409) from a genuine database failure (HTTP 500).
+    pub fn is_unique_violation(&self) -> bool {
+        let inner = match self {
+            DbError::Rusqlite(e) => Some(e),
+            DbError::Sqlite(tokio_rusqlite::Error::Error(e)) => Some(e),
+            DbError::Sqlite(tokio_rusqlite::Error::Close((_, e))) => Some(e),
+            DbError::Sqlite(_) => None,
+        };
+        matches!(
+            inner,
+            Some(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+}
+
 /// Number of read-only SQLite connections in the pool. Each connection owns
 /// its own tokio-rusqlite worker thread, so this is the parallelism cap for
 /// admin/stats queries. WAL lets readers proceed without blocking each other.
@@ -73,6 +93,51 @@ pub struct TopUpstream {
 pub struct DohTokenRow {
     pub id: i64,
     pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserRow {
+    pub id: i64,
+    pub username: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserAuth {
+    pub id: i64,
+    pub password_hash: String,
+}
+
+/// Result of attempting to delete an operator.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteUserOutcome {
+    /// The operator was deleted.
+    Deleted,
+    /// Refused: this is the last remaining operator (would lock everyone out).
+    LastOperator,
+    /// No operator with the given id exists.
+    NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub created_at: i64,
+    pub last_seen: i64,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedSession {
+    pub token: String,
+    pub id: i64,
+    pub user_id: i64,
+    pub created_at: i64,
+    pub last_seen: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,6 +357,13 @@ impl Database {
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         token TEXT NOT NULL UNIQUE
                     );
+
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        created_at INTEGER NOT NULL
+                    );
                     ",
                 )?;
                 Self::run_migrations(conn)?;
@@ -348,7 +420,29 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 5;
+        if version < 6 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    ip TEXT,
+                    user_agent TEXT
+                );
+                DELETE FROM settings WHERE key = 'admin_password_hash';
+                DELETE FROM settings WHERE key = 'sessions';",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 6;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -884,6 +978,301 @@ impl Database {
             })
             .await?;
         Ok(count > 0)
+    }
+
+    // --- Users ---
+
+    pub async fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        created_at: i64,
+    ) -> Result<i64, DbError> {
+        let username = username.to_string();
+        let password_hash = password_hash.to_string();
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+                    params![username, password_hash, created_at],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn get_user_auth(&self, username: &str) -> Result<Option<UserAuth>, DbError> {
+        let username = username.to_string();
+        let row = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id, password_hash FROM users WHERE username = ?1")?;
+                let r = stmt
+                    .query_row(params![username], |row| {
+                        Ok(UserAuth {
+                            id: row.get(0)?,
+                            password_hash: row.get(1)?,
+                        })
+                    })
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(row)
+    }
+
+    pub async fn get_user_password_hash(&self, id: i64) -> Result<Option<String>, DbError> {
+        let val = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT password_hash FROM users WHERE id = ?1")?;
+                let r = stmt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(val)
+    }
+
+    pub async fn update_user_password(&self, id: i64, password_hash: &str) -> Result<(), DbError> {
+        let password_hash = password_hash.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                    params![password_hash, id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<UserRow>, DbError> {
+        let rows = self
+            .reader()
+            .call(|conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id, username, created_at FROM users ORDER BY id")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(UserRow {
+                            id: row.get(0)?,
+                            username: row.get(1)?,
+                            created_at: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn count_users(&self) -> Result<i64, DbError> {
+        let n = self
+            .reader()
+            .call(|conn| {
+                let mut stmt = conn.prepare_cached("SELECT COUNT(*) FROM users")?;
+                let n: i64 = stmt.query_row([], |row| row.get(0))?;
+                Ok(n)
+            })
+            .await?;
+        Ok(n)
+    }
+
+    pub async fn delete_user(&self, id: i64) -> Result<DeleteUserOutcome, DbError> {
+        let outcome = self
+            .conn
+            .call(move |conn| {
+                // Guard and delete in one writer closure so the count and the
+                // delete cannot interleave with a concurrent deletion — that
+                // race could otherwise remove the last two operators at once and
+                // lock everyone out of the instance.
+                let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+                if count <= 1 {
+                    return Ok(DeleteUserOutcome::LastOperator);
+                }
+                let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+                Ok(if n > 0 {
+                    DeleteUserOutcome::Deleted
+                } else {
+                    DeleteUserOutcome::NotFound
+                })
+            })
+            .await?;
+        Ok(outcome)
+    }
+
+    pub async fn get_username(&self, id: i64) -> Result<Option<String>, DbError> {
+        let val = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached("SELECT username FROM users WHERE id = ?1")?;
+                let r = stmt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(val)
+    }
+
+    // --- Sessions ---
+
+    pub async fn insert_session(
+        &self,
+        token: &str,
+        user_id: i64,
+        created_at: i64,
+        last_seen: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let token = token.to_string();
+        let ip = ip.map(|s| s.to_string());
+        let user_agent = user_agent.map(|s| s.to_string());
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO sessions (token, user_id, created_at, last_seen, ip, user_agent)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![token, user_id, created_at, last_seen, ip, user_agent],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn delete_session_by_token(&self, token: &str) -> Result<(), DbError> {
+        let token = token.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_session_by_id(&self, id: i64) -> Result<Option<String>, DbError> {
+        let token = self
+            .conn
+            .call(move |conn| {
+                // Single atomic statement: DELETE ... RETURNING removes the row and
+                // yields its token in one step, so there is no SELECT-then-DELETE
+                // window where a concurrent revoke of the same id could double-fire.
+                let tok: Option<String> = conn
+                    .query_row(
+                        "DELETE FROM sessions WHERE id = ?1 RETURNING token",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(tok)
+            })
+            .await?;
+        Ok(token)
+    }
+
+    pub async fn delete_all_sessions(&self) -> Result<(), DbError> {
+        self.conn
+            .call(|conn| {
+                conn.execute("DELETE FROM sessions", [])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
+        let rows = self
+            .reader()
+            .call(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT s.id, s.user_id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token
+                     FROM sessions s JOIN users u ON u.id = s.user_id
+                     ORDER BY s.last_seen DESC",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(SessionRow {
+                            id: row.get(0)?,
+                            user_id: row.get(1)?,
+                            username: row.get(2)?,
+                            created_at: row.get(3)?,
+                            last_seen: row.get(4)?,
+                            ip: row.get(5)?,
+                            user_agent: row.get(6)?,
+                            token: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn load_sessions(
+        &self,
+        max_age_secs: i64,
+        now: i64,
+    ) -> Result<Vec<LoadedSession>, DbError> {
+        let cutoff = now - max_age_secs;
+        let rows = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM sessions WHERE created_at < ?1",
+                    params![cutoff],
+                )?;
+                let mut stmt =
+                    conn.prepare("SELECT token, id, user_id, created_at, last_seen FROM sessions")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(LoadedSession {
+                            token: row.get(0)?,
+                            id: row.get(1)?,
+                            user_id: row.get(2)?,
+                            created_at: row.get(3)?,
+                            last_seen: row.get(4)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn flush_sessions_last_seen(&self, entries: &[(String, i64)]) -> Result<(), DbError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entries: Vec<(String, i64)> = entries.to_vec();
+        self.conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt =
+                        tx.prepare_cached("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")?;
+                    for (token, last_seen) in &entries {
+                        stmt.execute(params![last_seen, token])?;
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
     }
 
     // --- Stats ---
@@ -1642,6 +2031,53 @@ mod tests {
             indexes.iter().any(|n| n == "idx_query_logs_domain_ts"),
             "composite index should be created by migration: {indexes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn migration_v6_drops_credential_and_adds_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // Simulate a v5 database holding the old single-password credential and
+        // some unrelated business data.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE custom_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, rule TEXT NOT NULL, rule_type TEXT NOT NULL);
+                 INSERT INTO settings (key, value) VALUES ('admin_password_hash', '$argon2id$xxx');
+                 INSERT INTO settings (key, value) VALUES ('sessions', 'tok:123');
+                 INSERT INTO settings (key, value) VALUES ('log_retention_days', '14');
+                 INSERT INTO custom_rules (rule, rule_type) VALUES ('ads.example.com', 'block');
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        // Credential + old sessions blob dropped.
+        assert!(
+            db.get_setting("admin_password_hash")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.get_setting("sessions").await.unwrap().is_none());
+        // Unrelated data preserved.
+        assert_eq!(
+            db.get_setting("log_retention_days")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("14")
+        );
+        // New tables exist and are empty.
+        let tables = db.list_tables().await.unwrap();
+        assert!(tables.contains(&"users".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert_eq!(db.count_users().await.unwrap(), 0);
     }
 
     #[tokio::test]

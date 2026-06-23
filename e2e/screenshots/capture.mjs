@@ -8,7 +8,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, request } from '@playwright/test';
-import { ADMIN_PASSWORD, generateSeedSql } from './seed.mjs';
+import { ADMIN_USERNAME, ADMIN_PASSWORD, generateSeedSql } from './seed.mjs';
 
 const E2E_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.NOADD_BIN || resolve(E2E_DIR, '../target/debug/noadd');
@@ -107,14 +107,14 @@ async function main() {
   mkdirSync(OUT, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) rmSync(`${DB}${suffix}`, { force: true });
 
-  // Phase 1: boot fresh -> set admin password via the product setup flow -> stop.
+  // Phase 1: boot fresh -> create operator account via the product setup flow -> stop.
   let server = startNoadd();
   try {
     await waitHealthy();
     const res = await fetch(`${BASE}/api/auth/setup`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD }),
     });
     if (!res.ok) throw new Error(`setup failed: ${res.status}`);
   } finally {
@@ -133,7 +133,7 @@ async function main() {
 
     // Login once via API; reuse the session cookie in every context.
     const api = await request.newContext({ baseURL: BASE });
-    const login = await api.post('/api/auth/login', { data: { password: ADMIN_PASSWORD } });
+    const login = await api.post('/api/auth/login', { data: { username: ADMIN_USERNAME, password: ADMIN_PASSWORD } });
     if (!login.ok()) throw new Error(`login failed: ${login.status()}`);
     const storageState = await api.storageState();
     await api.dispose();

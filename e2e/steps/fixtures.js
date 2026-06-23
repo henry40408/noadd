@@ -1,7 +1,8 @@
 import { test as base, createBdd } from 'playwright-bdd';
 import { expect } from '@playwright/test';
 
-// Admin password used across setup and sign-in flows.
+// Admin credentials used across setup and sign-in flows.
+export const ADMIN_USERNAME = 'testuser';
 export const ADMIN_PASSWORD = 'correct horse battery staple';
 // Where the authenticated session for the @app instance is persisted.
 export const STORAGE_STATE = '.auth/app.json';
@@ -13,6 +14,7 @@ export const NAV = {
   'Query Log': 'nav-logs',
   Filters: 'nav-filters',
   Settings: 'nav-settings',
+  Account: 'nav-account',
 };
 
 // `testState` is a per-scenario scratchpad for carrying values between steps
@@ -36,10 +38,12 @@ export async function ensureSignedIn(page) {
   await expect(shell.or(setupPw).or(loginPw).first()).toBeVisible();
 
   if (await setupPw.isVisible()) {
+    await page.getByTestId('setup-username').fill(ADMIN_USERNAME);
     await setupPw.fill(ADMIN_PASSWORD);
     await page.getByTestId('setup-password-confirm').fill(ADMIN_PASSWORD);
     await page.getByTestId('setup-submit').click();
   } else if (await loginPw.isVisible()) {
+    await page.getByTestId('login-username').fill(ADMIN_USERNAME);
     await loginPw.fill(ADMIN_PASSWORD);
     await page.getByTestId('login-submit').click();
   }

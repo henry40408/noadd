@@ -1,4 +1,4 @@
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, DeleteUserOutcome, QueryLogEntry};
 use tempfile::tempdir;
 
 async fn test_db() -> Database {
@@ -474,4 +474,134 @@ async fn test_read_conn_opens_and_basic_roundtrip_works() {
     let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].domain, "example.com");
+}
+
+#[tokio::test]
+async fn test_users_crud() {
+    let db = test_db().await;
+    assert_eq!(db.count_users().await.unwrap(), 0);
+
+    let id = db.create_user("alice", "hash-a", 1000).await.unwrap();
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    let auth = db.get_user_auth("alice").await.unwrap().unwrap();
+    assert_eq!(auth.id, id);
+    assert_eq!(auth.password_hash, "hash-a");
+    assert!(db.get_user_auth("nobody").await.unwrap().is_none());
+
+    assert_eq!(db.get_username(id).await.unwrap().as_deref(), Some("alice"));
+
+    db.update_user_password(id, "hash-b").await.unwrap();
+    assert_eq!(
+        db.get_user_password_hash(id).await.unwrap().as_deref(),
+        Some("hash-b")
+    );
+
+    let users = db.list_users().await.unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+
+    // The last remaining operator cannot be deleted.
+    assert_eq!(
+        db.delete_user(id).await.unwrap(),
+        DeleteUserOutcome::LastOperator
+    );
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    // With a second operator present, a non-last operator can be deleted.
+    let id2 = db.create_user("bob", "hash-b2", 2000).await.unwrap();
+    assert_eq!(
+        db.delete_user(id2).await.unwrap(),
+        DeleteUserOutcome::Deleted
+    );
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    // A non-existent id (while more than one operator remains) reports NotFound.
+    db.create_user("carol", "hash-c", 3000).await.unwrap();
+    assert_eq!(
+        db.delete_user(99999).await.unwrap(),
+        DeleteUserOutcome::NotFound
+    );
+    assert_eq!(db.count_users().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_duplicate_username_rejected() {
+    let db = test_db().await;
+    db.create_user("bob", "h", 1).await.unwrap();
+    assert!(db.create_user("bob", "h2", 2).await.is_err());
+}
+
+#[tokio::test]
+async fn test_sessions_crud_and_cascade() {
+    let db = test_db().await;
+    let uid = db.create_user("carol", "h", 100).await.unwrap();
+
+    let sid = db
+        .insert_session("tok-1", uid, 100, 100, Some("1.2.3.4"), Some("UA"))
+        .await
+        .unwrap();
+
+    let list = db.list_sessions().await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].username, "carol");
+    assert_eq!(list[0].token, "tok-1");
+    assert_eq!(list[0].ip.as_deref(), Some("1.2.3.4"));
+
+    // delete_session_by_id returns the token for in-memory eviction
+    assert_eq!(
+        db.delete_session_by_id(sid).await.unwrap().as_deref(),
+        Some("tok-1")
+    );
+    assert!(db.list_sessions().await.unwrap().is_empty());
+    assert!(db.delete_session_by_id(sid).await.unwrap().is_none());
+
+    // Deleting the user cascades to their sessions. Add a second operator first
+    // so carol is not the last one (which would be refused).
+    db.insert_session("tok-2", uid, 100, 100, None, None)
+        .await
+        .unwrap();
+    db.create_user("carol2", "h", 200).await.unwrap();
+    assert_eq!(
+        db.delete_user(uid).await.unwrap(),
+        DeleteUserOutcome::Deleted
+    );
+    assert!(db.list_sessions().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_load_sessions_drops_expired() {
+    let db = test_db().await;
+    let uid = db.create_user("dave", "h", 0).await.unwrap();
+    db.insert_session("fresh", uid, 1_000, 1_000, None, None)
+        .await
+        .unwrap();
+    db.insert_session("stale", uid, 1, 1, None, None)
+        .await
+        .unwrap();
+
+    // max_age 100, now 1100 → cutoff 1000; "stale" (created_at 1) is purged.
+    let loaded = db.load_sessions(100, 1_100).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].token, "fresh");
+    assert!(
+        db.list_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.token == "fresh")
+    );
+}
+
+#[tokio::test]
+async fn test_flush_last_seen() {
+    let db = test_db().await;
+    let uid = db.create_user("erin", "h", 0).await.unwrap();
+    db.insert_session("tok", uid, 0, 0, None, None)
+        .await
+        .unwrap();
+    db.flush_sessions_last_seen(&[("tok".to_string(), 555)])
+        .await
+        .unwrap();
+    assert_eq!(db.list_sessions().await.unwrap()[0].last_seen, 555);
 }

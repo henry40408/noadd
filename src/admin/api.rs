@@ -18,7 +18,8 @@ use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::auth::{
-    RateLimiter, SessionStore, create_session, hash_password, validate_session, verify_password,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, store_session,
+    validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -95,6 +96,17 @@ pub fn admin_router(state: AppState) -> Router {
         // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
+        // Operator management
+        .route("/api/auth/me", get(get_me))
+        .route(
+            "/api/users",
+            get(list_users_handler).post(create_user_handler),
+        )
+        .route("/api/users/{id}", delete(delete_user_handler))
+        .route("/api/users/me/password", post(change_own_password))
+        // Session management
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/{id}", delete(revoke_session_by_id))
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
@@ -251,22 +263,27 @@ fn client_ip(
 
 // --- Auth helper ---
 
-fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
+/// Returns `(user_id, token)` for the current authenticated session, or 401.
+fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
     let token = jar
         .get("session")
         .map(|c| c.value().to_string())
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if validate_session(&state.sessions, &token) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    match validate_session(&state.sessions, &token) {
+        Some(user_id) => Ok((user_id, token)),
+        None => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
+    current_session(state, jar).map(|_| ())
 }
 
 // --- Auth endpoints ---
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
+    pub username: String,
     pub password: String,
 }
 
@@ -289,26 +306,42 @@ async fn login(
     }
     state.rate_limiter.record(ip);
 
-    let hash = state
+    // Generic 401 whether the username is unknown or the password is wrong.
+    let auth = state
         .db
-        .get_setting("admin_password_hash")
+        .get_user_auth(body.username.trim())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let valid =
-        verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    let valid = verify_password(&body.password, &auth.password_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
-        tracing::warn!("login failed: invalid password");
+        tracing::warn!("login failed: invalid credentials");
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    tracing::info!("login successful");
-    let token = create_session(&state.sessions);
-
-    // Persist sessions to DB so they survive restarts
-    let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+    let now = crate::now_unix();
+    let token = generate_token();
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    let session_id = state
+        .db
+        .insert_session(&token, auth.id, now, now, Some(&ip.to_string()), user_agent)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store_session(
+        &state.sessions,
+        &token,
+        SessionInfo {
+            session_id,
+            user_id: auth.id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+    tracing::info!(user_id = auth.id, "login successful");
 
     let cookie = Cookie::build(("session", token))
         .path("/")
@@ -324,6 +357,7 @@ async fn login(
 
 #[derive(Deserialize)]
 pub struct SetupRequest {
+    pub username: String,
     pub password: String,
 }
 
@@ -353,15 +387,8 @@ async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
-    // Only allow setup if no password exists (check this first so a
-    // configured instance never reveals password-policy details).
-    let existing = state
-        .db
-        .get_setting("admin_password_hash")
-        .await
-        .map_err(|_| setup_ise())?;
-
-    if existing.is_some() {
+    let count = state.db.count_users().await.map_err(|_| setup_ise())?;
+    if count > 0 {
         return Err((
             StatusCode::CONFLICT,
             Json(SetupErrorResponse {
@@ -369,7 +396,15 @@ async fn setup(
             }),
         ));
     }
-
+    let username = body.username.trim();
+    if username.is_empty() || username.chars().count() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(SetupErrorResponse {
+                error: "invalid username".to_string(),
+            }),
+        ));
+    }
     if body.password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -378,15 +413,12 @@ async fn setup(
             }),
         ));
     }
-
     let hash = hash_password(&body.password).map_err(|_| setup_ise())?;
-
     state
         .db
-        .set_setting("admin_password_hash", &hash)
+        .create_user(username, &hash, crate::now_unix())
         .await
         .map_err(|_| setup_ise())?;
-
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -401,8 +433,8 @@ async fn revoke_all(
     Ok(StatusCode::OK)
 }
 
-/// Log out the current session only: revoke this token, persist, and expire
-/// the client's session cookie. Other devices' sessions are untouched.
+/// Log out the current session only: revoke this token, delete from DB, and
+/// expire the client's session cookie. Other devices' sessions are untouched.
 async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -411,10 +443,220 @@ async fn logout(
     if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
-        let _ = crate::admin::auth::save_sessions_to_db(&state.sessions, &state.db).await;
+        let _ = state.db.delete_session_by_token(&token).await;
     }
     let removal = Cookie::build(("session", "")).path("/").build();
     Ok((jar.remove(removal), StatusCode::OK))
+}
+
+// --- Operator management ---
+
+#[derive(Serialize)]
+struct MeResponse {
+    id: i64,
+    username: String,
+}
+
+async fn get_me(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<MeResponse>, StatusCode> {
+    let (user_id, _token) = current_session(&state, &jar)?;
+    let username = state
+        .db
+        .get_username(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Json(MeResponse {
+        id: user_id,
+        username,
+    }))
+}
+
+async fn list_users_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::db::UserRow>>, StatusCode> {
+    require_auth(&state, &jar)?;
+    let users = state
+        .db
+        .list_users()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(users))
+}
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    username: String,
+    password: String,
+}
+
+async fn create_user_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    let username = body.username.trim();
+    if username.is_empty() || username.chars().count() > 64 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if body.password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = hash_password(&body.password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match state
+        .db
+        .create_user(username, &hash, crate::now_unix())
+        .await
+    {
+        Ok(_) => Ok(StatusCode::CREATED),
+        // A UNIQUE violation means the username is taken (409); any other
+        // database error is a genuine failure (500).
+        Err(e) if e.is_unique_violation() => Err(StatusCode::CONFLICT),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn delete_user_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    require_auth(&state, &jar)?;
+    // The last-operator guard and the delete run atomically inside the DB layer,
+    // so two concurrent deletes can never drop the instance to zero operators.
+    match state
+        .db
+        .delete_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        crate::db::DeleteUserOutcome::LastOperator => Err(StatusCode::CONFLICT),
+        crate::db::DeleteUserOutcome::NotFound => Err(StatusCode::NOT_FOUND),
+        crate::db::DeleteUserOutcome::Deleted => {
+            // The DB `ON DELETE CASCADE` removed this operator's session rows;
+            // evict the matching in-memory entries now that the durable delete
+            // has succeeded (so a failed delete never logs a live user out).
+            let tokens: Vec<String> = state
+                .sessions
+                .lock()
+                .iter()
+                .filter(|(_, info)| info.user_id == id)
+                .map(|(t, _)| t.clone())
+                .collect();
+            for t in &tokens {
+                crate::admin::auth::revoke_session(&state.sessions, t);
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_own_password(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let (user_id, _token) = current_session(&state, &jar)?;
+    if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = state
+        .db
+        .get_user_password_hash(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let ok = verify_password(&body.current_password, &hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let new_hash =
+        hash_password(&body.new_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .db
+        .update_user_password(user_id, &new_hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    id: i64,
+    username: String,
+    created_at: i64,
+    last_seen: i64,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    is_current: bool,
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
+    let (_user_id, token) = current_session(&state, &jar)?;
+    let rows = state
+        .db
+        .list_sessions()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Prefer the fresher in-memory last_seen when present.
+    let live = state.sessions.lock();
+    let out = rows
+        .into_iter()
+        .map(|r| {
+            let last_seen = live
+                .get(&r.token)
+                .map(|i| i.last_seen)
+                .unwrap_or(r.last_seen);
+            SessionResponse {
+                id: r.id,
+                username: r.username,
+                created_at: r.created_at,
+                last_seen,
+                ip: r.ip,
+                user_agent: r.user_agent,
+                is_current: r.token == token,
+            }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn revoke_session_by_id(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> Result<(CookieJar, StatusCode), StatusCode> {
+    let (_user_id, current_token) = current_session(&state, &jar)?;
+    let removed = state
+        .db
+        .delete_session_by_id(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match removed {
+        Some(token) => {
+            crate::admin::auth::revoke_session(&state.sessions, &token);
+            if token == current_token {
+                let removal = Cookie::build(("session", "")).path("/").build();
+                return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
+            }
+            Ok((jar, StatusCode::NO_CONTENT))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // --- Health ---
@@ -432,11 +674,10 @@ pub struct HealthResponse {
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let needs_setup = state
         .db
-        .get_setting("admin_password_hash")
+        .count_users()
         .await
-        .ok()
-        .flatten()
-        .is_none();
+        .map(|n| n == 0)
+        .unwrap_or(false);
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,

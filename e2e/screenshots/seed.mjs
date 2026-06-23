@@ -2,6 +2,7 @@
 // Generates deterministic fake-traffic SQL for the screenshot pipeline.
 // All query_logs timestamps are epoch MILLISECONDS (matches src/db.rs readers).
 
+export const ADMIN_USERNAME = 'testuser';
 export const ADMIN_PASSWORD = 'correct horse battery staple';
 
 function mulberry32(seed) {
