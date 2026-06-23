@@ -1616,13 +1616,17 @@ class SetupPage extends HTMLElement {
 ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═════╝</pre>
           <div class="boot-log">
             noadd dns sinkhole · first boot<br>
-            admin password ........... <span class="warn">not set</span><br>
+            admin account ............ <span class="warn">none</span><br>
             create operator credentials to continue_
           </div>
           <div class="login-error" id="setup-error" data-testid="setup-error"></div>
           <div class="login-line">
+            <label for="setup-user">username:</label>
+            <input type="text" id="setup-user" data-testid="setup-username" autofocus>
+          </div>
+          <div class="login-line">
             <label for="setup-pw">password:</label>
-            <input type="password" id="setup-pw" data-testid="setup-password" autofocus>
+            <input type="password" id="setup-pw" data-testid="setup-password">
           </div>
           <div class="login-line">
             <label for="setup-pw2">confirm:</label>
@@ -1632,18 +1636,21 @@ class SetupPage extends HTMLElement {
           <div class="boot-hint">minimum 8 characters</div>
         </div>
       </div>`;
+    const user = this.querySelector('#setup-user');
     const pw = this.querySelector('#setup-pw');
     const pw2 = this.querySelector('#setup-pw2');
     const btn = this.querySelector('#setup-btn');
     const err = this.querySelector('#setup-error');
     const doSetup = async () => {
       err.style.display = 'none';
+      const username = user.value.trim();
+      if (!username) return showFormError(err, 'Username is required');
       if (!pw.value || pw.value.length < 8) return showFormError(err, 'Password must be at least 8 characters');
       if (pw.value !== pw2.value) return showFormError(err, 'Passwords do not match');
       try {
-        await api.post('/api/auth/setup', { password: pw.value });
+        await api.post('/api/auth/setup', { username, password: pw.value });
         // Auto-login after setup
-        await api.post('/api/auth/login', { password: pw.value });
+        await api.post('/api/auth/login', { username, password: pw.value });
         // Mark this session as just-set-up so the dashboard shows a one-time
         // welcome message. Set before dispatching so AppShell sees it on render.
         try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
@@ -1678,19 +1685,24 @@ class LoginPage extends HTMLElement {
           </div>
           <div class="login-error" id="login-error" data-testid="login-error" role="alert"></div>
           <div class="login-line">
+            <label for="li-user">username:</label>
+            <input type="text" id="li-user" data-testid="login-username" autofocus>
+          </div>
+          <div class="login-line">
             <label for="pw">password:</label>
-            <input type="password" id="pw" data-testid="login-password" autofocus>
+            <input type="password" id="pw" data-testid="login-password">
           </div>
           <button class="btn btn-primary boot-submit" id="login-btn" data-testid="login-submit">authenticate</button>
         </div>
       </div>`;
+    const userEl = this.querySelector('#li-user');
     const pw = this.querySelector('#pw');
     const btn = this.querySelector('#login-btn');
     const err = this.querySelector('#login-error');
     const doLogin = async () => {
       try {
         err.style.display = 'none';
-        await api.post('/api/auth/login', { password: pw.value });
+        await api.post('/api/auth/login', { username: userEl.value.trim(), password: pw.value });
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
         const limited = /^429\b/.test((e && e.message) || '');
@@ -1720,6 +1732,7 @@ class AppShell extends HTMLElement {
             <button class="nav-item" data-route="#logs" data-testid="nav-logs"><b>3:</b>query-log</button>
             <button class="nav-item" data-route="#filters" data-testid="nav-filters"><b>4:</b>filters</button>
             <button class="nav-item" data-route="#settings" data-testid="nav-settings"><b>5:</b>settings</button>
+            <button class="nav-item" data-route="#account" data-testid="nav-account"><b>6:</b>account</button>
           </nav>
           <div class="topbar-meta">dns sinkhole</div>
           <button class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
@@ -1740,6 +1753,7 @@ class AppShell extends HTMLElement {
           <button class="nav-item" data-route="#logs"><span class="fk">F3</span><b>logs</b></button>
           <button class="nav-item" data-route="#filters"><span class="fk">F4</span><b>filt</b></button>
           <button class="nav-item" data-route="#settings"><span class="fk">F5</span><b>conf</b></button>
+          <button class="nav-item" data-route="#account"><span class="fk">F6</span><b>acct</b></button>
         </nav>
       </div>`;
 
@@ -1792,6 +1806,153 @@ class AppShell extends HTMLElement {
   get pageContent() { return this.querySelector('#page-content'); }
 }
 customElements.define('app-shell', AppShell);
+
+// --- Account Page ---
+class AccountPage extends HTMLElement {
+  connectedCallback() {
+    this.innerHTML = `
+      <div class="page-header fade-in"><h2>Account</h2><p>Operator accounts and active sessions</p></div>
+      <div class="card fade-in">
+        <div class="card-title">This Account</div>
+        <p id="acct-whoami" style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Loading…</p>
+        <div class="card-title" style="margin-top:4px">Change Password</div>
+        <div class="login-error" id="pw-error" style="display:none"></div>
+        <div class="input-row"><input type="password" id="pw-current" placeholder="current password" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" placeholder="new password (min 8)" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" placeholder="confirm new password" style="max-width:220px"></div>
+        <button class="btn btn-primary btn-sm" id="pw-save" style="margin-top:12px">Change Password</button>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="card-title">Operators</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">All operators have full admin access. The last operator cannot be deleted; deleting one revokes all their sessions.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
+          <tbody id="ops-body"></tbody>
+        </table></div>
+        <div class="card-title" style="margin-top:16px">Add Operator</div>
+        <div class="login-error" id="op-error" style="display:none"></div>
+        <div class="input-row"><input type="text" id="op-user" placeholder="username" style="max-width:200px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" placeholder="password (min 8)" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" placeholder="confirm password" style="max-width:220px"></div>
+        <button class="btn btn-primary btn-sm" id="op-add" style="margin-top:12px">Add Operator</button>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Active Sessions</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Operator</th><th>IP</th><th>Browser</th><th>Signed in</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="sess-body"></tbody>
+        </table></div>
+        <button class="btn btn-danger" id="revoke-all" data-testid="revoke-sessions" style="margin-top:14px">Revoke All Other Sessions</button>
+      </div>`;
+
+    this._me = null;
+    this.load();
+
+    this.querySelector('#pw-save').onclick = () => this.changePassword();
+    this.querySelector('#op-add').onclick = () => this.addOperator();
+    this.querySelector('#revoke-all').onclick = async () => {
+      if (!confirm('Revoke all sessions and log out everywhere?')) return;
+      await api.post('/api/auth/revoke-all');
+      window.dispatchEvent(new CustomEvent('auth-required'));
+    };
+  }
+
+  async load() {
+    try {
+      this._me = await api.get('/api/auth/me');
+      this.querySelector('#acct-whoami').innerHTML =
+        `Signed in as <code style="color:var(--accent);font-size:0.85rem">${esc(this._me.username)}</code>`;
+    } catch (e) {}
+    this.loadOperators();
+    this.loadSessions();
+  }
+
+  async loadOperators() {
+    const users = await api.get('/api/users');
+    const body = this.querySelector('#ops-body');
+    body.innerHTML = users.map(u => {
+      const isYou = this._me && u.id === this._me.id;
+      const last = users.length <= 1;
+      const disabled = isYou || last;
+      return `<tr>
+        <td class="mono" style="color:var(--text-primary)">${esc(u.username)}${isYou ? ' <span class="badge badge-allowed">you</span>' : ''}</td>
+        <td>${u.created_at ? timeAgo(u.created_at) : '—'}</td>
+        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${u.id}" ${disabled ? 'disabled style="opacity:.35"' : ''}>${icons.trash}</button></td>
+      </tr>`;
+    }).join('');
+    body.querySelectorAll('.del-op:not([disabled])').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this operator and revoke their sessions?')) return;
+        await api.del(`/api/users/${btn.dataset.id}`);
+        this.loadOperators();
+        this.loadSessions();
+      };
+    });
+  }
+
+  async loadSessions() {
+    const sessions = await api.get('/api/sessions');
+    const body = this.querySelector('#sess-body');
+    body.innerHTML = sessions.map(s => `<tr>
+      <td class="mono" style="color:var(--text-primary)">${esc(s.username)}${s.is_current ? ' <span class="badge badge-allowed">this device</span>' : ''}</td>
+      <td class="mono">${esc(s.ip || '—')}</td>
+      <td>${esc(s.user_agent || '—')}</td>
+      <td>${s.created_at ? timeAgo(s.created_at) : '—'}</td>
+      <td>${s.last_seen ? timeAgo(s.last_seen) : '—'}</td>
+      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${s.id}" data-current="${s.is_current}">${icons.trash}</button></td>
+    </tr>`).join('');
+    body.querySelectorAll('.rev-sess').forEach(btn => {
+      btn.onclick = async () => {
+        await api.del(`/api/sessions/${btn.dataset.id}`);
+        if (btn.dataset.current === 'true') { window.dispatchEvent(new CustomEvent('auth-required')); return; }
+        this.loadSessions();
+      };
+    });
+  }
+
+  async changePassword() {
+    const err = this.querySelector('#pw-error');
+    err.style.display = 'none';
+    const cur = this.querySelector('#pw-current').value;
+    const nw = this.querySelector('#pw-new').value;
+    const cf = this.querySelector('#pw-confirm').value;
+    if (nw.length < 8) return showFormError(err, 'New password must be at least 8 characters');
+    if (nw !== cf) return showFormError(err, 'Passwords do not match');
+    try {
+      await api.post('/api/users/me/password', { current_password: cur, new_password: nw });
+      this.querySelector('#pw-current').value = '';
+      this.querySelector('#pw-new').value = '';
+      this.querySelector('#pw-confirm').value = '';
+      const btn = this.querySelector('#pw-save');
+      btn.textContent = 'Changed!';
+      setTimeout(() => { btn.textContent = 'Change Password'; }, 2000);
+    } catch (e) {
+      showFormError(err, 'Current password is incorrect');
+    }
+  }
+
+  async addOperator() {
+    const err = this.querySelector('#op-error');
+    err.style.display = 'none';
+    const user = this.querySelector('#op-user').value.trim();
+    const pw = this.querySelector('#op-pw').value;
+    const pw2 = this.querySelector('#op-pw2').value;
+    if (!user) return showFormError(err, 'Username is required');
+    if (pw.length < 8) return showFormError(err, 'Password must be at least 8 characters');
+    if (pw !== pw2) return showFormError(err, 'Passwords do not match');
+    try {
+      await api.post('/api/users', { username: user, password: pw });
+      this.querySelector('#op-user').value = '';
+      this.querySelector('#op-pw').value = '';
+      this.querySelector('#op-pw2').value = '';
+      this.loadOperators();
+    } catch (e) {
+      showFormError(err, 'Could not add operator (username may already exist)');
+    }
+  }
+}
+customElements.define('account-page', AccountPage);
 
 // --- Rebuild Banner ---
 // Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
@@ -3524,11 +3685,6 @@ class SettingsPage extends HTMLElement {
           <button class="btn btn-primary btn-sm" id="add-token">${icons.plus} Add</button>
         </div>
         <div id="doh-tokens-list"></div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.25s">
-        <div class="card-title">Sessions</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Sessions expire after 7 days. Revoking logs out all devices.</p>
-        <button class="btn btn-danger" id="revoke-sessions" data-testid="revoke-sessions">${icons.trash} Revoke All Sessions</button>
       </div>`;
 
     this.load();
@@ -3587,13 +3743,6 @@ class SettingsPage extends HTMLElement {
       this.loadTokens();
     };
     this.querySelector('#token-value').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-token').click(); };
-
-    this.querySelector('#revoke-sessions').onclick = async () => {
-      if (confirm('Revoke all sessions? You will be logged out on all devices.')) {
-        await api.post('/api/auth/revoke-all');
-        window.dispatchEvent(new CustomEvent('auth-required'));
-      }
-    };
   }
 
   async load() {
@@ -3715,7 +3864,8 @@ router
   .on('#stats', () => setPage('stats-page'))
   .on('#logs', () => setPage('logs-page'))
   .on('#filters', () => setPage('filters-page'))
-  .on('#settings', () => setPage('settings-page'));
+  .on('#settings', () => setPage('settings-page'))
+  .on('#account', () => setPage('account-page'));
 
 window.addEventListener('auth-required', showLogin);
 window.addEventListener('login-success', showApp);
