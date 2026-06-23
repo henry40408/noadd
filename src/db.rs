@@ -76,6 +76,19 @@ pub struct DohTokenRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct UserRow {
+    pub id: i64,
+    pub username: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserAuth {
+    pub id: i64,
+    pub password_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FilterListRow {
     pub id: i64,
     pub name: String,
@@ -292,6 +305,13 @@ impl Database {
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         token TEXT NOT NULL UNIQUE
                     );
+
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        created_at INTEGER NOT NULL
+                    );
                     ",
                 )?;
                 Self::run_migrations(conn)?;
@@ -348,7 +368,29 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 5;
+        if version < 6 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    ip TEXT,
+                    user_agent TEXT
+                );
+                DELETE FROM settings WHERE key = 'admin_password_hash';
+                DELETE FROM settings WHERE key = 'sessions';",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 6;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -884,6 +926,136 @@ impl Database {
             })
             .await?;
         Ok(count > 0)
+    }
+
+    // --- Users ---
+
+    pub async fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        created_at: i64,
+    ) -> Result<i64, DbError> {
+        let username = username.to_string();
+        let password_hash = password_hash.to_string();
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+                    params![username, password_hash, created_at],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn get_user_auth(&self, username: &str) -> Result<Option<UserAuth>, DbError> {
+        let username = username.to_string();
+        let row = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id, password_hash FROM users WHERE username = ?1")?;
+                let r = stmt
+                    .query_row(params![username], |row| {
+                        Ok(UserAuth {
+                            id: row.get(0)?,
+                            password_hash: row.get(1)?,
+                        })
+                    })
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(row)
+    }
+
+    pub async fn get_user_password_hash(&self, id: i64) -> Result<Option<String>, DbError> {
+        let val = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT password_hash FROM users WHERE id = ?1")?;
+                let r = stmt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(val)
+    }
+
+    pub async fn update_user_password(&self, id: i64, password_hash: &str) -> Result<(), DbError> {
+        let password_hash = password_hash.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                    params![password_hash, id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<UserRow>, DbError> {
+        let rows = self
+            .reader()
+            .call(|conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id, username, created_at FROM users ORDER BY id")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(UserRow {
+                            id: row.get(0)?,
+                            username: row.get(1)?,
+                            created_at: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn count_users(&self) -> Result<i64, DbError> {
+        let n = self
+            .reader()
+            .call(|conn| {
+                let mut stmt = conn.prepare_cached("SELECT COUNT(*) FROM users")?;
+                let n: i64 = stmt.query_row([], |row| row.get(0))?;
+                Ok(n)
+            })
+            .await?;
+        Ok(n)
+    }
+
+    pub async fn delete_user(&self, id: i64) -> Result<(), DbError> {
+        self.conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_username(&self, id: i64) -> Result<Option<String>, DbError> {
+        let val = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached("SELECT username FROM users WHERE id = ?1")?;
+                let r = stmt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                Ok(r)
+            })
+            .await?;
+        Ok(val)
     }
 
     // --- Stats ---
@@ -1642,6 +1814,53 @@ mod tests {
             indexes.iter().any(|n| n == "idx_query_logs_domain_ts"),
             "composite index should be created by migration: {indexes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn migration_v6_drops_credential_and_adds_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // Simulate a v5 database holding the old single-password credential and
+        // some unrelated business data.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE custom_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, rule TEXT NOT NULL, rule_type TEXT NOT NULL);
+                 INSERT INTO settings (key, value) VALUES ('admin_password_hash', '$argon2id$xxx');
+                 INSERT INTO settings (key, value) VALUES ('sessions', 'tok:123');
+                 INSERT INTO settings (key, value) VALUES ('log_retention_days', '14');
+                 INSERT INTO custom_rules (rule, rule_type) VALUES ('ads.example.com', 'block');
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        // Credential + old sessions blob dropped.
+        assert!(
+            db.get_setting("admin_password_hash")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.get_setting("sessions").await.unwrap().is_none());
+        // Unrelated data preserved.
+        assert_eq!(
+            db.get_setting("log_retention_days")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("14")
+        );
+        // New tables exist and are empty.
+        let tables = db.list_tables().await.unwrap();
+        assert!(tables.contains(&"users".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert_eq!(db.count_users().await.unwrap(), 0);
     }
 
     #[tokio::test]

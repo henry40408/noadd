@@ -475,3 +475,39 @@ async fn test_read_conn_opens_and_basic_roundtrip_works() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].domain, "example.com");
 }
+
+#[tokio::test]
+async fn test_users_crud() {
+    let db = test_db().await;
+    assert_eq!(db.count_users().await.unwrap(), 0);
+
+    let id = db.create_user("alice", "hash-a", 1000).await.unwrap();
+    assert_eq!(db.count_users().await.unwrap(), 1);
+
+    let auth = db.get_user_auth("alice").await.unwrap().unwrap();
+    assert_eq!(auth.id, id);
+    assert_eq!(auth.password_hash, "hash-a");
+    assert!(db.get_user_auth("nobody").await.unwrap().is_none());
+
+    assert_eq!(db.get_username(id).await.unwrap().as_deref(), Some("alice"));
+
+    db.update_user_password(id, "hash-b").await.unwrap();
+    assert_eq!(
+        db.get_user_password_hash(id).await.unwrap().as_deref(),
+        Some("hash-b")
+    );
+
+    let users = db.list_users().await.unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+
+    db.delete_user(id).await.unwrap();
+    assert_eq!(db.count_users().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_duplicate_username_rejected() {
+    let db = test_db().await;
+    db.create_user("bob", "h", 1).await.unwrap();
+    assert!(db.create_user("bob", "h2", 2).await.is_err());
+}
