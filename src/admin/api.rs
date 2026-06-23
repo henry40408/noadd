@@ -513,8 +513,10 @@ async fn create_user_handler(
         .await
     {
         Ok(_) => Ok(StatusCode::CREATED),
-        // UNIQUE violation → duplicate username.
-        Err(_) => Err(StatusCode::CONFLICT),
+        // A UNIQUE violation means the username is taken (409); any other
+        // database error is a genuine failure (500).
+        Err(e) if e.is_unique_violation() => Err(StatusCode::CONFLICT),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

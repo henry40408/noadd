@@ -14,6 +14,26 @@ pub enum DbError {
     Rusqlite(#[from] rusqlite::Error),
 }
 
+impl DbError {
+    /// True when the error is a SQLite constraint violation (e.g. inserting a
+    /// duplicate `users.username`, which is the only UNIQUE constraint on that
+    /// table). Callers use this to distinguish a duplicate-key conflict (HTTP
+    /// 409) from a genuine database failure (HTTP 500).
+    pub fn is_unique_violation(&self) -> bool {
+        let inner = match self {
+            DbError::Rusqlite(e) => Some(e),
+            DbError::Sqlite(tokio_rusqlite::Error::Error(e)) => Some(e),
+            DbError::Sqlite(tokio_rusqlite::Error::Close((_, e))) => Some(e),
+            DbError::Sqlite(_) => None,
+        };
+        matches!(
+            inner,
+            Some(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+}
+
 /// Number of read-only SQLite connections in the pool. Each connection owns
 /// its own tokio-rusqlite worker thread, so this is the parallelism cap for
 /// admin/stats queries. WAL lets readers proceed without blocking each other.
@@ -1122,16 +1142,16 @@ impl Database {
         let token = self
             .conn
             .call(move |conn| {
+                // Single atomic statement: DELETE ... RETURNING removes the row and
+                // yields its token in one step, so there is no SELECT-then-DELETE
+                // window where a concurrent revoke of the same id could double-fire.
                 let tok: Option<String> = conn
                     .query_row(
-                        "SELECT token FROM sessions WHERE id = ?1",
+                        "DELETE FROM sessions WHERE id = ?1 RETURNING token",
                         params![id],
                         |row| row.get(0),
                     )
                     .optional()?;
-                if tok.is_some() {
-                    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
-                }
                 Ok(tok)
             })
             .await?;

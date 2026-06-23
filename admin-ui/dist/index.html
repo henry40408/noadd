@@ -1660,6 +1660,8 @@ class SetupPage extends HTMLElement {
       }
     };
     btn.onclick = doSetup;
+    user.onkeydown = (e) => { if (e.key === 'Enter') pw.focus(); };
+    pw.onkeydown = (e) => { if (e.key === 'Enter') pw2.focus(); };
     pw2.onkeydown = (e) => { if (e.key === 'Enter') doSetup(); };
   }
 }
@@ -1714,6 +1716,7 @@ class LoginPage extends HTMLElement {
       }
     };
     btn.onclick = doLogin;
+    userEl.onkeydown = (e) => { if (e.key === 'Enter') pw.focus(); };
     pw.onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
   }
 }
@@ -1843,7 +1846,7 @@ class AccountPage extends HTMLElement {
           <thead><tr><th>Operator</th><th>IP</th><th>Browser</th><th>Signed in</th><th>Last seen</th><th></th></tr></thead>
           <tbody id="sess-body"></tbody>
         </table></div>
-        <button class="btn btn-danger" id="revoke-all" data-testid="revoke-sessions" style="margin-top:14px">Revoke All Other Sessions</button>
+        <button class="btn btn-danger" id="revoke-all" data-testid="revoke-sessions" style="margin-top:14px">Revoke All Sessions</button>
       </div>`;
 
     this._me = null;
@@ -1853,8 +1856,12 @@ class AccountPage extends HTMLElement {
     this.querySelector('#op-add').onclick = () => this.addOperator();
     this.querySelector('#revoke-all').onclick = async () => {
       if (!confirm('Revoke all sessions and log out everywhere?')) return;
-      await api.post('/api/auth/revoke-all');
-      window.dispatchEvent(new CustomEvent('auth-required'));
+      try {
+        await api.post('/api/auth/revoke-all');
+        window.dispatchEvent(new CustomEvent('auth-required'));
+      } catch (e) {
+        alert('Could not revoke sessions. Please try again.');
+      }
     };
   }
 
@@ -1869,8 +1876,15 @@ class AccountPage extends HTMLElement {
   }
 
   async loadOperators() {
-    const users = await api.get('/api/users');
     const body = this.querySelector('#ops-body');
+    let users;
+    try {
+      users = await api.get('/api/users');
+    } catch (e) {
+      if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
+      body.innerHTML = '<tr><td colspan="3" style="color:var(--red)">Failed to load operators</td></tr>';
+      return;
+    }
     body.innerHTML = users.map(u => {
       const isYou = this._me && u.id === this._me.id;
       const last = users.length <= 1;
@@ -1878,13 +1892,18 @@ class AccountPage extends HTMLElement {
       return `<tr>
         <td class="mono" style="color:var(--text-primary)">${esc(u.username)}${isYou ? ' <span class="badge badge-allowed">you</span>' : ''}</td>
         <td>${u.created_at ? timeAgo(u.created_at) : '—'}</td>
-        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${u.id}" ${disabled ? 'disabled style="opacity:.35"' : ''}>${icons.trash}</button></td>
+        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${esc(String(u.id))}" ${disabled ? 'disabled style="opacity:.35"' : ''}>${icons.trash}</button></td>
       </tr>`;
     }).join('');
     body.querySelectorAll('.del-op:not([disabled])').forEach(btn => {
       btn.onclick = async () => {
         if (!confirm('Delete this operator and revoke their sessions?')) return;
-        await api.del(`/api/users/${btn.dataset.id}`);
+        try {
+          await api.del(`/api/users/${btn.dataset.id}`);
+        } catch (e) {
+          alert('Could not delete operator.');
+          return;
+        }
         this.loadOperators();
         this.loadSessions();
       };
@@ -1892,19 +1911,31 @@ class AccountPage extends HTMLElement {
   }
 
   async loadSessions() {
-    const sessions = await api.get('/api/sessions');
     const body = this.querySelector('#sess-body');
+    let sessions;
+    try {
+      sessions = await api.get('/api/sessions');
+    } catch (e) {
+      if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
+      body.innerHTML = '<tr><td colspan="6" style="color:var(--red)">Failed to load sessions</td></tr>';
+      return;
+    }
     body.innerHTML = sessions.map(s => `<tr>
       <td class="mono" style="color:var(--text-primary)">${esc(s.username)}${s.is_current ? ' <span class="badge badge-allowed">this device</span>' : ''}</td>
       <td class="mono">${esc(s.ip || '—')}</td>
       <td>${esc(s.user_agent || '—')}</td>
       <td>${s.created_at ? timeAgo(s.created_at) : '—'}</td>
       <td>${s.last_seen ? timeAgo(s.last_seen) : '—'}</td>
-      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${s.id}" data-current="${s.is_current}">${icons.trash}</button></td>
+      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${esc(String(s.id))}" data-current="${s.is_current ? 'true' : 'false'}">${icons.trash}</button></td>
     </tr>`).join('');
     body.querySelectorAll('.rev-sess').forEach(btn => {
       btn.onclick = async () => {
-        await api.del(`/api/sessions/${btn.dataset.id}`);
+        try {
+          await api.del(`/api/sessions/${btn.dataset.id}`);
+        } catch (e) {
+          alert('Could not revoke session.');
+          return;
+        }
         if (btn.dataset.current === 'true') { window.dispatchEvent(new CustomEvent('auth-required')); return; }
         this.loadSessions();
       };

@@ -1395,3 +1395,62 @@ async fn revoke_current_session_clears_cookie() {
         .map(|v| v.to_str().unwrap().to_string());
     assert!(set_cookie.unwrap_or_default().contains("session="));
 }
+
+#[tokio::test]
+async fn list_operators_excludes_password_hash() {
+    let (app, token) = setup().await;
+    app.clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bob","password":"longpass1"}"#),
+        ))
+        .await
+        .unwrap();
+    let res = app
+        .oneshot(authed("GET", "/api/users", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("admin") && text.contains("bob"));
+    assert!(
+        !text.contains("password_hash"),
+        "operator list must never expose password hashes"
+    );
+}
+
+#[tokio::test]
+async fn me_returns_current_operator_without_hash() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("\"username\":\"admin\""));
+    assert!(!text.contains("password_hash"));
+}
+
+#[tokio::test]
+async fn create_operator_rejects_short_password() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"shorty","password":"x"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
