@@ -1,0 +1,15 @@
+# Coverage configuration. main.rs only wires components together inside a live
+# process (socket bind, runtime spawn) and is not unit-testable; exclude it from
+# the project coverage denominator.
+ignore:
+  - "src/main.rs"
+
+coverage:
+  status:
+    project:
+      default:
+        target: 90%
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
