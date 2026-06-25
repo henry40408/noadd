@@ -58,8 +58,12 @@ jobs:
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
-        with:
-          components: llvm-tools-preview
+
+      # rust-toolchain.toml pins the exact 1.96.0 instance via a directory
+      # override; add the coverage-only component to that instance directly so
+      # it isn't forced onto every local checkout via the toolchain file.
+      - name: Add llvm-tools-preview
+        run: rustup component add llvm-tools-preview
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
