@@ -12,14 +12,6 @@ version = 2
 # `ignore` holds advisory IDs we've reviewed and consciously accept.
 yanked = "deny"
 ignore = [
-    # hickory-proto: NSEC3 closest-encloser proof validation can enter an
-    # unbounded loop on crafted cross-zone responses. No fixed release exists
-    # upstream yet; revisit once one ships.
-    "RUSTSEC-2026-0118",
-    # hickory-proto: O(n²) name compression during message encoding (CPU
-    # exhaustion). Fixed in hickory 0.26.1, but that is a breaking API bump
-    # (~80 call sites in the DNS core) tracked as a separate migration task.
-    "RUSTSEC-2026-0119",
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",

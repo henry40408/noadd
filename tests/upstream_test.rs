@@ -5,11 +5,8 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 /// Build a minimal DNS wire-format query for the given domain and record type.
 fn build_query(domain: &str, record_type: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(0x1234);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(0x1234, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
 
     let name = Name::from_ascii(domain).expect("valid domain name");
     let query = Query::query(name, record_type);
@@ -246,19 +243,22 @@ async fn test_forward_nxdomain_returns_response_not_error() {
         Message::from_vec(&response_bytes).expect("response must be valid DNS wire format");
 
     assert_eq!(
-        response.response_code(),
+        response.metadata.response_code,
         ResponseCode::NXDomain,
         "NXDOMAIN name must produce NXDomain response code, got {:?}",
-        response.response_code()
+        response.metadata.response_code
     );
     assert_eq!(
-        response.message_type(),
+        response.metadata.message_type,
         MessageType::Response,
         "message_type must be Response"
     );
-    assert_eq!(response.id(), 0x1234, "response id must echo the query id");
+    assert_eq!(
+        response.metadata.id, 0x1234,
+        "response id must echo the query id"
+    );
     assert!(
-        !response.queries().is_empty(),
+        !response.queries.is_empty(),
         "question section must be present in the response"
     );
     assert!(
@@ -288,17 +288,20 @@ async fn test_forward_nodata_returns_noerror() {
         Message::from_vec(&response_bytes).expect("response must be valid DNS wire format");
 
     assert_eq!(
-        response.response_code(),
+        response.metadata.response_code,
         ResponseCode::NoError,
         "NODATA response must carry NoError response code, got {:?}",
-        response.response_code()
+        response.metadata.response_code
     );
     assert_eq!(
-        response.message_type(),
+        response.metadata.message_type,
         MessageType::Response,
         "message_type must be Response"
     );
-    assert_eq!(response.id(), 0x1234, "response id must echo the query id");
+    assert_eq!(
+        response.metadata.id, 0x1234,
+        "response id must echo the query id"
+    );
     assert!(
         !upstream.is_empty(),
         "upstream address must be reported even for NODATA"

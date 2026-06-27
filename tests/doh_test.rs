@@ -22,11 +22,8 @@ use noadd::filter::parser::{ParsedRule, RuleAction};
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(1234);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(1234, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut query = hickory_proto::op::Query::new();
     query.set_name(Name::from_str(domain).unwrap());
     query.set_query_type(record_type);
@@ -167,8 +164,8 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
         .await
         .unwrap();
     let dns_response = Message::from_bytes(&body).expect("valid DNS message");
-    assert_eq!(dns_response.response_code(), ResponseCode::ServFail);
-    assert_eq!(dns_response.id(), 1234);
+    assert_eq!(dns_response.metadata.response_code, ResponseCode::ServFail);
+    assert_eq!(dns_response.metadata.id, 1234);
 }
 
 #[tokio::test]

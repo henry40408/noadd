@@ -17,11 +17,8 @@ use noadd::logger::QueryLogger;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(1234);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(1234, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut query = Query::new();
     query.set_name(Name::from_str(domain).unwrap());
     query.set_query_type(record_type);
@@ -68,10 +65,10 @@ async fn test_full_query_pipeline_block() {
 
     // 7. Parse response and verify answer is 0.0.0.0
     let response = Message::from_bytes(&outcome.bytes).unwrap();
-    assert_eq!(response.message_type(), MessageType::Response);
-    assert!(!response.answers().is_empty(), "should have an answer");
-    let answer = &response.answers()[0];
-    match answer.data() {
+    assert_eq!(response.metadata.message_type, MessageType::Response);
+    assert!(!response.answers.is_empty(), "should have an answer");
+    let answer = &response.answers[0];
+    match &answer.data {
         RData::A(a) => {
             assert_eq!(a.0, Ipv4Addr::UNSPECIFIED, "blocked A should be 0.0.0.0");
         }
@@ -121,9 +118,9 @@ async fn test_full_query_pipeline_allow() {
 
     // 3. Verify response has non-empty answers (requires network to upstream)
     let response = Message::from_bytes(&outcome.bytes).unwrap();
-    assert_eq!(response.message_type(), MessageType::Response);
+    assert_eq!(response.metadata.message_type, MessageType::Response);
     assert!(
-        !response.answers().is_empty(),
+        !response.answers.is_empty(),
         "allowed domain should have answers from upstream"
     );
 
