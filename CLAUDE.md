@@ -21,6 +21,7 @@ cargo nextest run -E 'test(parse_hosts)' # nextest filter expression
 # Lint + format (CI gate; clippy warnings are denied)
 cargo fmt --check
 cargo clippy -- -D warnings
+cargo deny check            # supply-chain: advisories, licenses, bans, sources
 
 # Run locally on non-privileged ports (no root)
 RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
