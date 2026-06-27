@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Message, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
@@ -37,7 +37,9 @@ const BLOCKED_RESPONSE_TTL_SECS: u32 = 300;
 #[derive(Debug, Error)]
 pub enum HandlerError {
     #[error("failed to parse DNS query: {0}")]
-    Parse(#[from] hickory_proto::ProtoError),
+    Parse(#[from] hickory_proto::serialize::binary::DecodeError),
+    #[error("failed to encode DNS message: {0}")]
+    Encode(#[from] hickory_proto::ProtoError),
     #[error("no queries in message")]
     NoQuery,
     #[error("upstream error: {0}")]
@@ -92,33 +94,31 @@ pub struct QueryContext {
 fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
     let msg = Message::from_bytes(response_bytes).ok()?;
     let parts: Vec<String> = msg
-        .answers()
+        .answers
         .iter()
         .take(3)
-        .map(|r| match r.data() {
+        .map(|r| match &r.data {
             RData::A(a) => a.0.to_string(),
             RData::AAAA(aaaa) => aaaa.0.to_string(),
             RData::CNAME(cname) => cname.0.to_string(),
-            RData::MX(mx) => format!("{} {}", mx.preference(), mx.exchange()),
+            RData::MX(mx) => format!("{} {}", mx.preference, mx.exchange),
             RData::NS(ns) => ns.0.to_string(),
             RData::PTR(ptr) => ptr.0.to_string(),
             RData::TXT(txt) => txt
+                .txt_data
                 .iter()
                 .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect::<Vec<_>>()
                 .join(""),
-            RData::SOA(soa) => format!("{} {}", soa.mname(), soa.rname()),
+            RData::SOA(soa) => format!("{} {}", soa.mname, soa.rname),
             RData::SRV(srv) => {
                 format!(
                     "{}:{} p={} w={}",
-                    srv.target(),
-                    srv.port(),
-                    srv.priority(),
-                    srv.weight()
+                    srv.target, srv.port, srv.priority, srv.weight
                 )
             }
             RData::CAA(caa) => {
-                format!("{} {}", caa.tag(), String::from_utf8_lossy(caa.raw_value()))
+                format!("{} {}", caa.tag, String::from_utf8_lossy(&caa.value))
             }
             other => other.to_string(),
         })
@@ -249,13 +249,13 @@ impl DnsHandler {
 
         // 1. Parse query
         let message = Message::from_bytes(query_bytes)?;
-        let query = message.queries().first().ok_or(HandlerError::NoQuery)?;
+        let query = message.queries.first().ok_or(HandlerError::NoQuery)?;
         let domain = query.name().to_ascii();
         // Strip trailing dot for filter matching
         let domain_clean = domain.trim_end_matches('.');
         let query_type = query.query_type();
         let query_type_u16: u16 = query_type.into();
-        let query_id = message.id();
+        let query_id = message.metadata.id;
 
         // 2a. Per-IP rate limit. Token drained here protects upstream and
         // cache from a single noisy client. REFUSED (rcode 5) is the
@@ -494,14 +494,11 @@ impl DnsHandler {
 /// client exceeds its per-IP rate limit. Preserves the query ID and
 /// question section so the caller can correlate the answer.
 fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_response_code(ResponseCode::Refused);
-    response.set_recursion_desired(true);
-    response.set_recursion_available(true);
-    for q in query.queries() {
+    let mut response = Message::response(query.metadata.id, OpCode::Query);
+    response.metadata.response_code = ResponseCode::Refused;
+    response.metadata.recursion_desired = true;
+    response.metadata.recursion_available = true;
+    for q in &query.queries {
         response.add_query(q.clone());
     }
     Ok(response.to_vec()?)
@@ -512,21 +509,18 @@ fn build_blocked_response(
     query: &Message,
     query_type: RecordType,
 ) -> Result<Vec<u8>, HandlerError> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_response_code(ResponseCode::NoError);
-    response.set_recursion_desired(true);
-    response.set_recursion_available(true);
+    let mut response = Message::response(query.metadata.id, OpCode::Query);
+    response.metadata.response_code = ResponseCode::NoError;
+    response.metadata.recursion_desired = true;
+    response.metadata.recursion_available = true;
 
     // Copy the query section
-    for q in query.queries() {
+    for q in &query.queries {
         response.add_query(q.clone());
     }
 
     // Add answer based on query type
-    if let Some(first_query) = query.queries().first() {
+    if let Some(first_query) = query.queries.first() {
         let name = first_query.name().clone();
         match query_type {
             RecordType::A => {
@@ -567,21 +561,21 @@ pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
         records
             .into_iter()
             .map(|mut r| {
-                let new_ttl = r.ttl().saturating_sub(elapsed_secs).max(1);
-                r.set_ttl(new_ttl);
+                let new_ttl = r.ttl.saturating_sub(elapsed_secs).max(1);
+                r.ttl = new_ttl;
                 r
             })
             .collect()
     };
 
     let mut patched = msg.clone();
-    let answers = patch(msg.answers().to_vec());
-    let ns = patch(msg.name_servers().to_vec());
-    let additionals = patch(msg.additionals().to_vec());
+    let answers = patch(msg.answers.clone());
+    let ns = patch(msg.authorities.clone());
+    let additionals = patch(msg.additionals.clone());
 
-    *patched.answers_mut() = answers;
-    *patched.name_servers_mut() = ns;
-    *patched.additionals_mut() = additionals;
+    patched.answers = answers;
+    patched.authorities = ns;
+    patched.additionals = additionals;
 
     patched.to_vec().unwrap_or_else(|_| response_bytes.to_vec())
 }
@@ -601,15 +595,15 @@ pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
 /// - Unparseable response → `None`
 pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
     let msg = Message::from_bytes(response_bytes).ok()?;
-    match msg.response_code() {
+    match msg.metadata.response_code {
         ResponseCode::NoError => {
-            if msg.answers().is_empty() {
+            if msg.answers.is_empty() {
                 Some(negative_ttl_from_soa(&msg))
             } else {
                 let ttl_secs = msg
-                    .answers()
+                    .answers
                     .iter()
-                    .map(|r| r.ttl())
+                    .map(|r| r.ttl)
                     .min()
                     .unwrap_or(DEFAULT_TTL_SECS as u32);
                 Some(Duration::from_secs(ttl_secs as u64))
@@ -625,10 +619,10 @@ pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
 /// capped by `NEGATIVE_TTL_CAP_SECS`.
 fn negative_ttl_from_soa(msg: &Message) -> Duration {
     let soa_min = msg
-        .name_servers()
+        .authorities
         .iter()
-        .filter_map(|r| match r.data() {
-            RData::SOA(soa) => Some(soa.minimum()),
+        .filter_map(|r| match &r.data {
+            RData::SOA(soa) => Some(soa.minimum),
             _ => None,
         })
         .min()
@@ -642,14 +636,11 @@ fn negative_ttl_from_soa(msg: &Message) -> Duration {
 /// to a minimal SERVFAIL with just the ID copied from raw bytes.
 pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     if let Ok(query) = Message::from_bytes(query_bytes) {
-        let mut response = Message::new();
-        response.set_id(query.id());
-        response.set_message_type(MessageType::Response);
-        response.set_op_code(OpCode::Query);
-        response.set_response_code(ResponseCode::ServFail);
-        response.set_recursion_desired(true);
-        response.set_recursion_available(true);
-        for q in query.queries() {
+        let mut response = Message::response(query.metadata.id, OpCode::Query);
+        response.metadata.response_code = ResponseCode::ServFail;
+        response.metadata.recursion_desired = true;
+        response.metadata.recursion_available = true;
+        for q in &query.queries {
             response.add_query(q.clone());
         }
         if let Ok(bytes) = response.to_vec() {
@@ -720,11 +711,8 @@ mod tests {
     use std::str::FromStr;
 
     fn make_response(rcode: ResponseCode, answers: Vec<Record>, soa_min: Option<u32>) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(1);
-        msg.set_message_type(MessageType::Response);
-        msg.set_op_code(OpCode::Query);
-        msg.set_response_code(rcode);
+        let mut msg = Message::response(1, OpCode::Query);
+        msg.metadata.response_code = rcode;
         for a in answers {
             msg.add_answer(a);
         }
@@ -740,7 +728,7 @@ mod tests {
                 min,
             );
             let rec = Record::from_rdata(name, 3600, RData::SOA(soa));
-            msg.add_name_server(rec);
+            msg.add_authority(rec);
         }
         msg.to_vec().unwrap()
     }

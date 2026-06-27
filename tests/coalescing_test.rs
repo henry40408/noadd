@@ -23,11 +23,8 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(0xBEEF);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(0xBEEF, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut q = Query::new();
     q.set_name(Name::from_str(domain).unwrap());
     q.set_query_type(qtype);
@@ -37,16 +34,13 @@ fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
 
 fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
     let query = Message::from_bytes(query_bytes).unwrap();
-    let mut resp = Message::new();
-    resp.set_id(query.id());
-    resp.set_message_type(MessageType::Response);
-    resp.set_op_code(OpCode::Query);
-    resp.set_recursion_desired(true);
-    resp.set_recursion_available(true);
-    for q in query.queries() {
+    let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+    resp.metadata.recursion_desired = true;
+    resp.metadata.recursion_available = true;
+    for q in &query.queries {
         resp.add_query(q.clone());
     }
-    if let Some(q) = query.queries().first() {
+    if let Some(q) = query.queries.first() {
         resp.add_answer(Record::from_rdata(
             q.name().clone(),
             60,
@@ -104,8 +98,11 @@ async fn make_test_handler(
 #[tokio::test]
 async fn test_cold_miss_coalesces_concurrent_queries() {
     // Upstream delay holds the fetcher's future open long enough for every
-    // concurrent query to arrive while the fetch is still in progress.
-    let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_millis(500)).await;
+    // concurrent query to arrive while the fetch is still in progress. Keep it
+    // under hickory's ~333ms UDP retransmit floor (proto's DEFAULT_RETRY_FLOOR)
+    // so a single logical query isn't retransmitted and double-counted; a few
+    // hundred ms is ample for 50 already-spawned tasks to coalesce.
+    let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_millis(200)).await;
     let (handler, _log_rx) = make_test_handler(upstream_addr).await;
 
     let query = make_query_bytes("coalesce-me.example.com", RecordType::A);
@@ -126,7 +123,7 @@ async fn test_cold_miss_coalesces_concurrent_queries() {
         let resp = handle.await.unwrap();
         let msg = Message::from_bytes(&resp.bytes).unwrap();
         assert!(
-            !msg.answers().is_empty(),
+            !msg.answers.is_empty(),
             "coalesced waiters should see the fetcher's answer section"
         );
     }

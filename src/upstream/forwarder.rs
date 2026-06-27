@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use hickory_proto::ProtoErrorKind;
-use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, FirstAnswer, Protocol};
-use hickory_resolver::config::{NameServerConfig, ResolverOpts};
-use hickory_resolver::name_server::{NameServer, TokioConnectionProvider};
-use hickory_resolver::proto::DnsHandle;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::xfer::{DnsHandle, FirstAnswer};
+use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::{NameServerPool, PoolContext, TlsConfig};
 use thiserror::Error;
 use tracing::warn;
 
@@ -24,10 +25,6 @@ const EMA_ALPHA: f64 = 0.3;
 /// switches) routinely need more than 2s for the first query after a
 /// network transition.
 const MIN_TIMEOUT_MS: u64 = 5000;
-
-/// UDP send attempts per query (1 original + N-1 retransmits) before the
-/// transport layer gives up on this upstream.
-const UDP_ATTEMPTS: usize = 2;
 
 /// Configuration for upstream DNS servers.
 #[derive(Debug, Clone)]
@@ -163,10 +160,15 @@ pub enum ForwardError {
     BadQuery,
 }
 
-/// A persistent NameServer connection paired with its display label.
+/// A single-upstream connection pool paired with its display label.
+///
+/// Each pool wraps exactly one upstream server; hickory's `NameServerPool`
+/// owns the per-server connection management (lazy connect, UDP retransmit
+/// within the timeout, reconnect for DoT/DoH) while [`UpstreamForwarder`]
+/// keeps the cross-upstream selection strategy and latency tracking.
 struct UpstreamEntry {
     label: String,
-    name_server: NameServer<TokioConnectionProvider>,
+    pool: NameServerPool<TokioRuntimeProvider>,
 }
 
 /// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
@@ -176,9 +178,9 @@ const NO_LATENCY: f64 = f64::INFINITY;
 
 /// Forwards DNS queries to upstream servers with configurable strategy.
 ///
-/// Transport (UDP retransmit, socket reuse, txid validation, automatic
-/// TCP-on-error fallback) is delegated to hickory's `NameServer`. This
-/// type owns the per-upstream selection strategy and latency tracking.
+/// Transport (UDP retransmit, socket handling, txid validation/rewrite) is
+/// delegated to a per-upstream hickory `NameServerPool`. This type owns the
+/// per-upstream selection strategy and latency tracking.
 ///
 /// Upstreams are addressed by index (matching `config.servers`) — looking
 /// them up by label-string used to allocate a `String` per query and was
@@ -207,14 +209,24 @@ impl UpstreamForwarder {
     pub async fn new(config: UpstreamConfig) -> Self {
         let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
 
+        // Only `timeout` is honoured on the `NameServerPool` path used below:
+        // it bounds each upstream attempt and feeds the per-connection I/O
+        // timeout. `attempts` / `preserve_intermediates` only affect the full
+        // `Resolver` (RetryDnsHandle / CachingClient), which we don't use —
+        // this forwarder owns retry and caching itself. UDP retransmit is
+        // handled inside hickory's transport (every ~333ms within `timeout`).
         let mut opts = ResolverOpts::default();
         opts.timeout = timeout;
-        opts.attempts = UDP_ATTEMPTS;
-        opts.try_tcp_on_error = true;
-        opts.validate = false;
-        opts.preserve_intermediates = false;
 
-        let provider = TokioConnectionProvider::default();
+        let provider = TokioRuntimeProvider::default();
+        // Shared connection context for every upstream pool: holds the resolver
+        // options plus the default (aws-lc-rs–backed) rustls client config used
+        // for DoT/DoH. The provider selects aws-lc-rs explicitly, so this does
+        // not depend on a process-wide rustls crypto provider being installed.
+        let cx = Arc::new(PoolContext::new(
+            opts,
+            TlsConfig::new().expect("failed to build default rustls TLS config"),
+        ));
 
         // Resolve all upstream hosts concurrently — geo-routed providers and
         // slow DNS can otherwise make startup linear in the number of
@@ -264,25 +276,39 @@ impl UpstreamForwarder {
                 }
             };
 
+            // One NameServerConfig per upstream, with a single connection of the
+            // requested transport — matching the pre-0.26 behavior (a truncated
+            // UDP response is relayed to the client, which retries over TCP
+            // itself). DoT/DoH carry the SNI / HTTP path inside the
+            // per-connection ProtocolConfig. The resolved address' port is
+            // propagated onto the connection.
             let ns_cfg = match &spec.kind {
-                UpstreamKind::Udp => NameServerConfig::new(addr, Protocol::Udp),
+                UpstreamKind::Udp => {
+                    let mut udp = ConnectionConfig::udp();
+                    udp.port = addr.port();
+                    NameServerConfig::new(addr.ip(), true, vec![udp])
+                }
                 UpstreamKind::Tls { sni } => {
-                    let mut c = NameServerConfig::new(addr, Protocol::Tls);
-                    c.tls_dns_name = Some(sni.clone());
-                    c
+                    let mut c = ConnectionConfig::tls(Arc::from(sni.as_str()));
+                    c.port = addr.port();
+                    NameServerConfig::new(addr.ip(), true, vec![c])
                 }
                 UpstreamKind::Https { sni, path } => {
-                    let mut c = NameServerConfig::new(addr, Protocol::Https);
-                    c.tls_dns_name = Some(sni.clone());
-                    c.http_endpoint = Some(path.clone());
-                    c
+                    let mut c = ConnectionConfig::https(
+                        Arc::from(sni.as_str()),
+                        Some(Arc::from(path.as_str())),
+                    );
+                    c.port = addr.port();
+                    NameServerConfig::new(addr.ip(), true, vec![c])
                 }
             };
 
-            let name_server = NameServer::new(ns_cfg, opts.clone(), provider.clone());
+            // Connections are established lazily on first use, so constructing
+            // the pool performs no network I/O here.
+            let pool = NameServerPool::from_config([ns_cfg], cx.clone(), provider.clone());
             entries[idx] = Some(UpstreamEntry {
                 label: server,
-                name_server,
+                pool,
             });
         }
 
@@ -397,7 +423,7 @@ impl UpstreamForwarder {
         // in the handler, but the forwarder API stays bytes-in / bytes-out
         // so the handler doesn't have to know about transport details.
         let request_msg = Message::from_vec(query_bytes).map_err(|_| ForwardError::BadQuery)?;
-        let client_id = request_msg.id();
+        let client_id = request_msg.metadata.id;
 
         let order = self.server_order();
         if self.strategy() == UpstreamStrategy::RoundRobin {
@@ -412,7 +438,7 @@ impl UpstreamForwarder {
             let request = DnsRequest::new(request_msg.clone(), DnsRequestOptions::default());
             let start = std::time::Instant::now();
 
-            match entry.name_server.send(request).first_answer().await {
+            match entry.pool.send(request).first_answer().await {
                 Ok(response) => {
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
                     self.update_latency(idx, ms);
@@ -421,7 +447,7 @@ impl UpstreamForwarder {
                     // so the response message we get back may not echo the
                     // client's original id. Restore it before re-encoding.
                     let mut msg: Message = response.into();
-                    msg.set_id(client_id);
+                    msg.metadata.id = client_id;
 
                     match msg.to_bytes() {
                         Ok(bytes) => return Ok((bytes, entry.label.clone())),
@@ -437,20 +463,19 @@ impl UpstreamForwarder {
                     // ProtoError so we reconstruct a proper DNS response and return
                     // it immediately so the query gets logged by the handler.
                     if e.is_no_records_found() {
-                        let rcode = match e.kind() {
-                            ProtoErrorKind::NoRecordsFound { response_code, .. } => *response_code,
+                        let rcode = match &e {
+                            NetError::Dns(DnsError::NoRecordsFound(no_records)) => {
+                                no_records.response_code
+                            }
                             _ => ResponseCode::NXDomain,
                         };
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         self.update_latency(idx, ms);
-                        let mut response = Message::new();
-                        response.set_id(client_id);
-                        response.set_message_type(MessageType::Response);
-                        response.set_op_code(OpCode::Query);
-                        response.set_response_code(rcode);
-                        response.set_recursion_desired(true);
-                        response.set_recursion_available(true);
-                        for q in request_msg.queries() {
+                        let mut response = Message::response(client_id, OpCode::Query);
+                        response.metadata.response_code = rcode;
+                        response.metadata.recursion_desired = true;
+                        response.metadata.recursion_available = true;
+                        for q in &request_msg.queries {
                             response.add_query(q.clone());
                         }
                         if let Ok(bytes) = response.to_bytes() {
@@ -508,7 +533,7 @@ impl UpstreamForwarder {
     /// can be closed by the server's idle timeout (or invalidated by an
     /// anycast reroute when the client's network changes), so the first send
     /// on a connection that went stale between health checks fails before
-    /// hickory's `NameServer` transparently reconnects. The forward path
+    /// hickory's `NameServerPool` transparently reconnects. The forward path
     /// hides this behind cross-upstream failover; the single-upstream probe
     /// has no such fallback, so it retries the same upstream once to give the
     /// connection a chance to rebuild.
@@ -518,15 +543,15 @@ impl UpstreamForwarder {
         // reply to the first attempt being matched against the second).
         const PROBE_ATTEMPTS: usize = 2;
         for attempt in 0..PROBE_ATTEMPTS {
-            let mut msg = Message::new();
-            msg.set_id(rand::random::<u16>());
-            msg.set_message_type(MessageType::Query);
-            msg.set_op_code(OpCode::Query);
-            msg.set_recursion_desired(true);
+            // `Message::query()` assigns a fresh random transaction id and sets
+            // MessageType::Query / OpCode::Query, so a late reply to a previous
+            // attempt won't be matched against this one.
+            let mut msg = Message::query();
+            msg.metadata.recursion_desired = true;
             msg.add_query(Query::query(Name::root(), RecordType::NS));
 
             let request = DnsRequest::new(msg, DnsRequestOptions::default());
-            match entry.name_server.send(request).first_answer().await {
+            match entry.pool.send(request).first_answer().await {
                 Ok(_) => return Ok(()),
                 // Log the real transport error the old probe used to swallow.
                 // The first failed attempt is the expected stale-connection
@@ -550,7 +575,7 @@ mod tests {
     use super::*;
 
     async fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
-        // Use real-looking IP:port so NameServer construction succeeds; tests
+        // Use real-looking IP:port so pool construction succeeds; tests
         // here only exercise ordering and EMA, never actually send. Plain
         // IP literals don't trigger any DNS lookup in `tokio::net::lookup_host`.
         let config = UpstreamConfig {

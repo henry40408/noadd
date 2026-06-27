@@ -30,11 +30,8 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(0xBEEF);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(0xBEEF, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut q = Query::new();
     q.set_name(Name::from_str(domain).unwrap());
     q.set_query_type(qtype);
@@ -44,16 +41,13 @@ fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
 
 fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
     let query = Message::from_bytes(query_bytes).unwrap();
-    let mut resp = Message::new();
-    resp.set_id(query.id());
-    resp.set_message_type(MessageType::Response);
-    resp.set_op_code(OpCode::Query);
-    resp.set_recursion_desired(true);
-    resp.set_recursion_available(true);
-    for q in query.queries() {
+    let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+    resp.metadata.recursion_desired = true;
+    resp.metadata.recursion_available = true;
+    for q in &query.queries {
         resp.add_query(q.clone());
     }
-    if let Some(q) = query.queries().first() {
+    if let Some(q) = query.queries.first() {
         // Three answer records to make the parse + reencode in the legacy
         // decrement_ttl path non-trivial — single-record responses are too
         // small for the patched-bytes cache to show measurable effect.

@@ -22,11 +22,8 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(0xABCD);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(0xABCD, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut q = Query::new();
     q.set_name(Name::from_str(domain).unwrap());
     q.set_query_type(qtype);
@@ -36,16 +33,13 @@ fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
 
 fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
     let query = Message::from_bytes(query_bytes).unwrap();
-    let mut resp = Message::new();
-    resp.set_id(query.id());
-    resp.set_message_type(MessageType::Response);
-    resp.set_op_code(OpCode::Query);
-    resp.set_recursion_desired(true);
-    resp.set_recursion_available(true);
-    for q in query.queries() {
+    let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+    resp.metadata.recursion_desired = true;
+    resp.metadata.recursion_available = true;
+    for q in &query.queries {
         resp.add_query(q.clone());
     }
-    if let Some(q) = query.queries().first() {
+    if let Some(q) = query.queries.first() {
         use hickory_proto::rr::rdata::A;
         use hickory_proto::rr::{RData, Record};
         let record = Record::from_rdata(
@@ -108,7 +102,12 @@ async fn make_test_handler(
 /// refresh request, not 50.
 #[tokio::test]
 async fn test_stale_refresh_is_deduplicated() {
-    let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_secs(2)).await;
+    // The mock delay both holds the coalescing window open and stands in for an
+    // upstream's response time. Keep it under hickory's ~333ms UDP retransmit
+    // floor (proto's DEFAULT_RETRY_FLOOR): a slower mock makes the transport
+    // retransmit a single logical query, inflating the datagram count we assert
+    // on. Real upstreams answer in well under 333ms, so they never retransmit.
+    let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_millis(200)).await;
 
     let (handler, cache, _log_rx) = make_test_handler(upstream_addr).await;
 

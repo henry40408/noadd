@@ -17,11 +17,8 @@ use noadd::filter::parser::{ParsedRule, RuleAction};
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(1234);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(1234, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let mut query = hickory_proto::op::Query::new();
     query.set_name(Name::from_str(domain).unwrap());
     query.set_query_type(record_type);
@@ -61,12 +58,12 @@ async fn test_handler_blocks_domain() {
     let result = handler.handle(&query, client_ip, None).await.unwrap();
     let response = Message::from_bytes(&result.bytes).unwrap();
 
-    assert!(response.message_type() == MessageType::Response);
-    assert_eq!(response.id(), 1234);
-    assert!(!response.answers().is_empty(), "should have an answer");
+    assert!(response.metadata.message_type == MessageType::Response);
+    assert_eq!(response.metadata.id, 1234);
+    assert!(!response.answers.is_empty(), "should have an answer");
 
-    let answer = &response.answers()[0];
-    match answer.data() {
+    let answer = &response.answers[0];
+    match &answer.data {
         RData::A(a) => {
             assert_eq!(a.0, Ipv4Addr::UNSPECIFIED, "blocked A should be 0.0.0.0");
         }
@@ -92,9 +89,9 @@ async fn test_handler_blocks_aaaa_domain() {
     let result = handler.handle(&query, client_ip, None).await.unwrap();
     let response = Message::from_bytes(&result.bytes).unwrap();
 
-    assert!(!response.answers().is_empty(), "should have an answer");
-    let answer = &response.answers()[0];
-    match answer.data() {
+    assert!(!response.answers.is_empty(), "should have an answer");
+    let answer = &response.answers[0];
+    match &answer.data {
         RData::AAAA(aaaa) => {
             assert_eq!(
                 aaaa.0,
@@ -116,7 +113,7 @@ async fn test_handler_forwards_allowed_domain() {
     assert!(!result.bytes.is_empty(), "response should be non-empty");
 
     let response = Message::from_bytes(&result.bytes).unwrap();
-    assert!(response.message_type() == MessageType::Response);
+    assert!(response.metadata.message_type == MessageType::Response);
 }
 
 #[tokio::test]
@@ -146,13 +143,10 @@ async fn test_handler_sends_log_event() {
 
 /// Build a fake DNS response with a single A record at the given TTL.
 fn build_response_with_ttl(id: u16, domain: &str, ttl: u32) -> Vec<u8> {
-    let mut msg = Message::new();
-    msg.set_id(id);
-    msg.set_message_type(MessageType::Response);
-    msg.set_op_code(OpCode::Query);
-    msg.set_response_code(ResponseCode::NoError);
-    msg.set_recursion_desired(true);
-    msg.set_recursion_available(true);
+    let mut msg = Message::new(id, MessageType::Response, OpCode::Query);
+    msg.metadata.response_code = ResponseCode::NoError;
+    msg.metadata.recursion_desired = true;
+    msg.metadata.recursion_available = true;
 
     let name = Name::from_str(domain).unwrap();
     let record = Record::from_rdata(name, ttl, RData::A(A(Ipv4Addr::new(93, 184, 216, 34))));
@@ -166,7 +160,7 @@ fn test_decrement_ttl_reduces_answer_ttl() {
     let patched = handler::decrement_ttl(&original, 120);
 
     let msg = Message::from_bytes(&patched).unwrap();
-    let answer_ttl = msg.answers()[0].ttl();
+    let answer_ttl = msg.answers[0].ttl;
     assert_eq!(
         answer_ttl, 180,
         "TTL should be decremented from 300 by 120 to 180"
@@ -179,7 +173,7 @@ fn test_decrement_ttl_clamps_to_minimum_1() {
     let patched = handler::decrement_ttl(&original, 9999);
 
     let msg = Message::from_bytes(&patched).unwrap();
-    let answer_ttl = msg.answers()[0].ttl();
+    let answer_ttl = msg.answers[0].ttl;
     assert_eq!(answer_ttl, 1, "TTL should be clamped to minimum of 1");
 }
 
@@ -216,12 +210,12 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     // over-filtering.
     let first = handler.handle(&query, ip1, None).await.unwrap();
     let first_msg = Message::from_bytes(&first.bytes).unwrap();
-    assert_eq!(first_msg.response_code(), ResponseCode::NoError);
+    assert_eq!(first_msg.metadata.response_code, ResponseCode::NoError);
 
     let second = handler.handle(&query, ip1, None).await.unwrap();
     let second_msg = Message::from_bytes(&second.bytes).unwrap();
     assert_eq!(
-        second_msg.response_code(),
+        second_msg.metadata.response_code,
         ResponseCode::Refused,
         "2nd query from ip1 should be REFUSED after bucket drained"
     );
@@ -230,7 +224,7 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     let from_ip2 = handler.handle(&query, ip2, None).await.unwrap();
     let from_ip2_msg = Message::from_bytes(&from_ip2.bytes).unwrap();
     assert_eq!(
-        from_ip2_msg.response_code(),
+        from_ip2_msg.metadata.response_code,
         ResponseCode::NoError,
         "ip2 should not be affected by ip1's exhaustion"
     );
@@ -320,7 +314,7 @@ async fn test_handler_inflight_limit_serves_all_queries() {
     for j in joins {
         let outcome = j.await.unwrap().expect("query should succeed");
         let response = Message::from_bytes(&outcome.bytes).unwrap();
-        assert!(!response.answers().is_empty());
+        assert!(!response.answers.is_empty());
     }
 }
 
@@ -330,7 +324,7 @@ fn test_decrement_ttl_zero_elapsed_unchanged() {
     let patched = handler::decrement_ttl(&original, 0);
 
     let msg = Message::from_bytes(&patched).unwrap();
-    let answer_ttl = msg.answers()[0].ttl();
+    let answer_ttl = msg.answers[0].ttl;
     assert_eq!(
         answer_ttl, 300,
         "TTL should remain unchanged when elapsed is 0"
