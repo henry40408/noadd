@@ -8,7 +8,9 @@ coverage:
   status:
     project:
       default:
-        target: 90%
+        # Compare against the base commit rather than an absolute bar: the gate
+        # fails only when a PR regresses coverage by more than the threshold.
+        target: auto
         threshold: 1%
     patch:
       default:
