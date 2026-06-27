@@ -88,7 +88,7 @@ impl ListManager {
             let mut block_rules: Vec<(crate::filter::parser::ParsedRule, u16)> = Vec::new();
             let mut allow_rules: Vec<crate::filter::parser::ParsedRule> = Vec::new();
 
-            for slot in parsed_lists.into_iter() {
+            for slot in parsed_lists {
                 let (name, parsed) = match slot {
                     Some(v) => v,
                     None => continue,

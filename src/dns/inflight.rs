@@ -115,11 +115,11 @@ mod tests {
         let inflight = Arc::new(InflightUpstream::new());
         let _g = match inflight.begin(&key("a.com")) {
             BeginResult::Fetcher(g) => g,
-            _ => panic!(),
+            BeginResult::Waiter(_) => panic!("first caller should be fetcher"),
         };
         match inflight.begin(&key("a.com")) {
             BeginResult::Waiter(_) => {}
-            _ => panic!("second caller should be waiter"),
+            BeginResult::Fetcher(_) => panic!("second caller should be waiter"),
         }
     }
 
@@ -128,11 +128,11 @@ mod tests {
         let inflight = Arc::new(InflightUpstream::new());
         let _g1 = match inflight.begin(&key("a.com")) {
             BeginResult::Fetcher(g) => g,
-            _ => panic!(),
+            BeginResult::Waiter(_) => panic!("first caller should be fetcher"),
         };
         match inflight.begin(&key("b.com")) {
             BeginResult::Fetcher(_g) => {}
-            _ => panic!("different key should get its own fetcher slot"),
+            BeginResult::Waiter(_) => panic!("different key should get its own fetcher slot"),
         }
     }
 
@@ -141,11 +141,11 @@ mod tests {
         let inflight = Arc::new(InflightUpstream::new());
         let g = match inflight.begin(&key("a.com")) {
             BeginResult::Fetcher(g) => g,
-            _ => panic!(),
+            BeginResult::Waiter(_) => panic!("first caller should be fetcher"),
         };
         let notify = match inflight.begin(&key("a.com")) {
             BeginResult::Waiter(n) => n,
-            _ => panic!(),
+            BeginResult::Fetcher(_) => panic!("second caller should be waiter"),
         };
 
         // `Notify::notify_waiters` only wakes currently-subscribed waiters,

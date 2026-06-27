@@ -1,4 +1,4 @@
-/// Domain filter engine using HashMap for exact matches and a flat-serialized
+/// Domain filter engine using `HashMap` for exact matches and a flat-serialized
 /// reverse-domain trie for subdomain matching.
 ///
 /// Designed for concurrent read access behind `ArcSwap<FilterEngine>`.
@@ -33,7 +33,7 @@ pub enum FilterResult {
 const NOT_TERMINAL: u16 = u16::MAX;
 
 /// Size of one child-index entry in the flat trie `nodes` buffer.
-/// Layout: label_offset(u32) + label_len(u8) + child_node_offset(u32) = 9.
+/// Layout: `label_offset(u32)` + `label_len(u8)` + `child_node_offset(u32)` = 9.
 const CHILD_ENTRY: usize = 9;
 
 // ── Flat trie ───────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ const CHILD_ENTRY: usize = 9;
 /// +4  N × ChildEntry
 /// ```
 ///
-/// ### ChildEntry (9 bytes, sorted by label)
+/// ### `ChildEntry` (9 bytes, sorted by label)
 ///
 /// ```text
 /// +0  u32  label_offset     (into `labels`)
@@ -244,7 +244,7 @@ pub struct FilterEngine {
     allow_trie: FlatTrie,
 }
 
-/// Marker value stored in allow-trie terminals (any value != NOT_TERMINAL).
+/// Marker value stored in allow-trie terminals (any value != `NOT_TERMINAL`).
 const ALLOW_MARKER: u16 = 0;
 
 impl FilterEngine {

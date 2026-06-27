@@ -205,7 +205,7 @@ impl UpstreamForwarder {
     /// Hostname-bearing entries (`tls://`, `https://`) are resolved to
     /// `SocketAddr` via `tokio::net::lookup_host`. The first address
     /// returned is used; geo-routed providers like Mullvad therefore
-    /// pin to the PoP that DNS picks at startup.
+    /// pin to the `PoP` that DNS picks at startup.
     pub async fn new(config: UpstreamConfig) -> Self {
         let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
 
@@ -263,13 +263,14 @@ impl UpstreamForwarder {
                 }
             };
             let addr = match addrs {
-                Ok(list) => match list.into_iter().next() {
-                    Some(a) => a,
-                    None => {
+                Ok(list) => {
+                    if let Some(a) = list.into_iter().next() {
+                        a
+                    } else {
                         warn!(server = %server, "no addresses returned for upstream");
                         continue;
                     }
-                },
+                }
                 Err(e) => {
                     warn!(server = %server, error = %e, "failed to resolve upstream host");
                     continue;
@@ -422,7 +423,7 @@ impl UpstreamForwarder {
         // build a `DnsRequest`; the caller has already parsed this once
         // in the handler, but the forwarder API stays bytes-in / bytes-out
         // so the handler doesn't have to know about transport details.
-        let request_msg = Message::from_vec(query_bytes).map_err(|_| ForwardError::BadQuery)?;
+        let request_msg = Message::from_vec(query_bytes).map_err(|_err| ForwardError::BadQuery)?;
         let client_id = request_msg.metadata.id;
 
         let order = self.server_order();
@@ -453,7 +454,6 @@ impl UpstreamForwarder {
                         Ok(bytes) => return Ok((bytes, entry.label.clone())),
                         Err(e) => {
                             warn!(upstream = %entry.label, error = %e, "failed to re-encode upstream response");
-                            continue;
                         }
                     }
                 }
@@ -483,7 +483,6 @@ impl UpstreamForwarder {
                         }
                     }
                     warn!(upstream = %entry.label, error = %e, "upstream forward failed");
-                    continue;
                 }
             }
         }
@@ -492,7 +491,7 @@ impl UpstreamForwarder {
     }
 
     /// Health check all configured upstream servers.
-    /// Returns a list of (server, status, latency_ms).
+    /// Returns a list of (server, status, `latency_ms`).
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
         let mut results = Vec::with_capacity(self.config.servers.len());
         for (idx, server) in self.config.servers.iter().enumerate() {

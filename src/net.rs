@@ -1,4 +1,4 @@
-//! Network helpers shared by the DoH and admin HTTP layers.
+//! Network helpers shared by the `DoH` and admin HTTP layers.
 //!
 //! `TrustedProxies` parses a comma-separated CIDR list (typically supplied via
 //! `--trusted-proxies` / `NOADD_TRUSTED_PROXIES`) and decides which TCP peers
@@ -6,7 +6,7 @@
 //! `X-Real-IP`. Everything else falls back to the TCP peer address.
 //!
 //! Trust policy:
-//! 1. Loopback peers (127.0.0.0/8, ::1) are *always* trusted — this keeps the
+//! 1. Loopback peers (127.0.0.0/8, `::1`) are *always* trusted — this keeps the
 //!    "reverse proxy on the same host" path working with no config.
 //! 2. Peers whose address matches a configured CIDR are trusted (e.g. a Docker
 //!    bridge `172.18.0.0/16` when noadd sits behind SWAG/nginx in another
@@ -55,7 +55,7 @@ impl Cidr {
 
         let base: IpAddr = addr_part
             .parse()
-            .map_err(|_| CidrParseError::InvalidAddress(s.to_string()))?;
+            .map_err(|_err| CidrParseError::InvalidAddress(s.to_string()))?;
 
         let max_prefix = match base {
             IpAddr::V4(_) => 32u8,
@@ -67,7 +67,7 @@ impl Cidr {
             Some(p) => p
                 .trim()
                 .parse::<u8>()
-                .map_err(|_| CidrParseError::InvalidPrefix(s.to_string()))?,
+                .map_err(|_err| CidrParseError::InvalidPrefix(s.to_string()))?,
         };
 
         if prefix_len > max_prefix {

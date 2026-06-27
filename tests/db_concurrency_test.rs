@@ -21,16 +21,15 @@ fn sample_entry(i: i64) -> QueryLogEntry {
 
 async fn open_db() -> Database {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("concurrency.db");
+    // Persist the tempdir (no Drop cleanup) so the file lives for the test.
+    let path = dir.keep().join("concurrency.db");
     let path_str = path.to_str().unwrap().to_string();
-    // Leak the dir so the file lives for the duration of the test.
-    std::mem::forget(dir);
     Database::open(&path_str).await.unwrap()
 }
 
-/// Concurrently run a heavy reader (latency_summary_since, which uses
-/// window functions and scans query_logs) alongside a streaming writer
-/// (insert_query_logs). With the reader connection in place, WAL allows
+/// Concurrently run a heavy reader (`latency_summary_since`, which uses
+/// window functions and scans `query_logs`) alongside a streaming writer
+/// (`insert_query_logs`). With the reader connection in place, WAL allows
 /// both paths to proceed in parallel on their own worker threads. The
 /// assertion is existence: both tasks must complete without error.
 ///
@@ -82,8 +81,8 @@ async fn reader_and_writer_run_concurrently_without_error() {
 }
 
 /// Smoke check for the spec's "defence-in-depth" claim: the read
-/// connection is opened with SQLITE_OPEN_READ_ONLY, so any write
-/// attempt would be rejected by SQLite. We can only observe this
+/// connection is opened with `SQLITE_OPEN_READ_ONLY`, so any write
+/// attempt would be rejected by `SQLite`. We can only observe this
 /// indirectly through the public API — `Database` routes all writes
 /// to the writer connection by construction. This test asserts the
 /// positive: a write followed by a read works, which means Database

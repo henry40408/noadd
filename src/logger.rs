@@ -15,7 +15,7 @@ pub struct QueryLogger {
 }
 
 impl QueryLogger {
-    /// Create a new QueryLogger and its corresponding sender.
+    /// Create a new `QueryLogger` and its corresponding sender.
     ///
     /// The channel has a capacity of 10,000 entries.
     pub fn new(
@@ -50,21 +50,18 @@ impl QueryLogger {
         loop {
             tokio::select! {
                 maybe_ctx = self.rx.recv() => {
-                    match maybe_ctx {
-                        Some(ctx) => {
-                            buffer.push(query_context_to_entry(ctx));
-                            if buffer.len() >= self.flush_threshold {
-                                flush(&self.db, &mut buffer).await;
-                            }
+                    if let Some(ctx) = maybe_ctx {
+                        buffer.push(query_context_to_entry(ctx));
+                        if buffer.len() >= self.flush_threshold {
+                            flush(&self.db, &mut buffer).await;
                         }
-                        None => {
-                            // Channel closed, flush remaining and exit
-                            if !buffer.is_empty() {
-                                flush(&self.db, &mut buffer).await;
-                            }
-                            info!("query logger shutting down");
-                            return;
+                    } else {
+                        // Channel closed, flush remaining and exit
+                        if !buffer.is_empty() {
+                            flush(&self.db, &mut buffer).await;
                         }
+                        info!("query logger shutting down");
+                        return;
                     }
                 }
                 _ = interval.tick() => {

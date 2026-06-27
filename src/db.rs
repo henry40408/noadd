@@ -15,15 +15,16 @@ pub enum DbError {
 }
 
 impl DbError {
-    /// True when the error is a SQLite constraint violation (e.g. inserting a
+    /// True when the error is a `SQLite` constraint violation (e.g. inserting a
     /// duplicate `users.username`, which is the only UNIQUE constraint on that
     /// table). Callers use this to distinguish a duplicate-key conflict (HTTP
     /// 409) from a genuine database failure (HTTP 500).
     pub fn is_unique_violation(&self) -> bool {
         let inner = match self {
-            DbError::Rusqlite(e) => Some(e),
-            DbError::Sqlite(tokio_rusqlite::Error::Error(e)) => Some(e),
-            DbError::Sqlite(tokio_rusqlite::Error::Close((_, e))) => Some(e),
+            DbError::Rusqlite(e)
+            | DbError::Sqlite(
+                tokio_rusqlite::Error::Error(e) | tokio_rusqlite::Error::Close((_, e)),
+            ) => Some(e),
             DbError::Sqlite(_) => None,
         };
         matches!(
@@ -34,7 +35,7 @@ impl DbError {
     }
 }
 
-/// Number of read-only SQLite connections in the pool. Each connection owns
+/// Number of read-only `SQLite` connections in the pool. Each connection owns
 /// its own tokio-rusqlite worker thread, so this is the parallelism cap for
 /// admin/stats queries. WAL lets readers proceed without blocking each other.
 const READ_POOL_SIZE: usize = 4;
@@ -207,7 +208,7 @@ pub struct LatencySummary {
 /// so anything below ~32 starts evicting on every admin poll.
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
 
-/// Open a second connection to the same SQLite file in read-only mode.
+/// Open a second connection to the same `SQLite` file in read-only mode.
 /// Used for admin SELECT queries so they run concurrently with the writer
 /// under WAL without blocking on a single worker thread.
 async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
@@ -271,11 +272,11 @@ impl Database {
     }
 
     /// Flush the WAL back into the main database file and close every
-    /// connection so SQLite can remove the `-wal`/`-shm` sidecar files.
+    /// connection so `SQLite` can remove the `-wal`/`-shm` sidecar files.
     ///
     /// Read connections are closed first so the writer is the sole open
     /// connection when the truncating checkpoint runs; closing that final
-    /// connection is what lets SQLite delete the sidecars. Errors are ignored
+    /// connection is what lets `SQLite` delete the sidecars. Errors are ignored
     /// because this only runs on shutdown — there is nothing left to recover,
     /// and an in-memory database (where readers share the writer connection)
     /// has no files to clean up regardless.
@@ -373,7 +374,7 @@ impl Database {
         Ok(())
     }
 
-    /// Run forward-only migrations using PRAGMA user_version to track schema version.
+    /// Run forward-only migrations using PRAGMA `user_version` to track schema version.
     /// New databases start at the latest version (tables already have all columns).
     /// Existing databases get migrated incrementally.
     //
@@ -953,7 +954,7 @@ impl Database {
         Ok(())
     }
 
-    /// Validate a DoH token. Returns the token string if valid.
+    /// Validate a `DoH` token. Returns the token string if valid.
     pub async fn validate_doh_token(&self, token: &str) -> Result<Option<String>, DbError> {
         let token = token.to_string();
         let result = self
@@ -1329,7 +1330,7 @@ impl Database {
         Ok(result)
     }
 
-    /// Returns (cache_hits, total_allowed, avg_response_ms) since the given timestamp.
+    /// Returns (`cache_hits`, `total_allowed`, `avg_response_ms`) since the given timestamp.
     /// `since` is in seconds (epoch).
     pub async fn cache_stats_since(&self, since: i64) -> Result<(i64, i64, f64), DbError> {
         let since_ms = since * 1000;
@@ -1390,7 +1391,7 @@ impl Database {
         Ok(result)
     }
 
-    /// Returns ((cache_hits, allowed_total, avg_response_ms), ...) for today / 7d / 30d in one scan.
+    /// Returns ((`cache_hits`, `allowed_total`, `avg_response_ms`), ...) for today / 7d / 30d in one scan.
     /// All `since_*` values are in epoch seconds. Caller MUST pass the widest window as `since_30d`.
     pub async fn cache_stats_multi_since(
         &self,
@@ -1708,7 +1709,7 @@ impl Database {
     /// file-backed and in-memory databases.
     ///
     /// - `main_bytes`: the main database file (`page_count * page_size`).
-    /// - `reclaimable_bytes`: free pages SQLite holds but is not using
+    /// - `reclaimable_bytes`: free pages `SQLite` holds but is not using
     ///   (`freelist_count * page_size`); a `VACUUM` would return these to the
     ///   OS. This mirrors the freelist ratio that gates
     ///   [`Database::run_maintenance`].
@@ -1777,12 +1778,12 @@ impl Database {
 ///
 /// The histogram is the list of `(response_ms, count)` pairs returned by the
 /// `GROUP BY response_ms` query: each entry says "there were `count` rows with
-/// this response_ms value." Because response_ms is integer milliseconds, the
+/// this `response_ms` value." Because `response_ms` is integer milliseconds, the
 /// histogram is loss-free (no bucket rounding), so the derived percentiles are
 /// bit-identical to those produced by the old `ROW_NUMBER()` SQL.
 ///
 /// Percentile semantics match the SQL version: `p_k` is the value at rank
-/// `max(1, floor(total * k))` when rows are sorted ascending by response_ms.
+/// `max(1, floor(total * k))` when rows are sorted ascending by `response_ms`.
 fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     let total: i64 = hist.iter().map(|(_, c)| *c).sum();
     if total == 0 {
@@ -1797,7 +1798,7 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     }
     let weighted_sum: i64 = hist.iter().map(|(ms, c)| ms * c).sum();
     let avg_ms = weighted_sum as f64 / total as f64;
-    let max_ms = hist.last().map(|(ms, _)| *ms).unwrap_or(0);
+    let max_ms = hist.last().map_or(0, |(ms, _)| *ms);
 
     // Mirror SQL's `MAX(1, CAST(total * p AS INTEGER))` — CAST truncates toward
     // zero, so this is `max(1, floor(total * p))` for non-negative inputs.
@@ -1825,7 +1826,7 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
 
 /// Add a column to `table` if it doesn't already exist.
 ///
-/// SQLite doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
+/// `SQLite` doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
 /// probe `pragma_table_info` first. The `table` argument is interpolated into
 /// the SQL — only call this from migration code with trusted table names.
 fn add_column_if_missing(
@@ -1853,7 +1854,7 @@ fn add_column_if_missing(
 /// Append the shared log-filter clauses to `sql` and return matching parameters.
 ///
 /// Both `query_logs` and `count_logs` share the same four optional filters
-/// (search, blocked, doh_token, query_type); centralising the builder keeps
+/// (search, blocked, `doh_token`, `query_type`); centralising the builder keeps
 /// the two code paths from drifting.
 ///
 /// Search semantics: a plain term (no wildcard metachars) does an index-backed

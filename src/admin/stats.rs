@@ -167,7 +167,7 @@ impl StatsRange {
         }
     }
 
-    /// (since_seconds_offset, bucket_secs)
+    /// (`since_seconds_offset`, `bucket_secs`)
     fn window(self) -> (i64, i64) {
         match self {
             Self::Days7 => (7 * 86400, 3600),

@@ -23,7 +23,7 @@ use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 const DEFAULT_TTL_SECS: u64 = 300;
 
 /// Maximum TTL (seconds) we will keep a *negative* response (NXDOMAIN or
-/// NoError with empty answer section). Caps RFC 2308 SOA-derived TTLs which
+/// `NoError` with empty answer section). Caps RFC 2308 SOA-derived TTLs which
 /// can otherwise be hours long for some TLDs and cause prolonged "host not
 /// found" symptoms after a single transient upstream hiccup.
 const NEGATIVE_TTL_CAP_SECS: u64 = 60;
@@ -47,13 +47,13 @@ pub enum HandlerError {
 }
 
 /// Outcome of `DnsHandler::handle`. Carries the response bytes plus
-/// metadata that downstream callers (DoH adapter, listeners) would
+/// metadata that downstream callers (`DoH` adapter, listeners) would
 /// otherwise have to recompute by re-parsing the response.
 #[derive(Debug, Clone)]
 pub struct HandleOutcome {
     pub bytes: Vec<u8>,
     /// Lowest TTL observed in the served response, in seconds. Used by
-    /// the DoH adapter for the `Cache-Control: max-age` header so it
+    /// the `DoH` adapter for the `Cache-Control: max-age` header so it
     /// doesn't have to re-parse the response a fourth time.
     pub min_ttl: u32,
 }
@@ -132,7 +132,7 @@ fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
 
 /// Core DNS query handler implementing the filter-cache-forward pipeline.
 ///
-/// Shared across all listener tasks (UDP, TCP, DoH) behind `Arc<DnsHandler>`.
+/// Shared across all listener tasks (UDP, TCP, `DoH`) behind `Arc<DnsHandler>`.
 pub struct DnsHandler {
     filter: Arc<ArcSwap<FilterEngine>>,
     cache: DnsCache,
@@ -222,9 +222,9 @@ impl DnsHandler {
         self.log_drop_count.load(Ordering::Relaxed)
     }
 
-    /// Handle a DNS query. Takes raw query bytes, client IP, and optional DoH token name.
+    /// Handle a DNS query. Takes raw query bytes, client IP, and optional `DoH` token name.
     /// Returns the response bytes plus metadata downstream callers would
-    /// otherwise have to recompute (e.g. min TTL for the DoH `Cache-Control`).
+    /// otherwise have to recompute (e.g. min TTL for the `DoH` `Cache-Control`).
     pub async fn handle(
         &self,
         query_bytes: &[u8],
@@ -438,7 +438,7 @@ impl DnsHandler {
                             // For DoH max-age: cacheable responses use the
                             // same TTL we just stored; non-cacheable
                             // (SERVFAIL etc.) tell downstream not to cache.
-                            let min_ttl = cache_ttl.map(|d| d.as_secs() as u32).unwrap_or(0);
+                            let min_ttl = cache_ttl.map_or(0, |d| d.as_secs() as u32);
                             // Drop guard (if we hold one) — notifies waiters
                             // after the cache insert is observable.
                             drop(fetcher_guard);
@@ -588,9 +588,9 @@ pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
 /// long-lived `NXDOMAIN`/empty answers.
 ///
 /// Rules:
-/// - SERVFAIL / Refused / FormErr / NotImp etc. → `None`
-/// - NoError with non-empty answer section → positive TTL from answers
-/// - NoError with empty answers → negative TTL (SOA min, capped)
+/// - SERVFAIL / Refused / `FormErr` / `NotImp` etc. → `None`
+/// - `NoError` with non-empty answer section → positive TTL from answers
+/// - `NoError` with empty answers → negative TTL (SOA min, capped)
 /// - NXDOMAIN → negative TTL (SOA min, capped)
 /// - Unparseable response → `None`
 pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
@@ -656,7 +656,7 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Remaining TTL of a cached entry, in seconds, clamped to a minimum of 0.
-/// Used as the DoH `Cache-Control: max-age` so downstream clients don't keep
+/// Used as the `DoH` `Cache-Control: max-age` so downstream clients don't keep
 /// a response past the upstream TTL.
 fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
     cached
@@ -675,13 +675,12 @@ fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
 /// saved per cache hit after the first one in the window).
 fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> Vec<u8> {
     let elapsed = cached.elapsed().as_secs() as u32;
-    let mut bytes = match cached.try_patched_bytes(elapsed) {
-        Some(cached_bytes) => cached_bytes,
-        None => {
-            let fresh = decrement_ttl(cached.bytes(), elapsed);
-            cached.store_patched_bytes(elapsed, fresh.clone());
-            fresh
-        }
+    let mut bytes = if let Some(cached_bytes) = cached.try_patched_bytes(elapsed) {
+        cached_bytes
+    } else {
+        let fresh = decrement_ttl(cached.bytes(), elapsed);
+        cached.store_patched_bytes(elapsed, fresh.clone());
+        fresh
     };
     let id_bytes = query_id.to_be_bytes();
     if bytes.len() >= 2 {

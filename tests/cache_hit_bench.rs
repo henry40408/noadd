@@ -1,14 +1,14 @@
 //! Throughput measurement for the cache-hit fast path. Not an assertion —
-//! meant to be run manually to compare the prepare_cached_response cost
+//! meant to be run manually to compare the `prepare_cached_response` cost
 //! across implementations:
 //!
 //!   cargo nextest run --no-capture --release \
-//!     --run-ignored only cache_hit_bench
+//!     --run-ignored only `cache_hit_bench`
 //!
 //! Pre-populates the cache with N (domain, qtype) entries via real upstream
 //! lookups on a UDP mock, then issues M concurrent queries that all hit the
 //! cache. Cold-miss + upstream cost is amortised in warmup so the timed phase
-//! reflects only filter check + cache.get + prepare_cached_response + logger
+//! reflects only filter check + cache.get + `prepare_cached_response` + logger
 //! send. Defaults: 64 workers × 2000 cache-hit queries each.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

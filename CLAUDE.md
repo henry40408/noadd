@@ -20,7 +20,7 @@ cargo nextest run -E 'test(parse_hosts)' # nextest filter expression
 
 # Lint + format (CI gate; clippy warnings are denied)
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo deny check            # supply-chain: advisories, licenses, bans, sources
 
 # Run locally on non-privileged ports (no root)

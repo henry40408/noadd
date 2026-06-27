@@ -26,7 +26,11 @@ pub fn user_agent() -> String {
 pub fn reclaim_memory() {
     // SAFETY: `mi_collect` is a thread-safe no-side-effect collection call;
     // `true` forces it to also return memory to the OS.
-    unsafe { libmimalloc_sys::mi_collect(true) }
+    // FFI: mimalloc heap collection, no safe wrapper exists
+    #[allow(unsafe_code)]
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
 }
 
 /// Current Unix timestamp in seconds. Returns 0 if the system clock is
@@ -34,14 +38,12 @@ pub fn reclaim_memory() {
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Current Unix timestamp in milliseconds.
 pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }

@@ -42,9 +42,9 @@ async fn unconfigured_app() -> axum::Router {
 
 async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.db");
+    // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
+    let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
-    std::mem::forget(dir);
 
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();
@@ -723,9 +723,9 @@ async fn test_logs_endpoint() {
 #[tokio::test]
 async fn test_setup_initial_password() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.db");
+    // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
+    let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
-    std::mem::forget(dir);
 
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();
@@ -1280,11 +1280,8 @@ fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<B
     if body.is_some() {
         b = b.header("content-type", "application/json");
     }
-    b.body(
-        body.map(|s| Body::from(s.to_string()))
-            .unwrap_or(Body::empty()),
-    )
-    .unwrap()
+    b.body(body.map_or(Body::empty(), |s| Body::from(s.to_string())))
+        .unwrap()
 }
 
 #[tokio::test]

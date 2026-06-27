@@ -2,11 +2,11 @@
 //! realistic DB. Manual-only — gated by `#[ignore]`.
 //!
 //!   BENCH_DB=/tmp/noadd-bench.db cargo nextest run --release \
-//!     --no-capture --run-ignored only stats_parallel_bench
+//!     --no-capture --run-ignored only `stats_parallel_bench`
 //!
 //! Defaults to `/tmp/noadd-bench.db`. Times two scenarios:
 //!   - sequential: 7 stats fns awaited one after the other (sum of latencies)
-//!   - parallel:   7 stats fns under tokio::join! (what the admin UI actually does)
+//!   - parallel:   7 stats fns under `tokio::join`! (what the admin UI actually does)
 //!
 //! Pre-pool, sequential and parallel should be ~identical (single read worker
 //! serializes both). Post-pool, parallel drops noticeably while sequential
