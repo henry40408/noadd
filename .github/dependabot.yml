@@ -10,6 +10,9 @@ updates:
    directory: "/"
    schedule:
      interval: weekly
+   groups:
+     devcontainers:
+       patterns: ["*"]
 
  - package-ecosystem: "github-actions"
    directory: "/"
@@ -17,6 +20,9 @@ updates:
      interval: weekly
    cooldown:
      default-days: 7
+   groups:
+     actions:
+       patterns: ["*"]
 
  - package-ecosystem: "npm"
    directory: "/e2e"
@@ -24,3 +30,6 @@ updates:
      interval: weekly
    cooldown:
      default-days: 7
+   groups:
+     npm:
+       patterns: ["*"]
