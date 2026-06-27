@@ -27,16 +27,13 @@ fn post_content_type_ok(headers: &HeaderMap) -> bool {
     let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) else {
         return true;
     };
-    ct.to_str()
-        .ok()
-        .map(|s| {
-            s.split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case(DNS_MESSAGE_CONTENT_TYPE)
-        })
-        .unwrap_or(false)
+    ct.to_str().ok().is_some_and(|s| {
+        s.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case(DNS_MESSAGE_CONTENT_TYPE)
+    })
 }
 
 /// Validate that the body parses as a DNS wire-format message.
@@ -56,7 +53,7 @@ pub struct DohState {
     pub trusted_proxies: Arc<TrustedProxies>,
 }
 
-/// Create an axum Router with DoH endpoints per RFC 8484.
+/// Create an axum Router with `DoH` endpoints per RFC 8484.
 ///
 /// Access policy is controlled by the `doh_access_policy` setting:
 /// - `"deny"` (default when tokens exist): unauthenticated requests are rejected (403)
@@ -104,7 +101,7 @@ async fn is_open_access(db: &Database) -> bool {
 async fn validate_token(db: &Database, token: &str) -> Result<String, StatusCode> {
     db.validate_doh_token(token)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::FORBIDDEN)
 }
 

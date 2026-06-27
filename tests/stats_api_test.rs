@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 
 async fn setup() -> (axum::Router, String) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.db");
+    // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
+    let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
-    std::mem::forget(dir);
 
     let db = Database::open(&path_str).await.unwrap();
     let sessions = new_session_store();

@@ -135,7 +135,7 @@ pub fn admin_router(state: AppState) -> Router {
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
 
-/// Strong, quoted ETag derived from a content hash. `DefaultHasher` seeds with
+/// Strong, quoted `ETag` derived from a content hash. `DefaultHasher` seeds with
 /// fixed keys, so the digest is deterministic across process restarts of the
 /// same binary — exactly what a content-addressed validator needs, and with no
 /// extra dependency.
@@ -145,7 +145,7 @@ fn etag_for(bytes: &[u8]) -> String {
     format!("\"{:016x}\"", hasher.finish())
 }
 
-/// Per-path ETags for the embedded admin UI, computed once. Assets are fixed at
+/// Per-path `ETags` for the embedded admin UI, computed once. Assets are fixed at
 /// compile time, so the map never needs invalidation.
 fn ui_etags() -> &'static HashMap<PathBuf, String> {
     static ETAGS: OnceLock<HashMap<PathBuf, String>> = OnceLock::new();
@@ -157,14 +157,13 @@ fn ui_etags() -> &'static HashMap<PathBuf, String> {
     })
 }
 
-/// True when `If-None-Match` lists the given ETag (browsers echo back exactly
+/// True when `If-None-Match` lists the given `ETag` (browsers echo back exactly
 /// what we sent; we also tolerate a comma-separated list).
 fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(axum::http::header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').any(|t| t.trim() == etag))
-        .unwrap_or(false)
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
 }
 
 /// Build a `200` (with body) or `304` response for an embedded file, always
@@ -228,20 +227,19 @@ async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
-    match ADMIN_UI.get_file(path) {
-        Some(file) => static_response(file, &headers),
-        None => {
-            // Only fall back to index.html for extension-less paths (SPA
-            // client-side routes like /dashboard, /settings). Requests for
-            // missing assets (favicon.ico, robots.txt, *.map, etc.) must
-            // 404 so the browser doesn't try to parse HTML as the asset.
-            if std::path::Path::new(path).extension().is_some() {
-                return (StatusCode::NOT_FOUND, "not found").into_response();
-            }
-            match ADMIN_UI.get_file("index.html") {
-                Some(file) => static_response(file, &headers),
-                None => (StatusCode::NOT_FOUND, "not found").into_response(),
-            }
+    if let Some(file) = ADMIN_UI.get_file(path) {
+        static_response(file, &headers)
+    } else {
+        // Only fall back to index.html for extension-less paths (SPA
+        // client-side routes like /dashboard, /settings). Requests for
+        // missing assets (favicon.ico, robots.txt, *.map, etc.) must
+        // 404 so the browser doesn't try to parse HTML as the asset.
+        if std::path::Path::new(path).extension().is_some() {
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        }
+        match ADMIN_UI.get_file("index.html") {
+            Some(file) => static_response(file, &headers),
+            None => (StatusCode::NOT_FOUND, "not found").into_response(),
         }
     }
 }
@@ -311,11 +309,11 @@ async fn login(
         .db
         .get_user_auth(body.username.trim())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let valid = verify_password(&body.password, &auth.password_hash)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
         tracing::warn!("login failed: invalid credentials");
         return Err(StatusCode::UNAUTHORIZED);
@@ -330,7 +328,7 @@ async fn login(
         .db
         .insert_session(&token, auth.id, now, now, Some(&ip.to_string()), user_agent)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     store_session(
         &state.sessions,
         &token,
@@ -387,7 +385,7 @@ async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
-    let count = state.db.count_users().await.map_err(|_| setup_ise())?;
+    let count = state.db.count_users().await.map_err(|_err| setup_ise())?;
     if count > 0 {
         return Err((
             StatusCode::CONFLICT,
@@ -413,12 +411,12 @@ async fn setup(
             }),
         ));
     }
-    let hash = hash_password(&body.password).map_err(|_| setup_ise())?;
+    let hash = hash_password(&body.password).map_err(|_err| setup_ise())?;
     state
         .db
         .create_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_| setup_ise())?;
+        .map_err(|_err| setup_ise())?;
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -429,7 +427,7 @@ async fn revoke_all(
     require_auth(&state, &jar)?;
     crate::admin::auth::revoke_all_sessions(&state.sessions, &state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
 
@@ -466,7 +464,7 @@ async fn get_me(
         .db
         .get_username(user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Json(MeResponse {
         id: user_id,
@@ -483,7 +481,7 @@ async fn list_users_handler(
         .db
         .list_users()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(users))
 }
 
@@ -506,7 +504,7 @@ async fn create_user_handler(
     if body.password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let hash = hash_password(&body.password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&body.password).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     match state
         .db
         .create_user(username, &hash, crate::now_unix())
@@ -532,7 +530,7 @@ async fn delete_user_handler(
         .db
         .delete_user(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
     {
         crate::db::DeleteUserOutcome::LastOperator => Err(StatusCode::CONFLICT),
         crate::db::DeleteUserOutcome::NotFound => Err(StatusCode::NOT_FOUND),
@@ -574,20 +572,20 @@ async fn change_own_password(
         .db
         .get_user_password_hash(user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let ok = verify_password(&body.current_password, &hash)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let new_hash =
-        hash_password(&body.new_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        hash_password(&body.new_password).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .db
         .update_user_password(user_id, &new_hash)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -611,16 +609,13 @@ async fn list_sessions(
         .db
         .list_sessions()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Prefer the fresher in-memory last_seen when present.
     let live = state.sessions.lock();
     let out = rows
         .into_iter()
         .map(|r| {
-            let last_seen = live
-                .get(&r.token)
-                .map(|i| i.last_seen)
-                .unwrap_or(r.last_seen);
+            let last_seen = live.get(&r.token).map_or(r.last_seen, |i| i.last_seen);
             SessionResponse {
                 id: r.id,
                 username: r.username,
@@ -645,7 +640,7 @@ async fn revoke_session_by_id(
         .db
         .delete_session_by_id(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     match removed {
         Some(token) => {
             crate::admin::auth::revoke_session(&state.sessions, &token);
@@ -672,12 +667,7 @@ pub struct HealthResponse {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let needs_setup = state
-        .db
-        .count_users()
-        .await
-        .map(|n| n == 0)
-        .unwrap_or(false);
+    let needs_setup = state.db.count_users().await.is_ok_and(|n| n == 0);
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,
@@ -746,7 +736,7 @@ async fn put_settings(
             .db
             .set_setting(key, value)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     // Apply strategy change immediately if present
@@ -771,7 +761,7 @@ async fn get_lists(
         .db
         .get_filter_lists()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(lists))
 }
@@ -798,7 +788,7 @@ async fn add_list(
         .db
         .add_filter_list(&body.name, &body.url, true)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::CREATED, Json(AddListResponse { id })))
 }
@@ -823,7 +813,7 @@ async fn update_list(
             .db
             .update_filter_list_enabled(id, enabled)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     if let (Some(name), Some(url)) = (body.name.as_deref(), body.url.as_deref()) {
@@ -831,7 +821,7 @@ async fn update_list(
             .db
             .update_filter_list(id, name, url)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     state.trigger_rebuild();
@@ -862,7 +852,7 @@ async fn check_list_url(
             .db
             .get_filter_lists()
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
         lists
             .into_iter()
             .find(|l| l.id == id)
@@ -874,7 +864,7 @@ async fn check_list_url(
         .timeout(std::time::Duration::from_secs(10))
         .user_agent(crate::user_agent())
         .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match client.get(&url).send().await {
         Ok(resp) => {
@@ -906,7 +896,7 @@ async fn delete_list(
         .db
         .delete_filter_list(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state.trigger_rebuild();
 
@@ -928,7 +918,7 @@ async fn trigger_list_update(
         .list_manager
         .update_all_lists_no_rebuild()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state.trigger_rebuild();
 
@@ -1009,7 +999,7 @@ async fn batch_add_lists(
         .timeout(std::time::Duration::from_secs(60))
         .user_agent(crate::user_agent())
         .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     let mut set = tokio::task::JoinSet::new();
@@ -1134,7 +1124,7 @@ async fn get_rules(
         .db
         .get_all_custom_rules()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(rules))
 }
@@ -1159,7 +1149,7 @@ async fn add_rule(
         .db
         .has_custom_rule(&body.rule)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
     {
         return Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 })));
     }
@@ -1168,7 +1158,7 @@ async fn add_rule(
         .db
         .add_custom_rule(&body.rule, rule_type)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state.trigger_rebuild();
 
@@ -1186,7 +1176,7 @@ async fn delete_rule(
         .db
         .delete_custom_rule(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state.trigger_rebuild();
 
@@ -1204,7 +1194,7 @@ async fn get_doh_tokens(
         .db
         .get_doh_tokens()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(tokens))
 }
 
@@ -1227,7 +1217,7 @@ async fn add_doh_token(
         .db
         .add_doh_token(&token)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "id": id, "token": token })))
 }
 
@@ -1241,7 +1231,7 @@ async fn delete_doh_token_endpoint(
         .db
         .delete_doh_token(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
 
@@ -1344,7 +1334,7 @@ async fn get_stats_summary(
     let now = crate::now_unix();
     let summary = stats::compute_summary(&state.db, now)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(summary))
 }
@@ -1365,7 +1355,7 @@ async fn get_stats_timeline(
     let hours = query.hours.unwrap_or(24);
     let timeline = stats::compute_timeline(&state.db, now, hours)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(timeline))
 }
@@ -1386,7 +1376,7 @@ async fn get_stats_top_domains(
     let limit = query.limit.unwrap_or(20);
     let domains = stats::compute_top_domains(&state.db, now, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(domains))
 }
@@ -1402,7 +1392,7 @@ async fn get_stats_top_clients(
     let limit = query.limit.unwrap_or(20);
     let clients = stats::compute_top_clients(&state.db, now, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(clients))
 }
@@ -1418,7 +1408,7 @@ async fn get_stats_top_upstreams(
     let limit = query.limit.unwrap_or(10);
     let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(upstreams))
 }
@@ -1457,7 +1447,7 @@ async fn get_stats_v2_timeline(
     let now = crate::now_unix();
     let timeline = stats::compute_stats_timeline(&state.db, now, range, tz_offset)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(timeline))
 }
 
@@ -1469,7 +1459,7 @@ async fn get_stats_v2_heatmap(
     let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(cells))
 }
 
@@ -1483,7 +1473,7 @@ async fn get_stats_v2_breakdown(
     let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(b))
 }
 
@@ -1495,7 +1485,7 @@ async fn get_stats_v2_health(
     let now = crate::now_unix();
     let h = stats::compute_db_health(&state.db, now)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(h))
 }
 
@@ -1509,7 +1499,7 @@ async fn get_stats_v2_highlights(
     let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(h))
 }
 
@@ -1533,7 +1523,7 @@ async fn get_stats_v2_top_domains(
     let now = crate::now_unix();
     let rows = stats::compute_top_domains_ranged(&state.db, now, range, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows))
 }
 
@@ -1551,7 +1541,7 @@ async fn get_stats_v2_top_clients(
     let now = crate::now_unix();
     let rows = stats::compute_top_clients_ranged(&state.db, now, range, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows))
 }
 
@@ -1600,14 +1590,14 @@ async fn get_mobileconfig(
         .db
         .validate_doh_token(&token)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let public_url = state
         .db
         .get_setting("public_url")
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
 
     if public_url.is_empty() {
@@ -1642,7 +1632,7 @@ async fn get_mobileconfig(
     };
 
     let mut xml = Vec::new();
-    plist::to_writer_xml(&mut xml, &profile).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    plist::to_writer_xml(&mut xml, &profile).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -1663,7 +1653,7 @@ async fn get_mobileconfig(
 
 /// Generate a deterministic UUID v5 from a seed string.
 ///
-/// Uses the URL namespace since these UUIDs identify DoH URL-based resources.
+/// Uses the URL namespace since these UUIDs identify `DoH` URL-based resources.
 fn make_uuid(seed: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes()).to_string()
 }
@@ -1699,8 +1689,8 @@ async fn get_logs(
             .query_logs(limit, offset, search, blocked, token, query_type),
         state.db.count_logs(search, blocked, token, query_type),
     );
-    let logs = logs.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let total = total.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let logs = logs.map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total = total.map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({
         "logs": logs,
@@ -1718,7 +1708,7 @@ async fn delete_logs(
         .db
         .delete_all_logs()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
 }

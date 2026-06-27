@@ -78,7 +78,7 @@ pub struct CliArgs {
     pub log_query_results: bool,
 
     /// Comma-separated CIDR list of reverse-proxy peers permitted to set
-    /// `X-Forwarded-For` / `X-Real-IP`. Loopback (127.0.0.0/8, ::1) is
+    /// `X-Forwarded-For` / `X-Real-IP`. Loopback (127.0.0.0/8, `::1`) is
     /// always trusted; configure this when noadd sits behind a proxy on a
     /// non-loopback address — e.g. SWAG/nginx in a separate Docker
     /// container reaching noadd over the bridge network

@@ -111,7 +111,7 @@ fn test_provenance_tracking() {
             assert_eq!(rule, "tracker.net");
             assert_eq!(list, "easylist");
         }
-        other => panic!("expected Blocked, got {other:?}"),
+        other @ FilterResult::Allowed { .. } => panic!("expected Blocked, got {other:?}"),
     }
 
     // Trie match provenance
@@ -120,7 +120,7 @@ fn test_provenance_tracking() {
             assert_eq!(rule, "ads.example.com");
             assert_eq!(list, "adguard");
         }
-        other => panic!("expected Blocked, got {other:?}"),
+        other @ FilterResult::Allowed { .. } => panic!("expected Blocked, got {other:?}"),
     }
 }
 
@@ -157,14 +157,14 @@ fn new_with_pre_interned_list_names_resolves_provenance() {
             assert_eq!(rule, "tracker.net");
             assert_eq!(list, "easylist");
         }
-        other => panic!("expected Blocked, got {other:?}"),
+        other @ FilterResult::Allowed { .. } => panic!("expected Blocked, got {other:?}"),
     }
     match engine.check("sub.ads.example.com") {
         FilterResult::Blocked { rule, list } => {
             assert_eq!(rule, "ads.example.com");
             assert_eq!(list, "adguard");
         }
-        other => panic!("expected Blocked, got {other:?}"),
+        other @ FilterResult::Allowed { .. } => panic!("expected Blocked, got {other:?}"),
     }
 }
 

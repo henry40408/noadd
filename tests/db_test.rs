@@ -3,10 +3,9 @@ use tempfile::tempdir;
 
 async fn test_db() -> Database {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("test.db");
-    // Leak the dir so it lives for the duration of the test
+    // Persist the tempdir (no Drop cleanup) so it lives for the duration of the test.
+    let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
-    std::mem::forget(dir);
     Database::open(&path_str).await.unwrap()
 }
 

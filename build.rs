@@ -86,8 +86,10 @@ fn get_git_version() -> String {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "dev".to_string())
+        .map_or_else(
+            || "dev".to_string(),
+            |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        )
 }
 
 fn download(url: &str, dest: &Path) -> bool {
@@ -98,9 +100,7 @@ fn download(url: &str, dest: &Path) -> bool {
 
     match result {
         Ok(status) => {
-            status.success()
-                && dest.exists()
-                && fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false)
+            status.success() && dest.exists() && fs::metadata(dest).is_ok_and(|m| m.len() > 0)
         }
         Err(_) => false,
     }

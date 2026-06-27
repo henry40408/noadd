@@ -3,7 +3,7 @@
 //! against different implementations of `InflightUpstream::pending` to
 //! compare contention behavior:
 //!
-//!   cargo nextest run --no-capture --release inflight_contention
+//!   cargo nextest run --no-capture --release `inflight_contention`
 //!
 //! Each worker issues N distinct (uncached, unique) queries; the mock
 //! upstream replies immediately so the bench is bounded by handler
