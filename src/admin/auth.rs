@@ -6,7 +6,7 @@ use std::time::Instant;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 
 /// Wrapper around `rand::rngs::OsRng` that implements `rand_core` 0.6 traits
