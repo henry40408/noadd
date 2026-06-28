@@ -3760,7 +3760,7 @@ class SettingsPage extends HTMLElement {
       try {
         const rows = await api.get('/api/upstream/health');
         const transport = s => s.startsWith('tls://') ? ['dot','var(--accent)'] : s.startsWith('https://') ? ['doh','var(--accent)'] : ['plain','var(--orange)'];
-        el.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span class="card-title">Active upstreams</span><button class="btn btn-sm" id="refresh-upstream">${icons.refresh} Recheck</button></div>
+        el.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span class="card-title" style="margin-bottom:0">Active upstreams</span><button class="btn btn-sm" id="refresh-upstream">${icons.refresh} Recheck</button></div>
           <div class="table-wrap"><table><thead><tr><th>Server</th><th>Transport</th><th>Health</th><th>Latency</th></tr></thead><tbody>` +
           rows.map(r => { const [t,c] = transport(r.server); return `<tr>
             <td class="mono">${esc(r.server)}</td>
