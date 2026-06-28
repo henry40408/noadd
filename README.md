@@ -53,6 +53,15 @@ The admin UI is embedded in the binary — dark/light follows your OS preference
 - **DNSSEC transparency** — forces the DO (DNSSEC OK) bit on upstream queries and surfaces the upstream's Authenticated Data (AD) verdict as a badge in the query log (default on, toggle in Settings); full hop-by-hop protection requires a `tls://` upstream and DoH to devices
 - **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
 
+## Out of Scope
+
+noadd intentionally keeps a narrow focus. The following are **not** supported, and most are not currently planned:
+
+- **Encrypted inbound DNS beyond DoH** — no DoT, DoQ, or DNSCrypt server. Clients connect over plain UDP/TCP or DoH. (DoT *is* supported for upstream forwarding via `tls://`.)
+- **Local DNSSEC validation** — noadd surfaces the upstream's AD verdict (see Features) but does not verify signatures itself or return SERVFAIL on bogus answers. Trust is hop-by-hop.
+- **Recursive resolution** — noadd is a forwarder, not a recursive resolver; it relies on configured upstreams rather than resolving from the root.
+- **Per-client / per-device policies** — filtering and rules are global; there is no AdGuard-style per-client filtering.
+
 ## Quick Start
 
 ```bash
