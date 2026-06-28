@@ -1,5 +1,7 @@
 # noadd
 
+> A self-hosted DNS ad-blocker with DNS-over-HTTPS support, built in Rust.
+
 [![CI](https://github.com/henry40408/noadd/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/noadd/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/henry40408/noadd/graph/badge.svg)](https://codecov.io/gh/henry40408/noadd)
 [![Release](https://img.shields.io/github/v/release/henry40408/noadd)](https://github.com/henry40408/noadd/releases/latest)
@@ -9,28 +11,7 @@
 [![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
 [![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 
-A self-hosted DNS ad-blocker with DNS-over-HTTPS support, built in Rust.
-
 Blocks ads and trackers at the DNS level using community-maintained filter lists. Ships as a single binary with an embedded web admin UI.
-
-## Features
-
-- **Plain DNS** (UDP + TCP, port 53) and **DNS-over-HTTPS** (RFC 8484)
-- **Filter engine** with FST + flat trie — 390K rules in ~7 MB RAM (~19 bytes/rule), 50K+ QPS
-- **Built-in filter lists** — AdGuard DNS, EasyList, Peter Lowe's, OISD Basic, Steven Black, URLhaus
-- **Custom rules** — unified API with auto-detection of block/allow syntax
-- **Domain test** — check if a domain is allowed or blocked with matched rule details
-- **Upstream DNS strategy** — Sequential, Round Robin, or Lowest Latency (EMA-based) with runtime switching
-- **Admin web UI** — dashboard with live stats, statistics page (7d/30d/90d trends, weekday×hour heatmap, query type & result breakdowns, DB health), query log with quick Allow/Block actions, filter management
-- **Mobile-friendly** — responsive layout with bottom tab navigation and card-based views
-- **DoH token auth** — restrict DoH access with user-defined URL tokens (`/dns-query/my-token`)
-- **Apple mobileconfig** — generate iOS/macOS DNS profiles for DoH tokens
-- **TLS support** — manual certificates or automatic Let's Encrypt via ACME
-- **SQLite storage** — config, query logs, and stats in a single file
-- **Hot-swap filters** — update lists without restarting, zero query interruption
-- **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
-
-## Screenshots
 
 The admin UI is embedded in the binary — dark/light follows your OS preference, and the layout adapts to phones with a bottom tab bar.
 
@@ -53,6 +34,23 @@ The admin UI is embedded in the binary — dark/light follows your OS preference
     <td align="center" colspan="2">Mobile layout with bottom tab bar</td>
   </tr>
 </table>
+
+## Features
+
+- **Plain DNS** (UDP + TCP, port 53) and **DNS-over-HTTPS** (RFC 8484)
+- **Filter engine** with FST + flat trie — 390K rules in ~7 MB RAM (~19 bytes/rule), 50K+ QPS
+- **Built-in filter lists** — AdGuard DNS, EasyList, Peter Lowe's, OISD Basic, Steven Black, URLhaus
+- **Custom rules** — unified API with auto-detection of block/allow syntax
+- **Domain test** — check if a domain is allowed or blocked with matched rule details
+- **Upstream DNS strategy** — Sequential, Round Robin, or Lowest Latency (EMA-based) with runtime switching
+- **Admin web UI** — dashboard with live stats, statistics page (7d/30d/90d trends, weekday×hour heatmap, query type & result breakdowns, DB health), query log with quick Allow/Block actions, filter management
+- **Mobile-friendly** — responsive layout with bottom tab navigation and card-based views
+- **DoH token auth** — restrict DoH access with user-defined URL tokens (`/dns-query/my-token`)
+- **Apple mobileconfig** — generate iOS/macOS DNS profiles for DoH tokens
+- **TLS support** — manual certificates or automatic Let's Encrypt via ACME
+- **SQLite storage** — config, query logs, and stats in a single file
+- **Hot-swap filters** — update lists without restarting, zero query interruption
+- **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
 
 ## Quick Start
 
