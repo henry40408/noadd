@@ -746,6 +746,10 @@ async fn put_settings(
         state.forwarder.set_strategy(strategy);
     }
 
+    if let Some(v) = body.settings.get("dnssec_disabled") {
+        state.forwarder.set_dnssec_enabled(v.trim() != "true");
+    }
+
     Ok(StatusCode::OK)
 }
 
