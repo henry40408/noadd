@@ -420,7 +420,7 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .btn { white-space: nowrap; }
 
 /* Inputs */
-input[type="text"], input[type="password"], input[type="url"], select {
+input[type="text"], input[type="password"], input[type="url"], select, textarea {
   padding: 8px 12px;
   border-radius: 0;
   border: 1px solid var(--border);
@@ -433,7 +433,9 @@ input[type="text"], input[type="password"], input[type="url"], select {
   width: 100%;
 }
 
-input:focus, select:focus { border-color: var(--border-focus); box-shadow: var(--glow); }
+input:focus, select:focus, textarea:focus { border-color: var(--border-focus); box-shadow: var(--glow); }
+
+textarea { resize: vertical; line-height: 1.7; }
 
 .input-row {
   display: flex;
@@ -3676,7 +3678,7 @@ class SettingsPage extends HTMLElement {
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
         <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code style="color:var(--accent)">ip:port</code>, <code style="color:var(--accent)">tls://host</code> (DoT), or <code style="color:var(--accent)">https://host/dns-query</code> (DoH)</p>
-        <textarea id="s-upstream" rows="4" style="width:100%;font-family:var(--font-mono);font-size:0.82rem" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853"></textarea>
+        <textarea id="s-upstream" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853"></textarea>
         <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
           <button class="btn btn-sm btn-primary" id="apply-upstream">${icons.refresh} Save &amp; apply</button>
           <span id="upstream-apply-msg" style="font-size:0.8rem"></span>
