@@ -3690,6 +3690,17 @@ class SettingsPage extends HTMLElement {
           </select>
         </div>
         <div id="ema-latency" style="margin-top:12px"></div>
+        <div class="card-title" style="margin-top:16px">DNSSEC</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+          Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
+        </p>
+        <div class="input-row">
+          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">DNSSEC status</label>
+          <select id="s-dnssec">
+            <option value="on">On (surface AD)</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
@@ -3771,6 +3782,10 @@ class SettingsPage extends HTMLElement {
       this.loadEma();
     };
 
+    this.querySelector('#s-dnssec').onchange = async (e) => {
+      await api.put('/api/settings', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' });
+    };
+
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
@@ -3793,6 +3808,7 @@ class SettingsPage extends HTMLElement {
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
       this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
+      this.querySelector('#s-dnssec').value = (s.dnssec_disabled === 'true') ? 'off' : 'on';
       this.loadEma();
       if (info) {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
