@@ -1495,6 +1495,67 @@ async fn create_operator_rejects_short_password() {
 }
 
 #[tokio::test]
+async fn test_upstream_servers_round_trip_and_validation() {
+    let (app, token) = setup().await;
+
+    // valid → 200 and GET returns it
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(
+                    r#"{"upstream_servers":"1.1.1.1:53\ntls://dns.mullvad.net:853"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/settings")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["upstream_servers"]
+            .as_str()
+            .unwrap()
+            .contains("1.1.1.1:53")
+    );
+
+    // invalid → 400 and the setting is unchanged
+    let bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"upstream_servers":"not an address"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn delete_operator_succeeds_and_missing_returns_404() {
     let (app, token) = setup().await;
     // admin is id 1; add two more so the last-operator guard does not fire.

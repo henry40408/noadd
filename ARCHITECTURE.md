@@ -62,7 +62,9 @@ src/
 │   ├── engine.rs        # FST + flat reverse-domain trie matching
 │   └── lists.rs         # List download, storage, and filter rebuild
 ├── upstream/
-│   └── forwarder.rs     # UDP forwarding with failover
+│   ├── forwarder.rs     # UpstreamForwarder: transport, ArcSwap<Upstreams>, reconfigure
+│   ├── strategy.rs      # UpstreamStrategy enum (Sequential / RoundRobin / LowestLatency)
+│   └── mod.rs           # Module re-exports
 └── admin/
     ├── api.rs           # REST API routes + static file serving
     ├── auth.rs          # Argon2 password hashing, sessions, rate limiting
@@ -87,6 +89,12 @@ The DNS handler sends log events through a `tokio::sync::mpsc` channel. A dedica
 ### Schema Migrations
 
 SQLite schema versioning uses `PRAGMA user_version`. Each migration checks the current version and applies changes incrementally. New databases get the latest schema directly from `CREATE TABLE` statements.
+
+### Upstream DNS
+
+`upstream_servers` is loaded from the database at startup and parsed via `parse_upstreams` (splits on newlines and commas, validates each entry). Accepted formats: `ip:port` (plain UDP/TCP), `tls://host[:port]` (DNS-over-TLS, default port 853), `https://host[:port][/path]` (DNS-over-HTTPS, default port 443 / path `/dns-query`).
+
+`UpstreamForwarder` holds the live server set behind `ArcSwap<Upstreams>`. When settings are saved via the admin API, the validated server list is passed to `reconfigure(servers)`, which builds a fresh `Upstreams` (resolves hostnames, constructs `NameServerPool`s, resets EMA latencies) and atomically swaps it in — no restart, zero query interruption. In-flight queries hold an `Arc` to the old snapshot and complete normally; the old snapshot is dropped when the last in-flight query releases it. Strategy (`Sequential` / `Round Robin` / `Lowest Latency`) and DNSSEC-transparency mode are stored outside the swapped snapshot and survive `reconfigure` unchanged.
 
 ### DoH Token Auth
 
