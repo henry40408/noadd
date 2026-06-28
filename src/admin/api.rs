@@ -706,6 +706,7 @@ async fn get_settings(
         "doh_access_policy",
         "public_url",
         "onboarding_banner_dismissed",
+        "dnssec_disabled",
     ];
     let mut settings = std::collections::HashMap::new();
 
@@ -744,6 +745,10 @@ async fn put_settings(
         && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
     {
         state.forwarder.set_strategy(strategy);
+    }
+
+    if let Some(v) = body.settings.get("dnssec_disabled") {
+        state.forwarder.set_dnssec_enabled(v.trim() != "true");
     }
 
     Ok(StatusCode::OK)

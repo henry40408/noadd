@@ -85,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%strategy_str, "loaded upstream strategy from DB");
     }
 
+    if let Ok(Some(v)) = db.get_setting("dnssec_disabled").await {
+        forwarder.set_dnssec_enabled(v.trim() != "true");
+        tracing::info!(dnssec_disabled = %v, "loaded DNSSEC transparency setting");
+    }
+
     let cache = DnsCache::new(10_000);
 
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);

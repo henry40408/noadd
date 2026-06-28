@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message, OpCode, Query, ResponseCode};
+use hickory_proto::op::{
+    DnsRequest, DnsRequestOptions, Edns, Message, OpCode, Query, ResponseCode,
+};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverOpts};
@@ -171,6 +173,27 @@ struct UpstreamEntry {
     pool: NameServerPool<TokioRuntimeProvider>,
 }
 
+/// EDNS UDP payload advertised when forcing DO. 1232 is the DNS-flag-day
+/// recommendation that avoids IP fragmentation of larger signed responses.
+const DNSSEC_UDP_PAYLOAD: u16 = 1232;
+
+/// Upsert an EDNS(0) OPT on `msg` with the DNSSEC-OK (DO) bit set, preserving
+/// any existing OPT and its options. Never produces a second OPT record.
+fn ensure_dnssec_ok(msg: &mut Message) {
+    if let Some(edns) = msg.edns.as_mut() {
+        edns.set_dnssec_ok(true);
+        if edns.max_payload() < DNSSEC_UDP_PAYLOAD {
+            edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
+        }
+    } else {
+        let mut edns = Edns::new();
+        edns.set_version(0);
+        edns.set_dnssec_ok(true);
+        edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
+        msg.set_edns(edns);
+    }
+}
+
 /// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
 /// Sorts last under `total_cmp`, so an unobserved upstream is naturally
 /// the worst choice for `LowestLatency`.
@@ -197,6 +220,9 @@ pub struct UpstreamForwarder {
     /// the EMA computation is atomic with respect to the previous value.
     /// Same length and order as `entries`.
     latencies: Vec<AtomicU64>,
+    /// When true, force the DO bit on upstream requests (DNSSEC transparency).
+    /// Runtime-switchable so the admin-UI toggle takes effect without restart.
+    dnssec_enabled: AtomicBool,
 }
 
 impl UpstreamForwarder {
@@ -323,6 +349,7 @@ impl UpstreamForwarder {
             strategy: ArcSwap::from_pointee(UpstreamStrategy::default()),
             rr_counter: AtomicUsize::new(0),
             latencies,
+            dnssec_enabled: AtomicBool::new(true),
         }
     }
 
@@ -334,6 +361,16 @@ impl UpstreamForwarder {
     /// Set the active strategy.
     pub fn set_strategy(&self, strategy: UpstreamStrategy) {
         self.strategy.store(std::sync::Arc::new(strategy));
+    }
+
+    /// Enable/disable forcing the DO bit on upstream requests.
+    pub fn set_dnssec_enabled(&self, enabled: bool) {
+        self.dnssec_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether DO forcing is currently enabled.
+    pub fn dnssec_enabled(&self) -> bool {
+        self.dnssec_enabled.load(Ordering::Relaxed)
     }
 
     /// Return the server try-order for the current strategy as indices
@@ -423,8 +460,12 @@ impl UpstreamForwarder {
         // build a `DnsRequest`; the caller has already parsed this once
         // in the handler, but the forwarder API stays bytes-in / bytes-out
         // so the handler doesn't have to know about transport details.
-        let request_msg = Message::from_vec(query_bytes).map_err(|_err| ForwardError::BadQuery)?;
+        let mut request_msg =
+            Message::from_vec(query_bytes).map_err(|_err| ForwardError::BadQuery)?;
         let client_id = request_msg.metadata.id;
+        if self.dnssec_enabled() {
+            ensure_dnssec_ok(&mut request_msg);
+        }
 
         let order = self.server_order();
         if self.strategy() == UpstreamStrategy::RoundRobin {
@@ -471,6 +512,11 @@ impl UpstreamForwarder {
                         };
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         self.update_latency(idx, ms);
+                        // Reconstruct a minimal DNS response for NXDOMAIN / NODATA.
+                        // The AD bit is NOT set here even if the upstream validated the
+                        // negative answer: hickory's `NoRecordsFound` struct does not
+                        // expose an authentic-data field (see docs/superpowers/specs/
+                        // 2026-06-28-dnssec-transparency-design.md "Known limitations").
                         let mut response = Message::response(client_id, OpCode::Query);
                         response.metadata.response_code = rcode;
                         response.metadata.recursion_desired = true;
@@ -572,6 +618,38 @@ impl UpstreamForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_dnssec_ok_adds_opt_when_absent() {
+        let mut msg = Message::query();
+        msg.add_query(Query::query(Name::root(), RecordType::A));
+        ensure_dnssec_ok(&mut msg);
+        let edns = msg.edns.as_ref().expect("OPT added");
+        assert!(edns.flags().dnssec_ok);
+        assert_eq!(edns.max_payload(), 1232);
+    }
+
+    #[test]
+    fn ensure_dnssec_ok_upserts_existing_opt_without_duplicating() {
+        let mut msg = Message::query();
+        let mut edns = Edns::new();
+        edns.set_version(0);
+        edns.set_max_payload(4096);
+        msg.set_edns(edns);
+        ensure_dnssec_ok(&mut msg);
+        let edns = msg.edns.as_ref().unwrap();
+        assert!(edns.flags().dnssec_ok);
+        // existing larger payload preserved (>= 1232)
+        assert_eq!(edns.max_payload(), 4096);
+    }
+
+    #[tokio::test]
+    async fn dnssec_toggle_defaults_on_and_flips() {
+        let f = make_forwarder(UpstreamStrategy::Sequential).await;
+        assert!(f.dnssec_enabled());
+        f.set_dnssec_enabled(false);
+        assert!(!f.dnssec_enabled());
+    }
 
     async fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
         // Use real-looking IP:port so pool construction succeeds; tests

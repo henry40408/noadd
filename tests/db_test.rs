@@ -67,6 +67,7 @@ async fn test_insert_and_query_logs() {
             doh_token: None,
             result: None,
             response_ms: 5,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 2000000,
@@ -79,6 +80,7 @@ async fn test_insert_and_query_logs() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
     ];
     db.insert_query_logs(&entries).await.unwrap();
@@ -122,6 +124,7 @@ async fn test_query_logs_search_prefix_fastpath() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 1000001,
@@ -134,6 +137,7 @@ async fn test_query_logs_search_prefix_fastpath() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 1000002,
@@ -146,6 +150,7 @@ async fn test_query_logs_search_prefix_fastpath() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 1000003,
@@ -158,6 +163,7 @@ async fn test_query_logs_search_prefix_fastpath() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
     ];
     db.insert_query_logs(&entries).await.unwrap();
@@ -221,6 +227,7 @@ async fn test_query_logs_pagination() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         });
     }
     db.insert_query_logs(&entries).await.unwrap();
@@ -357,6 +364,7 @@ async fn test_count_queries_since() {
             doh_token: None,
             result: None,
             response_ms: 5,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 2000000,
@@ -369,6 +377,7 @@ async fn test_count_queries_since() {
             doh_token: None,
             result: None,
             response_ms: 3,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 3000000,
@@ -381,6 +390,7 @@ async fn test_count_queries_since() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
     ];
     db.insert_query_logs(&entries).await.unwrap();
@@ -409,6 +419,7 @@ async fn test_top_domains_since() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 2000000,
@@ -421,6 +432,7 @@ async fn test_top_domains_since() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
         QueryLogEntry {
             timestamp: 3000000,
@@ -433,6 +445,7 @@ async fn test_top_domains_since() {
             doh_token: None,
             result: None,
             response_ms: 1,
+            authenticated_data: false,
         },
     ];
     db.insert_query_logs(&entries).await.unwrap();
@@ -466,6 +479,7 @@ async fn test_read_conn_opens_and_basic_roundtrip_works() {
         upstream: None,
         doh_token: None,
         result: None,
+        authenticated_data: false,
     };
     db.insert_query_logs(std::slice::from_ref(&entry))
         .await

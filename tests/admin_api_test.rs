@@ -863,6 +863,48 @@ async fn test_upstream_strategy_setting() {
 }
 
 #[tokio::test]
+async fn test_dnssec_disabled_setting_round_trip() {
+    let (app, token) = setup().await;
+
+    // Write dnssec_disabled = "true"
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"dnssec_disabled":"true"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read it back — must appear in GET /api/settings
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/settings")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["dnssec_disabled"], "true",
+        "dnssec_disabled must be returned by GET /api/settings"
+    );
+}
+
+#[tokio::test]
 async fn test_filter_check_allowed() {
     let (app, token) = setup().await;
 
