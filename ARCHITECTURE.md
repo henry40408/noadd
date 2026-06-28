@@ -36,6 +36,10 @@ Browser ──────────► │  Admin API + Web UI     │Logger 
 
 Filter runs **before** cache so newly added block rules take effect immediately.
 
+### DNSSEC Transparency
+
+When DNSSEC transparency is enabled (the default, toggled via the `dnssec_disabled` runtime setting in the Settings page), the upstream forwarder upserts an EDNS OPT record with the DO (DNSSEC OK) bit set and a UDP payload size of 1232 before forwarding each query. The handler then reads the Authenticated Data (AD) bit from byte 3 of the upstream response (`response_bytes[3] & 0x20`) and stores it in `query_logs.authenticated_data`. This is **transparency, not local validation** — noadd does not verify DNSSEC signatures; the AD bit reflects the upstream resolver's verdict. Full hop-by-hop DNSSEC protection requires a `tls://` upstream and DoH to client devices.
+
 ## Source Layout
 
 ```
@@ -99,7 +103,7 @@ Everything is in a single SQLite file (`noadd.db` by default):
 | Table | Purpose |
 |-------|---------|
 | `settings` | Key-value config (upstream DNS, log retention, access policy) |
-| `query_logs` | DNS query history with timestamps, domains, actions, cache hits |
+| `query_logs` | DNS query history with timestamps, domains, actions, cache hits, and upstream DNSSEC AD bit (`authenticated_data`) |
 | `filter_lists` | Registered filter lists (name, URL, enabled, rule count) |
 | `filter_list_content` | Raw downloaded list content |
 | `custom_rules` | User-defined allow/block rules |
