@@ -16,6 +16,7 @@ fn sample_entry(i: i64) -> QueryLogEntry {
         upstream: Some("1.1.1.1".to_string()),
         doh_token: None,
         result: None,
+        authenticated_data: false,
     }
 }
 

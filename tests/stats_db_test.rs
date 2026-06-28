@@ -27,6 +27,7 @@ fn entry(
         doh_token: None,
         result: result.map(|s| s.to_string()),
         response_ms: 5,
+        authenticated_data: false,
     }
 }
 
@@ -189,6 +190,7 @@ fn entry_with(ts_secs: i64, domain: &str, response_ms: i64) -> QueryLogEntry {
         doh_token: None,
         result: None,
         response_ms,
+        authenticated_data: false,
     }
 }
 

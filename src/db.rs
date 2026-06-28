@@ -75,6 +75,7 @@ pub struct QueryLogEntry {
     pub upstream: Option<String>,
     pub doh_token: Option<String>,
     pub result: Option<String>,
+    pub authenticated_data: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -329,7 +330,8 @@ impl Database {
                         response_ms INTEGER NOT NULL DEFAULT 0,
                         upstream TEXT,
                         doh_token TEXT,
-                        result TEXT
+                        result TEXT,
+                        authenticated_data INTEGER NOT NULL DEFAULT 0
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
@@ -443,7 +445,16 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 6;
+        if version < 7 {
+            add_column_if_missing(
+                conn,
+                "query_logs",
+                "authenticated_data",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 7;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -509,7 +520,7 @@ impl Database {
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare_cached(
-                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result, authenticated_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     )?;
                     for e in &entries {
                         stmt.execute(params![
@@ -523,6 +534,7 @@ impl Database {
                             e.upstream,
                             e.doh_token,
                             e.result,
+                            e.authenticated_data,
                         ])?;
                     }
                 }
@@ -548,7 +560,7 @@ impl Database {
         let rows = self
             .reader()
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result FROM query_logs WHERE 1=1".to_string();
+                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result, authenticated_data FROM query_logs WHERE 1=1".to_string();
                 let mut param_values = append_log_filters(
                     &mut sql,
                     search.as_deref(),
@@ -577,6 +589,7 @@ impl Database {
                             upstream: row.get(7)?,
                             doh_token: row.get(8)?,
                             result: row.get(9)?,
+                            authenticated_data: row.get::<_, bool>(10)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1956,6 +1969,7 @@ mod tests {
             upstream: None,
             doh_token: None,
             result: None,
+            authenticated_data: false,
         }
     }
 
@@ -2079,6 +2093,30 @@ mod tests {
         assert!(tables.contains(&"users".to_string()));
         assert!(tables.contains(&"sessions".to_string()));
         assert_eq!(db.count_users().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn query_log_roundtrips_authenticated_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+        let entry = QueryLogEntry {
+            timestamp: 1,
+            domain: "example.com".into(),
+            query_type: "A".into(),
+            client_ip: "127.0.0.1".into(),
+            blocked: false,
+            cached: false,
+            response_ms: 1,
+            upstream: Some("1.1.1.1:53".into()),
+            doh_token: None,
+            result: None,
+            authenticated_data: true,
+        };
+        db.insert_query_logs(&[entry]).await.unwrap();
+        let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].authenticated_data);
     }
 
     #[tokio::test]

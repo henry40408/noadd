@@ -387,6 +387,7 @@ mod tests {
             upstream: None,
             doh_token: None,
             result: None,
+            authenticated_data: false,
         }
     }
 
