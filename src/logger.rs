@@ -91,7 +91,7 @@ fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
         upstream: ctx.upstream,
         doh_token: ctx.doh_token,
         result: ctx.result,
-        authenticated_data: false,
+        authenticated_data: ctx.authenticated_data,
     }
 }
 

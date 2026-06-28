@@ -87,6 +87,14 @@ pub struct QueryContext {
     pub matched_list: Option<String>,
     pub doh_token: Option<String>,
     pub result: Option<String>,
+    pub authenticated_data: bool,
+}
+
+/// True if the DNS response carries the Authenticated Data (AD) header bit.
+/// AD is bit 5 (0x20) of byte 3 of the DNS header — read directly from the
+/// wire bytes, no message parse (cheap enough to run on every query).
+fn response_authenticated(bytes: &[u8]) -> bool {
+    bytes.get(3).is_some_and(|b| b & 0x20 != 0)
 }
 
 /// Extract a short summary of the DNS answer section from response bytes.
@@ -279,6 +287,7 @@ impl DnsHandler {
                 matched_list: None,
                 doh_token,
                 result: None,
+                authenticated_data: false,
             };
             if let Err(e) = self.log_tx.try_send(ctx) {
                 self.log_drop_count.fetch_add(1, Ordering::Relaxed);
@@ -477,6 +486,7 @@ impl DnsHandler {
             matched_list,
             doh_token,
             result,
+            authenticated_data: response_authenticated(&response_bytes),
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
             self.log_drop_count.fetch_add(1, Ordering::Relaxed);
@@ -805,6 +815,17 @@ mod tests {
     #[test]
     fn unparseable_response_is_not_cached() {
         assert!(cache_ttl_for_response(&[0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn ad_bit_read_from_header_byte3() {
+        // AD is bit 5 (0x20) of byte 3 of the DNS header.
+        let mut hdr = vec![0u8; 12];
+        assert!(!response_authenticated(&hdr));
+        hdr[3] |= 0x20;
+        assert!(response_authenticated(&hdr));
+        // too-short buffers are not authenticated, never panic
+        assert!(!response_authenticated(&[0, 1]));
     }
 
     #[test]

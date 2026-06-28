@@ -33,6 +33,7 @@ async fn test_logger_flushes_on_threshold() {
             response_time_ms: 10,
             matched_rule: None,
             matched_list: None,
+            authenticated_data: false,
         };
         tx.send(ctx).await.unwrap();
     }
@@ -81,6 +82,7 @@ async fn test_logger_flushes_on_channel_close() {
             response_time_ms: 5,
             matched_rule: Some("||test.org^".to_string()),
             matched_list: Some("blocklist".to_string()),
+            authenticated_data: false,
         };
         tx.send(ctx).await.unwrap();
     }
@@ -125,6 +127,7 @@ async fn test_logger_flushes_on_interval() {
             response_time_ms: 1,
             matched_rule: None,
             matched_list: None,
+            authenticated_data: false,
         };
         tx.send(ctx).await.unwrap();
     }
