@@ -117,6 +117,27 @@ impl UpstreamSpec {
     }
 }
 
+/// Parse textarea / CSV upstream input into validated server strings.
+/// Splits on newlines and commas, trims, drops blanks, and validates each
+/// entry via [`UpstreamSpec::parse`]. Returns the cleaned strings in order,
+/// or an error naming the first offending entry. Empty input is an error —
+/// a resolver with zero upstreams is non-functional.
+pub fn parse_upstreams(input: &str) -> Result<Vec<String>, String> {
+    let mut servers = Vec::new();
+    for raw in input.split(['\n', ',']) {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        UpstreamSpec::parse(entry)?;
+        servers.push(entry.to_string());
+    }
+    if servers.is_empty() {
+        return Err("at least one upstream server is required".to_string());
+    }
+    Ok(servers)
+}
+
 /// Parse a `host[:port]` fragment, returning a default port when omitted.
 /// Handles bracketed IPv6 literals (`[::1]:853`).
 fn parse_host_port(s: &str, default_port: u16) -> Result<(String, u16), String> {
@@ -837,5 +858,36 @@ mod tests {
     #[test]
     fn parse_dot_unclosed_ipv6() {
         assert!(UpstreamSpec::parse("tls://[::1:853").is_err());
+    }
+
+    #[test]
+    fn parse_upstreams_accepts_newlines_and_commas() {
+        let out = parse_upstreams(
+            "1.1.1.1:53\ntls://dns.mullvad.net:853, https://dns.quad9.net/dns-query",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "1.1.1.1:53".to_string(),
+                "tls://dns.mullvad.net:853".to_string(),
+                "https://dns.quad9.net/dns-query".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_upstreams_rejects_empty() {
+        assert!(parse_upstreams("").is_err());
+        assert!(parse_upstreams("   \n  ").is_err());
+    }
+
+    #[test]
+    fn parse_upstreams_reports_bad_entry() {
+        let err = parse_upstreams("1.1.1.1:53\nnot an address").unwrap_err();
+        assert!(
+            err.contains("not an address"),
+            "error should name the bad entry: {err}"
+        );
     }
 }
