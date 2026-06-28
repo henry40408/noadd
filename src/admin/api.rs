@@ -732,6 +732,15 @@ async fn put_settings(
 ) -> Result<StatusCode, StatusCode> {
     require_auth(&state, &jar)?;
 
+    // Validate upstream_servers before persisting anything — reject the whole
+    // save on a bad entry so a broken value is never stored.
+    let upstream_servers = match body.settings.get("upstream_servers") {
+        Some(v) => Some(
+            crate::upstream::forwarder::parse_upstreams(v).map_err(|_e| StatusCode::BAD_REQUEST)?,
+        ),
+        None => None,
+    };
+
     for (key, value) in &body.settings {
         state
             .db
@@ -749,6 +758,10 @@ async fn put_settings(
 
     if let Some(v) = body.settings.get("dnssec_disabled") {
         state.forwarder.set_dnssec_enabled(v.trim() != "true");
+    }
+
+    if let Some(servers) = upstream_servers {
+        state.forwarder.reconfigure(servers).await;
     }
 
     Ok(StatusCode::OK)

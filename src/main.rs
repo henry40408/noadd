@@ -76,7 +76,22 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(3600),
     );
 
-    let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
+    let upstream_config = match db.get_setting("upstream_servers").await {
+        Ok(Some(v)) if !v.trim().is_empty() => {
+            match noadd::upstream::forwarder::parse_upstreams(&v) {
+                Ok(servers) => UpstreamConfig {
+                    servers,
+                    ..UpstreamConfig::default()
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "invalid upstream_servers setting; using defaults");
+                    UpstreamConfig::default()
+                }
+            }
+        }
+        _ => UpstreamConfig::default(),
+    };
+    let forwarder = Arc::new(UpstreamForwarder::new(upstream_config).await);
 
     if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
         && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
