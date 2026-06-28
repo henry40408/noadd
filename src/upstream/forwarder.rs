@@ -220,6 +220,136 @@ fn ensure_dnssec_ok(msg: &mut Message) {
 /// the worst choice for `LowestLatency`.
 const NO_LATENCY: f64 = f64::INFINITY;
 
+/// The reconfigurable upstream set. Swapped atomically by `reconfigure`.
+/// `config.servers`, `entries`, and `latencies` are index-aligned.
+struct Upstreams {
+    config: UpstreamConfig,
+    /// `None` for entries whose parse / DNS lookup failed at build time.
+    entries: Vec<Option<UpstreamEntry>>,
+    /// EMA latencies (ms), bit-packed into `AtomicU64`; `NO_LATENCY` until observed.
+    latencies: Vec<AtomicU64>,
+}
+
+/// Build the upstream pool set for `config` (concurrent host resolution +
+/// one `NameServerPool` per server + a fresh latencies vec). Performs no
+/// query I/O — connections are lazy.
+async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
+    let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
+
+    // Only `timeout` is honoured on the `NameServerPool` path used below:
+    // it bounds each upstream attempt and feeds the per-connection I/O
+    // timeout. `attempts` / `preserve_intermediates` only affect the full
+    // `Resolver` (RetryDnsHandle / CachingClient), which we don't use —
+    // this forwarder owns retry and caching itself. UDP retransmit is
+    // handled inside hickory's transport (every ~333ms within `timeout`).
+    let mut opts = ResolverOpts::default();
+    opts.timeout = timeout;
+
+    let provider = TokioRuntimeProvider::default();
+    // Shared connection context for every upstream pool: holds the resolver
+    // options plus the default (aws-lc-rs–backed) rustls client config used
+    // for DoT/DoH. The provider selects aws-lc-rs explicitly, so this does
+    // not depend on a process-wide rustls crypto provider being installed.
+    let cx = Arc::new(PoolContext::new(
+        opts,
+        TlsConfig::new().expect("failed to build default rustls TLS config"),
+    ));
+
+    // Resolve all upstream hosts concurrently — geo-routed providers and
+    // slow DNS can otherwise make startup linear in the number of
+    // upstreams. Each task reports its config index so we can place
+    // the result back into the parallel `entries` Vec without a
+    // post-hoc sort.
+    let mut lookup_set = tokio::task::JoinSet::new();
+    for (idx, server) in config.servers.iter().enumerate() {
+        let spec = match UpstreamSpec::parse(server) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(server = %server, error = %e, "skipping unparseable upstream entry");
+                continue;
+            }
+        };
+        let server = server.clone();
+        let lookup_target = format!("{}:{}", spec.host, spec.port);
+        lookup_set.spawn(async move {
+            let addrs = tokio::net::lookup_host(lookup_target)
+                .await
+                .map(|it| it.collect::<Vec<_>>());
+            (idx, server, spec, addrs)
+        });
+    }
+
+    let mut entries: Vec<Option<UpstreamEntry>> = (0..config.servers.len()).map(|_| None).collect();
+    while let Some(joined) = lookup_set.join_next().await {
+        let (idx, server, spec, addrs) = match joined {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %e, "upstream resolve task join failed");
+                continue;
+            }
+        };
+        let addr = match addrs {
+            Ok(list) => {
+                if let Some(a) = list.into_iter().next() {
+                    a
+                } else {
+                    warn!(server = %server, "no addresses returned for upstream");
+                    continue;
+                }
+            }
+            Err(e) => {
+                warn!(server = %server, error = %e, "failed to resolve upstream host");
+                continue;
+            }
+        };
+
+        // One NameServerConfig per upstream, with a single connection of the
+        // requested transport — matching the pre-0.26 behavior (a truncated
+        // UDP response is relayed to the client, which retries over TCP
+        // itself). DoT/DoH carry the SNI / HTTP path inside the
+        // per-connection ProtocolConfig. The resolved address' port is
+        // propagated onto the connection.
+        let ns_cfg = match &spec.kind {
+            UpstreamKind::Udp => {
+                let mut udp = ConnectionConfig::udp();
+                udp.port = addr.port();
+                NameServerConfig::new(addr.ip(), true, vec![udp])
+            }
+            UpstreamKind::Tls { sni } => {
+                let mut c = ConnectionConfig::tls(Arc::from(sni.as_str()));
+                c.port = addr.port();
+                NameServerConfig::new(addr.ip(), true, vec![c])
+            }
+            UpstreamKind::Https { sni, path } => {
+                let mut c = ConnectionConfig::https(
+                    Arc::from(sni.as_str()),
+                    Some(Arc::from(path.as_str())),
+                );
+                c.port = addr.port();
+                NameServerConfig::new(addr.ip(), true, vec![c])
+            }
+        };
+
+        // Connections are established lazily on first use, so constructing
+        // the pool performs no network I/O here.
+        let pool = NameServerPool::from_config([ns_cfg], cx.clone(), provider.clone());
+        entries[idx] = Some(UpstreamEntry {
+            label: server,
+            pool,
+        });
+    }
+
+    let latencies = (0..config.servers.len())
+        .map(|_| AtomicU64::new(NO_LATENCY.to_bits()))
+        .collect();
+
+    Upstreams {
+        config,
+        entries,
+        latencies,
+    }
+}
+
 /// Forwards DNS queries to upstream servers with configurable strategy.
 ///
 /// Transport (UDP retransmit, socket handling, txid validation/rewrite) is
@@ -230,17 +360,9 @@ const NO_LATENCY: f64 = f64::INFINITY;
 /// them up by label-string used to allocate a `String` per query and was
 /// the dominant per-query allocation outside the cache hot path.
 pub struct UpstreamForwarder {
-    config: UpstreamConfig,
-    /// Same length and order as `config.servers`. `None` for entries
-    /// whose address parse / DNS lookup failed during construction.
-    entries: Vec<Option<UpstreamEntry>>,
+    upstreams: ArcSwap<Upstreams>,
     strategy: ArcSwap<UpstreamStrategy>,
     rr_counter: AtomicUsize,
-    /// EMA latencies (milliseconds), bit-packed into `AtomicU64`. Reads
-    /// and writes are lock-free; concurrent updates use a CAS loop so
-    /// the EMA computation is atomic with respect to the previous value.
-    /// Same length and order as `entries`.
-    latencies: Vec<AtomicU64>,
     /// When true, force the DO bit on upstream requests (DNSSEC transparency).
     /// Runtime-switchable so the admin-UI toggle takes effect without restart.
     dnssec_enabled: AtomicBool,
@@ -254,124 +376,26 @@ impl UpstreamForwarder {
     /// returned is used; geo-routed providers like Mullvad therefore
     /// pin to the `PoP` that DNS picks at startup.
     pub async fn new(config: UpstreamConfig) -> Self {
-        let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
-
-        // Only `timeout` is honoured on the `NameServerPool` path used below:
-        // it bounds each upstream attempt and feeds the per-connection I/O
-        // timeout. `attempts` / `preserve_intermediates` only affect the full
-        // `Resolver` (RetryDnsHandle / CachingClient), which we don't use —
-        // this forwarder owns retry and caching itself. UDP retransmit is
-        // handled inside hickory's transport (every ~333ms within `timeout`).
-        let mut opts = ResolverOpts::default();
-        opts.timeout = timeout;
-
-        let provider = TokioRuntimeProvider::default();
-        // Shared connection context for every upstream pool: holds the resolver
-        // options plus the default (aws-lc-rs–backed) rustls client config used
-        // for DoT/DoH. The provider selects aws-lc-rs explicitly, so this does
-        // not depend on a process-wide rustls crypto provider being installed.
-        let cx = Arc::new(PoolContext::new(
-            opts,
-            TlsConfig::new().expect("failed to build default rustls TLS config"),
-        ));
-
-        // Resolve all upstream hosts concurrently — geo-routed providers and
-        // slow DNS can otherwise make startup linear in the number of
-        // upstreams. Each task reports its config index so we can place
-        // the result back into the parallel `entries` Vec without a
-        // post-hoc sort.
-        let mut lookup_set = tokio::task::JoinSet::new();
-        for (idx, server) in config.servers.iter().enumerate() {
-            let spec = match UpstreamSpec::parse(server) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(server = %server, error = %e, "skipping unparseable upstream entry");
-                    continue;
-                }
-            };
-            let server = server.clone();
-            let lookup_target = format!("{}:{}", spec.host, spec.port);
-            lookup_set.spawn(async move {
-                let addrs = tokio::net::lookup_host(lookup_target)
-                    .await
-                    .map(|it| it.collect::<Vec<_>>());
-                (idx, server, spec, addrs)
-            });
-        }
-
-        let mut entries: Vec<Option<UpstreamEntry>> =
-            (0..config.servers.len()).map(|_| None).collect();
-        while let Some(joined) = lookup_set.join_next().await {
-            let (idx, server, spec, addrs) = match joined {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(error = %e, "upstream resolve task join failed");
-                    continue;
-                }
-            };
-            let addr = match addrs {
-                Ok(list) => {
-                    if let Some(a) = list.into_iter().next() {
-                        a
-                    } else {
-                        warn!(server = %server, "no addresses returned for upstream");
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    warn!(server = %server, error = %e, "failed to resolve upstream host");
-                    continue;
-                }
-            };
-
-            // One NameServerConfig per upstream, with a single connection of the
-            // requested transport — matching the pre-0.26 behavior (a truncated
-            // UDP response is relayed to the client, which retries over TCP
-            // itself). DoT/DoH carry the SNI / HTTP path inside the
-            // per-connection ProtocolConfig. The resolved address' port is
-            // propagated onto the connection.
-            let ns_cfg = match &spec.kind {
-                UpstreamKind::Udp => {
-                    let mut udp = ConnectionConfig::udp();
-                    udp.port = addr.port();
-                    NameServerConfig::new(addr.ip(), true, vec![udp])
-                }
-                UpstreamKind::Tls { sni } => {
-                    let mut c = ConnectionConfig::tls(Arc::from(sni.as_str()));
-                    c.port = addr.port();
-                    NameServerConfig::new(addr.ip(), true, vec![c])
-                }
-                UpstreamKind::Https { sni, path } => {
-                    let mut c = ConnectionConfig::https(
-                        Arc::from(sni.as_str()),
-                        Some(Arc::from(path.as_str())),
-                    );
-                    c.port = addr.port();
-                    NameServerConfig::new(addr.ip(), true, vec![c])
-                }
-            };
-
-            // Connections are established lazily on first use, so constructing
-            // the pool performs no network I/O here.
-            let pool = NameServerPool::from_config([ns_cfg], cx.clone(), provider.clone());
-            entries[idx] = Some(UpstreamEntry {
-                label: server,
-                pool,
-            });
-        }
-
-        let latencies = (0..config.servers.len())
-            .map(|_| AtomicU64::new(NO_LATENCY.to_bits()))
-            .collect();
-
         Self {
-            config,
-            entries,
+            upstreams: ArcSwap::from_pointee(build_upstreams(config).await),
             strategy: ArcSwap::from_pointee(UpstreamStrategy::default()),
             rr_counter: AtomicUsize::new(0),
-            latencies,
             dnssec_enabled: AtomicBool::new(true),
         }
+    }
+
+    /// Atomically replace the upstream set with `servers`, with no restart and
+    /// no query interruption. The current timeout is preserved. DNS-resolution
+    /// failures for individual hosts are tolerated (logged, left unavailable),
+    /// exactly as `new` handles them.
+    pub async fn reconfigure(&self, servers: Vec<String>) {
+        let timeout_ms = self.upstreams.load().config.timeout_ms;
+        let next = build_upstreams(UpstreamConfig {
+            servers,
+            timeout_ms,
+        })
+        .await;
+        self.upstreams.store(Arc::new(next));
     }
 
     /// Get the current strategy.
@@ -399,7 +423,8 @@ impl UpstreamForwarder {
     /// labels) to avoid a per-query allocation; callers that need a
     /// label can read `entries[idx].label`.
     pub fn server_order(&self) -> Vec<usize> {
-        let len = self.entries.len();
+        let up = self.upstreams.load();
+        let len = up.entries.len();
         if len == 0 {
             return vec![];
         }
@@ -413,8 +438,8 @@ impl UpstreamForwarder {
             UpstreamStrategy::LowestLatency => {
                 let mut order: Vec<usize> = (0..len).collect();
                 order.sort_by(|&a, &b| {
-                    let la = self.latency_ms_at(a);
-                    let lb = self.latency_ms_at(b);
+                    let la = f64::from_bits(up.latencies[a].load(Ordering::Relaxed));
+                    let lb = f64::from_bits(up.latencies[b].load(Ordering::Relaxed));
                     la.total_cmp(&lb)
                 });
                 order
@@ -425,7 +450,8 @@ impl UpstreamForwarder {
     /// Read the EMA latency for the upstream at `idx`, in milliseconds.
     /// Returns `f64::INFINITY` when no observation has been recorded yet.
     fn latency_ms_at(&self, idx: usize) -> f64 {
-        f64::from_bits(self.latencies[idx].load(Ordering::Relaxed))
+        let up = self.upstreams.load();
+        f64::from_bits(up.latencies[idx].load(Ordering::Relaxed))
     }
 
     /// Update the EMA latency for the upstream at `idx`. Concurrent
@@ -433,7 +459,8 @@ impl UpstreamForwarder {
     /// always computed from the most recent stored value rather than a
     /// stale local copy.
     pub fn update_latency(&self, idx: usize, ms: f64) {
-        let cell = &self.latencies[idx];
+        let up = self.upstreams.load();
+        let cell = &up.latencies[idx];
         let mut prev_bits = cell.load(Ordering::Relaxed);
         loop {
             let prev = f64::from_bits(prev_bits);
@@ -458,7 +485,8 @@ impl UpstreamForwarder {
     /// Servers without any observation yet are omitted (matches the
     /// previous `Mutex<HashMap>`-backed behavior).
     pub fn latencies(&self) -> HashMap<String, f64> {
-        self.config
+        let up = self.upstreams.load();
+        up.config
             .servers
             .iter()
             .enumerate()
@@ -477,6 +505,10 @@ impl UpstreamForwarder {
     ///
     /// Returns `(response_bytes, upstream_address)` on success.
     pub async fn forward(&self, query_bytes: &[u8]) -> Result<(Vec<u8>, String), ForwardError> {
+        // Snapshot the upstream set for the duration of this query. Using
+        // `load_full` (Arc) rather than `load` (Guard) so the reference
+        // can be held across `.await` points on the multi-threaded runtime.
+        let up = self.upstreams.load_full();
         // Parse incoming wire bytes once. We need a hickory `Message` to
         // build a `DnsRequest`; the caller has already parsed this once
         // in the handler, but the forwarder API stays bytes-in / bytes-out
@@ -494,7 +526,7 @@ impl UpstreamForwarder {
         }
 
         for &idx in &order {
-            let Some(entry) = self.entries[idx].as_ref() else {
+            let Some(entry) = up.entries.get(idx).and_then(|e| e.as_ref()) else {
                 continue;
             };
 
@@ -560,9 +592,10 @@ impl UpstreamForwarder {
     /// Health check all configured upstream servers.
     /// Returns a list of (server, status, `latency_ms`).
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
-        let mut results = Vec::with_capacity(self.config.servers.len());
-        for (idx, server) in self.config.servers.iter().enumerate() {
-            let Some(entry) = self.entries[idx].as_ref() else {
+        let up = self.upstreams.load_full();
+        let mut results = Vec::with_capacity(up.config.servers.len());
+        for (idx, server) in up.config.servers.iter().enumerate() {
+            let Some(entry) = up.entries[idx].as_ref() else {
                 results.push((server.clone(), false, 0));
                 continue;
             };
@@ -576,7 +609,8 @@ impl UpstreamForwarder {
 
     /// Probe all servers and update EMA latencies. Used by background task.
     pub async fn probe_all(&self) {
-        for (idx, entry) in self.entries.iter().enumerate() {
+        let up = self.upstreams.load_full();
+        for (idx, entry) in up.entries.iter().enumerate() {
             let Some(entry) = entry else { continue };
             let start = std::time::Instant::now();
             if self.probe(entry).await.is_ok() {
@@ -889,5 +923,25 @@ mod tests {
             err.contains("not an address"),
             "error should name the bad entry: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_swaps_server_set_and_preserves_modes() {
+        let f = make_forwarder(UpstreamStrategy::RoundRobin).await; // 3x 10.0.0.x:53
+        f.set_dnssec_enabled(false);
+        assert_eq!(f.server_order().len(), 3);
+
+        f.reconfigure(vec!["10.0.1.1:53".into(), "10.0.1.2:53".into()])
+            .await;
+
+        // new set is live: 2 servers, labels updated, latencies reset
+        assert_eq!(f.server_order().len(), 2);
+        let snap = f.latencies();
+        assert!(snap.is_empty(), "latencies reset on reconfigure");
+        f.update_latency(0, 5.0);
+        assert!(f.latencies().contains_key("10.0.1.1:53"));
+        // independent modes survive the swap
+        assert_eq!(f.strategy(), UpstreamStrategy::RoundRobin);
+        assert!(!f.dnssec_enabled());
     }
 }
