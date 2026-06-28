@@ -3675,9 +3675,13 @@ class SettingsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
-        <div class="input-row"><input type="text" id="s-upstream" placeholder="1.1.1.1:53, tls://dns.mullvad.net:853, https://example.net/dns-query"></div>
-        <button class="btn btn-sm" id="check-upstream" style="margin-top:8px">${icons.refresh} Check Health</button>
-        <div id="upstream-health" style="margin-top:12px"></div>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code style="color:var(--accent)">ip:port</code>, <code style="color:var(--accent)">tls://host</code> (DoT), or <code style="color:var(--accent)">https://host/dns-query</code> (DoH)</p>
+        <textarea id="s-upstream" rows="4" style="width:100%;font-family:var(--font-mono);font-size:0.82rem" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853"></textarea>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
+          <button class="btn btn-sm btn-primary" id="apply-upstream">${icons.refresh} Save &amp; apply</button>
+          <span id="upstream-apply-msg" style="font-size:0.8rem"></span>
+        </div>
+        <div id="upstream-health" style="margin-top:14px"></div>
         <div class="card-title" style="margin-top:16px">Strategy</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
           How upstream servers are selected for each DNS query.
@@ -3739,7 +3743,6 @@ class SettingsPage extends HTMLElement {
 
     this.querySelector('#save-settings').onclick = async () => {
       const settings = {
-        upstream_servers: this.querySelector('#s-upstream').value,
         upstream_strategy: this.querySelector('#s-strategy').value,
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
@@ -3750,27 +3753,31 @@ class SettingsPage extends HTMLElement {
       setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
     };
 
-    this.querySelector('#check-upstream').onclick = async () => {
-      const btn = this.querySelector('#check-upstream');
+    this.renderUpstreams = async () => {
       const el = this.querySelector('#upstream-health');
-      btn.disabled = true;
-      btn.innerHTML = icons.refresh + ' Checking...';
       try {
-        const results = await api.get('/api/upstream/health');
-        let html = '<div class="table-wrap"><table><thead><tr><th>Server</th><th>Status</th><th>Latency</th></tr></thead><tbody>';
-        for (const r of results) {
-          const status = r.ok
-            ? '<span class="badge badge-allowed">OK</span>'
-            : '<span class="badge badge-blocked">FAIL</span>';
-          html += `<tr><td class="mono">${esc(r.server)}</td><td>${status}</td><td class="mono">${r.ok ? r.latency_ms + 'ms' : '-'}</td></tr>`;
-        }
-        html += '</tbody></table></div>';
-        el.innerHTML = html;
-      } catch (e) {
-        el.innerHTML = '<p style="color:var(--red)">Failed to check upstream health</p>';
-      }
-      btn.disabled = false;
-      btn.innerHTML = icons.refresh + ' Check Health';
+        const rows = await api.get('/api/upstream/health');
+        const transport = s => s.startsWith('tls://') ? ['dot','var(--accent)'] : s.startsWith('https://') ? ['doh','var(--accent)'] : ['plain','var(--orange)'];
+        el.innerHTML = `<div class="card-title" style="margin-bottom:6px">Active upstreams</div>
+          <div class="table-wrap"><table><thead><tr><th>Server</th><th>Transport</th><th>Health</th><th>Latency</th></tr></thead><tbody>` +
+          rows.map(r => { const [t,c] = transport(r.server); return `<tr>
+            <td class="mono">${esc(r.server)}</td>
+            <td><span class="badge" style="color:${c}">${t}</span></td>
+            <td><span class="st ${r.ok ? 'st-ok' : 'st-block'}">${r.ok ? '✔' : '✖'}</span></td>
+            <td class="mono">${r.ok ? r.latency_ms + 'ms' : '—'}</td></tr>`; }).join('') +
+          `</tbody></table></div>`;
+      } catch (e) { el.innerHTML = '<p style="color:var(--red)">Failed to load upstreams</p>'; }
+    };
+
+    this.querySelector('#apply-upstream').onclick = async () => {
+      const msg = this.querySelector('#upstream-apply-msg');
+      try {
+        const res = await fetch('/api/settings', { method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({ upstream_servers: this.querySelector('#s-upstream').value }) });
+        if (!res.ok) { msg.style.color = 'var(--red)'; msg.textContent = res.status === 400 ? 'Invalid upstream entry — not applied' : 'Failed to apply'; return; }
+        msg.style.color = 'var(--accent)'; msg.textContent = '✔ applied';
+        await this.renderUpstreams();
+        setTimeout(() => { msg.textContent = ''; }, 2500);
+      } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
     this.querySelector('#s-doh-policy').onchange = async (e) => {
@@ -3803,7 +3810,8 @@ class SettingsPage extends HTMLElement {
         api.get('/api/settings'),
         api.get('/api/server-info'),
       ]);
-      if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers;
+      if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers.replace(/,\s*/g, '\n');
+      this.renderUpstreams();
       if (s.public_url) this.querySelector('#s-public-url').value = s.public_url;
       if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
