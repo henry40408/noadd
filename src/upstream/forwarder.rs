@@ -512,6 +512,11 @@ impl UpstreamForwarder {
                         };
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         self.update_latency(idx, ms);
+                        // Reconstruct a minimal DNS response for NXDOMAIN / NODATA.
+                        // The AD bit is NOT set here even if the upstream validated the
+                        // negative answer: hickory's `NoRecordsFound` struct does not
+                        // expose an authentic-data field (see docs/superpowers/specs/
+                        // 2026-06-28-dnssec-transparency-design.md "Known limitations").
                         let mut response = Message::response(client_id, OpCode::Query);
                         response.metadata.response_code = rcode;
                         response.metadata.recursion_desired = true;

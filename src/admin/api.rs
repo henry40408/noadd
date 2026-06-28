@@ -706,6 +706,7 @@ async fn get_settings(
         "doh_access_policy",
         "public_url",
         "onboarding_banner_dismissed",
+        "dnssec_disabled",
     ];
     let mut settings = std::collections::HashMap::new();
 

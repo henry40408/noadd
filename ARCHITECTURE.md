@@ -38,7 +38,7 @@ Filter runs **before** cache so newly added block rules take effect immediately.
 
 ### DNSSEC Transparency
 
-When DNSSEC transparency is enabled (the default, toggled via the `dnssec_disabled` runtime setting in the Settings page), the upstream forwarder upserts an EDNS OPT record with the DO (DNSSEC OK) bit set and a UDP payload size of 1232 before forwarding each query. The handler then reads the Authenticated Data (AD) bit from byte 3 of the upstream response (`response_bytes[3] & 0x20`) and stores it in `query_logs.authenticated_data`. This is **transparency, not local validation** — noadd does not verify DNSSEC signatures; the AD bit reflects the upstream resolver's verdict. Full hop-by-hop DNSSEC protection requires a `tls://` upstream and DoH to client devices.
+When DNSSEC transparency is enabled (the default, toggled via the `dnssec_disabled` runtime setting in the Settings page), the upstream forwarder upserts an EDNS OPT record with the DO (DNSSEC OK) bit set and a UDP payload size of 1232 before forwarding each query. The handler then reads the Authenticated Data (AD) bit from byte 3 of the upstream response (`response_bytes[3] & 0x20`) and stores it in `query_logs.authenticated_data`. This is **transparency, not local validation** — noadd does not verify DNSSEC signatures; the AD bit reflects the upstream resolver's verdict. Full hop-by-hop DNSSEC protection requires a `tls://` upstream and DoH to client devices. **Known limitation (v1):** NXDOMAIN and NODATA (empty-NOERROR) responses that hickory surfaces via `NoRecordsFound` are logged as `authenticated_data = false` even when the upstream validated the negative answer, because the `NoRecordsFound` struct in hickory 0.26 does not expose an authentic-data field.
 
 ## Source Layout
 

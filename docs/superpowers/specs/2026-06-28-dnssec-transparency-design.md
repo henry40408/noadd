@@ -13,6 +13,10 @@ This is explicitly **not** local cryptographic validation. noadd does not verify
 - No EDNS TCP Keepalive, no DoT/DoH changes.
 - No CLI flag for the toggle (it is a runtime DB setting — see below).
 
+## Known Limitations (v1)
+
+- **Authenticated negative answers (NXDOMAIN/NODATA) are logged as `authenticated_data = false`.** hickory 0.26 surfaces both NXDOMAIN and empty-NOERROR (NODATA) through `NetError::Dns(DnsError::NoRecordsFound(NoRecords { … }))`. The `NoRecords` struct does not carry an authentic-data flag, so the reconstructed response message in `src/upstream/forwarder.rs` cannot set the AD bit even when the upstream validated the negative answer. NODATA is common (e.g. AAAA queries for IPv4-only hosts), meaning the AD column under-reports on these paths. Fixing this requires hickory to expose AD in `NoRecords`.
+
 ## Behaviour & Configuration
 
 ### Runtime toggle (mechanism: DB setting, switchable in admin UI)
