@@ -361,6 +361,10 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .badge-allowed { color: var(--green); text-shadow: var(--glow); }
 .badge-cached { color: var(--orange); }
 .badge-off { color: var(--text-dim); }
+.badge-dnssec { color: var(--accent); text-shadow: var(--glow); }
+.st { font-size: 0.98rem; font-weight: 700; line-height: 1; display: inline-block; width: 1em; text-align: center; }
+.st-ok { color: var(--green); text-shadow: var(--glow); }
+.st-block { color: var(--red); text-shadow: var(--glow-red); }
 
 /* Buttons */
 .btn {
@@ -3216,7 +3220,7 @@ class LogsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Time</th><th>Query</th><th>Type</th><th>Client</th><th>Status</th><th></th><th>Source</th><th>ms</th>
+          <th>Time</th><th>Status</th><th>Query</th><th>Type</th><th>Client</th><th></th><th>Source</th><th>ms</th>
         </tr></thead><tbody id="log-body"></tbody></table></div>
         <div id="log-cards" class="show-mobile"></div>
         <div class="pagination" id="log-pagination"></div>
@@ -3278,10 +3282,10 @@ class LogsPage extends HTMLElement {
     } else {
       body.innerHTML = logs.map(l => `<tr>
         <td>${timeAgo(l.timestamp)}</td>
-        <td><div style="color:var(--text-primary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.domain)}">${esc(l.domain)}</div>${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
+        <td style="text-align:center"><span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}">${l.blocked ? '✖' : '✔'}</span></td>
+        <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${esc(l.domain)}">${esc(l.domain)}</span>${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}</div>${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
         <td class="mono">${esc(l.query_type)}</td>
         <td class="mono">${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.85rem">' + esc(l.doh_token) + '</span>' : ''}</td>
-        <td><span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span></td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
         <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span class="mono" style="font-size:0.9rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
         <td class="mono">${l.response_ms}</td>
@@ -3297,14 +3301,16 @@ class LogsPage extends HTMLElement {
     } else {
       cards.innerHTML = logs.map(l => `<div class="log-card">
         <div class="log-card-row1">
-          <span class="badge ${l.blocked ? 'badge-blocked' : 'badge-allowed'}">${l.blocked ? 'blocked' : 'allowed'}</span>
+          <span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}" style="flex:0 0 auto">${l.blocked ? '✖' : '✔'}</span>
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
+          ${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}
           <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
         ${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
         <div class="log-card-row2">
           <span class="lc-time">${timeAgo(l.timestamp)}</span>
           <span class="lc-type">${esc(l.query_type)}</span>
+          <span class="lc-client" style="color:var(--text-secondary)">${esc(l.client_ip)}</span>
           ${l.cached ? '<span class="lc-cached">cached</span>' : l.upstream ? '<span class="lc-up">' + esc(l.upstream) + '</span>' : ''}
           ${l.doh_token ? '<span class="lc-token">' + esc(l.doh_token) + '</span>' : ''}
           <span class="lc-ms">${l.response_ms}ms</span>
