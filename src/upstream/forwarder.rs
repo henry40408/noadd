@@ -220,6 +220,35 @@ fn ensure_dnssec_ok(msg: &mut Message) {
 /// the worst choice for `LowestLatency`.
 const NO_LATENCY: f64 = f64::INFINITY;
 
+/// Fold a new latency observation `ms` into the EMA stored in `cell`.
+///
+/// Operates on a borrowed cell so callers can write through the snapshot they
+/// already hold (`load_full`), rather than re-loading the live snapshot and
+/// risking an index into a different generation after a concurrent
+/// `reconfigure`. Concurrent updates on the same cell race via a CAS loop so
+/// the EMA is always computed from the most recent stored value rather than a
+/// stale local copy.
+fn update_latency_cell(cell: &AtomicU64, ms: f64) {
+    let mut prev_bits = cell.load(Ordering::Relaxed);
+    loop {
+        let prev = f64::from_bits(prev_bits);
+        let next = if prev.is_infinite() {
+            ms
+        } else {
+            EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * prev
+        };
+        match cell.compare_exchange_weak(
+            prev_bits,
+            next.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(actual) => prev_bits = actual,
+        }
+    }
+}
+
 /// The reconfigurable upstream set. Swapped atomically by `reconfigure`.
 /// `config.servers`, `entries`, and `latencies` are index-aligned.
 struct Upstreams {
@@ -449,6 +478,7 @@ impl UpstreamForwarder {
 
     /// Read the EMA latency for the upstream at `idx`, in milliseconds.
     /// Returns `f64::INFINITY` when no observation has been recorded yet.
+    #[cfg(test)]
     fn latency_ms_at(&self, idx: usize) -> f64 {
         let up = self.upstreams.load();
         f64::from_bits(up.latencies[idx].load(Ordering::Relaxed))
@@ -458,26 +488,14 @@ impl UpstreamForwarder {
     /// updates on the same index race via a CAS loop so the EMA is
     /// always computed from the most recent stored value rather than a
     /// stale local copy.
+    ///
+    /// Panic-safe across a concurrent `reconfigure`: indexing is bounds-checked
+    /// via `get`, so an `idx` that has been shrunk out of the live snapshot is a
+    /// silent no-op rather than an out-of-bounds panic.
     pub fn update_latency(&self, idx: usize, ms: f64) {
         let up = self.upstreams.load();
-        let cell = &up.latencies[idx];
-        let mut prev_bits = cell.load(Ordering::Relaxed);
-        loop {
-            let prev = f64::from_bits(prev_bits);
-            let next = if prev.is_infinite() {
-                ms
-            } else {
-                EMA_ALPHA * ms + (1.0 - EMA_ALPHA) * prev
-            };
-            match cell.compare_exchange_weak(
-                prev_bits,
-                next.to_bits(),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => prev_bits = actual,
-            }
+        if let Some(cell) = up.latencies.get(idx) {
+            update_latency_cell(cell, ms);
         }
     }
 
@@ -491,7 +509,11 @@ impl UpstreamForwarder {
             .iter()
             .enumerate()
             .filter_map(|(i, label)| {
-                let ms = self.latency_ms_at(i);
+                // Read from the single held snapshot. `i` is in range for
+                // `up.config.servers`, which is index-aligned with
+                // `up.latencies`, so this never races a concurrent
+                // `reconfigure` into a different generation.
+                let ms = f64::from_bits(up.latencies[i].load(Ordering::Relaxed));
                 if ms.is_finite() {
                     Some((label.clone(), ms))
                 } else {
@@ -536,7 +558,13 @@ impl UpstreamForwarder {
             match entry.pool.send(request).first_answer().await {
                 Ok(response) => {
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
-                    self.update_latency(idx, ms);
+                    // Write through the snapshot held for this query (`up`),
+                    // not the live one: `idx` already passed `up.entries.get`
+                    // above, so the same-generation cell is always in range,
+                    // and a post-swap write lands harmlessly in the old `Arc`.
+                    if let Some(cell) = up.latencies.get(idx) {
+                        update_latency_cell(cell, ms);
+                    }
 
                     // hickory rewrites txids for connection multiplexing,
                     // so the response message we get back may not echo the
@@ -564,7 +592,9 @@ impl UpstreamForwarder {
                             _ => ResponseCode::NXDomain,
                         };
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
-                        self.update_latency(idx, ms);
+                        if let Some(cell) = up.latencies.get(idx) {
+                            update_latency_cell(cell, ms);
+                        }
                         // Reconstruct a minimal DNS response for NXDOMAIN / NODATA.
                         // The AD bit is NOT set here even if the upstream validated the
                         // negative answer: hickory's `NoRecordsFound` struct does not
@@ -615,7 +645,12 @@ impl UpstreamForwarder {
             let start = std::time::Instant::now();
             if self.probe(entry).await.is_ok() {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                self.update_latency(idx, ms);
+                // Write through the held snapshot `up`; `idx` came from
+                // `up.entries.iter().enumerate()` so it is always in range
+                // for `up.latencies` of the same generation.
+                if let Some(cell) = up.latencies.get(idx) {
+                    update_latency_cell(cell, ms);
+                }
             }
         }
     }
@@ -923,6 +958,31 @@ mod tests {
             err.contains("not an address"),
             "error should name the bad entry: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn latency_write_after_shrinking_reconfigure_does_not_panic() {
+        // Regression for finding C1/I1: a latency write or `latencies()` read
+        // that re-loads the live snapshot and indexes by `idx` would panic if a
+        // concurrent `reconfigure` shrank the set during an in-flight query.
+        let f = make_forwarder(UpstreamStrategy::LowestLatency).await; // 3 servers
+        f.reconfigure(vec!["10.0.9.9:53".into()]).await; // shrink to 1
+
+        // idx 2 is now out of range for the live snapshot — must be a no-op,
+        // not an index-out-of-bounds panic.
+        f.update_latency(2, 5.0);
+
+        // And `latencies()` must not panic after the swap, and must reflect
+        // only the surviving generation.
+        let snap = f.latencies();
+        assert!(
+            !snap.contains_key("10.0.0.3:53"),
+            "stale-generation label must not leak into snapshot"
+        );
+
+        // Writing to a valid index on the new set still works.
+        f.update_latency(0, 7.0);
+        assert!(f.latencies().contains_key("10.0.9.9:53"));
     }
 
     #[tokio::test]
