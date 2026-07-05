@@ -1,13 +1,16 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+use tracing_subscriber::{
+    EnvFilter, Layer as _, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 /// Log output format.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum LogFormat {
-    /// Human-readable text (default)
     #[default]
-    Text,
-    /// Structured JSON (for Loki / Grafana / structured logging pipelines)
+    Full,
+    Compact,
+    Pretty,
     Json,
 }
 
@@ -48,7 +51,7 @@ pub struct CliArgs {
     pub acme_prod: bool,
 
     /// Log output format
-    #[arg(long, default_value = "text", env = "NOADD_LOG_FORMAT")]
+    #[arg(long, default_value = "full", env = "LOG_FORMAT")]
     pub log_format: LogFormat,
 
     /// Maximum concurrent in-flight DNS queries across UDP/TCP/DoH. Excess
@@ -86,4 +89,31 @@ pub struct CliArgs {
     /// header trust outside loopback.
     #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
     pub trusted_proxies: String,
+}
+
+/// Initialize the global `tracing` subscriber for the given log format.
+///
+/// Without `RUST_LOG` set, defaults to `error,noadd=info`: third-party crates
+/// are limited to ERROR while noadd's own INFO-level logs remain visible.
+pub fn init_tracing(format: LogFormat) {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error,noadd=info"));
+    let span_events = env_filter.max_level_hint().map_or(FmtSpan::CLOSE, |l| {
+        if l >= tracing::Level::DEBUG {
+            FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        }
+    });
+    let use_ansi = std::env::var_os("NO_COLOR").is_none();
+    let layer = tracing_subscriber::fmt::layer()
+        .with_span_events(span_events)
+        .with_ansi(use_ansi);
+    let layer = match format {
+        LogFormat::Full => layer.with_filter(env_filter).boxed(),
+        LogFormat::Compact => layer.compact().with_filter(env_filter).boxed(),
+        LogFormat::Pretty => layer.pretty().with_filter(env_filter).boxed(),
+        LogFormat::Json => layer.json().with_filter(env_filter).boxed(),
+    };
+    tracing_subscriber::registry().with(layer).init();
 }

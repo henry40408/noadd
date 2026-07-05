@@ -32,24 +32,7 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "noadd=info".into());
-
-    match args.log_format {
-        noadd::config::LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
-                .init();
-        }
-        noadd::config::LogFormat::Text => {
-            let use_color = std::env::var_os("NO_COLOR").is_none();
-            tracing_subscriber::fmt()
-                .with_ansi(use_color)
-                .with_env_filter(env_filter)
-                .init();
-        }
-    }
+    noadd::config::init_tracing(args.log_format);
 
     let db_path = args.db_path.to_str().unwrap_or("noadd.db");
     let db = Database::open(db_path).await?;
