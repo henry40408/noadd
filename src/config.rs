@@ -1,13 +1,17 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+use tracing_subscriber::{
+    EnvFilter, Layer, fmt::format::FmtSpan, layer::SubscriberExt, registry::LookupSpan,
+    util::SubscriberInitExt,
+};
 
 /// Log output format.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum LogFormat {
-    /// Human-readable text (default)
     #[default]
-    Text,
-    /// Structured JSON (for Loki / Grafana / structured logging pipelines)
+    Full,
+    Compact,
+    Pretty,
     Json,
 }
 
@@ -48,7 +52,7 @@ pub struct CliArgs {
     pub acme_prod: bool,
 
     /// Log output format
-    #[arg(long, default_value = "text", env = "NOADD_LOG_FORMAT")]
+    #[arg(long, default_value = "full", env = "LOG_FORMAT")]
     pub log_format: LogFormat,
 
     /// Maximum concurrent in-flight DNS queries across UDP/TCP/DoH. Excess
@@ -86,4 +90,108 @@ pub struct CliArgs {
     /// header trust outside loopback.
     #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
     pub trusted_proxies: String,
+}
+
+/// Environment filter for logging: honours `RUST_LOG`, otherwise defaults to
+/// `error,noadd=info` — third-party crates limited to ERROR while noadd's own
+/// INFO-level logs remain visible.
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error,noadd=info"))
+}
+
+/// Emit span-close events only when the max enabled level is DEBUG or more
+/// verbose (or unknown); at INFO and below they are pure noise.
+fn span_events_for(max_level: Option<tracing::level_filters::LevelFilter>) -> FmtSpan {
+    max_level.map_or(FmtSpan::CLOSE, |l| {
+        if l >= tracing::Level::DEBUG {
+            FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        }
+    })
+}
+
+/// Build the boxed `fmt` layer for the chosen output format, applying the
+/// env filter and honouring `NO_COLOR` for ANSI.
+fn build_fmt_layer<S>(
+    format: LogFormat,
+    env_filter: EnvFilter,
+    span_events: FmtSpan,
+) -> Box<dyn Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    let use_ansi = std::env::var_os("NO_COLOR").is_none();
+    let layer = tracing_subscriber::fmt::layer()
+        .with_span_events(span_events)
+        .with_ansi(use_ansi);
+    match format {
+        LogFormat::Full => layer.with_filter(env_filter).boxed(),
+        LogFormat::Compact => layer.compact().with_filter(env_filter).boxed(),
+        LogFormat::Pretty => layer.pretty().with_filter(env_filter).boxed(),
+        LogFormat::Json => layer.json().with_filter(env_filter).boxed(),
+    }
+}
+
+/// Initialize the global `tracing` subscriber for the given log format.
+///
+/// Without `RUST_LOG` set, defaults to `error,noadd=info`: third-party crates
+/// are limited to ERROR while noadd's own INFO-level logs remain visible.
+pub fn init_tracing(format: LogFormat) {
+    let env_filter = default_env_filter();
+    let span_events = span_events_for(env_filter.max_level_hint());
+    let layer = build_fmt_layer(format, env_filter, span_events);
+    tracing_subscriber::registry().with(layer).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn span_events_close_without_level_hint() {
+        assert_eq!(span_events_for(None), FmtSpan::CLOSE);
+    }
+
+    #[test]
+    fn span_events_off_at_info_and_below() {
+        assert_eq!(span_events_for(Some(LevelFilter::ERROR)), FmtSpan::NONE);
+        assert_eq!(span_events_for(Some(LevelFilter::WARN)), FmtSpan::NONE);
+        assert_eq!(span_events_for(Some(LevelFilter::INFO)), FmtSpan::NONE);
+    }
+
+    #[test]
+    fn span_events_close_at_debug_and_trace() {
+        assert_eq!(span_events_for(Some(LevelFilter::DEBUG)), FmtSpan::CLOSE);
+        assert_eq!(span_events_for(Some(LevelFilter::TRACE)), FmtSpan::CLOSE);
+    }
+
+    #[test]
+    fn default_env_filter_is_constructible() {
+        // Falls back to the built-in directive when RUST_LOG is unset in the
+        // test environment; must not panic either way.
+        let _ = default_env_filter().max_level_hint();
+    }
+
+    #[test]
+    fn build_fmt_layer_covers_every_format() {
+        for format in [
+            LogFormat::Full,
+            LogFormat::Compact,
+            LogFormat::Pretty,
+            LogFormat::Json,
+        ] {
+            let _: Box<dyn Layer<Registry> + Send + Sync> =
+                build_fmt_layer(format, EnvFilter::new("info"), FmtSpan::NONE);
+        }
+    }
+
+    #[test]
+    fn init_tracing_installs_global_subscriber() {
+        // nextest runs each test in its own process, so installing the global
+        // subscriber here does not clash with other tests.
+        init_tracing(LogFormat::Full);
+    }
 }
