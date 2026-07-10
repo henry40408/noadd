@@ -5,15 +5,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use hickory_proto::op::{
-    DnsRequest, DnsRequestOptions, Edns, Message, OpCode, Query, ResponseCode,
-};
+use hickory_proto::op::{DnsRequest, DnsRequestOptions, Edns, Message, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::xfer::{DnsHandle, FirstAnswer};
-use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::net::{DnsError, NetError, NoRecords};
 use hickory_resolver::{NameServerPool, PoolContext, TlsConfig};
 use thiserror::Error;
 use tracing::warn;
@@ -213,6 +211,59 @@ fn ensure_dnssec_ok(msg: &mut Message) {
         edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
         msg.set_edns(edns);
     }
+}
+
+/// Build the DNS response for an authoritative negative answer (NXDOMAIN or
+/// NODATA) that hickory surfaced as a [`NoRecords`] error.
+///
+/// Preserves the upstream's authority section — the SOA and any DNSSEC
+/// NSEC/RRSIG records — so downstream clients can negative-cache the answer
+/// per [RFC 2308]. Without the SOA a resolver such as iOS/mDNSResponder falls
+/// back to a short default negative TTL and re-queries the name on nearly
+/// every connection; that is measurably slow for IPv4-only hosts whose
+/// AAAA/HTTPS lookups are always NODATA. An EDNS OPT is echoed when the
+/// client's request carried one, as required by [RFC 6891 §6.1.1].
+///
+/// The AD bit is intentionally left unset: [`NoRecords`] does not expose an
+/// authenticated-data field (see docs/superpowers/specs/
+/// 2026-06-28-dnssec-transparency-design.md "Known limitations").
+///
+/// [RFC 2308]: https://www.rfc-editor.org/rfc/rfc2308
+/// [RFC 6891 §6.1.1]: https://www.rfc-editor.org/rfc/rfc6891#section-6.1.1
+fn build_negative_response(client_id: u16, no_records: &NoRecords, request: &Message) -> Message {
+    let mut response = Message::response(client_id, OpCode::Query);
+    response.metadata.response_code = no_records.response_code;
+    response.metadata.recursion_desired = true;
+    response.metadata.recursion_available = true;
+    for q in &request.queries {
+        response.add_query(q.clone());
+    }
+
+    // Carry the authority section so clients can negative-cache (RFC 2308).
+    // `authorities` is the full section hickory saw upstream (SOA plus any
+    // NSEC/RRSIG); `soa` is that same SOA extracted out of it. Prefer the full
+    // section when present and fall back to the bare SOA, so the SOA is added
+    // exactly once.
+    if let Some(authorities) = no_records.authorities.as_deref() {
+        for record in authorities {
+            response.add_authority(record.clone());
+        }
+    } else if let Some(soa) = no_records.soa.as_deref() {
+        response.add_authority(soa.clone().into_record_of_rdata());
+    }
+
+    // RFC 6891 §6.1.1: a response to a request that carried an OPT must also
+    // carry one (and §7: it must not otherwise). Mirror the client's DO bit and
+    // advertise our own payload size.
+    if let Some(client_edns) = request.edns.as_ref() {
+        let mut edns = Edns::new();
+        edns.set_version(0);
+        edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
+        edns.set_dnssec_ok(client_edns.flags().dnssec_ok);
+        response.set_edns(edns);
+    }
+
+    response
 }
 
 /// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
@@ -582,31 +633,15 @@ impl UpstreamForwarder {
                 Err(e) => {
                     // NXDOMAIN / NoError-with-no-records is a valid authoritative
                     // response, not an upstream failure.  hickory converts it to a
-                    // ProtoError so we reconstruct a proper DNS response and return
-                    // it immediately so the query gets logged by the handler.
-                    if e.is_no_records_found() {
-                        let rcode = match &e {
-                            NetError::Dns(DnsError::NoRecordsFound(no_records)) => {
-                                no_records.response_code
-                            }
-                            _ => ResponseCode::NXDomain,
-                        };
+                    // ProtoError so we reconstruct a proper DNS response (preserving
+                    // the SOA/authority section for client-side negative caching) and
+                    // return it immediately so the query gets logged by the handler.
+                    if let NetError::Dns(DnsError::NoRecordsFound(no_records)) = &e {
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         if let Some(cell) = up.latencies.get(idx) {
                             update_latency_cell(cell, ms);
                         }
-                        // Reconstruct a minimal DNS response for NXDOMAIN / NODATA.
-                        // The AD bit is NOT set here even if the upstream validated the
-                        // negative answer: hickory's `NoRecordsFound` struct does not
-                        // expose an authentic-data field (see docs/superpowers/specs/
-                        // 2026-06-28-dnssec-transparency-design.md "Known limitations").
-                        let mut response = Message::response(client_id, OpCode::Query);
-                        response.metadata.response_code = rcode;
-                        response.metadata.recursion_desired = true;
-                        response.metadata.recursion_available = true;
-                        for q in &request_msg.queries {
-                            response.add_query(q.clone());
-                        }
+                        let response = build_negative_response(client_id, no_records, &request_msg);
                         if let Ok(bytes) = response.to_bytes() {
                             return Ok((bytes, entry.label.clone()));
                         }
@@ -708,6 +743,8 @@ impl UpstreamForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::op::ResponseCode;
+    use hickory_proto::rr::Record;
 
     #[test]
     fn ensure_dnssec_ok_adds_opt_when_absent() {
@@ -731,6 +768,103 @@ mod tests {
         assert!(edns.flags().dnssec_ok);
         // existing larger payload preserved (>= 1232)
         assert_eq!(edns.max_payload(), 4096);
+    }
+
+    fn example_soa() -> Record<hickory_proto::rr::rdata::SOA> {
+        use hickory_proto::rr::rdata::SOA;
+        let soa = SOA::new(
+            Name::from_ascii("ns1.example.com.").unwrap(),
+            Name::from_ascii("hostmaster.example.com.").unwrap(),
+            2026042954,
+            1200,
+            144,
+            1_814_400,
+            7200,
+        );
+        Record::from_rdata(Name::from_ascii("example.com.").unwrap(), 7200, soa)
+    }
+
+    #[test]
+    fn negative_response_preserves_soa_in_authority() {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        let mut request = Message::query();
+        request.add_query(Query::query(name.clone(), RecordType::AAAA));
+
+        let mut no_records =
+            NoRecords::new(Query::query(name, RecordType::AAAA), ResponseCode::NoError);
+        no_records.soa = Some(Box::new(example_soa()));
+
+        let response = build_negative_response(0x1234, &no_records, &request);
+
+        assert_eq!(response.metadata.id, 0x1234);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(
+            response.authorities.len(),
+            1,
+            "the SOA must be carried in the authority section so clients can negative-cache"
+        );
+        assert_eq!(response.authorities[0].record_type(), RecordType::SOA);
+    }
+
+    #[test]
+    fn negative_response_uses_full_authority_section_without_duplicating_soa() {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        let mut request = Message::query();
+        request.add_query(Query::query(name.clone(), RecordType::AAAA));
+
+        // hickory populates both fields: `soa` is extracted from the same
+        // authority section it also exposes via `authorities`. We must not add
+        // the SOA twice.
+        let soa = example_soa();
+        let mut no_records =
+            NoRecords::new(Query::query(name, RecordType::AAAA), ResponseCode::NoError);
+        no_records.soa = Some(Box::new(soa.clone()));
+        no_records.authorities = Some(vec![soa.into_record_of_rdata()].into());
+
+        let response = build_negative_response(0x1234, &no_records, &request);
+
+        assert_eq!(
+            response.authorities.len(),
+            1,
+            "SOA present in both fields must appear exactly once"
+        );
+        assert_eq!(response.authorities[0].record_type(), RecordType::SOA);
+    }
+
+    #[test]
+    fn negative_response_echoes_opt_when_client_used_edns() {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        let mut request = Message::query();
+        request.add_query(Query::query(name.clone(), RecordType::HTTPS));
+        let mut client_edns = Edns::new();
+        client_edns.set_version(0);
+        client_edns.set_max_payload(1232);
+        request.set_edns(client_edns);
+
+        let no_records =
+            NoRecords::new(Query::query(name, RecordType::HTTPS), ResponseCode::NoError);
+        let response = build_negative_response(0x1234, &no_records, &request);
+
+        assert!(
+            response.edns.is_some(),
+            "RFC 6891 §6.1.1: a response to an EDNS request must carry an OPT"
+        );
+    }
+
+    #[test]
+    fn negative_response_omits_opt_when_client_sent_none() {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        let mut request = Message::query();
+        request.add_query(Query::query(name.clone(), RecordType::HTTPS));
+
+        let no_records =
+            NoRecords::new(Query::query(name, RecordType::HTTPS), ResponseCode::NoError);
+        let response = build_negative_response(0x1234, &no_records, &request);
+
+        assert!(
+            response.edns.is_none(),
+            "RFC 6891 §7: no OPT in the response when the client sent none"
+        );
     }
 
     #[tokio::test]
