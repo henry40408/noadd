@@ -40,6 +40,10 @@ Filter runs **before** cache so newly added block rules take effect immediately.
 
 When DNSSEC transparency is enabled (the default, toggled via the `dnssec_disabled` runtime setting in the Settings page), the upstream forwarder upserts an EDNS OPT record with the DO (DNSSEC OK) bit set and a UDP payload size of 1232 before forwarding each query. The handler then reads the Authenticated Data (AD) bit from byte 3 of the upstream response (`response_bytes[3] & 0x20`) and stores it in `query_logs.authenticated_data`. This is **transparency, not local validation** — noadd does not verify DNSSEC signatures; the AD bit reflects the upstream resolver's verdict. Full hop-by-hop DNSSEC protection requires a `tls://` upstream and DoH to client devices. **Known limitation (v1):** NXDOMAIN and NODATA (empty-NOERROR) responses that hickory surfaces via `NoRecordsFound` are logged as `authenticated_data = false` even when the upstream validated the negative answer, because the `NoRecordsFound` struct in hickory 0.26 does not expose an authentic-data field.
 
+### Negative Responses (NXDOMAIN / NODATA)
+
+hickory reports an authoritative negative answer as a `NoRecordsFound` error rather than a `Message`, so the forwarder reconstructs the wire response in `build_negative_response` (`src/upstream/forwarder.rs`). It carries over the upstream's **authority section** — the SOA plus any DNSSEC NSEC/RRSIG records — so clients can negative-cache the answer per [RFC 2308](https://www.rfc-editor.org/rfc/rfc2308); without the SOA, resolvers such as iOS/mDNSResponder fall back to a short default negative TTL and re-query the name on nearly every connection (costly for IPv4-only hosts whose AAAA/HTTPS lookups are always NODATA). An EDNS OPT is echoed only when the client's request carried one, per [RFC 6891 §6.1.1](https://www.rfc-editor.org/rfc/rfc6891#section-6.1.1). The AD bit remains unset (see the DNSSEC limitation above).
+
 ## Source Layout
 
 ```
