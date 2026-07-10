@@ -253,7 +253,8 @@ card, mirroring the DoH-tokens UI:
 
 1. **Docs endpoints stay open** (unauthenticated). `/api/docs` and
    `/api/openapi.json` expose only the API shape, no data; every underlying
-   endpoint still enforces auth.
+   endpoint still enforces auth. (Later changed: both endpoints now require
+   an authenticated operator, to minimize pre-auth recon.)
 2. **Key expiry is optional, UI defaults to "never"** (`expires_at` NULL).
 3. **Token shape**: `noadd_` prefix + 40 alphanumeric chars; the stored/displayed
    `prefix` is `noadd_` + the first 4 body chars.

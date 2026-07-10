@@ -157,7 +157,8 @@ curl -H "Authorization: Bearer noadd_XXXXXXXX…" \
 ```
 
 Interactive reference (OpenAPI / Scalar): open **`/api/docs`** on your instance;
-the raw spec is at **`/api/openapi.json`**.
+the raw spec is at **`/api/openapi.json`**. Both require the same
+authentication (session or API key) as the rest of the API.
 
 ## Development
 

@@ -199,14 +199,43 @@ async fn api_key_lifecycle_over_http() {
 }
 
 #[tokio::test]
-async fn docs_endpoints_are_public() {
-    let (app, _db) = build_app().await;
+async fn docs_endpoints_require_auth() {
+    let (app, db) = build_app().await;
+
+    let (full, prefix, hash) = generate_api_key();
+    db.insert_api_key(1, "test", &hash, &prefix, 0, None)
+        .await
+        .unwrap();
+
     for uri in ["/api/openapi.json", "/api/docs"] {
+        // No credentials -> 401.
         let res = app
             .clone()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK, "{uri} should be public 200");
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should require auth"
+        );
+
+        // Valid bearer key -> 200.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {full}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{uri} should be 200 with a valid key"
+        );
     }
 }

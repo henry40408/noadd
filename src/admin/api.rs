@@ -17,7 +17,7 @@ use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 use utoipa::OpenApi as _;
-use utoipa_scalar::{Scalar, Servable};
+use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, hash_api_key, hash_password,
@@ -119,11 +119,21 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
-/// Serve the raw `OpenAPI` document. Unauthenticated: it exposes only the schema
-/// shape, never any data.
-async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
-    use utoipa::OpenApi;
+/// Serve the raw `OpenAPI` document.
+///
+/// Requires an operator (session or API key). It exposes only the schema
+/// shape, never any data, but recon of the API surface itself is still
+/// gated on this security appliance.
+async fn openapi_json(_auth: AuthedUser) -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
+}
+
+/// Serve the interactive Scalar API reference.
+///
+/// Requires an operator (session or API key), for the same reason as
+/// `GET /api/openapi.json`.
+async fn scalar_docs(_auth: AuthedUser) -> axum::response::Html<String> {
+    axum::response::Html(Scalar::new(ApiDoc::openapi()).to_html())
 }
 
 pub fn admin_router(state: AppState) -> Router {
@@ -191,9 +201,10 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Apple touch icon (rendered from favicon.svg at build time)
         .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
-        // OpenAPI spec + Scalar docs UI (unauthenticated: schema only, no data)
+        // OpenAPI spec + Scalar docs UI (schema only, no data — but still
+        // gated: this is a security appliance and we minimize pre-auth recon)
         .route("/api/openapi.json", get(openapi_json))
-        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
+        .route("/api/docs", get(scalar_docs))
         .fallback(serve_static)
         .with_state(state)
 }
