@@ -10,23 +10,39 @@ use crate::db::{
 /// to this, so the admin UI shows the retention that is actually in effect.
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Summary {
+    /// Total queries handled since local midnight today.
     pub total_today: i64,
+    /// Queries blocked by the filter engine since local midnight today.
     pub blocked_today: i64,
+    /// Total queries handled in the trailing 7 days.
     pub total_7d: i64,
+    /// Queries blocked in the trailing 7 days.
     pub blocked_7d: i64,
+    /// Total queries handled in the trailing 30 days.
     pub total_30d: i64,
+    /// Queries blocked in the trailing 30 days.
     pub blocked_30d: i64,
+    /// `blocked_today / total_today`, or `0` if there were no queries today.
     pub block_ratio_today: f64,
+    /// `blocked_7d / total_7d`, or `0` if there were no queries in the window.
     pub block_ratio_7d: f64,
+    /// `blocked_30d / total_30d`, or `0` if there were no queries in the window.
     pub block_ratio_30d: f64,
+    /// Fraction of today's queries answered from the DNS cache.
     pub cache_hit_rate_today: f64,
+    /// Fraction of the trailing-7-day queries answered from the DNS cache.
     pub cache_hit_rate_7d: f64,
+    /// Fraction of the trailing-30-day queries answered from the DNS cache.
     pub cache_hit_rate_30d: f64,
+    /// Average response time in milliseconds for today's queries.
     pub avg_response_ms_today: f64,
+    /// Average response time in milliseconds over the trailing 7 days.
     pub avg_response_ms_7d: f64,
+    /// Average response time in milliseconds over the trailing 30 days.
     pub avg_response_ms_30d: f64,
+    /// Queries handled in the last 60 seconds (a rough current-rate indicator).
     pub queries_1m: i64,
 }
 

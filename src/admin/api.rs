@@ -16,10 +16,12 @@ use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
+use utoipa::OpenApi as _;
+use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
-    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, store_session,
-    validate_session, verify_password,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_api_key, hash_password,
+    store_session, validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -60,11 +62,80 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct ServerInfo {
+    /// Address the plain-DNS listener is bound to, e.g. `0.0.0.0:53`.
     pub dns_addr: String,
+    /// Address the admin/DoH HTTP(S) listener is bound to.
     pub http_addr: String,
+    /// Whether the HTTP listener is serving TLS (ACME or user-provided certs).
     pub tls_enabled: bool,
+}
+
+/// `OpenAPI` document for the core programmatic subset of the admin API. Only the
+/// endpoints a script would drive (health, settings, lists, rules, filter check,
+/// stats summary, API keys) are annotated — the browser-only endpoints are not.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(title = "noadd API", description = "Programmatic access to noadd."),
+    paths(
+        health, get_server_info,
+        get_settings, put_settings,
+        get_lists, add_list, update_list, delete_list,
+        get_rules, add_rule, delete_rule,
+        filter_check, get_stats_summary,
+        get_logs, delete_logs,
+        list_api_keys, create_api_key, delete_api_key,
+    ),
+    components(schemas(
+        ServerInfo, HealthResponse, SettingsMap,
+        AddListRequest, AddListResponse, UpdateListRequest,
+        AddRuleRequest, AddRuleResponse,
+        FilterCheckRequest, CreateApiKeyRequest, CreateApiKeyResponse,
+        crate::db::CustomRuleRow, crate::db::FilterListRow, crate::db::ApiKeyRow,
+        crate::admin::stats::Summary,
+    )),
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "system"), (name = "settings"), (name = "lists"),
+        (name = "rules"), (name = "filter"), (name = "stats"), (name = "api-keys"),
+        (name = "logs"),
+    )
+)]
+struct ApiDoc;
+
+struct SecurityAddon;
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "api_key",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some("noadd API key: `Authorization: Bearer noadd_…`"))
+                    .build(),
+            ),
+        );
+    }
+}
+
+/// Serve the raw `OpenAPI` document.
+///
+/// Requires an operator (session or API key). It exposes only the schema
+/// shape, never any data, but recon of the API surface itself is still
+/// gated on this security appliance.
+async fn openapi_json(_auth: AuthedUser) -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+/// Serve the interactive Scalar API reference.
+///
+/// Requires an operator (session or API key), for the same reason as
+/// `GET /api/openapi.json`.
+async fn scalar_docs(_auth: AuthedUser) -> axum::response::Html<String> {
+    axum::response::Html(Scalar::new(ApiDoc::openapi()).to_html())
 }
 
 pub fn admin_router(state: AppState) -> Router {
@@ -110,6 +181,9 @@ pub fn admin_router(state: AppState) -> Router {
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
+        // API keys
+        .route("/api/api-keys", get(list_api_keys).post(create_api_key))
+        .route("/api/api-keys/{id}", delete(delete_api_key))
         // Stats
         .route("/api/stats/summary", get(get_stats_summary))
         .route("/api/stats/timeline", get(get_stats_timeline))
@@ -129,6 +203,10 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Apple touch icon (rendered from favicon.svg at build time)
         .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
+        // OpenAPI spec + Scalar docs UI (schema only, no data — but still
+        // gated: this is a security appliance and we minimize pre-auth recon)
+        .route("/api/openapi.json", get(openapi_json))
+        .route("/api/docs", get(scalar_docs))
         .fallback(serve_static)
         .with_state(state)
 }
@@ -273,8 +351,46 @@ fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), S
     }
 }
 
-fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
-    current_session(state, jar).map(|_| ())
+/// Extract a bearer token from the `Authorization` header, if present.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let v = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
+}
+
+/// An authenticated operator, resolved from either the browser `session` cookie
+/// or an `Authorization: Bearer <api key>` header. Downstream handlers depend
+/// only on `user_id`, so cookie and API-key requests are indistinguishable.
+pub struct AuthedUser {
+    pub user_id: i64,
+}
+
+impl axum::extract::FromRequestParts<AppState> for AuthedUser {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // 1. Session cookie (browser path).
+        let jar = CookieJar::from_headers(&parts.headers);
+        if let Some(cookie) = jar.get("session")
+            && let Some(user_id) = validate_session(&state.sessions, cookie.value())
+        {
+            return Ok(AuthedUser { user_id });
+        }
+        // 2. Bearer API key (programmatic path).
+        if let Some(token) = bearer_token(&parts.headers) {
+            let hash = hash_api_key(&token);
+            let now = crate::now_unix();
+            if let Ok(Some(user_id)) = state.db.validate_api_key(&hash, now).await {
+                return Ok(AuthedUser { user_id });
+            }
+        }
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // --- Auth endpoints ---
@@ -422,9 +538,8 @@ async fn setup(
 
 async fn revoke_all(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     crate::admin::auth::revoke_all_sessions(&state.sessions, &state.db)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -437,7 +552,7 @@ async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
-    require_auth(&state, &jar)?;
+    current_session(&state, &jar)?;
     if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
@@ -457,26 +572,24 @@ struct MeResponse {
 
 async fn get_me(
     State(state): State<AppState>,
-    jar: CookieJar,
+    auth: AuthedUser,
 ) -> Result<Json<MeResponse>, StatusCode> {
-    let (user_id, _token) = current_session(&state, &jar)?;
     let username = state
         .db
-        .get_username(user_id)
+        .get_username(auth.user_id)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Json(MeResponse {
-        id: user_id,
+        id: auth.user_id,
         username,
     }))
 }
 
 async fn list_users_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::UserRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let users = state
         .db
         .list_users()
@@ -493,10 +606,9 @@ struct CreateUserRequest {
 
 async fn create_user_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     let username = body.username.trim();
     if username.is_empty() || username.chars().count() > 64 {
         return Err(StatusCode::BAD_REQUEST);
@@ -520,10 +632,9 @@ async fn create_user_handler(
 
 async fn delete_user_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     // The last-operator guard and the delete run atomically inside the DB layer,
     // so two concurrent deletes can never drop the instance to zero operators.
     match state
@@ -656,16 +767,29 @@ async fn revoke_session_by_id(
 
 // --- Health ---
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
+    /// Always `"ok"` while the process is up and serving requests.
     pub status: String,
+    /// True when no operator account exists yet and `POST /api/auth/setup`
+    /// still needs to be called before the admin UI is usable.
     pub needs_setup: bool,
+    /// Build version string (from `git describe`).
     pub version: &'static str,
     /// Number of query-log events dropped because the async logger channel
     /// was saturated. Non-zero means query logging is incomplete.
     pub dropped_log_count: u64,
 }
 
+/// Report basic service health.
+///
+/// Always unauthenticated so monitoring and the setup wizard can call it
+/// before any operator exists. Includes whether initial setup is still
+/// pending and how many query-log events the async logger has dropped.
+#[utoipa::path(
+    get, path = "/api/health", tag = "system",
+    responses((status = 200, description = "Service health", body = HealthResponse))
+)]
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let needs_setup = state.db.count_users().await.is_ok_and(|n| n == 0);
     Json(HealthResponse {
@@ -676,28 +800,47 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+/// Get the server's bound addresses and TLS status.
+///
+/// Requires an operator (session or API key).
+#[utoipa::path(
+    get, path = "/api/server-info", tag = "system",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Server addresses and TLS status", body = ServerInfo))
+)]
 async fn get_server_info(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<ServerInfo>, StatusCode> {
-    require_auth(&state, &jar)?;
     Ok(Json(state.server_info.clone()))
 }
 
 // --- Settings ---
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingsMap {
+    /// Flattened key/value pairs, e.g. `upstream_servers`,
+    /// `upstream_strategy`, `log_retention_days`, `doh_access_policy`,
+    /// `public_url`, `dnssec_disabled`.
     #[serde(flatten)]
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Get the current runtime settings.
+///
+/// Requires an operator (session or API key). Only known setting keys
+/// (upstream servers/strategy, log retention, `DoH` access policy, public
+/// URL, DNSSEC toggle, etc.) are returned; unknown keys stored in the
+/// database are omitted.
+#[utoipa::path(
+    get, path = "/api/settings", tag = "settings",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Current settings", body = SettingsMap))
+)]
 async fn get_settings(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<SettingsMap>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Return known settings
     let keys = [
         "upstream_servers",
@@ -725,13 +868,28 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Update one or more runtime settings.
+///
+/// Requires an operator (session or API key). Only the keys present in the
+/// request body are changed; others are left untouched. `upstream_servers`
+/// is validated before anything is persisted, so a malformed value rejects
+/// the whole request with no partial write. Changes to `upstream_strategy`,
+/// `dnssec_disabled`, and `upstream_servers` take effect immediately, with
+/// no restart required.
+#[utoipa::path(
+    put, path = "/api/settings", tag = "settings",
+    security(("api_key" = [])),
+    request_body = SettingsMap,
+    responses(
+        (status = 200, description = "Settings saved"),
+        (status = 400, description = "Invalid setting value")
+    )
+)]
 async fn put_settings(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Validate upstream_servers before persisting anything — reject the whole
     // save on a bad entry so a broken value is never stored.
     let upstream_servers = match body.settings.get("upstream_servers") {
@@ -769,12 +927,19 @@ async fn put_settings(
 
 // --- Lists ---
 
+/// List all configured filter lists.
+///
+/// Requires an operator (session or API key). Includes both built-in and
+/// user-added lists, with their enabled state and last-updated rule count.
+#[utoipa::path(
+    get, path = "/api/lists", tag = "lists",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All filter lists", body = [crate::db::FilterListRow]))
+)]
 async fn get_lists(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::FilterListRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let lists = state
         .db
         .get_filter_lists()
@@ -784,24 +949,37 @@ async fn get_lists(
     Ok(Json(lists))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddListRequest {
+    /// Display name for the list.
     pub name: String,
+    /// URL the list's contents are fetched from.
     pub url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AddListResponse {
+    /// Id of the newly created filter list.
     pub id: i64,
 }
 
+/// Add a new filter list by URL.
+///
+/// Requires an operator (session or API key). The list is created enabled
+/// but its content is not fetched synchronously; use `POST
+/// /api/lists/update` (or wait for the periodic refresh) to download it and
+/// rebuild the filter engine.
+#[utoipa::path(
+    post, path = "/api/lists", tag = "lists",
+    security(("api_key" = [])),
+    request_body = AddListRequest,
+    responses((status = 201, description = "List created", body = AddListResponse))
+)]
 async fn add_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddListRequest>,
 ) -> Result<(StatusCode, Json<AddListResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
     let id = state
         .db
         .add_filter_list(&body.name, &body.url, true)
@@ -811,21 +989,36 @@ async fn add_list(
     Ok((StatusCode::CREATED, Json(AddListResponse { id })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateListRequest {
+    /// If present, enables or disables the list.
     pub enabled: Option<bool>,
+    /// New display name; only applied if `url` is also present.
     pub name: Option<String>,
+    /// New source URL; only applied if `name` is also present.
     pub url: Option<String>,
 }
 
+/// Update a filter list's enabled state, name, and/or URL.
+///
+/// Requires an operator (session or API key). All fields are optional and
+/// independent: `enabled` toggles the list without touching name/url, and
+/// name/url are only changed if both are provided together. Triggers an
+/// async filter-engine rebuild so an enable/disable takes effect shortly
+/// after the response returns.
+#[utoipa::path(
+    put, path = "/api/lists/{id}", tag = "lists",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "List id")),
+    request_body = UpdateListRequest,
+    responses((status = 200, description = "List updated"))
+)]
 async fn update_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
     Json(body): Json<UpdateListRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     if let Some(enabled) = body.enabled {
         state
             .db
@@ -854,12 +1047,10 @@ pub struct CheckListUrlRequest {
 
 async fn check_list_url(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
     body: Option<Json<CheckListUrlRequest>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Use provided URL or fetch from DB
     let url = if let Some(Json(b)) = body
         && let Some(u) = b.url
@@ -903,13 +1094,22 @@ async fn check_list_url(
     }
 }
 
+/// Delete a filter list.
+///
+/// Requires an operator (session or API key). Triggers an async filter-engine
+/// rebuild so the list's rules stop applying shortly after the response
+/// returns.
+#[utoipa::path(
+    delete, path = "/api/lists/{id}", tag = "lists",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "List id")),
+    responses((status = 200, description = "List deleted"))
+)]
 async fn delete_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_filter_list(id)
@@ -928,10 +1128,8 @@ pub struct ListUpdateResponse {
 
 async fn trigger_list_update(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<ListUpdateResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .list_manager
         .update_all_lists_no_rebuild()
@@ -955,9 +1153,8 @@ struct RebuildStatusResponse {
 
 async fn get_rebuild_status(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<RebuildStatusResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
     let s = state.rebuild.state();
     Ok(Json(RebuildStatusResponse {
         rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
@@ -1005,10 +1202,9 @@ pub struct BatchAddResponse {
 
 async fn batch_add_lists(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<BatchAddRequest>,
 ) -> Result<Json<BatchAddResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
     if body.items.is_empty() || body.items.len() > 50 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1108,9 +1304,8 @@ async fn batch_add_lists(
 
 async fn get_registry_filters(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<crate::registry::RegistryData>, StatusCode> {
-    require_auth(&state, &jar)?;
     match state.registry.list().await {
         Ok(data) => Ok(Json(data)),
         Err(e) => {
@@ -1122,22 +1317,32 @@ async fn get_registry_filters(
 
 // --- Rules ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddRuleRequest {
+    /// Rule text in hosts-file or Adblock-style syntax, e.g.
+    /// `ads.example.com` or `@@allow.example.com`.
     pub rule: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AddRuleResponse {
+    /// Id of the created rule, or `0` if it already existed.
     pub id: i64,
 }
 
+/// List all custom allow/block rules.
+///
+/// Requires an operator (session or API key). Returned in the same syntax
+/// used to add them (hosts-file / Adblock-style lines).
+#[utoipa::path(
+    get, path = "/api/rules", tag = "rules",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All custom rules", body = [crate::db::CustomRuleRow]))
+)]
 async fn get_rules(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let rules = state
         .db
         .get_all_custom_rules()
@@ -1147,13 +1352,28 @@ async fn get_rules(
     Ok(Json(rules))
 }
 
+/// Add a custom allow/block rule.
+///
+/// Requires an operator (session or API key). No-op (200, `id: 0`) if the
+/// exact rule text already exists rather than erroring; a genuinely new rule
+/// returns 201 with its id. Rejects text that doesn't parse as a rule (400).
+/// Triggers an async filter-engine rebuild so the rule takes effect shortly
+/// after the response returns.
+#[utoipa::path(
+    post, path = "/api/rules", tag = "rules",
+    security(("api_key" = [])),
+    request_body = AddRuleRequest,
+    responses(
+        (status = 201, description = "Rule created", body = AddRuleResponse),
+        (status = 200, description = "Rule already existed", body = AddRuleResponse),
+        (status = 400, description = "Unparseable rule")
+    )
+)]
 async fn add_rule(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddRuleRequest>,
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
     let rule_type = match crate::filter::parser::parse_rule(&body.rule) {
         Some(parsed) => match parsed.action {
             crate::filter::parser::RuleAction::Allow => "allow",
@@ -1183,13 +1403,22 @@ async fn add_rule(
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
+/// Delete a custom allow/block rule.
+///
+/// Requires an operator (session or API key). Triggers an async
+/// filter-engine rebuild so the removal takes effect shortly after the
+/// response returns.
+#[utoipa::path(
+    delete, path = "/api/rules/{id}", tag = "rules",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "Rule id")),
+    responses((status = 200, description = "Deleted"))
+)]
 async fn delete_rule(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_custom_rule(id)
@@ -1205,9 +1434,8 @@ async fn delete_rule(
 
 async fn get_doh_tokens(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::DohTokenRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let tokens = state
         .db
         .get_doh_tokens()
@@ -1223,10 +1451,9 @@ pub struct AddDohTokenRequest {
 
 async fn add_doh_token(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddDohTokenRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
     let token = body.token.trim().to_string();
     if token.is_empty() || token.contains('/') {
         return Err(StatusCode::BAD_REQUEST);
@@ -1241,10 +1468,9 @@ async fn add_doh_token(
 
 async fn delete_doh_token_endpoint(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     state
         .db
         .delete_doh_token(id)
@@ -1253,19 +1479,151 @@ async fn delete_doh_token_endpoint(
     Ok(StatusCode::OK)
 }
 
+// --- API Keys ---
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CreateApiKeyRequest {
+    /// Human-readable label for the key (1-64 characters), e.g. `"ci"`.
+    pub name: String,
+    /// Optional Unix timestamp (seconds) after which the key stops working.
+    /// Omit or `null` for a key that never expires.
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct CreateApiKeyResponse {
+    /// Id of the newly created key.
+    pub id: i64,
+    /// The label given at creation time.
+    pub name: String,
+    /// Short, non-secret prefix used to identify the key afterwards.
+    pub prefix: String,
+    /// Full secret — shown only in this create response, never again.
+    pub token: String,
+}
+
+/// List the caller's own API keys.
+///
+/// Requires an operator (session or API key). Scoped to the authenticated
+/// caller — never returns another operator's keys. Only metadata is
+/// returned; the secret token itself is never shown again after creation.
+#[utoipa::path(
+    get, path = "/api/api-keys", tag = "api-keys",
+    security(("api_key" = [])),
+    responses((status = 200, description = "API keys for the caller", body = [crate::db::ApiKeyRow]))
+)]
+async fn list_api_keys(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+) -> Result<Json<Vec<crate::db::ApiKeyRow>>, StatusCode> {
+    let keys = state
+        .db
+        .list_api_keys_for_user(auth.user_id)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(keys))
+}
+
+/// Create a new API key for the calling operator.
+///
+/// Requires an operator (session or API key). The full secret `token` is
+/// returned only in this response — it is never shown or recoverable again,
+/// only the `prefix` is retained for identification afterwards. The new key
+/// inherits the caller's permissions.
+#[utoipa::path(
+    post, path = "/api/api-keys", tag = "api-keys",
+    security(("api_key" = [])),
+    request_body = CreateApiKeyRequest,
+    responses(
+        (status = 201, description = "API key created; token shown once", body = CreateApiKeyResponse),
+        (status = 400, description = "Invalid name")
+    )
+)]
+async fn create_api_key(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+    Json(body): Json<CreateApiKeyRequest>,
+) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let (full, prefix, hash) = crate::admin::auth::generate_api_key();
+    let now = crate::now_unix();
+    let id = state
+        .db
+        .insert_api_key(auth.user_id, &name, &hash, &prefix, now, body.expires_at)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateApiKeyResponse {
+            id,
+            name,
+            prefix,
+            token: full,
+        }),
+    ))
+}
+
+/// Delete one of the caller's own API keys.
+///
+/// Requires an operator (session or API key). Scoped to the authenticated
+/// caller — deleting an id owned by another operator returns 404 rather
+/// than revealing it exists.
+#[utoipa::path(
+    delete, path = "/api/api-keys/{id}", tag = "api-keys",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "API key id")),
+    responses(
+        (status = 200, description = "Deleted"),
+        (status = 404, description = "Not found or not owned by caller")
+    )
+)]
+async fn delete_api_key(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    let deleted = state
+        .db
+        .delete_api_key(id, auth.user_id)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if deleted {
+        Ok(StatusCode::OK)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
 // --- Filter Check ---
 
-#[derive(Deserialize)]
-struct FilterCheckRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct FilterCheckRequest {
+    /// Domain to evaluate, e.g. `"ads.example.com"`. A trailing dot is
+    /// stripped before matching.
     domain: String,
 }
 
+/// Check what the filter engine would decide for a domain, without querying DNS.
+///
+/// Requires an operator (session or API key). Evaluates against the live,
+/// currently-loaded filter engine (custom rules + enabled lists). The
+/// response is an untyped JSON verdict: `{"action": "blocked", "rule":
+/// ..., "list": ...}` or `{"action": "allowed", "rule": ...}` (rule
+/// omitted when no explicit allow rule matched).
+#[utoipa::path(
+    post, path = "/api/filter/check", tag = "filter",
+    security(("api_key" = [])),
+    request_body = FilterCheckRequest,
+    responses((status = 200, description = "Filter decision for the domain", body = serde_json::Value))
+)]
 async fn filter_check(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<FilterCheckRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
     let domain = body.domain.trim().trim_end_matches('.');
     let filter = state.filter.load();
     let result = filter.check(domain);
@@ -1291,9 +1649,8 @@ async fn filter_check(
 
 async fn upstream_health(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let results = state.forwarder.health_check().await;
     let json: Vec<serde_json::Value> = results
         .into_iter()
@@ -1312,9 +1669,8 @@ async fn upstream_health(
 
 async fn upstream_latency(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let latencies = state.forwarder.latencies();
     let strategy = state.forwarder.strategy();
 
@@ -1343,12 +1699,20 @@ async fn upstream_latency(
 
 // --- Stats ---
 
+/// Get aggregate query statistics for today, the last 7 days, and the last 30 days.
+///
+/// Requires an operator (session or API key). Includes totals, block ratio,
+/// cache hit rate, average response time per window, plus the query rate
+/// over the last minute.
+#[utoipa::path(
+    get, path = "/api/stats/summary", tag = "stats",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Aggregate query statistics", body = crate::admin::stats::Summary))
+)]
 async fn get_stats_summary(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<stats::Summary>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let summary = stats::compute_summary(&state.db, now)
         .await
@@ -1364,11 +1728,9 @@ pub struct TimelineQuery {
 
 async fn get_stats_timeline(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TimelineQuery>,
 ) -> Result<Json<Vec<crate::db::TimelinePoint>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let hours = query.hours.unwrap_or(24);
     let timeline = stats::compute_timeline(&state.db, now, hours)
@@ -1385,11 +1747,9 @@ pub struct TopQuery {
 
 async fn get_stats_top_domains(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let domains = stats::compute_top_domains(&state.db, now, limit)
@@ -1401,11 +1761,9 @@ async fn get_stats_top_domains(
 
 async fn get_stats_top_clients(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let clients = stats::compute_top_clients(&state.db, now, limit)
@@ -1417,11 +1775,9 @@ async fn get_stats_top_clients(
 
 async fn get_stats_top_upstreams(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopUpstream>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(10);
     let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
@@ -1456,10 +1812,9 @@ fn resolve_tz_offset_secs(q: &StatsRangeQuery) -> i64 {
 
 async fn get_stats_v2_timeline(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let tz_offset = resolve_tz_offset_secs(&query);
     let now = crate::now_unix();
@@ -1471,9 +1826,8 @@ async fn get_stats_v2_timeline(
 
 async fn get_stats_v2_heatmap(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now)
         .await
@@ -1483,10 +1837,9 @@ async fn get_stats_v2_heatmap(
 
 async fn get_stats_v2_breakdown(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<stats::Breakdowns>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
@@ -1497,9 +1850,8 @@ async fn get_stats_v2_breakdown(
 
 async fn get_stats_v2_health(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<stats::DbHealth>, StatusCode> {
-    require_auth(&state, &jar)?;
     let now = crate::now_unix();
     let h = stats::compute_db_health(&state.db, now)
         .await
@@ -1509,10 +1861,9 @@ async fn get_stats_v2_health(
 
 async fn get_stats_v2_highlights(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<stats::StatsHighlights>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
@@ -1529,10 +1880,9 @@ pub struct RangedTopQuery {
 
 async fn get_stats_v2_top_domains(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
         tz_offset: None,
@@ -1547,10 +1897,9 @@ async fn get_stats_v2_top_domains(
 
 async fn get_stats_v2_top_clients(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
         tz_offset: None,
@@ -1678,23 +2027,39 @@ fn make_uuid(seed: &str) -> String {
 
 // --- Logs ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LogsQuery {
+    /// Maximum number of log entries to return (default 100).
     pub limit: Option<i64>,
+    /// Number of entries to skip from the most recent, for pagination (default 0).
     pub offset: Option<i64>,
+    /// Case-insensitive substring to match against the queried domain.
     pub search: Option<String>,
+    /// Filter by outcome: `true` returns only blocked queries, `false` only allowed.
     pub blocked: Option<bool>,
+    /// Restrict to queries served through a specific `DoH` URL token.
     pub token: Option<String>,
+    /// Filter by DNS record type (e.g. `A`, `AAAA`, `HTTPS`).
     pub query_type: Option<String>,
 }
 
+/// List recent DNS query logs, most recent first.
+///
+/// Supports pagination (`limit`/`offset`) and filtering by domain substring,
+/// block outcome, `DoH` token, and DNS record type. Returns the matching
+/// `logs` array plus the `total` count for the applied filters.
+#[utoipa::path(
+    get, path = "/api/logs", tag = "logs",
+    security(("api_key" = [])),
+    params(LogsQuery),
+    responses((status = 200, description = "Matching query logs and total count", body = serde_json::Value))
+)]
 async fn get_logs(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<LogsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let search = query.search.as_deref();
@@ -1716,12 +2081,18 @@ async fn get_logs(
     })))
 }
 
+/// Delete all DNS query logs.
+///
+/// Permanently clears the entire query-log history. This cannot be undone.
+#[utoipa::path(
+    delete, path = "/api/logs", tag = "logs",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All query logs were deleted"))
+)]
 async fn delete_logs(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_all_logs()
@@ -1729,4 +2100,80 @@ async fn delete_logs(
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn openapi_spec_covers_core_paths_and_bearer_scheme() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let paths = json["paths"].as_object().unwrap();
+        for p in [
+            "/api/health",
+            "/api/rules",
+            "/api/lists",
+            "/api/filter/check",
+            "/api/stats/summary",
+            "/api/api-keys",
+            "/api/logs",
+        ] {
+            assert!(paths.contains_key(p), "spec missing path {p}");
+        }
+        // Bearer security scheme registered.
+        let schemes = &json["components"]["securitySchemes"];
+        assert!(
+            schemes.get("api_key").is_some(),
+            "missing api_key security scheme"
+        );
+    }
+
+    /// Every annotated operation must carry a human-readable summary and
+    /// description, not just bare status-code/param docs — otherwise the
+    /// rendered Scalar UI shows nothing but an endpoint title.
+    #[test]
+    fn openapi_operations_have_summary_and_description() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let paths = json["paths"].as_object().unwrap();
+
+        let non_empty_str =
+            |v: &serde_json::Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+
+        for (path, methods) in paths {
+            for (method, op) in methods.as_object().unwrap() {
+                assert!(
+                    non_empty_str(&op["summary"]),
+                    "{method} {path} is missing a non-empty summary"
+                );
+                assert!(
+                    non_empty_str(&op["description"]),
+                    "{method} {path} is missing a non-empty description"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_fields_have_descriptions() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let schemas = &json["components"]["schemas"];
+
+        for (schema_name, fields) in [
+            ("CreateApiKeyRequest", vec!["name", "expires_at"]),
+            ("ApiKeyRow", vec!["id", "name", "prefix"]),
+        ] {
+            for field in fields {
+                let desc = &schemas[schema_name]["properties"][field]["description"];
+                assert!(
+                    desc.as_str().is_some_and(|s| !s.trim().is_empty()),
+                    "{schema_name}.{field} is missing a schema field description"
+                );
+            }
+        }
+    }
 }

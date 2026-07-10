@@ -46,6 +46,9 @@ uuid = { version = "1.23.0", features = ["v5"] }
 fst = "0.4.7"
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+blake2 = "0.10"
+utoipa = "5"
+utoipa-scalar = { version = "0.3", features = ["axum"] }
 
 [build-dependencies]
 resvg = { version = "0.47", default-features = false }
