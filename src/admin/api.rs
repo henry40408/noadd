@@ -84,6 +84,7 @@ pub struct ServerInfo {
         get_lists, add_list, update_list, delete_list,
         get_rules, add_rule, delete_rule,
         filter_check, get_stats_summary,
+        get_logs, delete_logs,
         list_api_keys, create_api_key, delete_api_key,
     ),
     components(schemas(
@@ -98,6 +99,7 @@ pub struct ServerInfo {
     tags(
         (name = "system"), (name = "settings"), (name = "lists"),
         (name = "rules"), (name = "filter"), (name = "stats"), (name = "api-keys"),
+        (name = "logs"),
     )
 )]
 struct ApiDoc;
@@ -2025,16 +2027,34 @@ fn make_uuid(seed: &str) -> String {
 
 // --- Logs ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct LogsQuery {
+    /// Maximum number of log entries to return (default 100).
     pub limit: Option<i64>,
+    /// Number of entries to skip from the most recent, for pagination (default 0).
     pub offset: Option<i64>,
+    /// Case-insensitive substring to match against the queried domain.
     pub search: Option<String>,
+    /// Filter by outcome: `true` returns only blocked queries, `false` only allowed.
     pub blocked: Option<bool>,
+    /// Restrict to queries served through a specific `DoH` URL token.
     pub token: Option<String>,
+    /// Filter by DNS record type (e.g. `A`, `AAAA`, `HTTPS`).
     pub query_type: Option<String>,
 }
 
+/// List recent DNS query logs, most recent first.
+///
+/// Supports pagination (`limit`/`offset`) and filtering by domain substring,
+/// block outcome, `DoH` token, and DNS record type. Returns the matching
+/// `logs` array plus the `total` count for the applied filters.
+#[utoipa::path(
+    get, path = "/api/logs", tag = "logs",
+    security(("api_key" = [])),
+    params(LogsQuery),
+    responses((status = 200, description = "Matching query logs and total count", body = serde_json::Value))
+)]
 async fn get_logs(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -2061,6 +2081,14 @@ async fn get_logs(
     })))
 }
 
+/// Delete all DNS query logs.
+///
+/// Permanently clears the entire query-log history. This cannot be undone.
+#[utoipa::path(
+    delete, path = "/api/logs", tag = "logs",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All query logs were deleted"))
+)]
 async fn delete_logs(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -2091,6 +2119,7 @@ mod openapi_tests {
             "/api/filter/check",
             "/api/stats/summary",
             "/api/api-keys",
+            "/api/logs",
         ] {
             assert!(paths.contains_key(p), "spec missing path {p}");
         }
