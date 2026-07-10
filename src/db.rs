@@ -1103,20 +1103,24 @@ impl Database {
 
     /// Resolve a presented key hash to its owner. Rejects expired keys and
     /// refreshes `last_used_at` at most once per 60s to avoid a write per call.
+    ///
+    /// The lookup runs on a reader connection so authenticated reads never
+    /// contend with the single writer; the writer is only taken when the
+    /// throttled `last_used_at` update actually needs to fire.
     pub async fn validate_api_key(
         &self,
         token_hash: &str,
         now: i64,
     ) -> Result<Option<i64>, DbError> {
-        let token_hash = token_hash.to_string();
-        let user_id = self
-            .conn
+        let hash_for_lookup = token_hash.to_string();
+        let row = self
+            .reader()
             .call(move |conn| {
                 let row = conn
                     .query_row(
                         "SELECT id, user_id, expires_at, last_used_at
                          FROM api_keys WHERE token_hash = ?1",
-                        params![token_hash],
+                        params![hash_for_lookup],
                         |r| {
                             Ok((
                                 r.get::<_, i64>(0)?,
@@ -1127,28 +1131,33 @@ impl Database {
                         },
                     )
                     .optional()?;
-                let Some((id, user_id, expires_at, last_used_at)) = row else {
-                    return Ok(None);
-                };
-                if let Some(exp) = expires_at
-                    && exp <= now
-                {
-                    return Ok(None);
-                }
-                let stale = match last_used_at {
-                    None => true,
-                    Some(t) => now - t >= 60,
-                };
-                if stale {
+                Ok(row)
+            })
+            .await?;
+        let Some((id, user_id, expires_at, last_used_at)) = row else {
+            return Ok(None);
+        };
+        if let Some(exp) = expires_at
+            && exp <= now
+        {
+            return Ok(None);
+        }
+        let stale = match last_used_at {
+            None => true,
+            Some(t) => now - t >= 60,
+        };
+        if stale {
+            self.conn
+                .call(move |conn| {
                     conn.execute(
                         "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
                         params![now, id],
                     )?;
-                }
-                Ok(Some(user_id))
-            })
-            .await?;
-        Ok(user_id)
+                    Ok(())
+                })
+                .await?;
+        }
+        Ok(Some(user_id))
     }
 
     // --- Users ---
@@ -2143,6 +2152,41 @@ mod tests {
         let live_id = keys.iter().find(|k| k.name == "live").unwrap().id;
         assert!(!db.delete_api_key(live_id, 2).await.unwrap());
         assert!(db.delete_api_key(live_id, 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_throttles_last_used_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("throttle.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+        db.create_user("op", "x", 100).await.unwrap(); // id = 1
+        db.insert_api_key(1, "ci", "hash-ci", "noadd_cccc", 100, None)
+            .await
+            .unwrap();
+
+        async fn last_used(db: &Database) -> Option<i64> {
+            db.list_api_keys_for_user(1).await.unwrap()[0].last_used_at
+        }
+
+        // `insert_api_key` starts `last_used_at` as NULL, so the first
+        // validation is stale and sets it.
+        let t0 = 1_000;
+        assert_eq!(db.validate_api_key("hash-ci", t0).await.unwrap(), Some(1));
+        assert_eq!(last_used(&db).await, Some(t0));
+
+        // Within the 60s throttle window: no update.
+        assert_eq!(
+            db.validate_api_key("hash-ci", t0 + 30).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(last_used(&db).await, Some(t0));
+
+        // Past the 60s throttle window: updates again.
+        assert_eq!(
+            db.validate_api_key("hash-ci", t0 + 61).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(last_used(&db).await, Some(t0 + 61));
     }
 
     #[tokio::test]

@@ -145,9 +145,11 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
 
 ## Programmatic API
 
-Every `/api/*` endpoint accepts an **API key** in addition to the browser
+Most `/api/*` endpoints accept an **API key** in addition to the browser
 session. Create one on the **Account** page (the full token is shown once — copy
-it then). A key inherits its operator's permissions.
+it then). A key inherits its operator's permissions. Session-management
+(`/api/sessions`, `/api/auth/logout`) and password-change (`/api/users/me/password`)
+endpoints remain cookie-only by design, since they act on the browser session itself.
 
 ```bash
 curl -H "Authorization: Bearer noadd_XXXXXXXX…" \
