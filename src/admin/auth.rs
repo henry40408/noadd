@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use blake2::{Blake2b512, Digest};
 use parking_lot::Mutex;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
@@ -64,6 +65,38 @@ pub fn generate_token() -> String {
         .take(64)
         .map(char::from)
         .collect()
+}
+
+/// Prefix identifying a noadd programmatic API key (useful for secret scanners).
+const API_KEY_PREFIX: &str = "noadd_";
+/// Random body length; 40 alphanumeric chars ≈ 238 bits of entropy.
+const API_KEY_BODY_LEN: usize = 40;
+
+/// BLAKE2b-512 hash of an API key, lower-hex encoded. Fast one-way hash — the
+/// token is high-entropy random, so no salt/Argon2 is needed, and the hex digest
+/// is directly indexable for lookup.
+pub fn hash_api_key(token: &str) -> String {
+    let mut hasher = Blake2b512::new();
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Mint a fresh API key. Returns `(full_token, display_prefix, token_hash)`.
+/// The full token is shown to the user exactly once; only the hash is stored.
+pub fn generate_api_key() -> (String, String, String) {
+    let body: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(API_KEY_BODY_LEN)
+        .map(char::from)
+        .collect();
+    let full = format!("{API_KEY_PREFIX}{body}");
+    let prefix = format!("{API_KEY_PREFIX}{}", &body[..4]);
+    let hash = hash_api_key(&full);
+    (full, prefix, hash)
 }
 
 /// Record a session in the in-memory store.
@@ -206,5 +239,29 @@ impl RateLimiter {
         } else {
             entry.0 += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_shape_and_prefix() {
+        let (full, prefix, hash) = generate_api_key();
+        assert!(full.starts_with("noadd_"));
+        assert_eq!(full.len(), "noadd_".len() + 40);
+        assert!(prefix.starts_with("noadd_"));
+        assert_eq!(prefix.len(), "noadd_".len() + 4);
+        assert!(full.starts_with(&prefix));
+        // hash is deterministic hex of the full token
+        assert_eq!(hash, hash_api_key(&full));
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_is_stable_and_distinct() {
+        assert_eq!(hash_api_key("noadd_abc"), hash_api_key("noadd_abc"));
+        assert_ne!(hash_api_key("noadd_abc"), hash_api_key("noadd_abd"));
     }
 }
