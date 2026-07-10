@@ -16,6 +16,8 @@ use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
+use utoipa::OpenApi as _;
+use utoipa_scalar::{Scalar, Servable};
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, hash_api_key, hash_password,
@@ -60,11 +62,65 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct ServerInfo {
     pub dns_addr: String,
     pub http_addr: String,
     pub tls_enabled: bool,
+}
+
+/// `OpenAPI` document for the core programmatic subset of the admin API. Only the
+/// endpoints a script would drive (health, settings, lists, rules, filter check,
+/// stats summary, API keys) are annotated — the browser-only endpoints are not.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(title = "noadd API", description = "Programmatic access to noadd."),
+    paths(
+        health, get_server_info,
+        get_settings, put_settings,
+        get_lists, add_list, update_list, delete_list,
+        get_rules, add_rule, delete_rule,
+        filter_check, get_stats_summary,
+        list_api_keys, create_api_key, delete_api_key,
+    ),
+    components(schemas(
+        ServerInfo, HealthResponse, SettingsMap,
+        AddListRequest, AddListResponse, UpdateListRequest,
+        AddRuleRequest, AddRuleResponse,
+        FilterCheckRequest, CreateApiKeyRequest, CreateApiKeyResponse,
+        crate::db::CustomRuleRow, crate::db::FilterListRow, crate::db::ApiKeyRow,
+        crate::admin::stats::Summary,
+    )),
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "system"), (name = "settings"), (name = "lists"),
+        (name = "rules"), (name = "filter"), (name = "stats"), (name = "api-keys"),
+    )
+)]
+struct ApiDoc;
+
+struct SecurityAddon;
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "api_key",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some("noadd API key: `Authorization: Bearer noadd_…`"))
+                    .build(),
+            ),
+        );
+    }
+}
+
+/// Serve the raw `OpenAPI` document. Unauthenticated: it exposes only the schema
+/// shape, never any data.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    use utoipa::OpenApi;
+    Json(ApiDoc::openapi())
 }
 
 pub fn admin_router(state: AppState) -> Router {
@@ -132,6 +188,9 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Apple touch icon (rendered from favicon.svg at build time)
         .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
+        // OpenAPI spec + Scalar docs UI (unauthenticated: schema only, no data)
+        .route("/api/openapi.json", get(openapi_json))
+        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
         .fallback(serve_static)
         .with_state(state)
 }
@@ -692,7 +751,7 @@ async fn revoke_session_by_id(
 
 // --- Health ---
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub needs_setup: bool,
@@ -702,6 +761,10 @@ pub struct HealthResponse {
     pub dropped_log_count: u64,
 }
 
+#[utoipa::path(
+    get, path = "/api/health", tag = "system",
+    responses((status = 200, description = "Service health", body = HealthResponse))
+)]
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let needs_setup = state.db.count_users().await.is_ok_and(|n| n == 0);
     Json(HealthResponse {
@@ -712,6 +775,11 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+#[utoipa::path(
+    get, path = "/api/server-info", tag = "system",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Server addresses and TLS status", body = ServerInfo))
+)]
 async fn get_server_info(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -721,12 +789,17 @@ async fn get_server_info(
 
 // --- Settings ---
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingsMap {
     #[serde(flatten)]
     pub settings: std::collections::HashMap<String, String>,
 }
 
+#[utoipa::path(
+    get, path = "/api/settings", tag = "settings",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Current settings", body = SettingsMap))
+)]
 async fn get_settings(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -758,6 +831,15 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
+#[utoipa::path(
+    put, path = "/api/settings", tag = "settings",
+    security(("api_key" = [])),
+    request_body = SettingsMap,
+    responses(
+        (status = 200, description = "Settings saved"),
+        (status = 400, description = "Invalid setting value")
+    )
+)]
 async fn put_settings(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -800,6 +882,11 @@ async fn put_settings(
 
 // --- Lists ---
 
+#[utoipa::path(
+    get, path = "/api/lists", tag = "lists",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All filter lists", body = [crate::db::FilterListRow]))
+)]
 async fn get_lists(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -813,17 +900,23 @@ async fn get_lists(
     Ok(Json(lists))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddListRequest {
     pub name: String,
     pub url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AddListResponse {
     pub id: i64,
 }
 
+#[utoipa::path(
+    post, path = "/api/lists", tag = "lists",
+    security(("api_key" = [])),
+    request_body = AddListRequest,
+    responses((status = 201, description = "List created", body = AddListResponse))
+)]
 async fn add_list(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -838,13 +931,20 @@ async fn add_list(
     Ok((StatusCode::CREATED, Json(AddListResponse { id })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateListRequest {
     pub enabled: Option<bool>,
     pub name: Option<String>,
     pub url: Option<String>,
 }
 
+#[utoipa::path(
+    put, path = "/api/lists/{id}", tag = "lists",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "List id")),
+    request_body = UpdateListRequest,
+    responses((status = 200, description = "List updated"))
+)]
 async fn update_list(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -926,6 +1026,12 @@ async fn check_list_url(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/api/lists/{id}", tag = "lists",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "List id")),
+    responses((status = 200, description = "List deleted"))
+)]
 async fn delete_list(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1138,16 +1244,21 @@ async fn get_registry_filters(
 
 // --- Rules ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddRuleRequest {
     pub rule: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AddRuleResponse {
     pub id: i64,
 }
 
+#[utoipa::path(
+    get, path = "/api/rules", tag = "rules",
+    security(("api_key" = [])),
+    responses((status = 200, description = "All custom rules", body = [crate::db::CustomRuleRow]))
+)]
 async fn get_rules(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1161,6 +1272,16 @@ async fn get_rules(
     Ok(Json(rules))
 }
 
+#[utoipa::path(
+    post, path = "/api/rules", tag = "rules",
+    security(("api_key" = [])),
+    request_body = AddRuleRequest,
+    responses(
+        (status = 201, description = "Rule created", body = AddRuleResponse),
+        (status = 200, description = "Rule already existed", body = AddRuleResponse),
+        (status = 400, description = "Unparseable rule")
+    )
+)]
 async fn add_rule(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1195,6 +1316,12 @@ async fn add_rule(
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
+#[utoipa::path(
+    delete, path = "/api/rules/{id}", tag = "rules",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "Rule id")),
+    responses((status = 200, description = "Deleted"))
+)]
 async fn delete_rule(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1262,13 +1389,13 @@ async fn delete_doh_token_endpoint(
 
 // --- API Keys ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateApiKeyRequest {
     pub name: String,
     pub expires_at: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct CreateApiKeyResponse {
     pub id: i64,
     pub name: String,
@@ -1277,6 +1404,11 @@ pub struct CreateApiKeyResponse {
     pub token: String,
 }
 
+#[utoipa::path(
+    get, path = "/api/api-keys", tag = "api-keys",
+    security(("api_key" = [])),
+    responses((status = 200, description = "API keys for the caller", body = [crate::db::ApiKeyRow]))
+)]
 async fn list_api_keys(
     State(state): State<AppState>,
     auth: AuthedUser,
@@ -1289,6 +1421,15 @@ async fn list_api_keys(
     Ok(Json(keys))
 }
 
+#[utoipa::path(
+    post, path = "/api/api-keys", tag = "api-keys",
+    security(("api_key" = [])),
+    request_body = CreateApiKeyRequest,
+    responses(
+        (status = 201, description = "API key created; token shown once", body = CreateApiKeyResponse),
+        (status = 400, description = "Invalid name")
+    )
+)]
 async fn create_api_key(
     State(state): State<AppState>,
     auth: AuthedUser,
@@ -1316,6 +1457,15 @@ async fn create_api_key(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/api/api-keys/{id}", tag = "api-keys",
+    security(("api_key" = [])),
+    params(("id" = i64, Path, description = "API key id")),
+    responses(
+        (status = 200, description = "Deleted"),
+        (status = 404, description = "Not found or not owned by caller")
+    )
+)]
 async fn delete_api_key(
     State(state): State<AppState>,
     auth: AuthedUser,
@@ -1335,11 +1485,17 @@ async fn delete_api_key(
 
 // --- Filter Check ---
 
-#[derive(Deserialize)]
-struct FilterCheckRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct FilterCheckRequest {
     domain: String,
 }
 
+#[utoipa::path(
+    post, path = "/api/filter/check", tag = "filter",
+    security(("api_key" = [])),
+    request_body = FilterCheckRequest,
+    responses((status = 200, description = "Filter decision for the domain", body = serde_json::Value))
+)]
 async fn filter_check(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1420,6 +1576,11 @@ async fn upstream_latency(
 
 // --- Stats ---
 
+#[utoipa::path(
+    get, path = "/api/stats/summary", tag = "stats",
+    security(("api_key" = [])),
+    responses((status = 200, description = "Aggregate query statistics", body = crate::admin::stats::Summary))
+)]
 async fn get_stats_summary(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -1785,4 +1946,33 @@ async fn delete_logs(
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn openapi_spec_covers_core_paths_and_bearer_scheme() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let paths = json["paths"].as_object().unwrap();
+        for p in [
+            "/api/health",
+            "/api/rules",
+            "/api/lists",
+            "/api/filter/check",
+            "/api/stats/summary",
+            "/api/api-keys",
+        ] {
+            assert!(paths.contains_key(p), "spec missing path {p}");
+        }
+        // Bearer security scheme registered.
+        let schemes = &json["components"]["securitySchemes"];
+        assert!(
+            schemes.get("api_key").is_some(),
+            "missing api_key security scheme"
+        );
+    }
 }

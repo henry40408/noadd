@@ -197,3 +197,16 @@ async fn api_key_lifecycle_over_http() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn docs_endpoints_are_public() {
+    let (app, _db) = build_app().await;
+    for uri in ["/api/openapi.json", "/api/docs"] {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri} should be public 200");
+    }
+}

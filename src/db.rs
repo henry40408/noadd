@@ -97,7 +97,7 @@ pub struct DohTokenRow {
     pub token: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ApiKeyRow {
     pub id: i64,
     pub name: String,
@@ -152,7 +152,7 @@ pub struct LoadedSession {
     pub last_seen: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FilterListRow {
     pub id: i64,
     pub name: String,
@@ -162,7 +162,7 @@ pub struct FilterListRow {
     pub rule_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CustomRuleRow {
     pub id: i64,
     pub rule: String,

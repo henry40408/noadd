@@ -10,7 +10,7 @@ use crate::db::{
 /// to this, so the admin UI shows the retention that is actually in effect.
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Summary {
     pub total_today: i64,
     pub blocked_today: i64,
