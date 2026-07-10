@@ -126,3 +126,74 @@ async fn bearer_api_key_authenticates_like_a_session() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn api_key_lifecycle_over_http() {
+    use serde_json::json;
+    let (app, db) = build_app().await;
+
+    // Authenticate management calls with a bootstrap key for user 1.
+    let (boot, prefix, hash) = generate_api_key();
+    db.insert_api_key(1, "boot", &hash, &prefix, 0, None)
+        .await
+        .unwrap();
+    let auth = format!("Bearer {boot}");
+
+    // Create returns the full token exactly once.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/api-keys")
+                .header("authorization", &auth)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name": "ci"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let token = created["token"].as_str().unwrap();
+    assert!(token.starts_with("noadd_"));
+    let new_id = created["id"].as_i64().unwrap();
+
+    // List never leaks a token/hash.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/api-keys")
+                .header("authorization", &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!body.contains("token_hash"));
+    assert!(!body.contains(token));
+
+    // Delete the created key.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/api-keys/{new_id}"))
+                .header("authorization", &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}

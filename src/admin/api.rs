@@ -110,6 +110,9 @@ pub fn admin_router(state: AppState) -> Router {
         // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
+        // API keys
+        .route("/api/api-keys", get(list_api_keys).post(create_api_key))
+        .route("/api/api-keys/{id}", delete(delete_api_key))
         // Stats
         .route("/api/stats/summary", get(get_stats_summary))
         .route("/api/stats/timeline", get(get_stats_timeline))
@@ -1255,6 +1258,79 @@ async fn delete_doh_token_endpoint(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+// --- API Keys ---
+
+#[derive(Deserialize)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct CreateApiKeyResponse {
+    pub id: i64,
+    pub name: String,
+    pub prefix: String,
+    /// Full secret — shown only in this create response, never again.
+    pub token: String,
+}
+
+async fn list_api_keys(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+) -> Result<Json<Vec<crate::db::ApiKeyRow>>, StatusCode> {
+    let keys = state
+        .db
+        .list_api_keys_for_user(auth.user_id)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(keys))
+}
+
+async fn create_api_key(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+    Json(body): Json<CreateApiKeyRequest>,
+) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let (full, prefix, hash) = crate::admin::auth::generate_api_key();
+    let now = crate::now_unix();
+    let id = state
+        .db
+        .insert_api_key(auth.user_id, &name, &hash, &prefix, now, body.expires_at)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateApiKeyResponse {
+            id,
+            name,
+            prefix,
+            token: full,
+        }),
+    ))
+}
+
+async fn delete_api_key(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    let deleted = state
+        .db
+        .delete_api_key(id, auth.user_id)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if deleted {
+        Ok(StatusCode::OK)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 // --- Filter Check ---
