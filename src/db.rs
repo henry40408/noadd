@@ -98,6 +98,16 @@ pub struct DohTokenRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ApiKeyRow {
+    pub id: i64,
+    pub name: String,
+    pub prefix: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct UserRow {
     pub id: i64,
     pub username: String,
@@ -367,6 +377,18 @@ impl Database {
                         password_hash TEXT NOT NULL,
                         created_at INTEGER NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        name         TEXT    NOT NULL,
+                        token_hash   TEXT    NOT NULL UNIQUE,
+                        prefix       TEXT    NOT NULL,
+                        created_at   INTEGER NOT NULL,
+                        last_used_at INTEGER,
+                        expires_at   INTEGER
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
                     ",
                 )?;
                 Self::run_migrations(conn)?;
@@ -454,7 +476,23 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 7;
+        if version < 8 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS api_keys (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name         TEXT    NOT NULL,
+                    token_hash   TEXT    NOT NULL UNIQUE,
+                    prefix       TEXT    NOT NULL,
+                    created_at   INTEGER NOT NULL,
+                    last_used_at INTEGER,
+                    expires_at   INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 8;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -992,6 +1030,125 @@ impl Database {
             })
             .await?;
         Ok(count > 0)
+    }
+
+    // --- API Keys ---
+
+    pub async fn insert_api_key(
+        &self,
+        user_id: i64,
+        name: &str,
+        token_hash: &str,
+        prefix: &str,
+        created_at: i64,
+        expires_at: Option<i64>,
+    ) -> Result<i64, DbError> {
+        let name = name.to_string();
+        let token_hash = token_hash.to_string();
+        let prefix = prefix.to_string();
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO api_keys (user_id, name, token_hash, prefix, created_at, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![user_id, name, token_hash, prefix, created_at, expires_at],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn list_api_keys_for_user(&self, user_id: i64) -> Result<Vec<ApiKeyRow>, DbError> {
+        let rows = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, name, prefix, created_at, last_used_at, expires_at
+                     FROM api_keys WHERE user_id = ?1 ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map(params![user_id], |row| {
+                        Ok(ApiKeyRow {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            prefix: row.get(2)?,
+                            created_at: row.get(3)?,
+                            last_used_at: row.get(4)?,
+                            expires_at: row.get(5)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    /// Delete a key scoped to its owner. Returns true if a row was removed.
+    pub async fn delete_api_key(&self, id: i64, user_id: i64) -> Result<bool, DbError> {
+        let n = self
+            .conn
+            .call(move |conn| {
+                let n = conn.execute(
+                    "DELETE FROM api_keys WHERE id = ?1 AND user_id = ?2",
+                    params![id, user_id],
+                )?;
+                Ok(n)
+            })
+            .await?;
+        Ok(n > 0)
+    }
+
+    /// Resolve a presented key hash to its owner. Rejects expired keys and
+    /// refreshes `last_used_at` at most once per 60s to avoid a write per call.
+    pub async fn validate_api_key(
+        &self,
+        token_hash: &str,
+        now: i64,
+    ) -> Result<Option<i64>, DbError> {
+        let token_hash = token_hash.to_string();
+        let user_id = self
+            .conn
+            .call(move |conn| {
+                let row = conn
+                    .query_row(
+                        "SELECT id, user_id, expires_at, last_used_at
+                         FROM api_keys WHERE token_hash = ?1",
+                        params![token_hash],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, Option<i64>>(2)?,
+                                r.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                let Some((id, user_id, expires_at, last_used_at)) = row else {
+                    return Ok(None);
+                };
+                if let Some(exp) = expires_at
+                    && exp <= now
+                {
+                    return Ok(None);
+                }
+                let stale = match last_used_at {
+                    None => true,
+                    Some(t) => now - t >= 60,
+                };
+                if stale {
+                    conn.execute(
+                        "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+                        params![now, id],
+                    )?;
+                }
+                Ok(Some(user_id))
+            })
+            .await?;
+        Ok(user_id)
     }
 
     // --- Users ---
@@ -1923,6 +2080,87 @@ fn append_log_filters(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn migration_v8_adds_api_keys_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // Simulate a v7 database with a user and unrelated data.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100);
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        // Table exists and is usable; user row preserved.
+        let id = db
+            .insert_api_key(1, "ci", "deadbeef", "noadd_dead", 200, None)
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let keys = db.list_api_keys_for_user(1).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "ci");
+        assert_eq!(keys[0].prefix, "noadd_dead");
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_respects_expiry_and_scoping() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+        db.create_user("op", "x", 100).await.unwrap(); // id = 1
+        db.create_user("op2", "y", 100).await.unwrap(); // id = 2
+
+        // Live key resolves to its owner.
+        db.insert_api_key(1, "live", "hash-live", "noadd_aaaa", 100, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.validate_api_key("hash-live", 200).await.unwrap(),
+            Some(1)
+        );
+
+        // Expired key is rejected.
+        db.insert_api_key(1, "old", "hash-old", "noadd_bbbb", 100, Some(150))
+            .await
+            .unwrap();
+        assert_eq!(db.validate_api_key("hash-old", 200).await.unwrap(), None);
+
+        // Unknown hash -> None.
+        assert_eq!(db.validate_api_key("nope", 200).await.unwrap(), None);
+
+        // delete is owner-scoped: user 2 cannot delete user 1's key.
+        let keys = db.list_api_keys_for_user(1).await.unwrap();
+        let live_id = keys.iter().find(|k| k.name == "live").unwrap().id;
+        assert!(!db.delete_api_key(live_id, 2).await.unwrap());
+        assert!(db.delete_api_key(live_id, 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn deleting_user_cascades_api_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+        db.create_user("a", "x", 100).await.unwrap(); // id 1
+        db.create_user("b", "y", 100).await.unwrap(); // id 2 (so delete isn't the last operator)
+        db.insert_api_key(1, "k", "h", "noadd_cccc", 100, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.delete_user(1).await.unwrap(),
+            crate::db::DeleteUserOutcome::Deleted
+        );
+        assert!(db.list_api_keys_for_user(1).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn close_removes_wal_sidecar_files() {
