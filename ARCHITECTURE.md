@@ -104,6 +104,10 @@ DoH access can be restricted with user-defined tokens. Each token becomes a URL 
 
 A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. Embedded assets are served with a content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate on each load and receive `304 Not Modified` when nothing changed — reloads avoid re-transferring the ~146 KB page, while a rebuilt binary (new content, new ETag) updates clients immediately. The dashboard polls the API every 10 seconds with a toggleable LIVE mode. Login is username + password; sessions are bound to a user and individually revocable.
 
+### API Authentication
+
+Every `/api/*` endpoint accepts either the browser `session` cookie or an `Authorization: Bearer <api key>` header; both paths are unified behind the `AuthedUser` axum extractor, so handlers don't need to distinguish how the caller authenticated. API keys are BLAKE2b-hashed at rest (only the hash is stored) and are bound to an operator via `ON DELETE CASCADE`, inheriting that operator's permissions — a key is only as powerful as the account that minted it. Keys are managed via `GET/POST/DELETE /api/api-keys`, driven from the admin UI's Account page (the full token is shown once, on creation, and never again). An OpenAPI 3.1 spec is served at `GET /api/openapi.json`, with an interactive Scalar reference at `GET /api/docs`; both are unauthenticated (schema only, no data) and cover a core subset of endpoints.
+
 ## Data Storage
 
 Everything is in a single SQLite file (`noadd.db` by default):
@@ -118,6 +122,7 @@ Everything is in a single SQLite file (`noadd.db` by default):
 | `doh_tokens` | DoH access tokens |
 | `users` | Operator accounts (username, Argon2 password hash) |
 | `sessions` | Active admin sessions (token, user_id, ip, user agent, timestamps) |
+| `api_keys` | Programmatic API keys (BLAKE2b hash, owning user_id, `ON DELETE CASCADE`) |
 
 `query_logs` is indexed on `timestamp` and on the composite `(domain, timestamp)`. The composite index lets the dashboard's domain aggregations (top domains, unique domains) be served from a covering index with the time-window filter pushed in, instead of scanning the whole domain index.
 

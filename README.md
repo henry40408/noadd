@@ -143,6 +143,20 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
   --acme-prod
 ```
 
+## Programmatic API
+
+Every `/api/*` endpoint accepts an **API key** in addition to the browser
+session. Create one on the **Account** page (the full token is shown once — copy
+it then). A key inherits its operator's permissions.
+
+```bash
+curl -H "Authorization: Bearer noadd_XXXXXXXX…" \
+     https://noadd.example.com/api/rules
+```
+
+Interactive reference (OpenAPI / Scalar): open **`/api/docs`** on your instance;
+the raw spec is at **`/api/openapi.json`**.
+
 ## Development
 
 ```bash
