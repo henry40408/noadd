@@ -64,8 +64,11 @@ impl AppState {
 
 #[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct ServerInfo {
+    /// Address the plain-DNS listener is bound to, e.g. `0.0.0.0:53`.
     pub dns_addr: String,
+    /// Address the admin/DoH HTTP(S) listener is bound to.
     pub http_addr: String,
+    /// Whether the HTTP listener is serving TLS (ACME or user-provided certs).
     pub tls_enabled: bool,
 }
 
@@ -753,14 +756,23 @@ async fn revoke_session_by_id(
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
+    /// Always `"ok"` while the process is up and serving requests.
     pub status: String,
+    /// True when no operator account exists yet and `POST /api/auth/setup`
+    /// still needs to be called before the admin UI is usable.
     pub needs_setup: bool,
+    /// Build version string (from `git describe`).
     pub version: &'static str,
     /// Number of query-log events dropped because the async logger channel
     /// was saturated. Non-zero means query logging is incomplete.
     pub dropped_log_count: u64,
 }
 
+/// Report basic service health.
+///
+/// Always unauthenticated so monitoring and the setup wizard can call it
+/// before any operator exists. Includes whether initial setup is still
+/// pending and how many query-log events the async logger has dropped.
 #[utoipa::path(
     get, path = "/api/health", tag = "system",
     responses((status = 200, description = "Service health", body = HealthResponse))
@@ -775,6 +787,9 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+/// Get the server's bound addresses and TLS status.
+///
+/// Requires an operator (session or API key).
 #[utoipa::path(
     get, path = "/api/server-info", tag = "system",
     security(("api_key" = [])),
@@ -791,10 +806,19 @@ async fn get_server_info(
 
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingsMap {
+    /// Flattened key/value pairs, e.g. `upstream_servers`,
+    /// `upstream_strategy`, `log_retention_days`, `doh_access_policy`,
+    /// `public_url`, `dnssec_disabled`.
     #[serde(flatten)]
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Get the current runtime settings.
+///
+/// Requires an operator (session or API key). Only known setting keys
+/// (upstream servers/strategy, log retention, `DoH` access policy, public
+/// URL, DNSSEC toggle, etc.) are returned; unknown keys stored in the
+/// database are omitted.
 #[utoipa::path(
     get, path = "/api/settings", tag = "settings",
     security(("api_key" = [])),
@@ -831,6 +855,14 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Update one or more runtime settings.
+///
+/// Requires an operator (session or API key). Only the keys present in the
+/// request body are changed; others are left untouched. `upstream_servers`
+/// is validated before anything is persisted, so a malformed value rejects
+/// the whole request with no partial write. Changes to `upstream_strategy`,
+/// `dnssec_disabled`, and `upstream_servers` take effect immediately, with
+/// no restart required.
 #[utoipa::path(
     put, path = "/api/settings", tag = "settings",
     security(("api_key" = [])),
@@ -882,6 +914,10 @@ async fn put_settings(
 
 // --- Lists ---
 
+/// List all configured filter lists.
+///
+/// Requires an operator (session or API key). Includes both built-in and
+/// user-added lists, with their enabled state and last-updated rule count.
 #[utoipa::path(
     get, path = "/api/lists", tag = "lists",
     security(("api_key" = [])),
@@ -902,15 +938,24 @@ async fn get_lists(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddListRequest {
+    /// Display name for the list.
     pub name: String,
+    /// URL the list's contents are fetched from.
     pub url: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct AddListResponse {
+    /// Id of the newly created filter list.
     pub id: i64,
 }
 
+/// Add a new filter list by URL.
+///
+/// Requires an operator (session or API key). The list is created enabled
+/// but its content is not fetched synchronously; use `POST
+/// /api/lists/update` (or wait for the periodic refresh) to download it and
+/// rebuild the filter engine.
 #[utoipa::path(
     post, path = "/api/lists", tag = "lists",
     security(("api_key" = [])),
@@ -933,11 +978,21 @@ async fn add_list(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateListRequest {
+    /// If present, enables or disables the list.
     pub enabled: Option<bool>,
+    /// New display name; only applied if `url` is also present.
     pub name: Option<String>,
+    /// New source URL; only applied if `name` is also present.
     pub url: Option<String>,
 }
 
+/// Update a filter list's enabled state, name, and/or URL.
+///
+/// Requires an operator (session or API key). All fields are optional and
+/// independent: `enabled` toggles the list without touching name/url, and
+/// name/url are only changed if both are provided together. Triggers an
+/// async filter-engine rebuild so an enable/disable takes effect shortly
+/// after the response returns.
 #[utoipa::path(
     put, path = "/api/lists/{id}", tag = "lists",
     security(("api_key" = [])),
@@ -1026,6 +1081,11 @@ async fn check_list_url(
     }
 }
 
+/// Delete a filter list.
+///
+/// Requires an operator (session or API key). Triggers an async filter-engine
+/// rebuild so the list's rules stop applying shortly after the response
+/// returns.
 #[utoipa::path(
     delete, path = "/api/lists/{id}", tag = "lists",
     security(("api_key" = [])),
@@ -1246,14 +1306,21 @@ async fn get_registry_filters(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddRuleRequest {
+    /// Rule text in hosts-file or Adblock-style syntax, e.g.
+    /// `ads.example.com` or `@@allow.example.com`.
     pub rule: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct AddRuleResponse {
+    /// Id of the created rule, or `0` if it already existed.
     pub id: i64,
 }
 
+/// List all custom allow/block rules.
+///
+/// Requires an operator (session or API key). Returned in the same syntax
+/// used to add them (hosts-file / Adblock-style lines).
 #[utoipa::path(
     get, path = "/api/rules", tag = "rules",
     security(("api_key" = [])),
@@ -1272,6 +1339,13 @@ async fn get_rules(
     Ok(Json(rules))
 }
 
+/// Add a custom allow/block rule.
+///
+/// Requires an operator (session or API key). No-op (200, `id: 0`) if the
+/// exact rule text already exists rather than erroring; a genuinely new rule
+/// returns 201 with its id. Rejects text that doesn't parse as a rule (400).
+/// Triggers an async filter-engine rebuild so the rule takes effect shortly
+/// after the response returns.
 #[utoipa::path(
     post, path = "/api/rules", tag = "rules",
     security(("api_key" = [])),
@@ -1316,6 +1390,11 @@ async fn add_rule(
     Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
 }
 
+/// Delete a custom allow/block rule.
+///
+/// Requires an operator (session or API key). Triggers an async
+/// filter-engine rebuild so the removal takes effect shortly after the
+/// response returns.
 #[utoipa::path(
     delete, path = "/api/rules/{id}", tag = "rules",
     security(("api_key" = [])),
@@ -1391,19 +1470,30 @@ async fn delete_doh_token_endpoint(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateApiKeyRequest {
+    /// Human-readable label for the key (1-64 characters), e.g. `"ci"`.
     pub name: String,
+    /// Optional Unix timestamp (seconds) after which the key stops working.
+    /// Omit or `null` for a key that never expires.
     pub expires_at: Option<i64>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct CreateApiKeyResponse {
+    /// Id of the newly created key.
     pub id: i64,
+    /// The label given at creation time.
     pub name: String,
+    /// Short, non-secret prefix used to identify the key afterwards.
     pub prefix: String,
     /// Full secret — shown only in this create response, never again.
     pub token: String,
 }
 
+/// List the caller's own API keys.
+///
+/// Requires an operator (session or API key). Scoped to the authenticated
+/// caller — never returns another operator's keys. Only metadata is
+/// returned; the secret token itself is never shown again after creation.
 #[utoipa::path(
     get, path = "/api/api-keys", tag = "api-keys",
     security(("api_key" = [])),
@@ -1421,6 +1511,12 @@ async fn list_api_keys(
     Ok(Json(keys))
 }
 
+/// Create a new API key for the calling operator.
+///
+/// Requires an operator (session or API key). The full secret `token` is
+/// returned only in this response — it is never shown or recoverable again,
+/// only the `prefix` is retained for identification afterwards. The new key
+/// inherits the caller's permissions.
 #[utoipa::path(
     post, path = "/api/api-keys", tag = "api-keys",
     security(("api_key" = [])),
@@ -1457,6 +1553,11 @@ async fn create_api_key(
     ))
 }
 
+/// Delete one of the caller's own API keys.
+///
+/// Requires an operator (session or API key). Scoped to the authenticated
+/// caller — deleting an id owned by another operator returns 404 rather
+/// than revealing it exists.
 #[utoipa::path(
     delete, path = "/api/api-keys/{id}", tag = "api-keys",
     security(("api_key" = [])),
@@ -1487,9 +1588,18 @@ async fn delete_api_key(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct FilterCheckRequest {
+    /// Domain to evaluate, e.g. `"ads.example.com"`. A trailing dot is
+    /// stripped before matching.
     domain: String,
 }
 
+/// Check what the filter engine would decide for a domain, without querying DNS.
+///
+/// Requires an operator (session or API key). Evaluates against the live,
+/// currently-loaded filter engine (custom rules + enabled lists). The
+/// response is an untyped JSON verdict: `{"action": "blocked", "rule":
+/// ..., "list": ...}` or `{"action": "allowed", "rule": ...}` (rule
+/// omitted when no explicit allow rule matched).
 #[utoipa::path(
     post, path = "/api/filter/check", tag = "filter",
     security(("api_key" = [])),
@@ -1576,6 +1686,11 @@ async fn upstream_latency(
 
 // --- Stats ---
 
+/// Get aggregate query statistics for today, the last 7 days, and the last 30 days.
+///
+/// Requires an operator (session or API key). Includes totals, block ratio,
+/// cache hit rate, average response time per window, plus the query rate
+/// over the last minute.
 #[utoipa::path(
     get, path = "/api/stats/summary", tag = "stats",
     security(("api_key" = [])),
@@ -1974,5 +2089,51 @@ mod openapi_tests {
             schemes.get("api_key").is_some(),
             "missing api_key security scheme"
         );
+    }
+
+    /// Every annotated operation must carry a human-readable summary and
+    /// description, not just bare status-code/param docs — otherwise the
+    /// rendered Scalar UI shows nothing but an endpoint title.
+    #[test]
+    fn openapi_operations_have_summary_and_description() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let paths = json["paths"].as_object().unwrap();
+
+        let non_empty_str =
+            |v: &serde_json::Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+
+        for (path, methods) in paths {
+            for (method, op) in methods.as_object().unwrap() {
+                assert!(
+                    non_empty_str(&op["summary"]),
+                    "{method} {path} is missing a non-empty summary"
+                );
+                assert!(
+                    non_empty_str(&op["description"]),
+                    "{method} {path} is missing a non-empty description"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_fields_have_descriptions() {
+        let doc = ApiDoc::openapi();
+        let json = serde_json::to_value(&doc).unwrap();
+        let schemas = &json["components"]["schemas"];
+
+        for (schema_name, fields) in [
+            ("CreateApiKeyRequest", vec!["name", "expires_at"]),
+            ("ApiKeyRow", vec!["id", "name", "prefix"]),
+        ] {
+            for field in fields {
+                let desc = &schemas[schema_name]["properties"][field]["description"];
+                assert!(
+                    desc.as_str().is_some_and(|s| !s.trim().is_empty()),
+                    "{schema_name}.{field} is missing a schema field description"
+                );
+            }
+        }
     }
 }

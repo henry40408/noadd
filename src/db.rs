@@ -99,11 +99,18 @@ pub struct DohTokenRow {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ApiKeyRow {
+    /// Key id.
     pub id: i64,
+    /// Human-readable label given at creation time.
     pub name: String,
+    /// Short, non-secret prefix used to identify the key; the full secret
+    /// is never returned again after creation.
     pub prefix: String,
+    /// Unix timestamp (seconds) the key was created.
     pub created_at: i64,
+    /// Unix timestamp (seconds) the key was last used to authenticate, if ever.
     pub last_used_at: Option<i64>,
+    /// Unix timestamp (seconds) after which the key stops working, if any.
     pub expires_at: Option<i64>,
 }
 
@@ -154,18 +161,27 @@ pub struct LoadedSession {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FilterListRow {
+    /// List id.
     pub id: i64,
+    /// Display name.
     pub name: String,
+    /// Source URL the list's contents are fetched from.
     pub url: String,
+    /// Whether the list's rules are currently applied by the filter engine.
     pub enabled: bool,
+    /// Unix timestamp (seconds) the list was last downloaded, or `0` if never.
     pub last_updated: i64,
+    /// Number of rules parsed out of the list's content on last download.
     pub rule_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CustomRuleRow {
+    /// Rule id.
     pub id: i64,
+    /// Rule text in hosts-file or Adblock-style syntax.
     pub rule: String,
+    /// Either `"block"` or `"allow"`.
     pub rule_type: String,
 }
 
