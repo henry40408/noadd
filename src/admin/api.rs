@@ -18,8 +18,8 @@ use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 
 use crate::admin::auth::{
-    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, store_session,
-    validate_session, verify_password,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_api_key, hash_password,
+    store_session, validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -273,8 +273,46 @@ fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), S
     }
 }
 
-fn require_auth(state: &AppState, jar: &CookieJar) -> Result<(), StatusCode> {
-    current_session(state, jar).map(|_| ())
+/// Extract a bearer token from the `Authorization` header, if present.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let v = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
+}
+
+/// An authenticated operator, resolved from either the browser `session` cookie
+/// or an `Authorization: Bearer <api key>` header. Downstream handlers depend
+/// only on `user_id`, so cookie and API-key requests are indistinguishable.
+pub struct AuthedUser {
+    pub user_id: i64,
+}
+
+impl axum::extract::FromRequestParts<AppState> for AuthedUser {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // 1. Session cookie (browser path).
+        let jar = CookieJar::from_headers(&parts.headers);
+        if let Some(cookie) = jar.get("session")
+            && let Some(user_id) = validate_session(&state.sessions, cookie.value())
+        {
+            return Ok(AuthedUser { user_id });
+        }
+        // 2. Bearer API key (programmatic path).
+        if let Some(token) = bearer_token(&parts.headers) {
+            let hash = hash_api_key(&token);
+            let now = crate::now_unix();
+            if let Ok(Some(user_id)) = state.db.validate_api_key(&hash, now).await {
+                return Ok(AuthedUser { user_id });
+            }
+        }
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // --- Auth endpoints ---
@@ -422,9 +460,8 @@ async fn setup(
 
 async fn revoke_all(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     crate::admin::auth::revoke_all_sessions(&state.sessions, &state.db)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -437,7 +474,7 @@ async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
-    require_auth(&state, &jar)?;
+    current_session(&state, &jar)?;
     if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
@@ -457,26 +494,24 @@ struct MeResponse {
 
 async fn get_me(
     State(state): State<AppState>,
-    jar: CookieJar,
+    auth: AuthedUser,
 ) -> Result<Json<MeResponse>, StatusCode> {
-    let (user_id, _token) = current_session(&state, &jar)?;
     let username = state
         .db
-        .get_username(user_id)
+        .get_username(auth.user_id)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Json(MeResponse {
-        id: user_id,
+        id: auth.user_id,
         username,
     }))
 }
 
 async fn list_users_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::UserRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let users = state
         .db
         .list_users()
@@ -493,10 +528,9 @@ struct CreateUserRequest {
 
 async fn create_user_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     let username = body.username.trim();
     if username.is_empty() || username.chars().count() > 64 {
         return Err(StatusCode::BAD_REQUEST);
@@ -520,10 +554,9 @@ async fn create_user_handler(
 
 async fn delete_user_handler(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     // The last-operator guard and the delete run atomically inside the DB layer,
     // so two concurrent deletes can never drop the instance to zero operators.
     match state
@@ -678,9 +711,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 
 async fn get_server_info(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<ServerInfo>, StatusCode> {
-    require_auth(&state, &jar)?;
     Ok(Json(state.server_info.clone()))
 }
 
@@ -694,10 +726,8 @@ pub struct SettingsMap {
 
 async fn get_settings(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<SettingsMap>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Return known settings
     let keys = [
         "upstream_servers",
@@ -727,11 +757,9 @@ pub struct UpdateSettingsRequest {
 
 async fn put_settings(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Validate upstream_servers before persisting anything — reject the whole
     // save on a bad entry so a broken value is never stored.
     let upstream_servers = match body.settings.get("upstream_servers") {
@@ -771,10 +799,8 @@ async fn put_settings(
 
 async fn get_lists(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::FilterListRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let lists = state
         .db
         .get_filter_lists()
@@ -797,11 +823,9 @@ pub struct AddListResponse {
 
 async fn add_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddListRequest>,
 ) -> Result<(StatusCode, Json<AddListResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
     let id = state
         .db
         .add_filter_list(&body.name, &body.url, true)
@@ -820,12 +844,10 @@ pub struct UpdateListRequest {
 
 async fn update_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
     Json(body): Json<UpdateListRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     if let Some(enabled) = body.enabled {
         state
             .db
@@ -854,12 +876,10 @@ pub struct CheckListUrlRequest {
 
 async fn check_list_url(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
     body: Option<Json<CheckListUrlRequest>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     // Use provided URL or fetch from DB
     let url = if let Some(Json(b)) = body
         && let Some(u) = b.url
@@ -905,11 +925,9 @@ async fn check_list_url(
 
 async fn delete_list(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_filter_list(id)
@@ -928,10 +946,8 @@ pub struct ListUpdateResponse {
 
 async fn trigger_list_update(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<ListUpdateResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .list_manager
         .update_all_lists_no_rebuild()
@@ -955,9 +971,8 @@ struct RebuildStatusResponse {
 
 async fn get_rebuild_status(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<RebuildStatusResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
     let s = state.rebuild.state();
     Ok(Json(RebuildStatusResponse {
         rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
@@ -1005,10 +1020,9 @@ pub struct BatchAddResponse {
 
 async fn batch_add_lists(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<BatchAddRequest>,
 ) -> Result<Json<BatchAddResponse>, StatusCode> {
-    require_auth(&state, &jar)?;
     if body.items.is_empty() || body.items.len() > 50 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1108,9 +1122,8 @@ async fn batch_add_lists(
 
 async fn get_registry_filters(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<crate::registry::RegistryData>, StatusCode> {
-    require_auth(&state, &jar)?;
     match state.registry.list().await {
         Ok(data) => Ok(Json(data)),
         Err(e) => {
@@ -1134,10 +1147,8 @@ pub struct AddRuleResponse {
 
 async fn get_rules(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::CustomRuleRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let rules = state
         .db
         .get_all_custom_rules()
@@ -1149,11 +1160,9 @@ async fn get_rules(
 
 async fn add_rule(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddRuleRequest>,
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
-    require_auth(&state, &jar)?;
-
     let rule_type = match crate::filter::parser::parse_rule(&body.rule) {
         Some(parsed) => match parsed.action {
             crate::filter::parser::RuleAction::Allow => "allow",
@@ -1185,11 +1194,9 @@ async fn add_rule(
 
 async fn delete_rule(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_custom_rule(id)
@@ -1205,9 +1212,8 @@ async fn delete_rule(
 
 async fn get_doh_tokens(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::DohTokenRow>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let tokens = state
         .db
         .get_doh_tokens()
@@ -1223,10 +1229,9 @@ pub struct AddDohTokenRequest {
 
 async fn add_doh_token(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<AddDohTokenRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
     let token = body.token.trim().to_string();
     if token.is_empty() || token.contains('/') {
         return Err(StatusCode::BAD_REQUEST);
@@ -1241,10 +1246,9 @@ async fn add_doh_token(
 
 async fn delete_doh_token_endpoint(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
     state
         .db
         .delete_doh_token(id)
@@ -1262,10 +1266,9 @@ struct FilterCheckRequest {
 
 async fn filter_check(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Json(body): Json<FilterCheckRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
     let domain = body.domain.trim().trim_end_matches('.');
     let filter = state.filter.load();
     let result = filter.check(domain);
@@ -1291,9 +1294,8 @@ async fn filter_check(
 
 async fn upstream_health(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let results = state.forwarder.health_check().await;
     let json: Vec<serde_json::Value> = results
         .into_iter()
@@ -1312,9 +1314,8 @@ async fn upstream_health(
 
 async fn upstream_latency(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let latencies = state.forwarder.latencies();
     let strategy = state.forwarder.strategy();
 
@@ -1345,10 +1346,8 @@ async fn upstream_latency(
 
 async fn get_stats_summary(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<stats::Summary>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let summary = stats::compute_summary(&state.db, now)
         .await
@@ -1364,11 +1363,9 @@ pub struct TimelineQuery {
 
 async fn get_stats_timeline(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TimelineQuery>,
 ) -> Result<Json<Vec<crate::db::TimelinePoint>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let hours = query.hours.unwrap_or(24);
     let timeline = stats::compute_timeline(&state.db, now, hours)
@@ -1385,11 +1382,9 @@ pub struct TopQuery {
 
 async fn get_stats_top_domains(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let domains = stats::compute_top_domains(&state.db, now, limit)
@@ -1401,11 +1396,9 @@ async fn get_stats_top_domains(
 
 async fn get_stats_top_clients(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(20);
     let clients = stats::compute_top_clients(&state.db, now, limit)
@@ -1417,11 +1410,9 @@ async fn get_stats_top_clients(
 
 async fn get_stats_top_upstreams(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<TopQuery>,
 ) -> Result<Json<Vec<crate::db::TopUpstream>>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let now = crate::now_unix();
     let limit = query.limit.unwrap_or(10);
     let upstreams = stats::compute_top_upstreams(&state.db, now, limit)
@@ -1456,10 +1447,9 @@ fn resolve_tz_offset_secs(q: &StatsRangeQuery) -> i64 {
 
 async fn get_stats_v2_timeline(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let tz_offset = resolve_tz_offset_secs(&query);
     let now = crate::now_unix();
@@ -1471,9 +1461,8 @@ async fn get_stats_v2_timeline(
 
 async fn get_stats_v2_heatmap(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now)
         .await
@@ -1483,10 +1472,9 @@ async fn get_stats_v2_heatmap(
 
 async fn get_stats_v2_breakdown(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<stats::Breakdowns>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
@@ -1497,9 +1485,8 @@ async fn get_stats_v2_breakdown(
 
 async fn get_stats_v2_health(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<Json<stats::DbHealth>, StatusCode> {
-    require_auth(&state, &jar)?;
     let now = crate::now_unix();
     let h = stats::compute_db_health(&state.db, now)
         .await
@@ -1509,10 +1496,9 @@ async fn get_stats_v2_health(
 
 async fn get_stats_v2_highlights(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<stats::StatsHighlights>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&query)?;
     let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
@@ -1529,10 +1515,9 @@ pub struct RangedTopQuery {
 
 async fn get_stats_v2_top_domains(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
         tz_offset: None,
@@ -1547,10 +1532,9 @@ async fn get_stats_v2_top_domains(
 
 async fn get_stats_v2_top_clients(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
-    require_auth(&state, &jar)?;
     let range = parse_stats_range(&StatsRangeQuery {
         range: query.range.clone(),
         tz_offset: None,
@@ -1690,11 +1674,9 @@ pub struct LogsQuery {
 
 async fn get_logs(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
     Query(query): Query<LogsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    require_auth(&state, &jar)?;
-
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let search = query.search.as_deref();
@@ -1718,10 +1700,8 @@ async fn get_logs(
 
 async fn delete_logs(
     State(state): State<AppState>,
-    jar: CookieJar,
+    _auth: AuthedUser,
 ) -> Result<StatusCode, StatusCode> {
-    require_auth(&state, &jar)?;
-
     state
         .db
         .delete_all_logs()
