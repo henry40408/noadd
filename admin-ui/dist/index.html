@@ -243,6 +243,10 @@ body::after {
   margin-bottom: 20px;
 }
 
+@media (min-width: 1024px) {
+  dashboard-page .stat-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
 .stat-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -1158,6 +1162,15 @@ stats-page .heatmap-wrap { overflow: visible; }
 stats-page .bar-list:has(> .bar-row:nth-child(8)) { max-height: 220px; overflow-y: auto; padding-right: 4px; }
 stats-page .card { margin-bottom: 12px; }
 stats-page .stat-grid { margin-bottom: 12px; }
+stats-page #health-grid { grid-auto-rows: 1fr; }
+stats-page #health-grid .stat-card {
+  display: grid;
+  grid-template-rows: auto 1fr 1rem;
+}
+stats-page #health-grid .stat-sub { align-self: end; margin-top: 0; white-space: nowrap; }
+@media (min-width: 1024px) {
+  stats-page #health-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
 
 /* Let hover tooltips escape card clipping on chart-containing cards */
 #chart-card,
@@ -3147,19 +3160,23 @@ class StatsPage extends HTMLElement {
     const avgDay = data.avg_new_rows_per_day != null ? formatNum(Math.round(data.avg_new_rows_per_day)) : '—';
     const fragPct = data.fragmentation_ratio != null ? Math.round(data.fragmentation_ratio * 100) : 0;
     const bytesPerLog = data.bytes_per_log ? this._formatBytes(Math.round(data.bytes_per_log)) : '—';
+    const growthPerDay = data.bytes_per_log && data.avg_new_rows_per_day
+      ? this._formatBytes(Math.round(data.bytes_per_log * data.avg_new_rows_per_day))
+      : '—';
     const cov = data.log_coverage_days || 0;
     const coverage = cov > 0 ? `${cov >= 10 ? Math.round(cov) : cov.toFixed(1)}d` : '—';
     const projected = data.projected_full_bytes ? this._formatBytes(data.projected_full_bytes) : '—';
     el.innerHTML = `
       <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.db_size_bytes)}</div></div>
-      <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
-      <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent" style="font-size:1.4rem">${projected}</div><div class="stat-sub">at full retention</div></div>
       <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
       <div class="stat-card"><div class="stat-label">Bytes / Log</div><div class="stat-value accent" style="font-size:1.4rem">${bytesPerLog}</div></div>
+      <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
       <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${esc(oldest)}</div></div>
       <div class="stat-card"><div class="stat-label">Log Coverage</div><div class="stat-value accent" style="font-size:1.4rem">${coverage}</div></div>
       <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${esc(retention)}</div></div>
-      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>`;
+      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>
+      <div class="stat-card"><div class="stat-label">Growth / Day</div><div class="stat-value accent" style="font-size:1.4rem">${growthPerDay}</div></div>
+      <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent" style="font-size:1.4rem">${projected}</div><div class="stat-sub">at full retention</div></div>`;
   }
 
   _renderHighlights(data) {
