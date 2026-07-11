@@ -52,6 +52,11 @@ struct CacheValueInner {
     bytes: Vec<u8>,
     ttl: Duration,
     inserted_at: Instant,
+    /// Upstream resolver's Authenticated Data verdict for this answer, captured
+    /// before the response was tailored to any client. Stored separately from
+    /// `bytes` because a non-DO client's cached wire response has the AD bit
+    /// stripped, yet the query log must still surface the upstream verdict.
+    authenticated_data: bool,
     /// Snapshot of the TTL-decremented response, valid for one integer
     /// second. Within that second multiple cache hits share the result;
     /// when the second rolls over the next caller recomputes and replaces.
@@ -84,6 +89,11 @@ impl CacheValue {
     /// How long ago this entry was inserted.
     pub fn elapsed(&self) -> Duration {
         self.inner.inserted_at.elapsed()
+    }
+
+    /// Upstream resolver's AD verdict for this cached answer.
+    pub fn authenticated_data(&self) -> bool {
+        self.inner.authenticated_data
     }
 
     /// Return cached patched bytes if a snapshot exists for this exact
@@ -150,8 +160,14 @@ impl DnsCache {
         Some(entry)
     }
 
-    /// Cache a DNS response with the given TTL.
-    pub async fn insert(&self, key: CacheKey, bytes: Vec<u8>, ttl: Duration) {
+    /// Cache a DNS response with the given TTL and upstream AD verdict.
+    pub async fn insert(
+        &self,
+        key: CacheKey,
+        bytes: Vec<u8>,
+        ttl: Duration,
+        authenticated_data: bool,
+    ) {
         self.cache
             .insert(
                 key,
@@ -160,6 +176,7 @@ impl DnsCache {
                         bytes,
                         ttl,
                         inserted_at: Instant::now(),
+                        authenticated_data,
                         patched: Mutex::new(None),
                     }),
                 },
@@ -192,13 +209,17 @@ mod tests {
         let data = vec![1, 2, 3];
 
         cache
-            .insert(key.clone(), data.clone(), Duration::from_secs(60))
+            .insert(key.clone(), data.clone(), Duration::from_secs(60), true)
             .await;
 
         let result = cache.get(&key).await.unwrap();
         assert_eq!(result.bytes(), data.as_slice());
         assert_eq!(result.ttl(), Duration::from_secs(60));
         assert!(!result.is_stale());
+        assert!(
+            result.authenticated_data(),
+            "AD verdict must round-trip through the cache"
+        );
     }
 
     #[tokio::test]
@@ -207,7 +228,7 @@ mod tests {
         let key = key("stale.test", 1);
 
         cache
-            .insert(key.clone(), vec![1, 2], Duration::from_millis(1))
+            .insert(key.clone(), vec![1, 2], Duration::from_millis(1), false)
             .await;
 
         // Wait for TTL to expire but within stale window
@@ -225,7 +246,7 @@ mod tests {
         let key = key("gone.test", 1);
 
         cache
-            .insert(key.clone(), vec![1], Duration::from_millis(1))
+            .insert(key.clone(), vec![1], Duration::from_millis(1), false)
             .await;
 
         // Wait beyond TTL + stale window
@@ -243,7 +264,7 @@ mod tests {
         let key = key("clear.test", 1);
 
         cache
-            .insert(key.clone(), vec![1], Duration::from_secs(300))
+            .insert(key.clone(), vec![1], Duration::from_secs(300), false)
             .await;
 
         cache.invalidate_all();
@@ -260,10 +281,10 @@ mod tests {
         let key_long = key("long.test", 1);
 
         cache
-            .insert(key_short.clone(), vec![1], Duration::from_millis(1))
+            .insert(key_short.clone(), vec![1], Duration::from_millis(1), false)
             .await;
         cache
-            .insert(key_long.clone(), vec![2], Duration::from_secs(300))
+            .insert(key_long.clone(), vec![2], Duration::from_secs(300), false)
             .await;
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -280,7 +301,12 @@ mod tests {
         let cache = DnsCache::new(100);
         let key = key("patched.test", 1);
         cache
-            .insert(key.clone(), vec![0xab, 0xcd, 0xef], Duration::from_secs(60))
+            .insert(
+                key.clone(),
+                vec![0xab, 0xcd, 0xef],
+                Duration::from_secs(60),
+                false,
+            )
             .await;
 
         let entry = cache.get(&key).await.unwrap();
@@ -317,6 +343,7 @@ mod tests {
                 key.clone(),
                 vec![0xde, 0xad, 0xbe, 0xef],
                 Duration::from_secs(60),
+                false,
             )
             .await;
 

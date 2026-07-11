@@ -90,13 +90,6 @@ pub struct QueryContext {
     pub authenticated_data: bool,
 }
 
-/// True if the DNS response carries the Authenticated Data (AD) header bit.
-/// AD is bit 5 (0x20) of byte 3 of the DNS header — read directly from the
-/// wire bytes, no message parse (cheap enough to run on every query).
-fn response_authenticated(bytes: &[u8]) -> bool {
-    bytes.get(3).is_some_and(|b| b & 0x20 != 0)
-}
-
 /// Extract a short summary of the DNS answer section from response bytes.
 /// Returns the first few records as a comma-separated string.
 fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
@@ -313,83 +306,133 @@ impl DnsHandler {
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
-        let (response_bytes, min_ttl, action, was_cached, upstream, matched_rule, matched_list) =
-            match filter_result {
-                FilterResult::Blocked { rule, list } => {
-                    let response = build_blocked_response(&message, query_type)?;
-                    // build_blocked_response sets every record's TTL to
-                    // BLOCKED_RESPONSE_TTL_SECS — keep this in sync.
-                    (
-                        response,
-                        BLOCKED_RESPONSE_TTL_SECS,
-                        QueryAction::Blocked,
-                        false,
-                        None,
-                        Some(rule),
-                        Some(list),
-                    )
-                }
-                FilterResult::Allowed { .. } => {
-                    // Most domains arrive lowercase already; skip the per-byte
-                    // case-mapping pass of to_lowercase() in that case. Both
-                    // branches still allocate the owned key string moka needs.
-                    let domain_lower = if domain_clean.bytes().any(|b| b.is_ascii_uppercase()) {
-                        domain_clean.to_lowercase()
-                    } else {
-                        domain_clean.to_string()
-                    };
-                    let cache_key = CacheKey::new(domain_lower, query_type_u16, response_profile);
+        let (
+            response_bytes,
+            min_ttl,
+            action,
+            was_cached,
+            upstream,
+            matched_rule,
+            matched_list,
+            authenticated,
+        ) = match filter_result {
+            FilterResult::Blocked { rule, list } => {
+                let response = build_blocked_response(&message, query_type)?;
+                // build_blocked_response sets every record's TTL to
+                // BLOCKED_RESPONSE_TTL_SECS — keep this in sync.
+                (
+                    response,
+                    BLOCKED_RESPONSE_TTL_SECS,
+                    QueryAction::Blocked,
+                    false,
+                    None,
+                    Some(rule),
+                    Some(list),
+                    // Locally-synthesised block, never validated upstream.
+                    false,
+                )
+            }
+            FilterResult::Allowed { .. } => {
+                // Most domains arrive lowercase already; skip the per-byte
+                // case-mapping pass of to_lowercase() in that case. Both
+                // branches still allocate the owned key string moka needs.
+                let domain_lower = if domain_clean.bytes().any(|b| b.is_ascii_uppercase()) {
+                    domain_clean.to_lowercase()
+                } else {
+                    domain_clean.to_string()
+                };
+                let cache_key = CacheKey::new(domain_lower, query_type_u16, response_profile);
 
-                    // 3. Check cache
-                    if let Some(cached) = self.cache.get(&cache_key).await {
-                        let bytes = prepare_cached_response(&cached, query_id);
-                        let remaining = remaining_ttl_secs(&cached);
+                // 3. Check cache
+                if let Some(cached) = self.cache.get(&cache_key).await {
+                    let bytes = prepare_cached_response(&cached, query_id);
+                    let remaining = remaining_ttl_secs(&cached);
 
-                        if cached.is_stale() {
-                            // Optimistic: serve stale, refresh in background.
-                            // Deduplicate: only spawn if no refresh is already in flight.
-                            // `insert` returns the previous value if any, so
-                            // `is_none()` ⇒ this caller is the first.
-                            let should_refresh =
-                                self.refreshing.insert(cache_key.clone(), ()).is_none();
+                    if cached.is_stale() {
+                        // Optimistic: serve stale, refresh in background.
+                        // Deduplicate: only spawn if no refresh is already in flight.
+                        // `insert` returns the previous value if any, so
+                        // `is_none()` ⇒ this caller is the first.
+                        let should_refresh =
+                            self.refreshing.insert(cache_key.clone(), ()).is_none();
 
-                            if should_refresh {
-                                let forwarder = self.forwarder.clone();
-                                let cache = self.cache.clone();
-                                let refreshing = self.refreshing.clone();
-                                let query_owned = query_bytes.to_vec();
-                                let key = cache_key.clone();
-                                tokio::spawn(async move {
-                                    // RAII guard ensures the in-flight marker is
-                                    // always cleared, even if the task panics or
-                                    // is cancelled — otherwise a single bad
-                                    // refresh could permanently block future
-                                    // refreshes for this key.
-                                    let _guard = RefreshGuard {
-                                        set: refreshing,
-                                        key: key.clone(),
-                                    };
-                                    match forwarder.forward(&query_owned).await {
-                                        Ok((response, _)) => {
-                                            if let Some(ttl) = cache_ttl_for_response(&response) {
-                                                cache.insert(key, response, ttl).await;
-                                            } else {
-                                                tracing::debug!(
-                                                    "stale refresh got non-cacheable response"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
+                        if should_refresh {
+                            let forwarder = self.forwarder.clone();
+                            let cache = self.cache.clone();
+                            let refreshing = self.refreshing.clone();
+                            let query_owned = query_bytes.to_vec();
+                            let key = cache_key.clone();
+                            tokio::spawn(async move {
+                                // RAII guard ensures the in-flight marker is
+                                // always cleared, even if the task panics or
+                                // is cancelled — otherwise a single bad
+                                // refresh could permanently block future
+                                // refreshes for this key.
+                                let _guard = RefreshGuard {
+                                    set: refreshing,
+                                    key: key.clone(),
+                                };
+                                match forwarder.forward(&query_owned).await {
+                                    Ok((response, _, authenticated)) => {
+                                        if let Some(ttl) = cache_ttl_for_response(&response) {
+                                            cache.insert(key, response, ttl, authenticated).await;
+                                        } else {
                                             tracing::debug!(
-                                                error = %e,
-                                                "stale refresh failed"
+                                                "stale refresh got non-cacheable response"
                                             );
                                         }
                                     }
-                                });
-                            }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            error = %e,
+                                            "stale refresh failed"
+                                        );
+                                    }
+                                }
+                            });
                         }
+                    }
 
+                    (
+                        bytes,
+                        remaining,
+                        QueryAction::Allowed,
+                        true,
+                        None,
+                        None,
+                        None,
+                        cached.authenticated_data(),
+                    )
+                } else {
+                    // 4. Forward upstream, coalescing concurrent misses.
+                    //    If another task is already fetching this key,
+                    //    subscribe to its Notify, re-check cache once it
+                    //    fires, and only fall back to our own forward if
+                    //    the original fetcher failed.
+                    let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
+                        BeginResult::Fetcher(g) => Some(g),
+                        BeginResult::Waiter(notify) => {
+                            // Subscribe BEFORE checking cache so we don't
+                            // miss `notify_waiters` fired between our
+                            // cache read and our await.
+                            let fut = notify.notified();
+                            tokio::pin!(fut);
+                            fut.as_mut().enable();
+                            if self.cache.get(&cache_key).await.is_none() {
+                                // 3s cap in case the fetcher is wedged
+                                // (bug or stuck upstream); we'll fall
+                                // through and do our own forward.
+                                let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
+                            }
+                            None
+                        }
+                    };
+
+                    if let Some(cached) = self.cache.get(&cache_key).await {
+                        // Fetcher populated the cache — treat like a
+                        // cache hit (TTL decrement + ID patch).
+                        let bytes = prepare_cached_response(&cached, query_id);
+                        let remaining = remaining_ttl_secs(&cached);
                         (
                             bytes,
                             remaining,
@@ -398,81 +441,44 @@ impl DnsHandler {
                             None,
                             None,
                             None,
+                            cached.authenticated_data(),
                         )
                     } else {
-                        // 4. Forward upstream, coalescing concurrent misses.
-                        //    If another task is already fetching this key,
-                        //    subscribe to its Notify, re-check cache once it
-                        //    fires, and only fall back to our own forward if
-                        //    the original fetcher failed.
-                        let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
-                            BeginResult::Fetcher(g) => Some(g),
-                            BeginResult::Waiter(notify) => {
-                                // Subscribe BEFORE checking cache so we don't
-                                // miss `notify_waiters` fired between our
-                                // cache read and our await.
-                                let fut = notify.notified();
-                                tokio::pin!(fut);
-                                fut.as_mut().enable();
-                                if self.cache.get(&cache_key).await.is_none() {
-                                    // 3s cap in case the fetcher is wedged
-                                    // (bug or stuck upstream); we'll fall
-                                    // through and do our own forward.
-                                    let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
-                                }
-                                None
-                            }
-                        };
-
-                        if let Some(cached) = self.cache.get(&cache_key).await {
-                            // Fetcher populated the cache — treat like a
-                            // cache hit (TTL decrement + ID patch).
-                            let bytes = prepare_cached_response(&cached, query_id);
-                            let remaining = remaining_ttl_secs(&cached);
-                            (
-                                bytes,
-                                remaining,
-                                QueryAction::Allowed,
-                                true,
-                                None,
-                                None,
-                                None,
-                            )
-                        } else {
-                            // We are the fetcher, OR a waiter whose fetcher
-                            // failed / timed out. Forward ourselves.
-                            let (response, upstream_addr) =
-                                self.forwarder.forward(query_bytes).await?;
-                            // Only cache cacheable responses (skip SERVFAIL
-                            // etc., and apply a capped negative TTL for
-                            // NXDOMAIN/empty NoError) to prevent transient
-                            // failures from poisoning the cache.
-                            let cache_ttl = cache_ttl_for_response(&response);
-                            if let Some(ttl) = cache_ttl {
-                                self.cache
-                                    .insert(cache_key.clone(), response.clone(), ttl)
-                                    .await;
-                            }
-                            // For DoH max-age: cacheable responses use the
-                            // same TTL we just stored; non-cacheable
-                            // (SERVFAIL etc.) tell downstream not to cache.
-                            let min_ttl = cache_ttl.map_or(0, |d| d.as_secs() as u32);
-                            // Drop guard (if we hold one) — notifies waiters
-                            // after the cache insert is observable.
-                            drop(fetcher_guard);
-                            (
-                                response,
-                                min_ttl,
-                                QueryAction::Allowed,
-                                false,
-                                Some(upstream_addr),
-                                None,
-                                None,
-                            )
+                        // We are the fetcher, OR a waiter whose fetcher
+                        // failed / timed out. Forward ourselves.
+                        let (response, upstream_addr, upstream_ad) =
+                            self.forwarder.forward(query_bytes).await?;
+                        // Only cache cacheable responses (skip SERVFAIL
+                        // etc., and apply a capped negative TTL for
+                        // NXDOMAIN/empty NoError) to prevent transient
+                        // failures from poisoning the cache.
+                        let cache_ttl = cache_ttl_for_response(&response);
+                        if let Some(ttl) = cache_ttl {
+                            self.cache
+                                .insert(cache_key.clone(), response.clone(), ttl, upstream_ad)
+                                .await;
                         }
+                        // For DoH max-age: cacheable responses use the
+                        // same TTL we just stored; non-cacheable
+                        // (SERVFAIL etc.) tell downstream not to cache.
+                        let min_ttl = cache_ttl.map_or(0, |d| d.as_secs() as u32);
+                        // Drop guard (if we hold one) — notifies waiters
+                        // after the cache insert is observable.
+                        drop(fetcher_guard);
+                        (
+                            response,
+                            min_ttl,
+                            QueryAction::Allowed,
+                            false,
+                            Some(upstream_addr),
+                            None,
+                            None,
+                            upstream_ad,
+                        )
                     }
                 }
-            };
+            }
+        };
 
         let elapsed = start.elapsed().as_millis() as i64;
 
@@ -495,7 +501,7 @@ impl DnsHandler {
             matched_list,
             doh_token,
             result,
-            authenticated_data: response_authenticated(&response_bytes),
+            authenticated_data: authenticated,
         };
         if let Err(e) = self.log_tx.try_send(ctx) {
             self.log_drop_count.fetch_add(1, Ordering::Relaxed);
@@ -824,17 +830,6 @@ mod tests {
     #[test]
     fn unparseable_response_is_not_cached() {
         assert!(cache_ttl_for_response(&[0xff, 0xff]).is_none());
-    }
-
-    #[test]
-    fn ad_bit_read_from_header_byte3() {
-        // AD is bit 5 (0x20) of byte 3 of the DNS header.
-        let mut hdr = vec![0u8; 12];
-        assert!(!response_authenticated(&hdr));
-        hdr[3] |= 0x20;
-        assert!(response_authenticated(&hdr));
-        // too-short buffers are not authenticated, never panic
-        assert!(!response_authenticated(&[0, 1]));
     }
 
     #[test]

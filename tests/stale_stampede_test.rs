@@ -47,11 +47,12 @@ fn cache_key(domain: &str, qtype: RecordType) -> CacheKey {
     )
 }
 
-fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
+fn build_mock_response(query_bytes: &[u8], authenticated: bool) -> Vec<u8> {
     let query = Message::from_bytes(query_bytes).unwrap();
     let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
     resp.metadata.recursion_desired = true;
     resp.metadata.recursion_available = true;
+    resp.metadata.authentic_data = authenticated;
     for q in &query.queries {
         resp.add_query(q.clone());
     }
@@ -70,6 +71,15 @@ fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
 
 /// Spawn a mock UDP DNS server that counts requests concurrently.
 async fn spawn_mock_upstream(delay: Duration) -> (SocketAddr, Arc<AtomicU64>) {
+    spawn_mock_upstream_ad(delay, false).await
+}
+
+/// Like [`spawn_mock_upstream`] but the mock answers with the given upstream
+/// Authenticated Data (AD) verdict, to exercise AD-transparency logging.
+async fn spawn_mock_upstream_ad(
+    delay: Duration,
+    authenticated: bool,
+) -> (SocketAddr, Arc<AtomicU64>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let addr = socket.local_addr().unwrap();
     let counter = Arc::new(AtomicU64::new(0));
@@ -83,7 +93,7 @@ async fn spawn_mock_upstream(delay: Duration) -> (SocketAddr, Arc<AtomicU64>) {
                 Err(_) => break,
             };
             counter_clone.fetch_add(1, Ordering::SeqCst);
-            let response_data = build_mock_response(&buf[..len]);
+            let response_data = build_mock_response(&buf[..len], authenticated);
             let sock = socket.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
@@ -140,7 +150,7 @@ async fn test_stale_refresh_is_deduplicated() {
     // Replace with instantly-stale entry
     let cache_key = cache_key(domain, RecordType::A);
     cache
-        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1))
+        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1), false)
         .await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     upstream_counter.store(0, Ordering::SeqCst);
@@ -200,6 +210,7 @@ async fn test_refresh_lock_released_after_completion() {
             cache_key.clone(),
             prime_resp.bytes.clone(),
             Duration::from_millis(1),
+            false,
         )
         .await;
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -217,7 +228,7 @@ async fn test_refresh_lock_released_after_completion() {
 
     // Round 2: make stale again, query once → should trigger a NEW refresh
     cache
-        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1))
+        .insert(cache_key, prime_resp.bytes, Duration::from_millis(1), false)
         .await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     upstream_counter.store(0, Ordering::SeqCst);
@@ -255,7 +266,7 @@ async fn test_different_domains_refresh_independently() {
     for (domain, _, resp) in &primed {
         let key = cache_key(domain, RecordType::A);
         cache
-            .insert(key, resp.bytes.clone(), Duration::from_millis(1))
+            .insert(key, resp.bytes.clone(), Duration::from_millis(1), false)
             .await;
     }
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -281,5 +292,34 @@ async fn test_different_domains_refresh_independently() {
     assert_eq!(
         count, 2,
         "Two different stale domains should each trigger 1 refresh (total 2), got {count}"
+    );
+}
+
+/// A client that did not request DNSSEC must not receive the AD bit, yet the
+/// query log must still surface the upstream resolver's AD verdict.
+#[tokio::test]
+async fn test_non_dnssec_client_gets_ad_stripped_but_log_keeps_verdict() {
+    let (upstream_addr, _counter) = spawn_mock_upstream_ad(Duration::from_millis(1), true).await;
+    let (handler, _cache, mut log_rx) = make_test_handler(upstream_addr).await;
+
+    // Bare query: no EDNS, so the client never advertised DNSSEC (no DO bit).
+    let query_bytes = make_query_bytes("ad-transparency.example.com", RecordType::A);
+    let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    let outcome = handler.handle(&query_bytes, client_ip, None).await.unwrap();
+
+    // The wire response to this plain client must have the AD bit cleared
+    // (byte 3, bit 0x20) even though the upstream set it.
+    assert_eq!(
+        outcome.bytes[3] & 0x20,
+        0,
+        "non-DO client must not receive the AD bit"
+    );
+
+    // ...but the query log must record the upstream's true AD verdict.
+    let ctx = log_rx.try_recv().expect("should receive a log event");
+    assert!(
+        ctx.authenticated_data,
+        "query log must surface the upstream AD verdict for a non-DO client"
     );
 }

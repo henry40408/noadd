@@ -918,6 +918,7 @@ async fn test_dnssec_setting_change_invalidates_dns_cache() {
             key.clone(),
             vec![0xde, 0xad, 0xbe, 0xef],
             std::time::Duration::from_secs(300),
+            false,
         )
         .await;
 
@@ -956,6 +957,7 @@ async fn test_dnssec_setting_unchanged_keeps_dns_cache() {
             key.clone(),
             vec![0xde, 0xad, 0xbe, 0xef],
             std::time::Duration::from_secs(300),
+            false,
         )
         .await;
 

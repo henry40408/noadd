@@ -21,7 +21,7 @@ async fn test_forward_resolves_known_domain() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, upstream) = forwarder
+    let (response, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward should succeed");
@@ -51,7 +51,7 @@ async fn test_forward_failover_on_bad_primary() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, upstream) = forwarder
+    let (response, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward should succeed after failover");
@@ -86,7 +86,7 @@ async fn test_forward_failover_on_closed_local_port() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, upstream) = forwarder
+    let (response, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward should fail over from closed local port to real upstream");
@@ -154,7 +154,7 @@ async fn test_forward_via_mullvad_dot_resolves_known_domain() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, upstream) = forwarder
+    let (response, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward via Mullvad DoT should succeed");
@@ -234,7 +234,7 @@ async fn test_forward_nxdomain_returns_response_not_error() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("nonexistent-noadd-probe.invalid.", RecordType::A);
-    let (response_bytes, upstream) = forwarder
+    let (response_bytes, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward should return Ok for NXDOMAIN, not a forwarding error");
@@ -279,7 +279,7 @@ async fn test_forward_nodata_returns_noerror() {
     let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::MX);
-    let (response_bytes, upstream) = forwarder
+    let (response_bytes, upstream, _ad) = forwarder
         .forward(&query)
         .await
         .expect("forward should return Ok for NODATA, not a forwarding error");
