@@ -3946,8 +3946,9 @@ class SettingsPage extends HTMLElement {
 
     this.querySelector('#s-retention').onchange = (e) => {
       const v = e.target.value.trim();
-      if (!/^\d+$/.test(v) || parseInt(v, 10) < 1) { setMsg('#msg-retention', false, 'Must be a positive integer'); return; }
-      putField('#msg-retention', { log_retention_days: v }, 'Saved');
+      // Blank clears the setting → the server falls back to its default retention.
+      if (v !== '' && (!/^\d+$/.test(v) || parseInt(v, 10) < 1)) { setMsg('#msg-retention', false, 'Must be a positive integer'); return; }
+      putField('#msg-retention', { log_retention_days: v }, v === '' ? 'Using default' : 'Saved');
     };
 
     this.querySelector('#s-public-url').onchange = (e) => {

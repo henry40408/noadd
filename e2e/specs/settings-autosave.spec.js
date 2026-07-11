@@ -122,10 +122,10 @@ test.describe('Settings page uses one consistent save model', () => {
     await expect(page.locator('#msg-block-ipv4')).toContainText(/IPv4/i);
   });
 
-  test('log retention auto-saves on blur and rejects non-numeric without a request', async ({ page }) => {
+  test('log retention auto-saves on blur, accepts blank (default), rejects non-numeric', async ({ page }) => {
     await gotoSettings(page);
     // Valid: persists.
-    const put = page.waitForResponse((r) =>
+    let put = page.waitForResponse((r) =>
       r.url().includes('/api/settings') && r.request().method() === 'PUT' && r.ok());
     await page.locator('#s-retention').fill('14');
     await page.locator('#s-retention').blur();
@@ -133,7 +133,16 @@ test.describe('Settings page uses one consistent save model', () => {
     await page.reload();
     await page.locator('#s-retention').waitFor();
     await expect(page.locator('#s-retention')).toHaveValue('14');
-    // Invalid: no request.
+    // Blank means "use the default" — it must be accepted and saved (not rejected).
+    put = page.waitForResponse((r) =>
+      r.url().includes('/api/settings') && r.request().method() === 'PUT' && r.ok());
+    await page.locator('#s-retention').fill('');
+    await page.locator('#s-retention').blur();
+    await put;
+    await page.reload();
+    await page.locator('#s-retention').waitFor();
+    await expect(page.locator('#s-retention')).toHaveValue('');
+    // Invalid non-numeric: no request.
     const puts = [];
     page.on('request', (req) => {
       if (req.url().includes('/api/settings') && req.method() === 'PUT') puts.push(1);
