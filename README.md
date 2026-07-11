@@ -43,6 +43,7 @@ The admin UI is embedded in the binary — dark/light follows your OS preference
 - **Custom rules** — unified API with auto-detection of block/allow syntax
 - **Domain test** — check if a domain is allowed or blocked with matched rule details
 - **Configurable upstream DNS** — user-configurable at runtime (plain `ip:port`, DoT `tls://`, DoH `https://`), applied live on save with no restart; strategy (Sequential / Round Robin / Lowest Latency EMA) switchable independently
+- **Configurable block response** — choose how blocked queries are answered: `0.0.0.0`/`::` (default), `NXDOMAIN`, `REFUSED`, or an operator-supplied custom IP for A/AAAA; runtime setting, applied live with no restart
 - **Admin web UI** — dashboard with live stats, statistics page (7d/30d/90d trends, weekday×hour heatmap, query type & result breakdowns, DB health), query log with quick Allow/Block actions, filter management
 - **Mobile-friendly** — responsive layout with bottom tab navigation and card-based views
 - **DoH token auth** — restrict DoH access with user-defined URL tokens (`/dns-query/my-token`)
