@@ -915,7 +915,16 @@ async fn put_settings(
     }
 
     if let Some(v) = body.settings.get("dnssec_disabled") {
-        state.forwarder.set_dnssec_enabled(v.trim() != "true");
+        let new_enabled = v.trim() != "true";
+        // Only flush when the policy actually flips. Cached values are
+        // client-ready wire responses that may have been produced while upstream
+        // DO forcing had the opposite state, so a real toggle must not keep
+        // serving stale AD/RRSIG/OPT data. A settings save that re-sends the
+        // unchanged value must not needlessly wipe every client's cache.
+        if state.forwarder.dnssec_enabled() != new_enabled {
+            state.forwarder.set_dnssec_enabled(new_enabled);
+            state.cache.invalidate_all();
+        }
     }
 
     if let Some(servers) = upstream_servers {

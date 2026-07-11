@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::{Semaphore, mpsc};
 use tracing::warn;
 
-use crate::cache::{CacheKey, DnsCache};
+use crate::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use crate::dns::inflight::{BeginResult, InflightUpstream};
 use crate::dns::ratelimit::IpRateLimiter;
 use crate::filter::engine::{FilterEngine, FilterResult};
@@ -264,6 +264,15 @@ impl DnsHandler {
         let query_type = query.query_type();
         let query_type_u16: u16 = query_type.into();
         let query_id = message.metadata.id;
+        let response_profile = ClientResponseProfile {
+            has_edns: message.edns.is_some(),
+            dnssec_ok: message
+                .edns
+                .as_ref()
+                .is_some_and(|edns| edns.flags().dnssec_ok),
+            checking_disabled: message.metadata.checking_disabled,
+            upstream_dnssec_enabled: self.forwarder.dnssec_enabled(),
+        };
 
         // 2a. Per-IP rate limit. Token drained here protects upstream and
         // cache from a single noisy client. REFUSED (rcode 5) is the
@@ -329,7 +338,7 @@ impl DnsHandler {
                     } else {
                         domain_clean.to_string()
                     };
-                    let cache_key: CacheKey = (domain_lower, query_type_u16);
+                    let cache_key = CacheKey::new(domain_lower, query_type_u16, response_profile);
 
                     // 3. Check cache
                     if let Some(cached) = self.cache.get(&cache_key).await {
@@ -831,7 +840,11 @@ mod tests {
     #[test]
     fn refresh_guard_removes_key_on_drop() {
         let set: Arc<DashMap<CacheKey, ()>> = Arc::new(DashMap::new());
-        let key: CacheKey = ("example.com".to_string(), 1);
+        let key = CacheKey::new(
+            "example.com".to_string(),
+            1,
+            ClientResponseProfile::default(),
+        );
         set.insert(key.clone(), ());
         {
             let _g = RefreshGuard {

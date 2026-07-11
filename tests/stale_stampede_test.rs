@@ -16,7 +16,7 @@ use hickory_proto::serialize::binary::BinDecodable;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use noadd::cache::DnsCache;
+use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use noadd::dns::handler::{DnsHandler, QueryContext};
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -29,6 +29,22 @@ fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
     q.set_query_type(qtype);
     msg.add_query(q);
     msg.to_vec().unwrap()
+}
+
+fn cache_key(domain: &str, qtype: RecordType) -> CacheKey {
+    // Mirror the profile the handler derives for `make_query_bytes`: a bare
+    // query carries no EDNS/DO/CD, and `UpstreamForwarder` defaults to DNSSEC
+    // enabled, so `upstream_dnssec_enabled` is true. A `default()` profile here
+    // would key a different entry than the handler looks up and the stale
+    // entries these tests plant would never be found.
+    CacheKey::new(
+        domain.to_lowercase(),
+        u16::from(qtype),
+        ClientResponseProfile {
+            upstream_dnssec_enabled: true,
+            ..ClientResponseProfile::default()
+        },
+    )
 }
 
 fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
@@ -122,7 +138,7 @@ async fn test_stale_refresh_is_deduplicated() {
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
 
     // Replace with instantly-stale entry
-    let cache_key = (domain.to_lowercase(), u16::from(RecordType::A));
+    let cache_key = cache_key(domain, RecordType::A);
     cache
         .insert(cache_key, prime_resp.bytes, Duration::from_millis(1))
         .await;
@@ -178,7 +194,7 @@ async fn test_refresh_lock_released_after_completion() {
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
 
     // Round 1: make stale, query once → triggers refresh
-    let cache_key = (domain.to_lowercase(), u16::from(RecordType::A));
+    let cache_key = cache_key(domain, RecordType::A);
     cache
         .insert(
             cache_key.clone(),
@@ -237,7 +253,7 @@ async fn test_different_domains_refresh_independently() {
 
     // Make both stale
     for (domain, _, resp) in &primed {
-        let key = (domain.to_lowercase(), u16::from(RecordType::A));
+        let key = cache_key(domain, RecordType::A);
         cache
             .insert(key, resp.bytes.clone(), Duration::from_millis(1))
             .await;

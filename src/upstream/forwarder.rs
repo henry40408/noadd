@@ -213,6 +213,43 @@ fn ensure_dnssec_ok(msg: &mut Message) {
     }
 }
 
+/// Convert an upstream response into the wire profile advertised by the
+/// original client request.
+///
+/// The upstream transaction may force DO even when the client did not. RFC
+/// 3225 requires a recursive resolver to remove DNSSEC security records again
+/// before replying to such a client. RFC 6891 likewise requires OPT presence
+/// to follow the client transaction, not the separately modified upstream
+/// transaction. Rebuilding a minimal OPT also prevents upstream/client-specific
+/// EDNS options from leaking through the shared response cache.
+fn prepare_response_for_client(mut response: Message, client_request: &Message) -> Message {
+    let client_dnssec_ok = client_request
+        .edns
+        .as_ref()
+        .is_some_and(|edns| edns.flags().dnssec_ok);
+
+    response = response.maybe_strip_dnssec_records(client_dnssec_ok);
+    response.metadata.checking_disabled = client_request.metadata.checking_disabled;
+    // RFC 6840 §5.7: never advertise Authenticated Data to a client that did
+    // not request DNSSEC. Leaving AD set after stripping the RRSIG/NSEC records
+    // would tell a plain stub the answer is validated with nothing to back it.
+    if !client_dnssec_ok {
+        response.metadata.authentic_data = false;
+    }
+
+    let upstream_rcode_high = response.edns.as_ref().map_or(0, Edns::rcode_high);
+    response.edns = client_request.edns.as_ref().map(|_| {
+        let mut edns = Edns::new();
+        edns.set_rcode_high(upstream_rcode_high);
+        edns.set_version(0);
+        edns.set_dnssec_ok(client_dnssec_ok);
+        edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
+        edns
+    });
+
+    response
+}
+
 /// Build the DNS response for an authoritative negative answer (NXDOMAIN or
 /// NODATA) that hickory surfaced as a [`NoRecords`] error.
 ///
@@ -252,18 +289,7 @@ fn build_negative_response(client_id: u16, no_records: &NoRecords, request: &Mes
         response.add_authority(soa.clone().into_record_of_rdata());
     }
 
-    // RFC 6891 §6.1.1: a response to a request that carried an OPT must also
-    // carry one (and §7: it must not otherwise). Mirror the client's DO bit and
-    // advertise our own payload size.
-    if let Some(client_edns) = request.edns.as_ref() {
-        let mut edns = Edns::new();
-        edns.set_version(0);
-        edns.set_max_payload(DNSSEC_UDP_PAYLOAD);
-        edns.set_dnssec_ok(client_edns.flags().dnssec_ok);
-        response.set_edns(edns);
-    }
-
-    response
+    prepare_response_for_client(response, request)
 }
 
 /// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
@@ -586,12 +612,20 @@ impl UpstreamForwarder {
         // build a `DnsRequest`; the caller has already parsed this once
         // in the handler, but the forwarder API stays bytes-in / bytes-out
         // so the handler doesn't have to know about transport details.
-        let mut request_msg =
+        let client_request_msg =
             Message::from_vec(query_bytes).map_err(|_err| ForwardError::BadQuery)?;
-        let client_id = request_msg.metadata.id;
-        if self.dnssec_enabled() {
-            ensure_dnssec_ok(&mut request_msg);
-        }
+        let client_id = client_request_msg.metadata.id;
+        // Only clone the client message when we actually need to mutate it to
+        // force DO; with DNSSEC disabled the upstream query is the client query
+        // verbatim, so borrow it and skip a full-`Message` copy per query.
+        let forced_request_msg = if self.dnssec_enabled() {
+            let mut msg = client_request_msg.clone();
+            ensure_dnssec_ok(&mut msg);
+            Some(msg)
+        } else {
+            None
+        };
+        let upstream_request_msg = forced_request_msg.as_ref().unwrap_or(&client_request_msg);
 
         let order = self.server_order();
         if self.strategy() == UpstreamStrategy::RoundRobin {
@@ -603,7 +637,8 @@ impl UpstreamForwarder {
                 continue;
             };
 
-            let request = DnsRequest::new(request_msg.clone(), DnsRequestOptions::default());
+            let request =
+                DnsRequest::new(upstream_request_msg.clone(), DnsRequestOptions::default());
             let start = std::time::Instant::now();
 
             match entry.pool.send(request).first_answer().await {
@@ -622,6 +657,7 @@ impl UpstreamForwarder {
                     // client's original id. Restore it before re-encoding.
                     let mut msg: Message = response.into();
                     msg.metadata.id = client_id;
+                    let msg = prepare_response_for_client(msg, &client_request_msg);
 
                     match msg.to_bytes() {
                         Ok(bytes) => return Ok((bytes, entry.label.clone())),
@@ -641,7 +677,8 @@ impl UpstreamForwarder {
                         if let Some(cell) = up.latencies.get(idx) {
                             update_latency_cell(cell, ms);
                         }
-                        let response = build_negative_response(client_id, no_records, &request_msg);
+                        let response =
+                            build_negative_response(client_id, no_records, &client_request_msg);
                         if let Ok(bytes) = response.to_bytes() {
                             return Ok((bytes, entry.label.clone()));
                         }
@@ -768,6 +805,71 @@ mod tests {
         assert!(edns.flags().dnssec_ok);
         // existing larger payload preserved (>= 1232)
         assert_eq!(edns.max_payload(), 4096);
+    }
+
+    fn response_with_dnssec_records() -> Message {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        let mut response = Message::response(0x1234, OpCode::Query);
+        response.metadata.authentic_data = true;
+        response.add_query(Query::query(name.clone(), RecordType::A));
+        response.add_answer(Record::update0(name, 300, RecordType::RRSIG));
+        let mut edns = Edns::new();
+        edns.set_dnssec_ok(true);
+        edns.set_max_payload(4096);
+        response.set_edns(edns);
+        response
+    }
+
+    fn client_request(edns: Option<bool>) -> Message {
+        let mut request = Message::query();
+        request.add_query(Query::query(
+            Name::from_ascii("api.example.com.").unwrap(),
+            RecordType::A,
+        ));
+        if let Some(dnssec_ok) = edns {
+            let mut client_edns = Edns::new();
+            client_edns.set_max_payload(4096);
+            client_edns.set_dnssec_ok(dnssec_ok);
+            request.set_edns(client_edns);
+        }
+        request
+    }
+
+    #[test]
+    fn response_for_plain_client_omits_opt_and_dnssec_records() {
+        let response =
+            prepare_response_for_client(response_with_dnssec_records(), &client_request(None));
+
+        assert!(response.edns.is_none());
+        assert!(response.answers.is_empty());
+        assert!(!response.metadata.authentic_data);
+    }
+
+    #[test]
+    fn response_for_edns_client_without_do_has_opt_but_no_dnssec_records() {
+        let response = prepare_response_for_client(
+            response_with_dnssec_records(),
+            &client_request(Some(false)),
+        );
+
+        let edns = response.edns.as_ref().expect("client sent OPT");
+        assert!(!edns.flags().dnssec_ok);
+        assert_eq!(edns.max_payload(), DNSSEC_UDP_PAYLOAD);
+        assert!(response.answers.is_empty());
+        assert!(!response.metadata.authentic_data);
+    }
+
+    #[test]
+    fn response_for_do_client_keeps_opt_and_dnssec_records() {
+        let response = prepare_response_for_client(
+            response_with_dnssec_records(),
+            &client_request(Some(true)),
+        );
+
+        assert!(response.edns.as_ref().unwrap().flags().dnssec_ok);
+        assert_eq!(response.answers.len(), 1);
+        assert_eq!(response.answers[0].record_type(), RecordType::RRSIG);
+        assert!(response.metadata.authentic_data);
     }
 
     fn example_soa() -> Record<hickory_proto::rr::rdata::SOA> {

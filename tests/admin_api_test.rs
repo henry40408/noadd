@@ -9,7 +9,7 @@ use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
     RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
 };
-use noadd::cache::DnsCache;
+use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use noadd::db::Database;
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
@@ -29,7 +29,8 @@ async fn setup_with_registry_url(url: String) -> (axum::Router, String) {
 }
 
 async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
-    build_app(registry_url, true).await
+    let (app, token, _cache) = build_app(registry_url, true).await;
+    (app, token)
 }
 
 /// Build a router whose admin password is NOT set, so `/api/auth/setup`
@@ -40,7 +41,7 @@ async fn unconfigured_app() -> axum::Router {
     build_app("http://127.0.0.1:1/filters.json", false).await.0
 }
 
-async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, String) {
+async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, String, DnsCache) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
     let path = dir.keep().join("test.db");
@@ -103,7 +104,7 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         db,
         sessions,
         filter,
-        cache,
+        cache: cache.clone(),
         rate_limiter,
         forwarder,
         handler,
@@ -117,7 +118,7 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
-    (router, token)
+    (router, token, cache)
 }
 
 #[tokio::test]
@@ -901,6 +902,80 @@ async fn test_dnssec_disabled_setting_round_trip() {
     assert_eq!(
         json["dnssec_disabled"], "true",
         "dnssec_disabled must be returned by GET /api/settings"
+    );
+}
+
+#[tokio::test]
+async fn test_dnssec_setting_change_invalidates_dns_cache() {
+    let (app, token, cache) = build_app("http://127.0.0.1:1/filters.json", true).await;
+    let key = CacheKey::new(
+        "example.com".to_string(),
+        1,
+        ClientResponseProfile::default(),
+    );
+    cache
+        .insert(
+            key.clone(),
+            vec![0xde, 0xad, 0xbe, 0xef],
+            std::time::Duration::from_secs(300),
+        )
+        .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"dnssec_disabled":"true"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        cache.get(&key).await.is_none(),
+        "DNSSEC policy changes must not leave old wire responses cached"
+    );
+}
+
+#[tokio::test]
+async fn test_dnssec_setting_unchanged_keeps_dns_cache() {
+    // The forwarder defaults to DNSSEC enabled (dnssec_disabled=false). Re-sending
+    // that same value must not flush every client's cache.
+    let (app, token, cache) = build_app("http://127.0.0.1:1/filters.json", true).await;
+    let key = CacheKey::new(
+        "example.com".to_string(),
+        1,
+        ClientResponseProfile::default(),
+    );
+    cache
+        .insert(
+            key.clone(),
+            vec![0xde, 0xad, 0xbe, 0xef],
+            std::time::Duration::from_secs(300),
+        )
+        .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .header("cookie", format!("session={token}"))
+                .body(Body::from(r#"{"dnssec_disabled":"false"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        cache.get(&key).await.is_some(),
+        "an unchanged DNSSEC setting must not wipe the cache"
     );
 }
 
