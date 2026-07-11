@@ -451,6 +451,9 @@ textarea { resize: vertical; line-height: 1.7; }
    a constant full width and the message toggling causes no reflow. */
 .field-msg { display: block; font-size: 0.8rem; line-height: 1.15em; min-height: 1.15em; margin: 0 0 14px; }
 
+/* Label sitting above its form control (consistent placement for every field). */
+.field-label { display: block; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 6px; }
+
 /* Toggle */
 .toggle {
   display: inline-block;
@@ -3813,8 +3816,8 @@ class SettingsPage extends HTMLElement {
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
         </p>
+        <label class="field-label" for="s-dnssec">DNSSEC status</label>
         <div class="input-row" style="margin-bottom:2px">
-          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">DNSSEC status</label>
           <select id="s-dnssec">
             <option value="on">On (surface AD)</option>
             <option value="off">Off</option>
@@ -3825,8 +3828,8 @@ class SettingsPage extends HTMLElement {
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
         </p>
+        <label class="field-label" for="s-block-mode">Response</label>
         <div class="input-row" style="margin-bottom:2px">
-          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">Response</label>
           <select id="s-block-mode">
             <option value="null_ip">Null IP (0.0.0.0 / ::)</option>
             <option value="nxdomain">NXDOMAIN</option>
@@ -3861,8 +3864,8 @@ class SettingsPage extends HTMLElement {
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           Default policy for unauthenticated DoH requests (without a token in URL).
         </p>
+        <label class="field-label" for="s-doh-policy">Default Policy</label>
         <div class="input-row">
-          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">Default Policy</label>
           <select id="s-doh-policy">
             <option value="allow">Allow (open access)</option>
             <option value="deny">Deny (require token)</option>
