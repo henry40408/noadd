@@ -906,6 +906,184 @@ async fn test_dnssec_disabled_setting_round_trip() {
 }
 
 #[tokio::test]
+async fn test_invalid_block_mode_rejected_and_not_persisted() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(r#"{"block_mode":"bogus"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("block_mode").is_none(),
+        "invalid block_mode must not be persisted, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_block_custom_ipv4_rejected() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(r#"{"block_mode":"custom_ip","block_custom_ipv4":"not-an-ip"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Verify no partial write: block_mode must not have been persisted even
+    // though it was valid, since the request as a whole was rejected.
+    let response = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("block_mode").is_none(),
+        "block_mode must not be persisted when the request is rejected, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_block_mode_partial_update_preserves_custom_ips() {
+    let (app, token) = setup().await;
+
+    // Set block_mode + both custom IPs.
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(
+                r#"{"block_mode":"custom_ip","block_custom_ipv4":"192.0.2.1","block_custom_ipv6":"100::1"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now send a partial update with only block_mode set again; the
+    // previously stored custom IPs must be preserved (merge-on-apply),
+    // not wiped out.
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(r#"{"block_mode":"custom_ip"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["block_mode"], "custom_ip");
+    assert_eq!(
+        json["block_custom_ipv4"], "192.0.2.1",
+        "partial update must not wipe previously stored block_custom_ipv4, got: {json}"
+    );
+    assert_eq!(
+        json["block_custom_ipv6"], "100::1",
+        "partial update must not wipe previously stored block_custom_ipv6, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_block_mode_nxdomain_round_trip() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(r#"{"block_mode":"nxdomain"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["block_mode"], "nxdomain");
+}
+
+#[tokio::test]
+async fn test_block_mode_custom_ip_with_valid_addresses_accepted() {
+    let (app, token) = setup().await;
+
+    let response = app
+        .clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(
+                r#"{"block_mode":"custom_ip","block_custom_ipv4":"192.0.2.1","block_custom_ipv6":"100::1"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["block_mode"], "custom_ip");
+    assert_eq!(json["block_custom_ipv4"], "192.0.2.1");
+    assert_eq!(json["block_custom_ipv6"], "100::1");
+}
+
+#[tokio::test]
 async fn test_dnssec_setting_change_invalidates_dns_cache() {
     let (app, token, cache) = build_app("http://127.0.0.1:1/filters.json", true).await;
     let key = CacheKey::new(

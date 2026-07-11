@@ -446,6 +446,14 @@ textarea { resize: vertical; line-height: 1.7; }
 
 .input-row input { flex: 1; }
 
+/* Inline save/validation feedback on its own reserved-height line directly
+   below a control — never shares the control's flex row, so the control keeps
+   a constant full width and the message toggling causes no reflow. */
+.field-msg { display: block; font-size: 0.8rem; line-height: 1.15em; min-height: 1.15em; margin: 6px 0; }
+
+/* Label sitting above its form control (consistent placement for every field). */
+.field-label { display: block; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 6px; }
+
 /* Toggle */
 .toggle {
   display: inline-block;
@@ -3795,48 +3803,75 @@ class SettingsPage extends HTMLElement {
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
           How upstream servers are selected for each DNS query.
         </p>
-        <div class="input-row">
+        <div class="input-row" style="margin-bottom:2px">
           <select id="s-strategy">
             <option value="sequential">Sequential (try in order)</option>
             <option value="round-robin">Round Robin (rotate)</option>
             <option value="lowest-latency">Lowest Latency (fastest first)</option>
           </select>
         </div>
+        <div class="field-msg" id="msg-strategy"></div>
         <div id="ema-latency" style="margin-top:12px"></div>
         <div class="card-title" style="margin-top:16px">DNSSEC</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
         </p>
-        <div class="input-row">
-          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">DNSSEC status</label>
+        <label class="field-label" for="s-dnssec">DNSSEC status</label>
+        <div class="input-row" style="margin-bottom:2px">
           <select id="s-dnssec">
             <option value="on">On (surface AD)</option>
             <option value="off">Off</option>
           </select>
         </div>
+        <div class="field-msg" id="msg-dnssec"></div>
+        <div class="card-title" style="margin-top:16px">Block mode</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+          How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
+        </p>
+        <label class="field-label" for="s-block-mode">Response</label>
+        <div class="input-row" style="margin-bottom:2px">
+          <select id="s-block-mode">
+            <option value="null_ip">Null IP (0.0.0.0 / ::)</option>
+            <option value="nxdomain">NXDOMAIN</option>
+            <option value="refused">REFUSED</option>
+            <option value="custom_ip">Custom IP</option>
+          </select>
+        </div>
+        <div class="field-msg" id="msg-block-mode"></div>
+        <div id="s-block-custom" style="display:none">
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv4" placeholder="Custom IPv4 for A, e.g. 192.0.2.1"></div>
+          <div class="field-msg" id="msg-block-ipv4"></div>
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv6" placeholder="Custom IPv6 for AAAA, e.g. 100::1"></div>
+          <div class="field-msg" id="msg-block-ipv6"></div>
+        </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
-        <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <div class="field-msg" id="msg-retention"></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.12s">
         <div class="card-title">Public URL</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
-        <div class="input-row"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
+        <div class="input-row" style="margin-bottom:2px"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
+        <div class="field-msg" id="msg-public-url"></div>
       </div>
-      <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>
+      <div class="fade-in" style="animation-delay:0.15s;min-height:18px;margin-top:4px">
+        <span style="color:var(--text-dim);font-size:0.8rem">Changes are saved automatically.</span>
+      </div>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
         <div class="card-title">DoH Access Control</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           Default policy for unauthenticated DoH requests (without a token in URL).
         </p>
+        <label class="field-label" for="s-doh-policy">Default Policy</label>
         <div class="input-row">
-          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">Default Policy</label>
           <select id="s-doh-policy">
             <option value="allow">Allow (open access)</option>
             <option value="deny">Deny (require token)</option>
           </select>
         </div>
+        <div class="field-msg" id="msg-doh-policy"></div>
         <div class="card-title" style="margin-top:16px">DoH Tokens</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
           Each token becomes a DoH URL path: <code style="color:var(--accent);font-size:0.8rem">/dns-query/your-token</code>. Always works regardless of policy.
@@ -3849,18 +3884,6 @@ class SettingsPage extends HTMLElement {
       </div>`;
 
     this.load();
-
-    this.querySelector('#save-settings').onclick = async () => {
-      const settings = {
-        upstream_strategy: this.querySelector('#s-strategy').value,
-        log_retention_days: this.querySelector('#s-retention').value,
-        doh_access_policy: this.querySelector('#s-doh-policy').value,
-        public_url: this.querySelector('#s-public-url').value,
-      };
-      await api.put('/api/settings', settings);
-      this.querySelector('#save-settings').textContent = 'Saved!';
-      setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
-    };
 
     this.renderUpstreams = async () => {
       const el = this.querySelector('#upstream-health');
@@ -3891,18 +3914,77 @@ class SettingsPage extends HTMLElement {
       } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
-    this.querySelector('#s-doh-policy').onchange = async (e) => {
-      await api.put('/api/settings', { doh_access_policy: e.target.value });
+    // --- Unified auto-save: every control saves on change/blur and reports its
+    // own result inline, right next to that field. Invalid values never PUT.
+    const setMsg = (id, ok, msg) => {
+      const el = this.querySelector(id);
+      if (!el) return;
+      el.style.color = ok ? 'var(--accent)' : 'var(--red)';
+      el.textContent = msg ? (ok ? '✔ ' : '✗ ') + msg : '';
+      if (el._t) clearTimeout(el._t);
+      if (ok && msg) el._t = setTimeout(() => { el.textContent = ''; }, 2000);
     };
+    const putField = async (id, payload, okMsg) => {
+      try {
+        await api.put('/api/settings', payload);
+        setMsg(id, true, okMsg);
+      } catch (e) {
+        setMsg(id, false, 'Save failed');
+      }
+    };
+    const isIpv4 = (s) =>
+      /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(s);
+    const isIpv6 = (s) => { try { new URL('http://[' + s + ']/'); return true; } catch (e) { return false; } };
 
-    this.querySelector('#s-strategy').onchange = async (e) => {
-      await api.put('/api/settings', { upstream_strategy: e.target.value });
+    this.querySelector('#s-doh-policy').onchange = (e) =>
+      putField('#msg-doh-policy', { doh_access_policy: e.target.value }, 'Saved');
+
+    this.querySelector('#s-strategy').onchange = (e) => {
+      putField('#msg-strategy', { upstream_strategy: e.target.value }, 'Saved');
       this.loadEma();
     };
 
-    this.querySelector('#s-dnssec').onchange = async (e) => {
-      await api.put('/api/settings', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' });
+    this.querySelector('#s-dnssec').onchange = (e) =>
+      putField('#msg-dnssec', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' }, 'Saved');
+
+    this.querySelector('#s-retention').onchange = (e) => {
+      const v = e.target.value.trim();
+      // Blank clears the setting → the server falls back to its default retention.
+      if (v !== '' && (!/^\d+$/.test(v) || parseInt(v, 10) < 1)) { setMsg('#msg-retention', false, 'Must be a positive integer'); return; }
+      putField('#msg-retention', { log_retention_days: v }, v === '' ? 'Using default' : 'Saved');
     };
+
+    this.querySelector('#s-public-url').onchange = (e) => {
+      const v = e.target.value.trim();
+      if (v !== '') {
+        let ok = /^https:\/\//i.test(v);
+        if (ok) { try { new URL(v); } catch (err) { ok = false; } }
+        if (!ok) { setMsg('#msg-public-url', false, 'Must be a valid https:// URL'); return; }
+      }
+      putField('#msg-public-url', { public_url: v }, 'Saved');
+    };
+
+    const syncBlockCustom = () => {
+      this.querySelector('#s-block-custom').style.display =
+        this.querySelector('#s-block-mode').value === 'custom_ip' ? 'block' : 'none';
+    };
+    // Validate the custom IPs (errors shown next to the offending field) and
+    // save; report success at `msgId` (the control the user just touched).
+    // Non-custom modes ignore the IP fields: send mode only so a stale/partial
+    // value in a hidden field can never trigger a backend 400.
+    const saveBlock = (msgId) => {
+      const mode = this.querySelector('#s-block-mode').value;
+      if (mode !== 'custom_ip') { putField(msgId, { block_mode: mode }, 'Saved'); return; }
+      const v4 = this.querySelector('#s-block-ipv4').value.trim();
+      const v6 = this.querySelector('#s-block-ipv6').value.trim();
+      if (v4 !== '' && !isIpv4(v4)) { setMsg('#msg-block-ipv4', false, 'Invalid IPv4'); return; }
+      if (v6 !== '' && !isIpv6(v6)) { setMsg('#msg-block-ipv6', false, 'Invalid IPv6'); return; }
+      setMsg('#msg-block-ipv4', true, ''); setMsg('#msg-block-ipv6', true, '');
+      putField(msgId, { block_mode: mode, block_custom_ipv4: v4, block_custom_ipv6: v6 }, 'Saved');
+    };
+    this.querySelector('#s-block-mode').onchange = () => { syncBlockCustom(); saveBlock('#msg-block-mode'); };
+    this.querySelector('#s-block-ipv4').onchange = () => saveBlock('#msg-block-ipv4');
+    this.querySelector('#s-block-ipv6').onchange = () => saveBlock('#msg-block-ipv6');
 
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
@@ -3928,6 +4010,11 @@ class SettingsPage extends HTMLElement {
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
       this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
       this.querySelector('#s-dnssec').value = (s.dnssec_disabled === 'true') ? 'off' : 'on';
+      this.querySelector('#s-block-mode').value = s.block_mode || 'null_ip';
+      if (s.block_custom_ipv4) this.querySelector('#s-block-ipv4').value = s.block_custom_ipv4;
+      if (s.block_custom_ipv6) this.querySelector('#s-block-ipv6').value = s.block_custom_ipv6;
+      this.querySelector('#s-block-custom').style.display =
+        (s.block_mode === 'custom_ip') ? 'block' : 'none';
       this.loadEma();
       if (info) {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';

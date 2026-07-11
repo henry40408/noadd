@@ -30,11 +30,22 @@ Browser ──────────► │  Admin API + Web UI     │Logger 
 
 1. DNS query arrives (UDP, TCP, or DoH)
 2. Filter engine checks the domain (allowlist > blocklist > filter lists)
-3. If blocked: return `0.0.0.0` / `::` immediately
+3. If blocked: synthesize a response per the configured block mode (see below)
 4. If allowed: check cache, then forward to upstream DNS if cache miss
 5. Log query asynchronously via mpsc channel
 
 Filter runs **before** cache so newly added block rules take effect immediately.
+
+### Block-Response Modes
+
+When the filter engine blocks a query, `build_blocked_response` (`src/dns/handler.rs`) synthesizes the reply according to the runtime `block_mode` setting:
+
+- **`null_ip`** (default, reproduces prior behavior) — `0.0.0.0` for A, `::` for AAAA, empty `NoError` for other query types.
+- **`nxdomain`** — `NXDOMAIN` for every query type.
+- **`refused`** — `REFUSED` for every query type.
+- **`custom_ip`** — the operator-supplied `block_custom_ipv4` / `block_custom_ipv6` address for A / AAAA respectively; an empty `NoError` answer when the relevant address is unset, or for other query types.
+
+`block_mode`, `block_custom_ipv4`, and `block_custom_ipv6` are runtime settings, validated and applied live via the settings API with no restart.
 
 ### DNSSEC Transparency
 
