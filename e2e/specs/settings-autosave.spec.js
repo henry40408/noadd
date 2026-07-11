@@ -118,8 +118,8 @@ test.describe('Settings page uses one consistent save model', () => {
     // Give any (incorrect) handler a chance to fire, then assert none did.
     await page.waitForTimeout(300);
     expect(puts.length).toBe(0);                   // invalid value never hits the network
-    // The field shows an inline error hint.
-    await expect(page.locator('#settings-status')).toContainText(/IPv4/i);
+    // The error appears inline, right next to the IPv4 field (not a shared line).
+    await expect(page.locator('#msg-block-ipv4')).toContainText(/IPv4/i);
   });
 
   test('log retention auto-saves on blur and rejects non-numeric without a request', async ({ page }) => {

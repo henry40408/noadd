@@ -3801,6 +3801,7 @@ class SettingsPage extends HTMLElement {
             <option value="round-robin">Round Robin (rotate)</option>
             <option value="lowest-latency">Lowest Latency (fastest first)</option>
           </select>
+          <span id="msg-strategy" style="font-size:0.8rem;margin-left:8px"></span>
         </div>
         <div id="ema-latency" style="margin-top:12px"></div>
         <div class="card-title" style="margin-top:16px">DNSSEC</div>
@@ -3813,6 +3814,7 @@ class SettingsPage extends HTMLElement {
             <option value="on">On (surface AD)</option>
             <option value="off">Off</option>
           </select>
+          <span id="msg-dnssec" style="font-size:0.8rem;margin-left:8px"></span>
         </div>
         <div class="card-title" style="margin-top:16px">Block mode</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
@@ -3826,24 +3828,26 @@ class SettingsPage extends HTMLElement {
             <option value="refused">REFUSED</option>
             <option value="custom_ip">Custom IP</option>
           </select>
+          <span id="msg-block-mode" style="font-size:0.8rem;margin-left:8px"></span>
         </div>
-        <div class="input-row" id="s-block-custom" style="display:none;flex-direction:column;gap:8px;align-items:stretch">
+        <div class="input-row" id="s-block-custom" style="display:none;flex-direction:column;gap:6px;align-items:stretch">
           <input type="text" id="s-block-ipv4" placeholder="Custom IPv4 for A, e.g. 192.0.2.1">
+          <span id="msg-block-ipv4" style="font-size:0.8rem;min-height:1em"></span>
           <input type="text" id="s-block-ipv6" placeholder="Custom IPv6 for AAAA, e.g. 100::1">
+          <span id="msg-block-ipv6" style="font-size:0.8rem;min-height:1em"></span>
         </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
-        <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <div class="input-row"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span><span id="msg-retention" style="font-size:0.8rem;margin-left:8px"></span></div>
       </div>
       <div class="card fade-in" style="animation-delay:0.12s">
         <div class="card-title">Public URL</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
-        <div class="input-row"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
+        <div class="input-row"><input type="url" id="s-public-url" placeholder="https://dns.example.com"><span id="msg-public-url" style="font-size:0.8rem;margin-left:8px"></span></div>
       </div>
-      <div class="fade-in" style="animation-delay:0.15s;display:flex;align-items:center;gap:10px;min-height:22px;margin-top:4px">
+      <div class="fade-in" style="animation-delay:0.15s;min-height:18px;margin-top:4px">
         <span style="color:var(--text-dim);font-size:0.8rem">Changes are saved automatically.</span>
-        <span id="settings-status" style="font-size:0.8rem"></span>
       </div>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
         <div class="card-title">DoH Access Control</div>
@@ -3856,6 +3860,7 @@ class SettingsPage extends HTMLElement {
             <option value="allow">Allow (open access)</option>
             <option value="deny">Deny (require token)</option>
           </select>
+          <span id="msg-doh-policy" style="font-size:0.8rem;margin-left:8px"></span>
         </div>
         <div class="card-title" style="margin-top:16px">DoH Tokens</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
@@ -3899,22 +3904,22 @@ class SettingsPage extends HTMLElement {
       } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
-    // --- Unified auto-save: every control saves on change/blur through one
-    // helper that flashes inline feedback. Invalid values never hit the network.
-    const settingsStatus = this.querySelector('#settings-status');
-    let statusTimer = null;
-    const flash = (ok, msg) => {
-      settingsStatus.style.color = ok ? 'var(--accent)' : 'var(--red)';
-      settingsStatus.textContent = (ok ? '✔ ' : '✗ ') + msg;
-      if (statusTimer) clearTimeout(statusTimer);
-      if (ok) statusTimer = setTimeout(() => { settingsStatus.textContent = ''; }, 2000);
+    // --- Unified auto-save: every control saves on change/blur and reports its
+    // own result inline, right next to that field. Invalid values never PUT.
+    const setMsg = (id, ok, msg) => {
+      const el = this.querySelector(id);
+      if (!el) return;
+      el.style.color = ok ? 'var(--accent)' : 'var(--red)';
+      el.textContent = msg ? (ok ? '✔ ' : '✗ ') + msg : '';
+      if (el._t) clearTimeout(el._t);
+      if (ok && msg) el._t = setTimeout(() => { el.textContent = ''; }, 2000);
     };
-    const putSetting = async (payload, okMsg) => {
+    const putField = async (id, payload, okMsg) => {
       try {
         await api.put('/api/settings', payload);
-        flash(true, okMsg);
+        setMsg(id, true, okMsg);
       } catch (e) {
-        flash(false, 'Save failed');
+        setMsg(id, false, 'Save failed');
       }
     };
     const isIpv4 = (s) =>
@@ -3922,20 +3927,20 @@ class SettingsPage extends HTMLElement {
     const isIpv6 = (s) => { try { new URL('http://[' + s + ']/'); return true; } catch (e) { return false; } };
 
     this.querySelector('#s-doh-policy').onchange = (e) =>
-      putSetting({ doh_access_policy: e.target.value }, 'DoH policy saved');
+      putField('#msg-doh-policy', { doh_access_policy: e.target.value }, 'Saved');
 
     this.querySelector('#s-strategy').onchange = (e) => {
-      putSetting({ upstream_strategy: e.target.value }, 'Strategy saved');
+      putField('#msg-strategy', { upstream_strategy: e.target.value }, 'Saved');
       this.loadEma();
     };
 
     this.querySelector('#s-dnssec').onchange = (e) =>
-      putSetting({ dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' }, 'DNSSEC saved');
+      putField('#msg-dnssec', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' }, 'Saved');
 
     this.querySelector('#s-retention').onchange = (e) => {
       const v = e.target.value.trim();
-      if (!/^\d+$/.test(v) || parseInt(v, 10) < 1) { flash(false, 'Retention must be a positive integer'); return; }
-      putSetting({ log_retention_days: v }, 'Retention saved');
+      if (!/^\d+$/.test(v) || parseInt(v, 10) < 1) { setMsg('#msg-retention', false, 'Must be a positive integer'); return; }
+      putField('#msg-retention', { log_retention_days: v }, 'Saved');
     };
 
     this.querySelector('#s-public-url').onchange = (e) => {
@@ -3943,29 +3948,32 @@ class SettingsPage extends HTMLElement {
       if (v !== '') {
         let ok = /^https:\/\//i.test(v);
         if (ok) { try { new URL(v); } catch (err) { ok = false; } }
-        if (!ok) { flash(false, 'Public URL must be a valid https:// URL'); return; }
+        if (!ok) { setMsg('#msg-public-url', false, 'Must be a valid https:// URL'); return; }
       }
-      putSetting({ public_url: v }, 'Public URL saved');
+      putField('#msg-public-url', { public_url: v }, 'Saved');
     };
 
     const syncBlockCustom = () => {
       this.querySelector('#s-block-custom').style.display =
         this.querySelector('#s-block-mode').value === 'custom_ip' ? 'flex' : 'none';
     };
-    const saveBlockMode = () => {
+    // Validate the custom IPs (errors shown next to the offending field) and
+    // save; report success at `msgId` (the control the user just touched).
+    // Non-custom modes ignore the IP fields: send mode only so a stale/partial
+    // value in a hidden field can never trigger a backend 400.
+    const saveBlock = (msgId) => {
       const mode = this.querySelector('#s-block-mode').value;
-      // Non-custom modes ignore the IP fields; send mode only so a stale/partial
-      // value in a hidden field can never trigger a backend 400.
-      if (mode !== 'custom_ip') { putSetting({ block_mode: mode }, 'Block mode saved'); return; }
+      if (mode !== 'custom_ip') { putField(msgId, { block_mode: mode }, 'Saved'); return; }
       const v4 = this.querySelector('#s-block-ipv4').value.trim();
       const v6 = this.querySelector('#s-block-ipv6').value.trim();
-      if (v4 !== '' && !isIpv4(v4)) { flash(false, 'Invalid custom IPv4'); return; }
-      if (v6 !== '' && !isIpv6(v6)) { flash(false, 'Invalid custom IPv6'); return; }
-      putSetting({ block_mode: mode, block_custom_ipv4: v4, block_custom_ipv6: v6 }, 'Block mode saved');
+      if (v4 !== '' && !isIpv4(v4)) { setMsg('#msg-block-ipv4', false, 'Invalid IPv4'); return; }
+      if (v6 !== '' && !isIpv6(v6)) { setMsg('#msg-block-ipv6', false, 'Invalid IPv6'); return; }
+      setMsg('#msg-block-ipv4', true, ''); setMsg('#msg-block-ipv6', true, '');
+      putField(msgId, { block_mode: mode, block_custom_ipv4: v4, block_custom_ipv6: v6 }, 'Saved');
     };
-    this.querySelector('#s-block-mode').onchange = () => { syncBlockCustom(); saveBlockMode(); };
-    this.querySelector('#s-block-ipv4').onchange = saveBlockMode;
-    this.querySelector('#s-block-ipv6').onchange = saveBlockMode;
+    this.querySelector('#s-block-mode').onchange = () => { syncBlockCustom(); saveBlock('#msg-block-mode'); };
+    this.querySelector('#s-block-ipv4').onchange = () => saveBlock('#msg-block-ipv4');
+    this.querySelector('#s-block-ipv6').onchange = () => saveBlock('#msg-block-ipv6');
 
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
