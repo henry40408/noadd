@@ -602,8 +602,15 @@ impl UpstreamForwarder {
 
     /// Forward a DNS query using the current strategy.
     ///
-    /// Returns `(response_bytes, upstream_address)` on success.
-    pub async fn forward(&self, query_bytes: &[u8]) -> Result<(Vec<u8>, String), ForwardError> {
+    /// Returns `(response_bytes, upstream_address, authenticated_data)` on
+    /// success. `authenticated_data` is the upstream resolver's AD verdict read
+    /// from its response *before* it is tailored to the client — so the query
+    /// log can surface the verdict even for clients that did not set DO and
+    /// therefore have the AD bit stripped from their wire response.
+    pub async fn forward(
+        &self,
+        query_bytes: &[u8],
+    ) -> Result<(Vec<u8>, String, bool), ForwardError> {
         // Snapshot the upstream set for the duration of this query. Using
         // `load_full` (Arc) rather than `load` (Guard) so the reference
         // can be held across `.await` points on the multi-threaded runtime.
@@ -657,10 +664,15 @@ impl UpstreamForwarder {
                     // client's original id. Restore it before re-encoding.
                     let mut msg: Message = response.into();
                     msg.metadata.id = client_id;
+                    // Capture the upstream's AD verdict before tailoring strips
+                    // the AD bit for non-DO clients (see `forward` docs).
+                    let upstream_authenticated = msg.metadata.authentic_data;
                     let msg = prepare_response_for_client(msg, &client_request_msg);
 
                     match msg.to_bytes() {
-                        Ok(bytes) => return Ok((bytes, entry.label.clone())),
+                        Ok(bytes) => {
+                            return Ok((bytes, entry.label.clone(), upstream_authenticated));
+                        }
                         Err(e) => {
                             warn!(upstream = %entry.label, error = %e, "failed to re-encode upstream response");
                         }
@@ -680,7 +692,10 @@ impl UpstreamForwarder {
                         let response =
                             build_negative_response(client_id, no_records, &client_request_msg);
                         if let Ok(bytes) = response.to_bytes() {
-                            return Ok((bytes, entry.label.clone()));
+                            // NoRecordsFound does not expose an AD field, so a
+                            // reconstructed negative answer is logged as
+                            // unauthenticated (documented v1 limitation).
+                            return Ok((bytes, entry.label.clone(), false));
                         }
                     }
                     warn!(upstream = %entry.label, error = %e, "upstream forward failed");
