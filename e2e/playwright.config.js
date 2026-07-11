@@ -122,5 +122,14 @@ export default defineConfig({
       testMatch: /chart-touch\.spec\.js$/,
       use: { ...devices['Pixel 5'] },
     },
+    {
+      // Settings-page auto-save model regression. Plain Playwright spec that
+      // seeds and drives its own noadd instance (dedicated ports 14104/15104),
+      // like `touch`; needs no shared server, storageState, or webServer entry.
+      name: 'settings',
+      testDir: 'specs',
+      testMatch: /settings-autosave\.spec\.js$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 });
