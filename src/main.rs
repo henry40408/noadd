@@ -88,6 +88,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(dnssec_disabled = %v, "loaded DNSSEC transparency setting");
     }
 
+    let block_config = {
+        let mode = db.get_setting("block_mode").await.ok().flatten();
+        let v4 = db.get_setting("block_custom_ipv4").await.ok().flatten();
+        let v6 = db.get_setting("block_custom_ipv6").await.ok().flatten();
+        noadd::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref())
+    };
+    tracing::info!(
+        block_mode = block_config.mode.as_str(),
+        "loaded block-response mode"
+    );
+
     let cache = DnsCache::new(10_000);
 
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
@@ -106,7 +117,8 @@ async fn main() -> anyhow::Result<()> {
             args.max_inflight_queries,
         )
         .with_rate_limiter(ip_rate_limiter.clone())
-        .with_log_query_results(args.log_query_results),
+        .with_log_query_results(args.log_query_results)
+        .with_block_config(block_config),
     );
     tracing::info!(
         max_inflight = args.max_inflight_queries,

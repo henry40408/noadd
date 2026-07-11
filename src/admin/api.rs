@@ -821,7 +821,8 @@ async fn get_server_info(
 pub struct SettingsMap {
     /// Flattened key/value pairs, e.g. `upstream_servers`,
     /// `upstream_strategy`, `log_retention_days`, `doh_access_policy`,
-    /// `public_url`, `dnssec_disabled`.
+    /// `public_url`, `dnssec_disabled`, `block_mode`, `block_custom_ipv4`,
+    /// `block_custom_ipv6`.
     #[serde(flatten)]
     pub settings: std::collections::HashMap<String, String>,
 }
@@ -850,6 +851,9 @@ async fn get_settings(
         "public_url",
         "onboarding_banner_dismissed",
         "dnssec_disabled",
+        "block_mode",
+        "block_custom_ipv4",
+        "block_custom_ipv6",
     ];
     let mut settings = std::collections::HashMap::new();
 
@@ -874,8 +878,9 @@ pub struct UpdateSettingsRequest {
 /// request body are changed; others are left untouched. `upstream_servers`
 /// is validated before anything is persisted, so a malformed value rejects
 /// the whole request with no partial write. Changes to `upstream_strategy`,
-/// `dnssec_disabled`, and `upstream_servers` take effect immediately, with
-/// no restart required.
+/// `dnssec_disabled`, `upstream_servers`, and `block_mode` (and its
+/// `block_custom_ipv4`/`block_custom_ipv6` companions) take effect
+/// immediately, with no restart required.
 #[utoipa::path(
     put, path = "/api/settings", tag = "settings",
     security(("api_key" = [])),
@@ -898,6 +903,28 @@ async fn put_settings(
         ),
         None => None,
     };
+
+    // Validate block-mode settings before persisting anything.
+    if let Some(mode) = body.settings.get("block_mode")
+        && mode.trim().parse::<crate::dns::block::BlockMode>().is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    for key in ["block_custom_ipv4", "block_custom_ipv6"] {
+        if let Some(v) = body.settings.get(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                let ok = if key == "block_custom_ipv4" {
+                    v.parse::<std::net::Ipv4Addr>().is_ok()
+                } else {
+                    v.parse::<std::net::Ipv6Addr>().is_ok()
+                };
+                if !ok {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            }
+        }
+    }
 
     for (key, value) in &body.settings {
         state
@@ -929,6 +956,25 @@ async fn put_settings(
 
     if let Some(servers) = upstream_servers {
         state.forwarder.reconfigure(servers).await;
+    }
+
+    if body.settings.keys().any(|k| k.starts_with("block_")) {
+        // Merge: prefer the just-submitted value, else the persisted one.
+        async fn merged(
+            db: &crate::db::Database,
+            body: &std::collections::HashMap<String, String>,
+            key: &str,
+        ) -> Option<String> {
+            match body.get(key) {
+                Some(v) => Some(v.clone()),
+                None => db.get_setting(key).await.ok().flatten(),
+            }
+        }
+        let mode = merged(&state.db, &body.settings, "block_mode").await;
+        let v4 = merged(&state.db, &body.settings, "block_custom_ipv4").await;
+        let v6 = merged(&state.db, &body.settings, "block_custom_ipv6").await;
+        let cfg = crate::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref());
+        state.handler.set_block_config(cfg);
     }
 
     Ok(StatusCode::OK)
