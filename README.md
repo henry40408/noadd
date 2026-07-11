@@ -50,7 +50,7 @@ The admin UI is embedded in the binary — dark/light follows your OS preference
 - **TLS support** — manual certificates or automatic Let's Encrypt via ACME
 - **SQLite storage** — config, query logs, and stats in a single file
 - **Hot-swap filters** — update lists without restarting, zero query interruption
-- **DNSSEC transparency** — forces the DO (DNSSEC OK) bit on upstream queries and surfaces the upstream's Authenticated Data (AD) verdict as a badge in the query log (default on, toggle in Settings); full hop-by-hop protection requires a `tls://` upstream and DoH to devices
+- **DNSSEC transparency** — forces the DO (DNSSEC OK) bit on upstream queries, surfaces the upstream's Authenticated Data (AD) verdict as a badge in the query log, and tailors OPT/DNSSEC records to each client's original EDNS/DO profile (default on, toggle in Settings); full hop-by-hop protection requires a `tls://` upstream and DoH to devices
 - **Low resident memory** — mimalloc allocator returns the filter-rebuild working set to the OS, keeping steady-state RSS low on small devices (e.g. Raspberry Pi)
 
 ## Out of Scope

@@ -5,8 +5,38 @@ use moka::future::Cache;
 use moka::policy::EvictionPolicy;
 use parking_lot::Mutex;
 
-/// Cache key: (domain name, DNS record type as u16)
-pub type CacheKey = (String, u16);
+/// Client capabilities that affect the DNS wire response.
+///
+/// noadd caches encoded responses, not semantic `RRsets`, so responses for
+/// clients with different EDNS / DNSSEC profiles must never share an entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ClientResponseProfile {
+    pub has_edns: bool,
+    pub dnssec_ok: bool,
+    pub checking_disabled: bool,
+    /// Upstream DO-forcing policy captured when handling the request. This
+    /// prevents an in-flight request from the old policy generation from
+    /// repopulating a cache entry used after a runtime toggle.
+    pub upstream_dnssec_enabled: bool,
+}
+
+/// Cache key for a client-ready DNS wire response.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CacheKey {
+    pub domain: String,
+    pub query_type: u16,
+    pub response_profile: ClientResponseProfile,
+}
+
+impl CacheKey {
+    pub fn new(domain: String, query_type: u16, response_profile: ClientResponseProfile) -> Self {
+        Self {
+            domain,
+            query_type,
+            response_profile,
+        }
+    }
+}
 
 /// Cache value: raw DNS response bytes + TTL metadata for optimistic serving.
 ///
@@ -147,10 +177,18 @@ impl DnsCache {
 mod tests {
     use super::*;
 
+    fn key(domain: &str, query_type: u16) -> CacheKey {
+        CacheKey::new(
+            domain.to_string(),
+            query_type,
+            ClientResponseProfile::default(),
+        )
+    }
+
     #[tokio::test]
     async fn test_insert_and_get() {
         let cache = DnsCache::new(100);
-        let key = ("example.com".to_string(), 1);
+        let key = key("example.com", 1);
         let data = vec![1, 2, 3];
 
         cache
@@ -166,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_stale_entry_still_returned() {
         let cache = DnsCache::new(100);
-        let key = ("stale.test".to_string(), 1);
+        let key = key("stale.test", 1);
 
         cache
             .insert(key.clone(), vec![1, 2], Duration::from_millis(1))
@@ -184,7 +222,7 @@ mod tests {
     async fn test_beyond_stale_window_not_returned() {
         let mut cache = DnsCache::new(100);
         cache.stale_window = Duration::from_millis(10); // very short for testing
-        let key = ("gone.test".to_string(), 1);
+        let key = key("gone.test", 1);
 
         cache
             .insert(key.clone(), vec![1], Duration::from_millis(1))
@@ -202,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalidate_all() {
         let cache = DnsCache::new(100);
-        let key = ("clear.test".to_string(), 1);
+        let key = key("clear.test", 1);
 
         cache
             .insert(key.clone(), vec![1], Duration::from_secs(300))
@@ -218,8 +256,8 @@ mod tests {
     async fn test_different_ttls_per_entry() {
         let mut cache = DnsCache::new(100);
         cache.stale_window = Duration::from_millis(5);
-        let key_short = ("short.test".to_string(), 1);
-        let key_long = ("long.test".to_string(), 1);
+        let key_short = key("short.test", 1);
+        let key_long = key("long.test", 1);
 
         cache
             .insert(key_short.clone(), vec![1], Duration::from_millis(1))
@@ -240,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn test_patched_bytes_window_reuse() {
         let cache = DnsCache::new(100);
-        let key = ("patched.test".to_string(), 1);
+        let key = key("patched.test", 1);
         cache
             .insert(key.clone(), vec![0xab, 0xcd, 0xef], Duration::from_secs(60))
             .await;
@@ -273,7 +311,7 @@ mod tests {
         // CacheValue's Arc inner means a clone obtained from a separate
         // cache.get() call must observe the same patched snapshot.
         let cache = DnsCache::new(100);
-        let key = ("shared.test".to_string(), 1);
+        let key = key("shared.test", 1);
         cache
             .insert(
                 key.clone(),

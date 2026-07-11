@@ -1,7 +1,7 @@
 //! Single-flight coalescing of concurrent cache-miss queries.
 //!
 //! When N clients simultaneously miss the cache for the same
-//! `(domain, query_type)` pair, we want exactly one upstream query — not N
+//! cache key, we want exactly one upstream query — not N
 //! identical ones. This module tracks which keys have an in-flight upstream
 //! fetch. The first arrival becomes the "fetcher"; subsequent arrivals
 //! subscribe to a `Notify` and re-check the cache after the fetcher stores
@@ -94,10 +94,11 @@ impl Drop for FetchGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::ClientResponseProfile;
     use std::time::Duration;
 
     fn key(s: &str) -> CacheKey {
-        (s.to_string(), 1)
+        CacheKey::new(s.to_string(), 1, ClientResponseProfile::default())
     }
 
     #[tokio::test]
