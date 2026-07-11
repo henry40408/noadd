@@ -14,6 +14,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tracing::warn;
 
 use crate::cache::{CacheKey, ClientResponseProfile, DnsCache};
+use crate::dns::block::{BlockConfig, BlockMode};
 use crate::dns::inflight::{BeginResult, InflightUpstream};
 use crate::dns::ratelimit::IpRateLimiter;
 use crate::filter::engine::{FilterEngine, FilterResult};
@@ -162,6 +163,10 @@ pub struct DnsHandler {
     /// nice-to-have and this is the largest single overhead on the
     /// cache-hit path (~10us / cache hit).
     log_query_results: bool,
+    /// Runtime block-response configuration (mode + optional custom IPs).
+    /// Behind `ArcSwap` for lock-free reads on the blocked path and atomic
+    /// live updates from the settings API.
+    block_config: Arc<ArcSwap<BlockConfig>>,
 }
 
 impl DnsHandler {
@@ -200,6 +205,7 @@ impl DnsHandler {
             log_drop_count: Arc::new(AtomicU64::new(0)),
             rate_limiter: None,
             log_query_results: false,
+            block_config: Arc::new(ArcSwap::from_pointee(BlockConfig::default())),
         }
     }
 
@@ -215,6 +221,23 @@ impl DnsHandler {
     pub fn with_log_query_results(mut self, enabled: bool) -> Self {
         self.log_query_results = enabled;
         self
+    }
+
+    /// Install the initial block-response configuration. Chainable during
+    /// construction (used by `main.rs` to load the persisted setting).
+    pub fn with_block_config(self, cfg: BlockConfig) -> Self {
+        self.block_config.store(Arc::new(cfg));
+        self
+    }
+
+    /// Atomically replace the block-response configuration at runtime.
+    pub fn set_block_config(&self, cfg: BlockConfig) {
+        self.block_config.store(Arc::new(cfg));
+    }
+
+    /// Load the current block-response configuration.
+    pub fn block_config(&self) -> arc_swap::Guard<Arc<BlockConfig>> {
+        self.block_config.load()
     }
 
     /// Cumulative number of log events dropped because the async logger
@@ -317,7 +340,8 @@ impl DnsHandler {
             authenticated,
         ) = match filter_result {
             FilterResult::Blocked { rule, list } => {
-                let response = build_blocked_response(&message, query_type)?;
+                let block_cfg = self.block_config.load();
+                let response = build_blocked_response(&message, query_type, &block_cfg)?;
                 // build_blocked_response sets every record's TTL to
                 // BLOCKED_RESPONSE_TTL_SECS — keep this in sync.
                 (
@@ -529,43 +553,69 @@ fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     Ok(response.to_vec()?)
 }
 
-/// Build a blocked DNS response for the given query message.
+/// Build a blocked DNS response for the given query message, according to the
+/// configured `BlockConfig`.
 fn build_blocked_response(
     query: &Message,
     query_type: RecordType,
+    config: &BlockConfig,
 ) -> Result<Vec<u8>, HandlerError> {
+    // REFUSED and NXDOMAIN apply uniformly to every query type.
+    match config.mode {
+        BlockMode::Refused => return build_refused_response(query),
+        BlockMode::Nxdomain => {
+            let mut response = Message::response(query.metadata.id, OpCode::Query);
+            response.metadata.response_code = ResponseCode::NXDomain;
+            response.metadata.recursion_desired = true;
+            response.metadata.recursion_available = true;
+            for q in &query.queries {
+                response.add_query(q.clone());
+            }
+            return Ok(response.to_vec()?);
+        }
+        BlockMode::NullIp | BlockMode::CustomIp => {}
+    }
+
+    // Address-bearing modes: NoError, with an A/AAAA answer when an address is
+    // available for the query type, otherwise an empty answer section.
+    let (v4, v6) = match config.mode {
+        BlockMode::CustomIp => (config.custom_v4, config.custom_v6),
+        // NullIp: the unspecified addresses.
+        _ => (Some(Ipv4Addr::UNSPECIFIED), Some(Ipv6Addr::UNSPECIFIED)),
+    };
+
     let mut response = Message::response(query.metadata.id, OpCode::Query);
     response.metadata.response_code = ResponseCode::NoError;
     response.metadata.recursion_desired = true;
     response.metadata.recursion_available = true;
 
-    // Copy the query section
     for q in &query.queries {
         response.add_query(q.clone());
     }
 
-    // Add answer based on query type
     if let Some(first_query) = query.queries.first() {
         let name = first_query.name().clone();
         match query_type {
             RecordType::A => {
-                let record = Record::from_rdata(
-                    name,
-                    BLOCKED_RESPONSE_TTL_SECS,
-                    RData::A(A(Ipv4Addr::UNSPECIFIED)),
-                );
-                response.add_answer(record);
+                if let Some(addr) = v4 {
+                    response.add_answer(Record::from_rdata(
+                        name,
+                        BLOCKED_RESPONSE_TTL_SECS,
+                        RData::A(A(addr)),
+                    ));
+                }
             }
             RecordType::AAAA => {
-                let record = Record::from_rdata(
-                    name,
-                    BLOCKED_RESPONSE_TTL_SECS,
-                    RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)),
-                );
-                response.add_answer(record);
+                if let Some(addr) = v6 {
+                    response.add_answer(Record::from_rdata(
+                        name,
+                        BLOCKED_RESPONSE_TTL_SECS,
+                        RData::AAAA(AAAA(addr)),
+                    ));
+                }
             }
             _ => {
-                // Empty answer for other types
+                // Empty answer for other types.
             }
         }
     }
@@ -848,5 +898,119 @@ mod tests {
             };
         }
         assert!(!set.contains_key(&key));
+    }
+
+    use crate::dns::block::{BlockConfig, BlockMode};
+    use hickory_proto::op::{MessageType, Query};
+
+    fn make_query(domain: &str, rtype: RecordType) -> Message {
+        // Mirror tests/upstream_test.rs::build_query — this repo's hickory
+        // uses Message::new(id, MessageType, OpCode) and Query::query(name, rt).
+        let mut msg = Message::new(42, MessageType::Query, OpCode::Query);
+        let name = Name::from_ascii(domain).expect("valid domain name");
+        msg.add_query(Query::query(name, rtype));
+        msg
+    }
+
+    fn blocked(msg: &Message, rtype: RecordType, cfg: &BlockConfig) -> Message {
+        let bytes = build_blocked_response(msg, rtype, cfg).unwrap();
+        Message::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn null_ip_mode_returns_unspecified_addresses() {
+        let cfg = BlockConfig::default();
+        let a = blocked(
+            &make_query("ads.example.com.", RecordType::A),
+            RecordType::A,
+            &cfg,
+        );
+        assert_eq!(a.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(a.answers.len(), 1);
+        assert_eq!(a.answers[0].data, RData::A(A(Ipv4Addr::UNSPECIFIED)));
+
+        let aaaa = blocked(
+            &make_query("ads.example.com.", RecordType::AAAA),
+            RecordType::AAAA,
+            &cfg,
+        );
+        assert_eq!(
+            aaaa.answers[0].data,
+            RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED))
+        );
+
+        let txt = blocked(
+            &make_query("ads.example.com.", RecordType::TXT),
+            RecordType::TXT,
+            &cfg,
+        );
+        assert_eq!(txt.metadata.response_code, ResponseCode::NoError);
+        assert!(txt.answers.is_empty());
+    }
+
+    #[test]
+    fn nxdomain_mode_returns_nxdomain_for_all_types() {
+        let cfg = BlockConfig {
+            mode: BlockMode::Nxdomain,
+            ..BlockConfig::default()
+        };
+        for rt in [RecordType::A, RecordType::AAAA, RecordType::TXT] {
+            let m = blocked(&make_query("ads.example.com.", rt), rt, &cfg);
+            assert_eq!(m.metadata.response_code, ResponseCode::NXDomain);
+            assert!(m.answers.is_empty());
+        }
+    }
+
+    #[test]
+    fn refused_mode_returns_refused_for_all_types() {
+        let cfg = BlockConfig {
+            mode: BlockMode::Refused,
+            ..BlockConfig::default()
+        };
+        for rt in [RecordType::A, RecordType::AAAA, RecordType::TXT] {
+            let m = blocked(&make_query("ads.example.com.", rt), rt, &cfg);
+            assert_eq!(m.metadata.response_code, ResponseCode::Refused);
+            assert!(m.answers.is_empty());
+        }
+    }
+
+    #[test]
+    fn custom_ip_mode_uses_configured_addresses() {
+        let cfg = BlockConfig {
+            mode: BlockMode::CustomIp,
+            custom_v4: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            custom_v6: Some("100::1".parse().unwrap()),
+        };
+        let a = blocked(
+            &make_query("ads.example.com.", RecordType::A),
+            RecordType::A,
+            &cfg,
+        );
+        assert_eq!(a.answers[0].data, RData::A(A(Ipv4Addr::new(192, 0, 2, 1))));
+        let aaaa = blocked(
+            &make_query("ads.example.com.", RecordType::AAAA),
+            RecordType::AAAA,
+            &cfg,
+        );
+        assert_eq!(
+            aaaa.answers[0].data,
+            RData::AAAA(AAAA("100::1".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn custom_ip_mode_unset_address_gives_empty_noerror() {
+        let cfg = BlockConfig {
+            mode: BlockMode::CustomIp,
+            custom_v4: None,
+            custom_v6: None,
+        };
+        let a = blocked(
+            &make_query("ads.example.com.", RecordType::A),
+            RecordType::A,
+            &cfg,
+        );
+        assert_eq!(a.metadata.response_code, ResponseCode::NoError);
+        assert!(a.answers.is_empty());
     }
 }
