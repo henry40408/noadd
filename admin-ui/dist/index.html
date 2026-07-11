@@ -3814,6 +3814,23 @@ class SettingsPage extends HTMLElement {
             <option value="off">Off</option>
           </select>
         </div>
+        <div class="card-title" style="margin-top:16px">Block mode</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+          How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
+        </p>
+        <div class="input-row">
+          <label style="min-width:140px;color:var(--text-secondary);font-size:0.85rem">Response</label>
+          <select id="s-block-mode">
+            <option value="null_ip">Null IP (0.0.0.0 / ::)</option>
+            <option value="nxdomain">NXDOMAIN</option>
+            <option value="refused">REFUSED</option>
+            <option value="custom_ip">Custom IP</option>
+          </select>
+        </div>
+        <div class="input-row" id="s-block-custom" style="display:none;flex-direction:column;gap:8px;align-items:stretch">
+          <input type="text" id="s-block-ipv4" placeholder="Custom IPv4 for A, e.g. 192.0.2.1">
+          <input type="text" id="s-block-ipv6" placeholder="Custom IPv6 for AAAA, e.g. 100::1">
+        </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
@@ -3856,6 +3873,9 @@ class SettingsPage extends HTMLElement {
         log_retention_days: this.querySelector('#s-retention').value,
         doh_access_policy: this.querySelector('#s-doh-policy').value,
         public_url: this.querySelector('#s-public-url').value,
+        block_mode: this.querySelector('#s-block-mode').value,
+        block_custom_ipv4: this.querySelector('#s-block-ipv4').value.trim(),
+        block_custom_ipv6: this.querySelector('#s-block-ipv6').value.trim(),
       };
       await api.put('/api/settings', settings);
       this.querySelector('#save-settings').textContent = 'Saved!';
@@ -3904,6 +3924,12 @@ class SettingsPage extends HTMLElement {
       await api.put('/api/settings', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' });
     };
 
+    const syncBlockCustom = () => {
+      this.querySelector('#s-block-custom').style.display =
+        this.querySelector('#s-block-mode').value === 'custom_ip' ? 'flex' : 'none';
+    };
+    this.querySelector('#s-block-mode').onchange = syncBlockCustom;
+
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
@@ -3928,6 +3954,11 @@ class SettingsPage extends HTMLElement {
       this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
       this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
       this.querySelector('#s-dnssec').value = (s.dnssec_disabled === 'true') ? 'off' : 'on';
+      this.querySelector('#s-block-mode').value = s.block_mode || 'null_ip';
+      if (s.block_custom_ipv4) this.querySelector('#s-block-ipv4').value = s.block_custom_ipv4;
+      if (s.block_custom_ipv6) this.querySelector('#s-block-ipv6').value = s.block_custom_ipv6;
+      this.querySelector('#s-block-custom').style.display =
+        (s.block_mode === 'custom_ip') ? 'flex' : 'none';
       this.loadEma();
       if (info) {
         const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
