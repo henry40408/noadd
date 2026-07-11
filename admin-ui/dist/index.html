@@ -3841,7 +3841,10 @@ class SettingsPage extends HTMLElement {
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
         <div class="input-row"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
       </div>
-      <button class="btn btn-primary fade-in" style="animation-delay:0.15s" id="save-settings">Save Settings</button>
+      <div class="fade-in" style="animation-delay:0.15s;display:flex;align-items:center;gap:10px;min-height:22px;margin-top:4px">
+        <span style="color:var(--text-dim);font-size:0.8rem">Changes are saved automatically.</span>
+        <span id="settings-status" style="font-size:0.8rem"></span>
+      </div>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
         <div class="card-title">DoH Access Control</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
@@ -3866,21 +3869,6 @@ class SettingsPage extends HTMLElement {
       </div>`;
 
     this.load();
-
-    this.querySelector('#save-settings').onclick = async () => {
-      const settings = {
-        upstream_strategy: this.querySelector('#s-strategy').value,
-        log_retention_days: this.querySelector('#s-retention').value,
-        doh_access_policy: this.querySelector('#s-doh-policy').value,
-        public_url: this.querySelector('#s-public-url').value,
-        block_mode: this.querySelector('#s-block-mode').value,
-        block_custom_ipv4: this.querySelector('#s-block-ipv4').value.trim(),
-        block_custom_ipv6: this.querySelector('#s-block-ipv6').value.trim(),
-      };
-      await api.put('/api/settings', settings);
-      this.querySelector('#save-settings').textContent = 'Saved!';
-      setTimeout(() => { this.querySelector('#save-settings').textContent = 'Save Settings'; }, 2000);
-    };
 
     this.renderUpstreams = async () => {
       const el = this.querySelector('#upstream-health');
@@ -3911,24 +3899,73 @@ class SettingsPage extends HTMLElement {
       } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
-    this.querySelector('#s-doh-policy').onchange = async (e) => {
-      await api.put('/api/settings', { doh_access_policy: e.target.value });
+    // --- Unified auto-save: every control saves on change/blur through one
+    // helper that flashes inline feedback. Invalid values never hit the network.
+    const settingsStatus = this.querySelector('#settings-status');
+    let statusTimer = null;
+    const flash = (ok, msg) => {
+      settingsStatus.style.color = ok ? 'var(--accent)' : 'var(--red)';
+      settingsStatus.textContent = (ok ? '✔ ' : '✗ ') + msg;
+      if (statusTimer) clearTimeout(statusTimer);
+      if (ok) statusTimer = setTimeout(() => { settingsStatus.textContent = ''; }, 2000);
     };
+    const putSetting = async (payload, okMsg) => {
+      try {
+        await api.put('/api/settings', payload);
+        flash(true, okMsg);
+      } catch (e) {
+        flash(false, 'Save failed');
+      }
+    };
+    const isIpv4 = (s) =>
+      /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(s);
+    const isIpv6 = (s) => { try { new URL('http://[' + s + ']/'); return true; } catch (e) { return false; } };
 
-    this.querySelector('#s-strategy').onchange = async (e) => {
-      await api.put('/api/settings', { upstream_strategy: e.target.value });
+    this.querySelector('#s-doh-policy').onchange = (e) =>
+      putSetting({ doh_access_policy: e.target.value }, 'DoH policy saved');
+
+    this.querySelector('#s-strategy').onchange = (e) => {
+      putSetting({ upstream_strategy: e.target.value }, 'Strategy saved');
       this.loadEma();
     };
 
-    this.querySelector('#s-dnssec').onchange = async (e) => {
-      await api.put('/api/settings', { dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' });
+    this.querySelector('#s-dnssec').onchange = (e) =>
+      putSetting({ dnssec_disabled: e.target.value === 'off' ? 'true' : 'false' }, 'DNSSEC saved');
+
+    this.querySelector('#s-retention').onchange = (e) => {
+      const v = e.target.value.trim();
+      if (!/^\d+$/.test(v) || parseInt(v, 10) < 1) { flash(false, 'Retention must be a positive integer'); return; }
+      putSetting({ log_retention_days: v }, 'Retention saved');
+    };
+
+    this.querySelector('#s-public-url').onchange = (e) => {
+      const v = e.target.value.trim();
+      if (v !== '') {
+        let ok = /^https:\/\//i.test(v);
+        if (ok) { try { new URL(v); } catch (err) { ok = false; } }
+        if (!ok) { flash(false, 'Public URL must be a valid https:// URL'); return; }
+      }
+      putSetting({ public_url: v }, 'Public URL saved');
     };
 
     const syncBlockCustom = () => {
       this.querySelector('#s-block-custom').style.display =
         this.querySelector('#s-block-mode').value === 'custom_ip' ? 'flex' : 'none';
     };
-    this.querySelector('#s-block-mode').onchange = syncBlockCustom;
+    const saveBlockMode = () => {
+      const mode = this.querySelector('#s-block-mode').value;
+      // Non-custom modes ignore the IP fields; send mode only so a stale/partial
+      // value in a hidden field can never trigger a backend 400.
+      if (mode !== 'custom_ip') { putSetting({ block_mode: mode }, 'Block mode saved'); return; }
+      const v4 = this.querySelector('#s-block-ipv4').value.trim();
+      const v6 = this.querySelector('#s-block-ipv6').value.trim();
+      if (v4 !== '' && !isIpv4(v4)) { flash(false, 'Invalid custom IPv4'); return; }
+      if (v6 !== '' && !isIpv6(v6)) { flash(false, 'Invalid custom IPv6'); return; }
+      putSetting({ block_mode: mode, block_custom_ipv4: v4, block_custom_ipv6: v6 }, 'Block mode saved');
+    };
+    this.querySelector('#s-block-mode').onchange = () => { syncBlockCustom(); saveBlockMode(); };
+    this.querySelector('#s-block-ipv4').onchange = saveBlockMode;
+    this.querySelector('#s-block-ipv6').onchange = saveBlockMode;
 
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
