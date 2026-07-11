@@ -1,3 +1,4 @@
+pub mod block;
 pub mod doh;
 pub mod handler;
 pub mod inflight;
