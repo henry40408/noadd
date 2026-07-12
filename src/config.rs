@@ -220,6 +220,33 @@ mod tests {
         assert_eq!(pick_default_db_path(false, true), LEGACY_DB_PATH);
     }
 
+    // The following exercise resolve_db_path's filesystem cascade against a
+    // real CWD. nextest runs each test in its own process, so mutating the
+    // process-wide current directory here does not race other tests.
+    #[test]
+    fn resolve_db_path_defaults_to_new_in_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(DEFAULT_DB_PATH));
+    }
+
+    #[test]
+    fn resolve_db_path_uses_legacy_when_only_legacy_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_DB_PATH), b"").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(LEGACY_DB_PATH));
+    }
+
+    #[test]
+    fn resolve_db_path_prefers_new_when_both_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DEFAULT_DB_PATH), b"").unwrap();
+        std::fs::write(dir.path().join(LEGACY_DB_PATH), b"").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(DEFAULT_DB_PATH));
+    }
+
     #[test]
     fn span_events_close_without_level_hint() {
         assert_eq!(span_events_for(None), FmtSpan::CLOSE);
