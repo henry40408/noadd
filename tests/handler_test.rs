@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
@@ -316,6 +316,80 @@ async fn test_handler_inflight_limit_serves_all_queries() {
         let response = Message::from_bytes(&outcome.bytes).unwrap();
         assert!(!response.answers.is_empty());
     }
+}
+
+#[tokio::test]
+async fn test_non_query_opcode_returns_notimp() {
+    // A blocked domain keeps this local (no upstream) and proves the opcode
+    // check fires before the filter: a STATUS query for a blocked name must
+    // still come back NOTIMP, not a synthesized block answer.
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let (handler, _rx) = make_handler(block_rules, vec![]).await;
+
+    let mut msg = Message::new(7, MessageType::Query, OpCode::Status);
+    msg.metadata.recursion_desired = true;
+    msg.add_query(Query::query(
+        Name::from_str("ads.example.com").unwrap(),
+        RecordType::A,
+    ));
+    let query = msg.to_vec().unwrap();
+
+    let result = handler
+        .handle(&query, IpAddr::V4(Ipv4Addr::LOCALHOST), None)
+        .await
+        .unwrap();
+    let resp = Message::from_bytes(&result.bytes).unwrap();
+
+    assert_eq!(resp.metadata.response_code, ResponseCode::NotImp);
+    assert_eq!(
+        resp.metadata.op_code,
+        OpCode::Status,
+        "opcode must be echoed"
+    );
+    assert_eq!(resp.metadata.id, 7);
+    assert_eq!(resp.metadata.message_type, MessageType::Response);
+}
+
+#[tokio::test]
+async fn test_unsupported_edns_version_returns_badvers() {
+    let block_rules = vec![(
+        ParsedRule {
+            domain: "ads.example.com".to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        },
+        "test-list".to_string(),
+    )];
+    let (handler, _rx) = make_handler(block_rules, vec![]).await;
+
+    let mut msg = Message::new(9, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
+    msg.add_query(Query::query(
+        Name::from_str("ads.example.com").unwrap(),
+        RecordType::A,
+    ));
+    let mut edns = Edns::new();
+    edns.set_version(1); // unsupported EDNS version
+    edns.set_max_payload(1232);
+    msg.set_edns(edns);
+    let query = msg.to_vec().unwrap();
+
+    let result = handler
+        .handle(&query, IpAddr::V4(Ipv4Addr::LOCALHOST), None)
+        .await
+        .unwrap();
+    let resp = Message::from_bytes(&result.bytes).unwrap();
+
+    // Extended RCODE 16 (BADVERS); indistinguishable from BADSIG on the wire.
+    assert_eq!(u16::from(resp.metadata.response_code), 16);
+    assert!(resp.edns.is_some(), "BADVERS response must carry an OPT");
 }
 
 #[test]

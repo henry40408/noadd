@@ -29,13 +29,25 @@ Browser ──────────► │  Admin API + Web UI     │Logger 
 ## Query Flow
 
 1. DNS query arrives (UDP, TCP, or DoH)
-2. Filter engine checks the domain (allowlist > blocklist > filter lists)
-3. If blocked: synthesize a response per the configured block mode (see below)
-4. If allowed: check cache, then forward to upstream DNS if cache miss
-5. Log query asynchronously via mpsc channel
-6. On the **UDP** path only, the reply is fit to the client's advertised buffer before it is sent (see UDP Truncation below)
+2. Reject requests we don't implement — non-`Query` opcodes get NOTIMP, unsupported EDNS versions get BADVERS (see Unsupported Requests below)
+3. Filter engine checks the domain (allowlist > blocklist > filter lists)
+4. If blocked: synthesize a response per the configured block mode (see below)
+5. If allowed: check cache, then forward to upstream DNS if cache miss
+6. Log query asynchronously via mpsc channel
+7. On the **UDP** path only, the reply is fit to the client's advertised buffer before it is sent (see UDP Truncation below)
 
 Filter runs **before** cache so newly added block rules take effect immediately.
+
+Every synthesized response — blocked, REFUSED, SERVFAIL, NXDOMAIN/NODATA, NOTIMP, BADVERS — copies the **RD (Recursion Desired)** bit from the client's query rather than assuming it was set, per RFC 1035 §4.1.1. RA (Recursion Available) is always advertised, since noadd is a forwarding resolver.
+
+### Unsupported Requests
+
+Before the filter, cache, or upstream are touched, `handle` (`src/dns/handler.rs`) rejects requests it cannot serve:
+
+- **Non-`Query` opcodes** (STATUS/NOTIFY/UPDATE/…) → **NOTIMP** via `build_notimp_response`, which echoes the request's opcode, ID, and question. A forwarding resolver implements only standard queries.
+- **Unsupported EDNS version** (OPT version > 0) → **BADVERS** via `build_badvers_response` (RFC 6891 §6.1.3). The extended RCODE 16 is split across the header and OPT — hickory does this automatically on encode when an OPT is present — and the OPT is emitted at version 0 to advertise the highest version supported.
+
+Neither path is logged or rate-limited: both are rejected early and carry no domain to attribute.
 
 ### Block-Response Modes
 

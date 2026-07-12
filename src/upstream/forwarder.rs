@@ -270,7 +270,8 @@ fn prepare_response_for_client(mut response: Message, client_request: &Message) 
 fn build_negative_response(client_id: u16, no_records: &NoRecords, request: &Message) -> Message {
     let mut response = Message::response(client_id, OpCode::Query);
     response.metadata.response_code = no_records.response_code;
-    response.metadata.recursion_desired = true;
+    // RFC 1035 §4.1.1: RD is set by the client and copied into the response.
+    response.metadata.recursion_desired = request.metadata.recursion_desired;
     response.metadata.recursion_available = true;
     for q in &request.queries {
         response.add_query(q.clone());
@@ -921,6 +922,25 @@ mod tests {
             "the SOA must be carried in the authority section so clients can negative-cache"
         );
         assert_eq!(response.authorities[0].record_type(), RecordType::SOA);
+    }
+
+    #[test]
+    fn negative_response_echoes_query_rd() {
+        let name = Name::from_ascii("api.example.com.").unwrap();
+        for rd in [true, false] {
+            let mut request = Message::query();
+            request.metadata.recursion_desired = rd;
+            request.add_query(Query::query(name.clone(), RecordType::AAAA));
+            let no_records = NoRecords::new(
+                Query::query(name.clone(), RecordType::AAAA),
+                ResponseCode::NoError,
+            );
+            let response = build_negative_response(0x1234, &no_records, &request);
+            assert_eq!(
+                response.metadata.recursion_desired, rd,
+                "RD must be copied from the client request"
+            );
+        }
     }
 
     #[test]
