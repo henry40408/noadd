@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use hickory_proto::op::{Message, OpCode, ResponseCode};
+use hickory_proto::op::{Edns, Message, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
@@ -278,6 +278,26 @@ impl DnsHandler {
 
         // 1. Parse query
         let message = Message::from_bytes(query_bytes)?;
+
+        // 1a. Reject requests we don't implement before touching the filter,
+        // cache, or upstream. A forwarding resolver only serves standard
+        // queries: any other opcode (STATUS/NOTIFY/UPDATE/...) gets NOTIMP,
+        // and an unsupported EDNS version gets BADVERS (RFC 6891 §6.1.3). Both
+        // echo the client's question and RD bit; neither is logged or
+        // rate-limited (they carry no domain to attribute).
+        if message.metadata.op_code != OpCode::Query {
+            return Ok(HandleOutcome {
+                bytes: build_notimp_response(&message)?,
+                min_ttl: 0,
+            });
+        }
+        if message.edns.as_ref().is_some_and(|edns| edns.version() > 0) {
+            return Ok(HandleOutcome {
+                bytes: build_badvers_response(&message)?,
+                min_ttl: 0,
+            });
+        }
+
         let query = message.queries.first().ok_or(HandlerError::NoQuery)?;
         let domain = query.name().to_ascii();
         // Strip trailing dot for filter matching
@@ -550,7 +570,8 @@ impl DnsHandler {
 fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     let mut response = Message::response(query.metadata.id, OpCode::Query);
     response.metadata.response_code = ResponseCode::Refused;
-    response.metadata.recursion_desired = true;
+    // RFC 1035 §4.1.1: RD is set by the client and copied into the response.
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
     response.metadata.recursion_available = true;
     for q in &query.queries {
         response.add_query(q.clone());
@@ -571,7 +592,7 @@ fn build_blocked_response(
         BlockMode::Nxdomain => {
             let mut response = Message::response(query.metadata.id, OpCode::Query);
             response.metadata.response_code = ResponseCode::NXDomain;
-            response.metadata.recursion_desired = true;
+            response.metadata.recursion_desired = query.metadata.recursion_desired;
             response.metadata.recursion_available = true;
             for q in &query.queries {
                 response.add_query(q.clone());
@@ -591,7 +612,7 @@ fn build_blocked_response(
 
     let mut response = Message::response(query.metadata.id, OpCode::Query);
     response.metadata.response_code = ResponseCode::NoError;
-    response.metadata.recursion_desired = true;
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
     response.metadata.recursion_available = true;
 
     for q in &query.queries {
@@ -718,7 +739,7 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     if let Ok(query) = Message::from_bytes(query_bytes) {
         let mut response = Message::response(query.metadata.id, OpCode::Query);
         response.metadata.response_code = ResponseCode::ServFail;
-        response.metadata.recursion_desired = true;
+        response.metadata.recursion_desired = query.metadata.recursion_desired;
         response.metadata.recursion_available = true;
         for q in &query.queries {
             response.add_query(q.clone());
@@ -733,6 +754,42 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     vec![
         id0, id1, 0x81, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]
+}
+
+/// Build a NOTIMP (Not Implemented) response for an opcode this forwarding
+/// resolver does not serve (anything other than a standard `Query`, e.g.
+/// STATUS/NOTIFY/UPDATE). The request's opcode, ID, question section, and RD
+/// bit are echoed per RFC 1035.
+fn build_notimp_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
+    let mut response = Message::response(query.metadata.id, query.metadata.op_code);
+    response.metadata.response_code = ResponseCode::NotImp;
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
+    for q in &query.queries {
+        response.add_query(q.clone());
+    }
+    Ok(response.to_vec()?)
+}
+
+/// Build a BADVERS response for a client that requested an EDNS version this
+/// resolver does not support (RFC 6891 §6.1.3). The extended RCODE 16 is split
+/// on the wire — its low 4 bits in the header, its high 8 bits in the OPT —
+/// which hickory does automatically on encode from `ResponseCode::BADVERS`,
+/// provided an OPT is present. The OPT is emitted at version 0 to advertise the
+/// highest version we support. The ID, question, and RD bit are echoed.
+fn build_badvers_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
+    let mut response = Message::response(query.metadata.id, OpCode::Query);
+    response.metadata.response_code = ResponseCode::BADVERS;
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
+    for q in &query.queries {
+        response.add_query(q.clone());
+    }
+    let mut edns = Edns::new();
+    edns.set_version(0);
+    edns.set_max_payload(MIN_UDP_SIZE as u16);
+    response.set_edns(edns);
+    Ok(response.to_vec()?)
 }
 
 /// Truncate a DNS response for UDP delivery so it fits within the buffer size
@@ -1063,6 +1120,106 @@ mod tests {
         let garbage = vec![0xffu8; 600];
         let out = truncate_for_udp(&plain_query(), garbage.clone());
         assert_eq!(out, garbage);
+    }
+
+    /// A `Query`-opcode message for `example.com`/A with an explicit RD bit.
+    fn query_with_rd(rd: bool) -> Message {
+        let mut msg = Message::new(7, MessageType::Query, OpCode::Query);
+        msg.metadata.recursion_desired = rd;
+        msg.add_query(Query::query(
+            Name::from_str("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        msg
+    }
+
+    #[test]
+    fn refused_response_echoes_query_rd() {
+        for rd in [true, false] {
+            let bytes = build_refused_response(&query_with_rd(rd)).unwrap();
+            let resp = Message::from_bytes(&bytes).unwrap();
+            assert_eq!(resp.metadata.recursion_desired, rd, "RD must be copied");
+            assert_eq!(resp.metadata.response_code, ResponseCode::Refused);
+            assert!(resp.metadata.recursion_available, "RA stays advertised");
+        }
+    }
+
+    #[test]
+    fn blocked_response_echoes_query_rd() {
+        let modes = [
+            BlockConfig::default(), // null_ip
+            BlockConfig {
+                mode: BlockMode::Nxdomain,
+                ..BlockConfig::default()
+            },
+            BlockConfig {
+                mode: BlockMode::Refused,
+                ..BlockConfig::default()
+            },
+        ];
+        for cfg in modes {
+            for rd in [true, false] {
+                let bytes =
+                    build_blocked_response(&query_with_rd(rd), RecordType::A, &cfg).unwrap();
+                let resp = Message::from_bytes(&bytes).unwrap();
+                assert_eq!(resp.metadata.recursion_desired, rd, "RD must be copied");
+            }
+        }
+    }
+
+    #[test]
+    fn servfail_echoes_query_rd() {
+        for rd in [true, false] {
+            let bytes = build_servfail(&query_with_rd(rd).to_vec().unwrap());
+            let resp = Message::from_bytes(&bytes).unwrap();
+            assert_eq!(resp.metadata.recursion_desired, rd, "RD must be copied");
+            assert_eq!(resp.metadata.response_code, ResponseCode::ServFail);
+        }
+    }
+
+    #[test]
+    fn notimp_response_echoes_opcode_question_and_rd() {
+        let mut q = Message::new(11, MessageType::Query, OpCode::Status);
+        q.metadata.recursion_desired = false;
+        q.add_query(Query::query(
+            Name::from_str("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let resp = Message::from_bytes(&build_notimp_response(&q).unwrap()).unwrap();
+        assert_eq!(resp.metadata.response_code, ResponseCode::NotImp);
+        assert_eq!(
+            resp.metadata.op_code,
+            OpCode::Status,
+            "opcode must be echoed"
+        );
+        assert_eq!(resp.metadata.message_type, MessageType::Response);
+        assert!(!resp.metadata.recursion_desired, "RD must be copied");
+        assert_eq!(resp.metadata.id, 11);
+        assert_eq!(resp.queries.len(), 1, "question must be echoed");
+    }
+
+    #[test]
+    fn badvers_response_sets_extended_rcode_and_opt() {
+        let resp =
+            Message::from_bytes(&build_badvers_response(&query_with_rd(true)).unwrap()).unwrap();
+        // Extended RCODE 16. On the wire BADVERS and BADSIG are indistinguishable
+        // (both encode 16), so assert the numeric code rather than the variant.
+        assert_eq!(
+            u16::from(resp.metadata.response_code),
+            16,
+            "extended RCODE must be 16"
+        );
+        let edns = resp
+            .edns
+            .as_ref()
+            .expect("BADVERS response must carry an OPT");
+        assert_eq!(
+            edns.version(),
+            0,
+            "must advertise the highest supported version"
+        );
+        assert!(resp.metadata.recursion_desired, "RD must be copied");
+        assert_eq!(resp.queries.len(), 1, "question must be echoed");
     }
 
     fn make_query(domain: &str, rtype: RecordType) -> Message {
