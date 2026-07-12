@@ -41,7 +41,7 @@ tokio-rusqlite = { version = "0.7", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "json"] }
 time = "0.3.47"
-plist = "1.8.0"
+plist = "1.10.0"
 uuid = { version = "1.23.0", features = ["v5"] }
 fst = "0.4.7"
 mimalloc = "0.1"
