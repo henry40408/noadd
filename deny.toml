@@ -15,16 +15,6 @@ ignore = [
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",
-    # quick-xml <0.41 DoS pair: unbounded namespace-declaration allocation
-    # (RUSTSEC-2026-0195) and quadratic duplicate-attribute scan
-    # (RUSTSEC-2026-0194). Both are reachable only through `NsReader` parsing
-    # untrusted XML. noadd's sole plist use is `plist::to_writer_xml`
-    # (serialization) in src/admin/api.rs — it never parses XML, so the
-    # vulnerable paths are unreachable. Pulled in via plist 1.9.0, which pins
-    # quick-xml ^0.39. Remove once we upgrade to plist >=1.10.0 (requires
-    # quick-xml ^0.41); tracked in the follow-up issue.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
     # crossbeam-epoch <0.9.20 invalid-pointer dereference in the `fmt::Pointer`
     # impl for `Atomic`/`Shared` (RUSTSEC-2026-0204). Reachable only when those
     # internal pointer types are `{:p}`-formatted; noadd never formats them —
