@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, info};
 
-use super::handler::{DnsHandler, build_servfail};
+use super::handler::{DnsHandler, build_servfail, truncate_for_udp};
 
 /// Maximum UDP DNS message size (RFC 6891 recommends 4096 for EDNS, but
 /// standard DNS caps at 512; we use 4096 to support EDNS).
@@ -31,7 +31,11 @@ pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
 
         tokio::spawn(async move {
             let response = match handler.handle(&buf, src.ip(), None).await {
-                Ok(outcome) => outcome.bytes,
+                // Enforce the client's advertised UDP buffer size (512 when it
+                // sent no EDNS OPT): oversized answers are truncated with the
+                // TC bit set so the client retries over TCP. TCP has no such
+                // limit, so only the UDP path does this.
+                Ok(outcome) => truncate_for_udp(&buf, outcome.bytes),
                 Err(e) => {
                     debug!("DNS handler error for UDP query from {src}: {e}");
                     build_servfail(&buf)

@@ -34,6 +34,11 @@ const NEGATIVE_TTL_CAP_SECS: u64 = 60;
 /// enough that an unblock takes effect without restart.
 const BLOCKED_RESPONSE_TTL_SECS: u32 = 300;
 
+/// RFC 1035 §4.2.1 minimum UDP message size, and the floor RFC 6891 §6.2.3
+/// mandates for any EDNS-advertised payload size. A client that sends no OPT
+/// (e.g. Apple's mDNSResponder for ordinary lookups) is limited to this.
+const MIN_UDP_SIZE: usize = 512;
+
 /// Errors that can occur during DNS query handling.
 #[derive(Debug, Error)]
 pub enum HandlerError {
@@ -730,6 +735,52 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     ]
 }
 
+/// Truncate a DNS response for UDP delivery so it fits within the buffer size
+/// the client advertised, setting the TC (truncated) bit when it doesn't.
+///
+/// A UDP client that receives an oversized answer either drops it (strict
+/// resolvers, middleboxes) or risks IP fragmentation that some networks
+/// silently discard. RFC 1035 §4.2.1 / RFC 6891 require the server to send a
+/// truncated response with the TC bit set instead, so the client retries the
+/// query over TCP. `noadd` forces the DO bit and a 1232-byte EDNS payload
+/// *upstream*, so upstream answers can exceed what the client asked for —
+/// notably Apple's mDNSResponder, which sends no OPT and is therefore limited
+/// to 512 bytes.
+///
+/// The client's limit is its EDNS OPT payload size, floored at 512 (or 512
+/// when it sent no OPT). Responses that already fit are returned unchanged
+/// with no parse. When truncation is needed, [`Message::truncate`] keeps the
+/// header, question, and any OPT record, drops the answer/authority/additional
+/// sections, and sets TC — always well under 512 bytes. On any parse failure
+/// the original bytes are returned (an oversized datagram beats a dropped
+/// query). TCP callers must not use this — TCP has no 512-byte limit.
+pub fn truncate_for_udp(query_bytes: &[u8], response_bytes: Vec<u8>) -> Vec<u8> {
+    // 512 is the floor for every client's limit, so anything this small always
+    // fits and needs no query parse.
+    if response_bytes.len() <= MIN_UDP_SIZE {
+        return response_bytes;
+    }
+    let max_size = client_udp_payload(query_bytes);
+    if response_bytes.len() <= max_size {
+        return response_bytes;
+    }
+    match Message::from_bytes(&response_bytes) {
+        Ok(msg) => msg.truncate().to_vec().unwrap_or(response_bytes),
+        Err(_) => response_bytes,
+    }
+}
+
+/// The UDP payload size the client is willing to receive: its EDNS OPT
+/// advertised size floored at [`MIN_UDP_SIZE`] (RFC 6891 §6.2.3), or
+/// [`MIN_UDP_SIZE`] when the client sent no OPT (RFC 1035 §2.3.4).
+fn client_udp_payload(query_bytes: &[u8]) -> usize {
+    let advertised = Message::from_bytes(query_bytes)
+        .ok()
+        .and_then(|m| m.edns.map(|e| e.max_payload()))
+        .unwrap_or(0) as usize;
+    advertised.max(MIN_UDP_SIZE)
+}
+
 /// Remaining TTL of a cached entry, in seconds, clamped to a minimum of 0.
 /// Used as the `DoH` `Cache-Control: max-age` so downstream clients don't keep
 /// a response past the upstream TTL.
@@ -901,7 +952,118 @@ mod tests {
     }
 
     use crate::dns::block::{BlockConfig, BlockMode};
-    use hickory_proto::op::{MessageType, Query};
+    use hickory_proto::op::{Edns, MessageType, Query};
+
+    fn plain_query() -> Vec<u8> {
+        let mut msg = Message::new(42, MessageType::Query, OpCode::Query);
+        msg.add_query(Query::query(
+            Name::from_str("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        msg.to_vec().unwrap()
+    }
+
+    fn edns_query(payload: u16) -> Vec<u8> {
+        let mut msg = Message::new(42, MessageType::Query, OpCode::Query);
+        msg.add_query(Query::query(
+            Name::from_str("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let mut edns = Edns::new();
+        edns.set_version(0);
+        edns.set_max_payload(payload);
+        msg.set_edns(edns);
+        msg.to_vec().unwrap()
+    }
+
+    /// A NOERROR response echoing the question with `n` A answer records.
+    fn response_with_n_a_records(n: usize) -> Vec<u8> {
+        let name = Name::from_str("example.com.").unwrap();
+        let mut msg = Message::response(42, OpCode::Query);
+        msg.metadata.response_code = ResponseCode::NoError;
+        msg.add_query(Query::query(name.clone(), RecordType::A));
+        for i in 0..n {
+            let addr = Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8);
+            msg.add_answer(Record::from_rdata(name.clone(), 300, RData::A(A(addr))));
+        }
+        msg.to_vec().unwrap()
+    }
+
+    #[test]
+    fn small_response_passes_through_untouched() {
+        let resp = response_with_n_a_records(1);
+        assert!(resp.len() <= MIN_UDP_SIZE, "precondition: {}", resp.len());
+        let out = truncate_for_udp(&plain_query(), resp.clone());
+        assert_eq!(out, resp);
+        assert!(!Message::from_bytes(&out).unwrap().metadata.truncation);
+    }
+
+    #[test]
+    fn oversized_response_to_plain_client_sets_tc_and_fits_512() {
+        let resp = response_with_n_a_records(120);
+        assert!(resp.len() > MIN_UDP_SIZE, "precondition: {}", resp.len());
+        let out = truncate_for_udp(&plain_query(), resp);
+        assert!(out.len() <= MIN_UDP_SIZE, "must fit 512, got {}", out.len());
+        let parsed = Message::from_bytes(&out).unwrap();
+        assert!(parsed.metadata.truncation, "TC bit must be set");
+        assert!(parsed.answers.is_empty(), "answers must be dropped");
+        assert_eq!(parsed.queries.len(), 1, "question must be preserved");
+        assert_eq!(parsed.metadata.id, 42, "id must be preserved");
+    }
+
+    #[test]
+    fn response_within_advertised_edns_size_not_truncated() {
+        let resp = response_with_n_a_records(120);
+        assert!(resp.len() < 4096, "precondition: {}", resp.len());
+        let out = truncate_for_udp(&edns_query(4096), resp.clone());
+        assert_eq!(out, resp);
+        assert!(!Message::from_bytes(&out).unwrap().metadata.truncation);
+    }
+
+    #[test]
+    fn oversized_response_to_edns_client_truncated_to_advertised() {
+        // Responses served to an EDNS client carry an OPT (added by
+        // `prepare_response_for_client`); it must survive truncation.
+        let mut msg = Message::from_bytes(&response_with_n_a_records(120)).unwrap();
+        let mut edns = Edns::new();
+        edns.set_version(0);
+        edns.set_max_payload(1232);
+        msg.set_edns(edns);
+        let resp = msg.to_vec().unwrap();
+        assert!(resp.len() > 1232, "precondition: {}", resp.len());
+        let out = truncate_for_udp(&edns_query(1232), resp);
+        assert!(
+            out.len() <= 1232,
+            "must fit advertised 1232, got {}",
+            out.len()
+        );
+        let parsed = Message::from_bytes(&out).unwrap();
+        assert!(parsed.metadata.truncation, "TC bit must be set");
+        assert!(
+            parsed.edns.is_some(),
+            "OPT must be preserved for an EDNS client"
+        );
+    }
+
+    #[test]
+    fn edns_advertised_below_512_is_floored_to_512() {
+        let resp = response_with_n_a_records(20);
+        assert!(
+            resp.len() > MIN_UDP_SIZE / 2 && resp.len() <= MIN_UDP_SIZE,
+            "precondition: {}",
+            resp.len()
+        );
+        // Advertised 200 must be floored to 512, so this response fits untouched.
+        let out = truncate_for_udp(&edns_query(200), resp.clone());
+        assert_eq!(out, resp);
+    }
+
+    #[test]
+    fn unparseable_oversized_response_returned_unchanged() {
+        let garbage = vec![0xffu8; 600];
+        let out = truncate_for_udp(&plain_query(), garbage.clone());
+        assert_eq!(out, garbage);
+    }
 
     fn make_query(domain: &str, rtype: RecordType) -> Message {
         // Mirror tests/upstream_test.rs::build_query — this repo's hickory

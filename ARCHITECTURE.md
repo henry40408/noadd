@@ -33,6 +33,7 @@ Browser ──────────► │  Admin API + Web UI     │Logger 
 3. If blocked: synthesize a response per the configured block mode (see below)
 4. If allowed: check cache, then forward to upstream DNS if cache miss
 5. Log query asynchronously via mpsc channel
+6. On the **UDP** path only, the reply is fit to the client's advertised buffer before it is sent (see UDP Truncation below)
 
 Filter runs **before** cache so newly added block rules take effect immediately.
 
@@ -56,6 +57,10 @@ When DNSSEC transparency is enabled (the default, toggled via the `dnssec_disabl
 hickory reports an authoritative negative answer as a `NoRecordsFound` error rather than a `Message`, so the forwarder reconstructs the wire response in `build_negative_response` (`src/upstream/forwarder.rs`). It carries over the upstream's **authority section** — the SOA plus any DNSSEC NSEC/RRSIG records — so clients can negative-cache the answer per [RFC 2308](https://www.rfc-editor.org/rfc/rfc2308); without the SOA, resolvers such as iOS/mDNSResponder fall back to a short default negative TTL and re-query the name on nearly every connection (costly for IPv4-only hosts whose AAAA/HTTPS lookups are always NODATA). An EDNS OPT is echoed only when the client's request carried one, per [RFC 6891 §6.1.1](https://www.rfc-editor.org/rfc/rfc6891#section-6.1.1). The AD bit remains unset (see the DNSSEC limitation above).
 
 Because the DNS cache stores client-ready wire responses, its key includes the client's EDNS presence, DO bit, and CD bit plus the active upstream DNSSEC policy in addition to domain and query type. This prevents a response containing OPT/RRSIG/NSEC records from being reused for a client that did not advertise those capabilities (or the inverse), and keeps a late response from the previous policy generation isolated across a runtime toggle. Changing the runtime DNSSEC policy also invalidates the cache immediately.
+
+### UDP Truncation
+
+Because noadd forces a 1232-byte EDNS payload **upstream** (see DNSSEC Transparency), an upstream answer can be larger than what the client is willing to receive over UDP. Before the UDP listener sends a reply, `truncate_for_udp` (`src/dns/handler.rs`) fits it to the client's advertised buffer: the EDNS OPT payload size floored at 512 ([RFC 6891 §6.2.3](https://www.rfc-editor.org/rfc/rfc6891#section-6.2.3)), or 512 when the client sent no OPT ([RFC 1035 §4.2.1](https://www.rfc-editor.org/rfc/rfc1035)). This 512-byte case is the common one for Apple's mDNSResponder, which sends no EDNS OPT on ordinary lookups. When the reply exceeds that size, `Message::truncate` drops the answer/authority/additional sections (keeping the header, question, and any OPT) and sets the **TC (truncated)** bit, so the client retries the query over TCP and receives the full answer. Responses that already fit are returned untouched with no re-parse. This only runs on the UDP path — TCP has no 512-byte limit, and truncation is applied at send time (not cached), so the cache always holds the complete response.
 
 ## Source Layout
 
