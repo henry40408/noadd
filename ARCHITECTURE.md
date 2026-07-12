@@ -144,7 +144,7 @@ Most `/api/*` endpoints accept either the browser `session` cookie or an `Author
 
 ## Data Storage
 
-Everything is in a single SQLite file (`noadd.db` by default):
+Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noadd.db` from an older release is used automatically when present):
 
 | Table | Purpose |
 |-------|---------|

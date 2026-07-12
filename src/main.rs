@@ -34,8 +34,8 @@ async fn main() -> anyhow::Result<()> {
 
     noadd::config::init_tracing(args.log_format);
 
-    let db_path = args.db_path.to_str().unwrap_or("noadd.db");
-    let db = Database::open(db_path).await?;
+    let db_path = noadd::config::resolve_db_path(args.db_path);
+    let db = Database::open(db_path.to_str().unwrap_or(noadd::config::DEFAULT_DB_PATH)).await?;
 
     // Auto-set public_url from ACME domain if not already configured
     if !args.acme_domain.is_empty() && db.get_setting("public_url").await?.is_none() {

@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{
     EnvFilter, Layer, fmt::format::FmtSpan, layer::SubscriberExt, registry::LookupSpan,
     util::SubscriberInitExt,
@@ -18,8 +18,14 @@ pub enum LogFormat {
 #[derive(Parser, Debug)]
 #[command(name = "noadd", about = "DNS ad-blocker with DoH support")]
 pub struct CliArgs {
-    #[arg(long, default_value = "noadd.db", env = "NOADD_DB_PATH")]
-    pub db_path: PathBuf,
+    /// SQLite database path [default: noadd.sqlite3]. When unset, the path
+    /// cascades: noadd.sqlite3 is used, but if that file is absent while a
+    /// legacy noadd.db from an older release exists, the legacy file is opened
+    /// so in-place upgrades keep their data (rename it to noadd.sqlite3 to
+    /// silence the warning).
+    #[allow(clippy::doc_markdown)]
+    #[arg(long, env = "NOADD_DB_PATH")]
+    pub db_path: Option<PathBuf>,
 
     #[arg(long, default_value = "0.0.0.0:53", env = "NOADD_DNS_ADDR")]
     pub dns_addr: String,
@@ -92,6 +98,48 @@ pub struct CliArgs {
     pub trusted_proxies: String,
 }
 
+/// Default on-disk database filename for a fresh install.
+pub const DEFAULT_DB_PATH: &str = "noadd.sqlite3";
+
+/// Legacy database filename from releases predating the `.sqlite3` default.
+/// Retained only for the cascade fallback in [`resolve_db_path`]; new installs
+/// never create a file with this name.
+const LEGACY_DB_PATH: &str = "noadd.db";
+
+/// Choose the default database filename given whether each candidate already
+/// exists on disk. Prefers the current `noadd.sqlite3`, falling back to a
+/// legacy `noadd.db` only when the new file is absent but the old one is
+/// present — so an in-place upgrade keeps using its existing database instead
+/// of silently starting a fresh one.
+fn pick_default_db_path(new_exists: bool, legacy_exists: bool) -> &'static str {
+    if !new_exists && legacy_exists {
+        LEGACY_DB_PATH
+    } else {
+        DEFAULT_DB_PATH
+    }
+}
+
+/// Resolve the database path to open. An explicit `--db-path` / `NOADD_DB_PATH`
+/// is honoured verbatim; otherwise the default cascades from `noadd.sqlite3` to
+/// a pre-existing legacy `noadd.db` (see [`pick_default_db_path`]), warning once
+/// when the legacy file is adopted.
+pub fn resolve_db_path(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    let chosen = pick_default_db_path(
+        Path::new(DEFAULT_DB_PATH).exists(),
+        Path::new(LEGACY_DB_PATH).exists(),
+    );
+    if chosen == LEGACY_DB_PATH {
+        tracing::warn!(
+            path = LEGACY_DB_PATH,
+            "opening legacy database `{LEGACY_DB_PATH}`; rename it to `{DEFAULT_DB_PATH}` to adopt the current default and silence this warning",
+        );
+    }
+    PathBuf::from(chosen)
+}
+
 /// Environment filter for logging: honours `RUST_LOG`, otherwise defaults to
 /// `error,noadd=info` — third-party crates limited to ERROR while noadd's own
 /// INFO-level logs remain visible.
@@ -149,6 +197,55 @@ mod tests {
     use super::*;
     use tracing::level_filters::LevelFilter;
     use tracing_subscriber::Registry;
+
+    #[test]
+    fn resolve_db_path_honours_explicit() {
+        let explicit = PathBuf::from("/custom/place.sqlite3");
+        assert_eq!(resolve_db_path(Some(explicit.clone())), explicit);
+    }
+
+    #[test]
+    fn pick_default_prefers_new_filename() {
+        // Fresh install: neither file present -> new default.
+        assert_eq!(pick_default_db_path(false, false), DEFAULT_DB_PATH);
+        // Only the new file present.
+        assert_eq!(pick_default_db_path(true, false), DEFAULT_DB_PATH);
+        // Both present: never silently switch to the legacy file.
+        assert_eq!(pick_default_db_path(true, true), DEFAULT_DB_PATH);
+    }
+
+    #[test]
+    fn pick_default_falls_back_to_legacy() {
+        // Upgrade from an older release: only noadd.db exists.
+        assert_eq!(pick_default_db_path(false, true), LEGACY_DB_PATH);
+    }
+
+    // The following exercise resolve_db_path's filesystem cascade against a
+    // real CWD. nextest runs each test in its own process, so mutating the
+    // process-wide current directory here does not race other tests.
+    #[test]
+    fn resolve_db_path_defaults_to_new_in_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(DEFAULT_DB_PATH));
+    }
+
+    #[test]
+    fn resolve_db_path_uses_legacy_when_only_legacy_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_DB_PATH), b"").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(LEGACY_DB_PATH));
+    }
+
+    #[test]
+    fn resolve_db_path_prefers_new_when_both_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DEFAULT_DB_PATH), b"").unwrap();
+        std::fs::write(dir.path().join(LEGACY_DB_PATH), b"").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(resolve_db_path(None), PathBuf::from(DEFAULT_DB_PATH));
+    }
 
     #[test]
     fn span_events_close_without_level_hint() {
