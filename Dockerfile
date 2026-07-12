@@ -59,8 +59,14 @@ COPY --from=build /out/noadd /noadd
 
 VOLUME /data
 
+# Run from /data so the default DB path cascade (noadd.sqlite3, falling back to
+# a legacy noadd.db) resolves inside the mounted volume without an explicit
+# --db-path. Existing deployments carrying /data/noadd.db keep working; fresh
+# ones create /data/noadd.sqlite3.
+WORKDIR /data
+
 EXPOSE 53/udp
 EXPOSE 53/tcp
 EXPOSE 3000
 
-ENTRYPOINT ["/noadd", "--db-path", "/data/noadd.db", "--dns-addr", "0.0.0.0:53", "--http-addr", "0.0.0.0:3000"]
+ENTRYPOINT ["/noadd", "--dns-addr", "0.0.0.0:53", "--http-addr", "0.0.0.0:3000"]

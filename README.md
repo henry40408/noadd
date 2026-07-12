@@ -84,8 +84,13 @@ docker run -d \
   --name noadd \
   -p 53:53/udp -p 53:53/tcp -p 3000:3000 \
   -v noadd-data:/data \
-  ghcr.io/henry40408/noadd --db-path /data/noadd.db
+  ghcr.io/henry40408/noadd
 ```
+
+The container runs from `/data`, so the database is stored there as
+`noadd.sqlite3`. Deployments created before this default carried a
+`noadd.db` in the same volume; it is picked up automatically on upgrade
+(rename it to `noadd.sqlite3` to silence the startup warning).
 
 ## Usage
 
@@ -93,7 +98,7 @@ docker run -d \
 noadd [OPTIONS]
 
 Options:
-      --db-path <DB_PATH>            SQLite database path [default: noadd.db] [env: NOADD_DB_PATH]
+      --db-path <DB_PATH>            SQLite database path [default: noadd.sqlite3] [env: NOADD_DB_PATH]
       --dns-addr <DNS_ADDR>          DNS listener (UDP + TCP) [default: 0.0.0.0:53] [env: NOADD_DNS_ADDR]
       --http-addr <HTTP_ADDR>        HTTP/DoH listener [default: 0.0.0.0:3000] [env: NOADD_HTTP_ADDR]
       --tls-cert <TLS_CERT>          TLS certificate file [env: NOADD_TLS_CERT]

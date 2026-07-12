@@ -2225,7 +2225,7 @@ mod tests {
     #[tokio::test]
     async fn close_removes_wal_sidecar_files() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noadd.db");
+        let path = dir.path().join("noadd.sqlite3");
         let path_str = path.to_str().unwrap().to_string();
 
         let db = Database::open(&path_str).await.unwrap();
@@ -2289,7 +2289,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_schema_uses_composite_domain_index() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noadd.db");
+        let path = dir.path().join("noadd.sqlite3");
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
 
         let indexes = query_log_index_names(&db).await;
@@ -2420,7 +2420,7 @@ mod tests {
     #[tokio::test]
     async fn run_maintenance_keeps_data_queryable() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noadd.db");
+        let path = dir.path().join("noadd.sqlite3");
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
 
         let entries: Vec<QueryLogEntry> = (0..100)
