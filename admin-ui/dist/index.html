@@ -2796,9 +2796,12 @@ class DashboardPage extends HTMLElement {
     const avgMs = ms(s.avg_response_ms_today);
     const avgMs7d = ms(s.avg_response_ms_7d);
     const avgMs30d = ms(s.avg_response_ms_30d);
-    const qps = ((s.queries_1m || 0) / 60).toFixed(1);
+    const fmtQps = (v) => v >= 100 ? Math.round(v).toString() : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+    const qpsToday = fmtQps((s.total_today || 0) / 86400);
+    const qps7d = fmtQps((s.total_7d || 0) / (7 * 86400));
+    const qps30d = fmtQps((s.total_30d || 0) / (30 * 86400));
 
-    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs, qps];
+    const vals = [s.total_today, s.blocked_today, ratio, cacheRate, avgMs, qpsToday];
     const prevVals = this._prevStats;
     this._prevStats = vals;
 
@@ -2809,7 +2812,7 @@ class DashboardPage extends HTMLElement {
       <div class="stat-card" data-i="2" data-testid="stat-block-rate"><div class="stat-label">Block Rate</div><div class="stat-value red">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value" style="color:var(--orange)">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
       <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
-      <div class="stat-card" data-i="5"><div class="stat-label">Throughput (1m)</div><div class="stat-value accent">${qps}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div></div>`;
+      <div class="stat-card" data-i="5"><div class="stat-label">Throughput</div><div class="stat-value accent">${qpsToday}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div><div class="stat-sub">7d: ${qps7d} / 30d: ${qps30d} q/s</div></div>`;
 
     // Flash cards that changed (skip on first render)
     if (prevVals) {
