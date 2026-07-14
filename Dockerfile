@@ -67,6 +67,6 @@ WORKDIR /data
 
 EXPOSE 53/udp
 EXPOSE 53/tcp
-EXPOSE 3000
+EXPOSE 8080
 
-ENTRYPOINT ["/noadd", "--dns-addr", "0.0.0.0:53", "--http-addr", "0.0.0.0:3000"]
+ENTRYPOINT ["/noadd", "--dns-addr", "0.0.0.0:53", "--http-addr", "0.0.0.0:8080"]

@@ -68,21 +68,21 @@ noadd intentionally keeps a narrow focus. The following are **not** supported, a
 ```bash
 cargo build --release
 
-# Start with default settings (DNS on 0.0.0.0:53, HTTP on 0.0.0.0:3000)
+# Start with default settings (DNS on 0.0.0.0:53, HTTP on 0.0.0.0:8080)
 sudo ./target/release/noadd
 
 # Or use custom ports (no root needed)
-./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
+./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Open `http://127.0.0.1:3000` to create your operator account (username + password) and access the dashboard. Additional operators and active sessions are managed from the Account page.
+Open `http://127.0.0.1:8080` to create your operator account (username + password) and access the dashboard. Additional operators and active sessions are managed from the Account page.
 
 ### Docker
 
 ```bash
 docker run -d \
   --name noadd \
-  -p 53:53/udp -p 53:53/tcp -p 3000:3000 \
+  -p 53:53/udp -p 53:53/tcp -p 8080:8080 \
   -v noadd-data:/data \
   ghcr.io/henry40408/noadd
 ```
@@ -100,7 +100,7 @@ noadd [OPTIONS]
 Options:
       --db-path <DB_PATH>            SQLite database path [default: noadd.sqlite3] [env: NOADD_DB_PATH]
       --dns-addr <DNS_ADDR>          DNS listener (UDP + TCP) [default: 0.0.0.0:53] [env: NOADD_DNS_ADDR]
-      --http-addr <HTTP_ADDR>        HTTP/DoH listener [default: 0.0.0.0:3000] [env: NOADD_HTTP_ADDR]
+      --http-addr <HTTP_ADDR>        HTTP/DoH listener [default: 0.0.0.0:8080] [env: NOADD_HTTP_ADDR]
       --tls-cert <TLS_CERT>          TLS certificate file [env: NOADD_TLS_CERT]
       --tls-key <TLS_KEY>            TLS private key file [env: NOADD_TLS_KEY]
       --acme-domain <ACME_DOMAIN>    Let's Encrypt domain(s), comma-separated [env: NOADD_ACME_DOMAIN]
@@ -117,7 +117,7 @@ Options:
 dig @127.0.0.1 -p 5353 example.com A
 
 # DNS-over-HTTPS (with token)
-doggo example.com A @https://127.0.0.1:3000/dns-query/my-token
+doggo example.com A @https://127.0.0.1:8080/dns-query/my-token
 
 # Verify ad blocking
 dig @127.0.0.1 -p 5353 ads.google.com A
@@ -177,7 +177,7 @@ cargo fmt --check
 cargo clippy -- -D warnings
 
 # Run in dev mode
-RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
+RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
 ### End-to-end tests
