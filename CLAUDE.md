@@ -24,7 +24,7 @@ cargo clippy --all-targets -- -D warnings
 cargo deny check            # supply-chain: advisories, licenses, bans, sources
 
 # Run locally on non-privileged ports (no root)
-RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:3000
+RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
 Integration tests live in `tests/` (not `src/`); shared helpers are in `tests/common/`. Files ending `_bench.rs` are benchmark-style tests run by the normal test command.

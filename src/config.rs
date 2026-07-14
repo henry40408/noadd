@@ -30,7 +30,7 @@ pub struct CliArgs {
     #[arg(long, default_value = "0.0.0.0:53", env = "NOADD_DNS_ADDR")]
     pub dns_addr: String,
 
-    #[arg(long, default_value = "0.0.0.0:3000", env = "NOADD_HTTP_ADDR")]
+    #[arg(long, default_value = "0.0.0.0:8080", env = "NOADD_HTTP_ADDR")]
     pub http_addr: String,
 
     /// TLS certificate file (manual TLS, mutually exclusive with --acme-domain)
