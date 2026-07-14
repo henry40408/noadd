@@ -15,15 +15,6 @@ ignore = [
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",
-    # crossbeam-epoch <0.9.20 invalid-pointer dereference in the `fmt::Pointer`
-    # impl for `Atomic`/`Shared` (RUSTSEC-2026-0204). Reachable only when those
-    # internal pointer types are `{:p}`-formatted; noadd never formats them —
-    # crossbeam-epoch is pulled in transitively via moka 0.12.15 (the query
-    # cache) and used only for epoch-based reclamation. Fix is 0.9.20, but it
-    # was published 2026-07-06 (inside our 7-day dependency cooldown). Remove
-    # once we `cargo update -p crossbeam-epoch` to >=0.9.20 after 2026-07-13;
-    # tracked in the follow-up issue.
-    "RUSTSEC-2026-0204",
 ]
 
 [licenses]
