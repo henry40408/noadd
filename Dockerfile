@@ -69,4 +69,11 @@ EXPOSE 53/udp
 EXPOSE 53/tcp
 EXPOSE 8080
 
-ENTRYPOINT ["/noadd", "--dns-addr", "0.0.0.0:53", "--http-addr", "0.0.0.0:8080"]
+# Bind the admin HTTP/DoH listener on all interfaces inside the container (the
+# app default is loopback). Set via ENV rather than a hardcoded ENTRYPOINT arg
+# so it stays overridable at runtime with `-e NOADD_HTTP_ADDR=...` or a compose
+# `environment:` entry. The DNS listener stays a fixed arg since it must always
+# serve the LAN.
+ENV NOADD_HTTP_ADDR=0.0.0.0:8080
+
+ENTRYPOINT ["/noadd", "--dns-addr", "0.0.0.0:53"]
