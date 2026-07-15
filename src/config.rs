@@ -30,7 +30,11 @@ pub struct CliArgs {
     #[arg(long, default_value = "0.0.0.0:53", env = "NOADD_DNS_ADDR")]
     pub dns_addr: String,
 
-    #[arg(long, default_value = "0.0.0.0:8080", env = "NOADD_HTTP_ADDR")]
+    // Defaults to loopback so a bare-metal run does not expose the admin UI on
+    // all interfaces without opting in. The DNS listener above still defaults to
+    // 0.0.0.0 (it must serve the LAN); the container image sets
+    // NOADD_HTTP_ADDR=0.0.0.0:8080 so the dashboard is reachable there.
+    #[arg(long, default_value = "127.0.0.1:8080", env = "NOADD_HTTP_ADDR")]
     pub http_addr: String,
 
     /// TLS certificate file (manual TLS, mutually exclusive with --acme-domain)
