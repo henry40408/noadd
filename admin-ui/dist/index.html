@@ -779,6 +779,12 @@ textarea { resize: vertical; line-height: 1.7; }
   animation: blink 1.6s steps(2, start) infinite;
 }
 
+@keyframes log-row-flash {
+  from { background: var(--green-dim); }
+  to   { background: transparent; }
+}
+.log-row-new { animation: log-row-flash 1.2s ease-out; }
+
 /* Update flash — uses transition instead of animation to avoid overriding fade-in */
 .stat-card, .card {
   transition: border-color 1.2s ease-out, background-color 1.2s ease-out;
@@ -3324,11 +3330,16 @@ class LogsPage extends HTMLElement {
     this.actionFilter = '';
     this.tokenFilter = '';
     this.typeFilter = '';
+    this._live = false;
+    this._es = null;
   }
 
   connectedCallback() {
     this.innerHTML = `
-      <div class="page-header fade-in"><h2>Query Log</h2><p>DNS query history</p></div>
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
+        <div><h2>Query Log</h2><p>DNS query history</p></div>
+        <button class="live-toggle paused" id="log-live-btn" data-testid="logs-live-toggle" title="Stream new queries live as they arrive. Click to toggle."><span class="live-dot"></span> LIVE</button>
+      </div>
       <div class="filters-row fade-in">
         <input type="text" id="log-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower).">
         <select id="log-action">
@@ -3384,7 +3395,108 @@ class LogsPage extends HTMLElement {
         this.load();
       }
     };
+    this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
     this.load();
+  }
+
+  disconnectedCallback() {
+    this._stopLive();
+  }
+
+  _toggleLive() {
+    this._live = !this._live;
+    const btn = this.querySelector('#log-live-btn');
+    btn.classList.toggle('paused', !this._live);
+    if (this._live) {
+      // Live tail only makes sense on the newest page with default ordering.
+      this.offset = 0;
+      // Start streaming only after the baseline render completes, so incoming
+      // events aren't wiped by renderLogs resetting body.innerHTML. Also hide
+      // pagination — the live tail always shows the newest page.
+      this.load().then(() => { if (this._live && this.isConnected) this._startLive(); });
+      this._togglePagination(false);
+    } else {
+      this._stopLive();
+      this._togglePagination(true);
+    }
+  }
+
+  _startLive() {
+    this._stopLive();
+    this._es = new EventSource('/api/logs/stream');
+    this._es.onmessage = (e) => {
+      try { this._prependRow(JSON.parse(e.data)); } catch (_) {}
+    };
+    // EventSource auto-reconnects on error; nothing to do here.
+  }
+
+  _stopLive() {
+    if (this._es) { this._es.close(); this._es = null; }
+  }
+
+  _togglePagination(show) {
+    const pag = this.querySelector('#log-pagination');
+    if (pag) pag.style.display = show ? '' : 'none';
+  }
+
+  _matchesFilters(l) {
+    if (this.actionFilter === 'blocked' && !l.blocked) return false;
+    if (this.actionFilter === 'allowed' && l.blocked) return false;
+    if (this.typeFilter && l.query_type !== this.typeFilter) return false;
+    if (this.tokenFilter && l.doh_token !== this.tokenFilter) return false;
+    if (this.search) {
+      // mirror server: plain text = domain prefix; *x* / %x% = substring
+      const s = this.search.toLowerCase();
+      const d = (l.domain || '').toLowerCase();
+      const wild = s.includes('*') || s.includes('%');
+      const needle = s.replace(/[*%]/g, '');
+      if (wild ? !d.includes(needle) : !d.startsWith(needle)) return false;
+    }
+    return true;
+  }
+
+  _prependRow(l) {
+    if (!this._live) return;
+    if (this.offset !== 0) return;            // only tail the first page
+    if (!this._matchesFilters(l)) return;
+    const body = this.querySelector('#log-body');
+    const cards = this.querySelector('#log-cards');
+    if (body) {
+      // Clear an empty-state placeholder row if present.
+      if (body.querySelector('[data-testid="logs-empty-state"]') || (body.children.length === 1 && body.textContent.includes('No logs'))) body.innerHTML = '';
+      const tr = document.createElement('tr');
+      tr.className = 'log-row-new';
+      tr.innerHTML = this._rowHtml(l);
+      body.insertBefore(tr, body.firstChild);
+      this._bindRowActions(tr);
+      while (body.children.length > 200) body.removeChild(body.lastChild);
+    }
+    if (cards) {
+      // Clear a mobile empty-state guide (no .log-card present yet) before inserting.
+      if (!cards.querySelector('.log-card')) cards.innerHTML = '';
+      const wrap = document.createElement('div');
+      wrap.innerHTML = this._cardHtml(l);
+      const card = wrap.firstElementChild;
+      if (card) {
+        card.classList.add('log-row-new');
+        cards.insertBefore(card, cards.firstChild);
+        this._bindRowActions(card);
+        while (cards.children.length > 200) cards.removeChild(cards.lastChild);
+      }
+    }
+  }
+
+  _bindRowActions(scope) {
+    (scope || this).querySelectorAll('.log-action').forEach(btn => {
+      if (btn._bound) return; btn._bound = true;
+      btn.onclick = async () => {
+        const domain = btn.dataset.domain;
+        const rule = btn.dataset.blocked === 'true' ? `@@||${domain}^` : `||${domain}^`;
+        await api.post('/api/rules', { rule });
+        btn.textContent = 'Done';
+        btn.disabled = true;
+      };
+    });
   }
 
   async load() {
@@ -3417,16 +3529,7 @@ class LogsPage extends HTMLElement {
         ? `<tr><td colspan="8" style="padding:0">${emptyGuideDesktop}</td></tr>`
         : '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
-      body.innerHTML = logs.map(l => `<tr>
-        <td>${timeAgo(l.timestamp)}</td>
-        <td style="text-align:center"><span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}">${l.blocked ? '✖' : '✔'}</span></td>
-        <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${esc(l.domain)}">${esc(l.domain)}</span>${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}</div>${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
-        <td class="mono">${esc(l.query_type)}</td>
-        <td class="mono">${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.85rem">' + esc(l.doh_token) + '</span>' : ''}</td>
-        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span class="mono" style="font-size:0.9rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
-        <td class="mono">${l.response_ms}</td>
-      </tr>`).join('');
+      body.innerHTML = logs.map(l => `<tr>${this._rowHtml(l)}</tr>`).join('');
     }
 
     // Mobile card list
@@ -3436,7 +3539,39 @@ class LogsPage extends HTMLElement {
         ? emptyGuide
         : '<p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>';
     } else {
-      cards.innerHTML = logs.map(l => `<div class="log-card">
+      cards.innerHTML = logs.map(l => this._cardHtml(l)).join('');
+    }
+
+    // Bind action buttons (both table and cards)
+    this._bindRowActions(this);
+
+    const pag = this.querySelector('#log-pagination');
+    const currentPage = Math.floor(this.offset / this.limit) + 1;
+    const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
+    const hasPrev = this.offset > 0;
+    const hasNext = currentPage < totalPages;
+    pag.innerHTML = `
+      <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
+      <span>Page ${currentPage} / ${totalPages}</span>
+      <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
+    pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
+    pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
+  }
+
+  _rowHtml(l) {
+    return `
+        <td>${timeAgo(l.timestamp)}</td>
+        <td style="text-align:center"><span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}">${l.blocked ? '✖' : '✔'}</span></td>
+        <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${esc(l.domain)}">${esc(l.domain)}</span>${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}</div>${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
+        <td class="mono">${esc(l.query_type)}</td>
+        <td class="mono">${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.85rem">' + esc(l.doh_token) + '</span>' : ''}</td>
+        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
+        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span class="mono" style="font-size:0.9rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td class="mono">${l.response_ms}</td>`;
+  }
+
+  _cardHtml(l) {
+    return `<div class="log-card">
         <div class="log-card-row1">
           <span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}" style="flex:0 0 auto">${l.blocked ? '✖' : '✔'}</span>
           <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
@@ -3452,32 +3587,9 @@ class LogsPage extends HTMLElement {
           ${l.doh_token ? '<span class="lc-token">' + esc(l.doh_token) + '</span>' : ''}
           <span class="lc-ms">${l.response_ms}ms</span>
         </div>
-      </div>`).join('');
-    }
-
-    // Bind action buttons (both table and cards)
-    this.querySelectorAll('.log-action').forEach(btn => {
-      btn.onclick = async () => {
-        const domain = btn.dataset.domain;
-        const rule = btn.dataset.blocked === 'true' ? `@@||${domain}^` : `||${domain}^`;
-        await api.post('/api/rules', { rule });
-        btn.textContent = 'Done';
-        btn.disabled = true;
-      };
-    });
-
-    const pag = this.querySelector('#log-pagination');
-    const currentPage = Math.floor(this.offset / this.limit) + 1;
-    const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
-    const hasPrev = this.offset > 0;
-    const hasNext = currentPage < totalPages;
-    pag.innerHTML = `
-      <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
-      <span>Page ${currentPage} / ${totalPages}</span>
-      <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
-    pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
-    pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
+      </div>`;
   }
+
   async loadTokens() {
     try {
       const tokens = await api.get('/api/doh-tokens');

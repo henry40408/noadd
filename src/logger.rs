@@ -12,6 +12,7 @@ pub struct QueryLogger {
     rx: mpsc::Receiver<QueryContext>,
     flush_threshold: usize,
     flush_interval_secs: u64,
+    events: Option<tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>>,
 }
 
 impl QueryLogger {
@@ -29,8 +30,19 @@ impl QueryLogger {
             rx,
             flush_threshold,
             flush_interval_secs,
+            events: None,
         };
         (logger, tx)
+    }
+
+    /// Attach a broadcast sender so each newly-logged entry is also published
+    /// live (for the admin UI SSE tail). Events fire before the DB batch flush.
+    pub fn with_event_sender(
+        mut self,
+        tx: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
+    ) -> Self {
+        self.events = Some(tx);
+        self
     }
 
     /// Run the logger loop. Consumes self. Call in a `tokio::spawn`.
@@ -51,7 +63,16 @@ impl QueryLogger {
             tokio::select! {
                 maybe_ctx = self.rx.recv() => {
                     if let Some(ctx) = maybe_ctx {
-                        buffer.push(query_context_to_entry(ctx));
+                        let entry = query_context_to_entry(ctx);
+                        // Publish a live copy for SSE subscribers *before* the DB flush, so the
+                        // admin UI tail is real-time. Gated on receiver_count so there is zero
+                        // clone/alloc cost when nobody is watching.
+                        if let Some(events) = &self.events
+                            && events.receiver_count() > 0
+                        {
+                            let _ = events.send(std::sync::Arc::new(entry.clone()));
+                        }
+                        buffer.push(entry);
                         if buffer.len() >= self.flush_threshold {
                             flush(&self.db, &mut buffer).await;
                         }

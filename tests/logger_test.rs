@@ -143,3 +143,46 @@ async fn test_logger_flushes_on_interval() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn test_logger_publishes_to_event_broadcast() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Database::open(db_path.to_str().unwrap()).await.unwrap();
+
+    // High threshold/interval so the DB flush doesn't race the assertion below;
+    // the broadcast event fires independently of the DB flush anyway.
+    let (logger, tx) = QueryLogger::new(db.clone(), 1000, 300);
+    let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(16);
+    let logger = logger.with_event_sender(events_tx);
+
+    let handle = tokio::spawn(logger.run());
+
+    let ctx = QueryContext {
+        timestamp: 4000,
+        client_ip: IpAddr::from_str("172.16.0.1").unwrap(),
+        domain: "live.example.com".to_string(),
+        query_type: u16::from(RecordType::A),
+        action: QueryAction::Allowed,
+        cached: false,
+        upstream: Some("1.1.1.1:53".to_string()),
+        doh_token: None,
+        result: None,
+        response_time_ms: 7,
+        matched_rule: None,
+        matched_list: None,
+        authenticated_data: false,
+    };
+    tx.send(ctx).await.unwrap();
+
+    let entry = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("timed out waiting for broadcast event")
+        .unwrap();
+    assert_eq!(entry.domain, "live.example.com");
+    assert_eq!(entry.query_type, "A");
+    assert!(!entry.blocked);
+
+    drop(tx);
+    handle.await.unwrap();
+}

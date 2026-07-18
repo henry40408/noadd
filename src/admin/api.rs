@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
@@ -16,6 +17,9 @@ use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use utoipa::OpenApi as _;
 use utoipa_scalar::Scalar;
 
@@ -25,7 +29,7 @@ use crate::admin::auth::{
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
-use crate::db::Database;
+use crate::db::{Database, QueryLogEntry};
 use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
 use crate::filter::lists::ListManager;
@@ -43,6 +47,7 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
+    pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
     pub server_info: ServerInfo,
     pub list_manager: Arc<ListManager>,
     pub rebuild: Arc<RebuildCoordinator>,
@@ -199,6 +204,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
         // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
+        .route("/api/logs/stream", get(stream_logs))
         // Apple mobileconfig (no auth — token in URL is the credential)
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Apple touch icon (rendered from favicon.svg at build time)
@@ -2134,6 +2140,27 @@ async fn get_logs(
         "logs": logs,
         "total": total,
     })))
+}
+
+/// Live tail of DNS query logs via Server-Sent Events.
+///
+/// Each newly-logged query is pushed as a JSON `QueryLogEntry` (identical
+/// shape to `GET /api/logs` rows). Auth is via the same `AuthedUser`
+/// extractor as the rest of the API; browsers send the `session` cookie on
+/// the `EventSource` connection automatically. Events are broadcast before the
+/// logger's DB flush, so the tail is real-time. A slow client that lags past
+/// the broadcast buffer simply skips the missed entries (the tail resumes).
+async fn stream_logs(
+    State(state): State<AppState>,
+    _auth: AuthedUser,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.log_events.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(entry) => Event::default().json_data(&*entry).ok().map(Ok),
+        // Lagged: client fell behind the buffer — skip missed entries.
+        Err(_) => None,
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Delete all DNS query logs.

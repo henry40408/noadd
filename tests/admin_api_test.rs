@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
@@ -10,7 +12,7 @@ use noadd::admin::auth::{
     RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
 };
 use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
-use noadd::db::Database;
+use noadd::db::{Database, QueryLogEntry};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -29,7 +31,7 @@ async fn setup_with_registry_url(url: String) -> (axum::Router, String) {
 }
 
 async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
-    let (app, token, _cache) = build_app(registry_url, true).await;
+    let (app, token, _cache, _events) = build_app(registry_url, true).await;
     (app, token)
 }
 
@@ -41,7 +43,15 @@ async fn unconfigured_app() -> axum::Router {
     build_app("http://127.0.0.1:1/filters.json", false).await.0
 }
 
-async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, String, DnsCache) {
+async fn build_app(
+    registry_url: &str,
+    set_password: bool,
+) -> (
+    axum::Router,
+    String,
+    DnsCache,
+    tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
+) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
     let path = dir.keep().join("test.db");
@@ -100,6 +110,8 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         std::time::Duration::from_secs(3600),
     );
 
+    let log_events = tokio::sync::broadcast::channel(256).0;
+
     let router = admin_router(AppState {
         db,
         sessions,
@@ -108,6 +120,7 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         rate_limiter,
         forwarder,
         handler,
+        log_events: log_events.clone(),
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -118,7 +131,7 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
     });
-    (router, token, cache)
+    (router, token, cache, log_events)
 }
 
 #[tokio::test]
@@ -765,6 +778,7 @@ async fn test_setup_initial_password() {
         rate_limiter: rate_limiter.clone(),
         forwarder: forwarder.clone(),
         handler: handler.clone(),
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -800,6 +814,7 @@ async fn test_setup_initial_password() {
         rate_limiter,
         forwarder,
         handler,
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -1085,7 +1100,7 @@ async fn test_block_mode_custom_ip_with_valid_addresses_accepted() {
 
 #[tokio::test]
 async fn test_dnssec_setting_change_invalidates_dns_cache() {
-    let (app, token, cache) = build_app("http://127.0.0.1:1/filters.json", true).await;
+    let (app, token, cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
     let key = CacheKey::new(
         "example.com".to_string(),
         1,
@@ -1124,7 +1139,7 @@ async fn test_dnssec_setting_change_invalidates_dns_cache() {
 async fn test_dnssec_setting_unchanged_keeps_dns_cache() {
     // The forwarder defaults to DNSSEC enabled (dnssec_disabled=false). Re-sending
     // that same value must not flush every client's cache.
-    let (app, token, cache) = build_app("http://127.0.0.1:1/filters.json", true).await;
+    let (app, token, cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
     let key = CacheKey::new(
         "example.com".to_string(),
         1,
@@ -1838,4 +1853,68 @@ async fn delete_operator_succeeds_and_missing_returns_404() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_logs_stream_sse_delivers_published_entry() {
+    let (app, token, _cache, events) = build_app("http://127.0.0.1:1/filters.json", true).await;
+
+    // Open the authenticated SSE stream. The handler subscribes to the
+    // broadcast channel while producing the response, so a publish after
+    // oneshot() returns is guaranteed to be delivered to this subscriber.
+    let req = Request::builder()
+        .uri("/api/logs/stream")
+        .header("cookie", format!("session={}", token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ctype.starts_with("text/event-stream"),
+        "unexpected content-type: {ctype}"
+    );
+
+    // Publish one entry through the broadcast sender the handler is now
+    // subscribed to.
+    let entry = QueryLogEntry {
+        timestamp: 1234,
+        domain: "live.example.com".to_string(),
+        query_type: "A".to_string(),
+        client_ip: "10.0.0.9".to_string(),
+        blocked: false,
+        cached: false,
+        response_ms: 5,
+        upstream: Some("1.1.1.1:53".to_string()),
+        doh_token: None,
+        result: None,
+        authenticated_data: false,
+    };
+    events.send(Arc::new(entry)).unwrap();
+
+    // Read SSE frames until the JSON data line for our entry arrives
+    // (keep-alive comments may interleave). Bound with a timeout so a
+    // regression can't hang the suite.
+    let mut stream = resp.into_body().into_data_stream();
+    let mut seen = String::new();
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.unwrap();
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+            if seen.contains("live.example.com") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("timed out waiting for SSE data");
+    assert!(
+        found,
+        "SSE stream did not deliver the published entry; got: {seen}"
+    );
 }
