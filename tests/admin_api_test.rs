@@ -108,6 +108,7 @@ async fn build_app(registry_url: &str, set_password: bool) -> (axum::Router, Str
         rate_limiter,
         forwarder,
         handler,
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -765,6 +766,7 @@ async fn test_setup_initial_password() {
         rate_limiter: rate_limiter.clone(),
         forwarder: forwarder.clone(),
         handler: handler.clone(),
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -800,6 +802,7 @@ async fn test_setup_initial_password() {
         rate_limiter,
         forwarder,
         handler,
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),

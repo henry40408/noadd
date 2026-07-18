@@ -63,6 +63,7 @@ async fn build_app() -> (axum::Router, Database) {
         rate_limiter,
         forwarder,
         handler,
+        log_events: tokio::sync::broadcast::channel(256).0,
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:5353".into(),
             http_addr: "127.0.0.1:3000".into(),

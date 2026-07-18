@@ -101,7 +101,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cache = DnsCache::new(10_000);
 
+    let (log_events, _) = tokio::sync::broadcast::channel(256);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
+    let logger = logger.with_event_sender(log_events.clone());
     let logger_handle = tokio::spawn(logger.run());
 
     let ip_rate_limiter = Arc::new(IpRateLimiter::new(
@@ -184,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         forwarder: forwarder.clone(),
         handler: handler.clone(),
+        log_events: log_events.clone(),
         server_info,
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),

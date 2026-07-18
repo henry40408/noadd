@@ -120,6 +120,8 @@ The engine is behind `ArcSwap` for lock-free reads. Filter updates build a new e
 
 The DNS handler sends log events through a `tokio::sync::mpsc` channel. A dedicated task batches entries and flushes to SQLite (every 500 entries or every 1 second). This keeps the query path non-blocking.
 
+The logger also fans each entry out to a `tokio::sync::broadcast` channel that backs the admin UI's live tail (`GET /api/logs/stream`, Server-Sent Events). The broadcast fires *before* the batch flush, so the tail is real-time, and is gated on `receiver_count()` so there is zero clone/allocation cost when nobody is watching. Slow SSE clients that lag past the buffer skip the missed entries rather than stalling the logger.
+
 ### Schema Migrations
 
 SQLite schema versioning uses `PRAGMA user_version`. Each migration checks the current version and applies changes incrementally. New databases get the latest schema directly from `CREATE TABLE` statements.
