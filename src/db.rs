@@ -608,9 +608,9 @@ impl Database {
         token: Option<&str>,
         query_type: Option<&str>,
     ) -> Result<Vec<QueryLogEntry>, DbError> {
-        let search = search.map(|s| s.to_string());
-        let token = token.map(|s| s.to_string());
-        let query_type = query_type.map(|s| s.to_string());
+        let search = search.map(std::string::ToString::to_string);
+        let token = token.map(std::string::ToString::to_string);
+        let query_type = query_type.map(std::string::ToString::to_string);
         let rows = self
             .reader()
             .call(move |conn| {
@@ -627,7 +627,7 @@ impl Database {
                 param_values.push(Box::new(offset));
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-                    param_values.iter().map(|p| p.as_ref()).collect();
+                    param_values.iter().map(std::convert::AsRef::as_ref).collect();
 
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let rows = stmt
@@ -660,9 +660,9 @@ impl Database {
         token: Option<&str>,
         query_type: Option<&str>,
     ) -> Result<i64, DbError> {
-        let search = search.map(|s| s.to_string());
-        let token = token.map(|s| s.to_string());
-        let query_type = query_type.map(|s| s.to_string());
+        let search = search.map(std::string::ToString::to_string);
+        let token = token.map(std::string::ToString::to_string);
+        let query_type = query_type.map(std::string::ToString::to_string);
         let count = self
             .reader()
             .call(move |conn| {
@@ -675,8 +675,10 @@ impl Database {
                     query_type.as_deref(),
                 );
 
-                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-                    param_values.iter().map(|p| p.as_ref()).collect();
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+                    .iter()
+                    .map(std::convert::AsRef::as_ref)
+                    .collect();
 
                 let mut stmt = conn.prepare_cached(&sql)?;
                 stmt.query_row(params_refs.as_slice(), |row| row.get(0))
@@ -1331,8 +1333,8 @@ impl Database {
         user_agent: Option<&str>,
     ) -> Result<i64, DbError> {
         let token = token.to_string();
-        let ip = ip.map(|s| s.to_string());
-        let user_agent = user_agent.map(|s| s.to_string());
+        let ip = ip.map(std::string::ToString::to_string);
+        let user_agent = user_agent.map(std::string::ToString::to_string);
         let id = self
             .conn
             .call(move |conn| {

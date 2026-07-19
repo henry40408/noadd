@@ -118,9 +118,8 @@ async fn handle_get_with_token(
         Ok(name) => Some(name),
         Err(status) => return status.into_response(),
     };
-    let query_bytes = match URL_SAFE_NO_PAD.decode(&params.dns) {
-        Ok(bytes) => bytes,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response(),
+    let Ok(query_bytes) = URL_SAFE_NO_PAD.decode(&params.dns) else {
+        return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response();
     };
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();
@@ -165,9 +164,8 @@ async fn handle_get(
     if !is_open_access(&state.db).await {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let query_bytes = match URL_SAFE_NO_PAD.decode(&params.dns) {
-        Ok(bytes) => bytes,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response(),
+    let Ok(query_bytes) = URL_SAFE_NO_PAD.decode(&params.dns) else {
+        return (StatusCode::BAD_REQUEST, "invalid base64url encoding").into_response();
     };
     if !is_valid_dns_wire(&query_bytes) {
         return (StatusCode::BAD_REQUEST, "malformed DNS message").into_response();

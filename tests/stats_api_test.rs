@@ -117,7 +117,7 @@ async fn stats_v2_timeline_invalid_range_returns_400() {
         .oneshot(
             Request::builder()
                 .uri("/api/stats/v2/timeline?range=bogus")
-                .header("cookie", format!("session={}", token))
+                .header("cookie", format!("session={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -133,7 +133,7 @@ async fn stats_v2_timeline_empty_db_returns_empty_array() {
         .oneshot(
             Request::builder()
                 .uri("/api/stats/v2/timeline?range=7d")
-                .header("cookie", format!("session={}", token))
+                .header("cookie", format!("session={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -154,7 +154,7 @@ async fn stats_v2_health_returns_expected_fields() {
         .oneshot(
             Request::builder()
                 .uri("/api/stats/v2/health")
-                .header("cookie", format!("session={}", token))
+                .header("cookie", format!("session={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -171,7 +171,8 @@ async fn stats_v2_health_returns_expected_fields() {
     // Retention falls back to the default when unconfigured, so the UI shows
     // the policy actually in effect rather than a null/dash.
     assert_eq!(
-        body.get("log_retention_days").and_then(|v| v.as_i64()),
+        body.get("log_retention_days")
+            .and_then(serde_json::Value::as_i64),
         Some(7)
     );
     assert!(body.get("avg_new_rows_per_day").is_some());

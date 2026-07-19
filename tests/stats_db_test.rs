@@ -25,7 +25,7 @@ fn entry(
         cached,
         upstream: None,
         doh_token: None,
-        result: result.map(|s| s.to_string()),
+        result: result.map(std::string::ToString::to_string),
         response_ms: 5,
         authenticated_data: false,
     }
@@ -89,7 +89,7 @@ async fn timeline_multi_offset_aligns_day_buckets_to_local_midnight() {
 async fn heatmap_groups_by_weekday_and_hour() {
     let db = test_db().await;
     // 2024-01-01 00:00:00 UTC = Monday, hour 0; epoch = 1704067200
-    let monday_midnight = 1704067200;
+    let monday_midnight = 1_704_067_200;
     let entries = vec![
         entry(monday_midnight + 10, "A", false, false, None),
         entry(monday_midnight + 20, "A", false, false, None),

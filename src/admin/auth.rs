@@ -76,13 +76,13 @@ const API_KEY_BODY_LEN: usize = 40;
 /// token is high-entropy random, so no salt/Argon2 is needed, and the hex digest
 /// is directly indexable for lookup.
 pub fn hash_api_key(token: &str) -> String {
+    use std::fmt::Write as _;
     let mut hasher = Blake2b512::new();
     hasher.update(token.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hasher.finalize().iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 /// Mint a fresh API key. Returns `(full_token, display_prefix, token_hash)`.

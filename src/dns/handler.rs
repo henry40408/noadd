@@ -115,8 +115,7 @@ fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
                 .txt_data
                 .iter()
                 .map(|s| String::from_utf8_lossy(s).into_owned())
-                .collect::<Vec<_>>()
-                .join(""),
+                .collect::<String>(),
             RData::SOA(soa) => format!("{} {}", soa.mname, soa.rname),
             RData::SRV(srv) => {
                 format!(

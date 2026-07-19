@@ -68,9 +68,8 @@ async fn spawn_mock_upstream() -> SocketAddr {
     tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
-            let (len, src) = match socket.recv_from(&mut buf).await {
-                Ok(r) => r,
-                Err(_) => break,
+            let Ok((len, src)) = socket.recv_from(&mut buf).await else {
+                break;
             };
             let response_data = build_mock_response(&buf[..len]);
             let _ = socket.send_to(&response_data, src).await;
@@ -98,7 +97,7 @@ async fn make_test_handler(addr: SocketAddr) -> Arc<DnsHandler> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore]
+#[ignore = "benchmark; run manually with --ignored"]
 async fn cache_hit_bench() {
     let n_keys: usize = std::env::var("BENCH_KEYS")
         .ok()
