@@ -33,8 +33,8 @@ pub enum FilterResult {
 const NOT_TERMINAL: u16 = u16::MAX;
 
 /// Size of one child-index entry in the flat trie `nodes` buffer.
-/// Layout: `label_offset(u32)` + `label_len(u8)` + `child_node_offset(u32)` = 9.
-const CHILD_ENTRY: usize = 9;
+/// Layout: `label_offset(u32)` + `label_len(u16)` + `child_node_offset(u32)` = 10.
+const CHILD_ENTRY: usize = 10;
 
 // ── Flat trie ───────────────────────────────────────────────────────────
 
@@ -44,16 +44,16 @@ const CHILD_ENTRY: usize = 9;
 ///
 /// ```text
 /// +0  u16  terminal_value   (NOT_TERMINAL if non-terminal)
-/// +2  u16  child_count (N)
-/// +4  N × ChildEntry
+/// +2  u32  child_count (N)
+/// +6  N × ChildEntry
 /// ```
 ///
-/// ### `ChildEntry` (9 bytes, sorted by label)
+/// ### `ChildEntry` (10 bytes, sorted by label)
 ///
 /// ```text
 /// +0  u32  label_offset     (into `labels`)
-/// +4  u8   label_len
-/// +5  u32  child_node_offset (into `nodes`)
+/// +4  u16  label_len
+/// +6  u32  child_node_offset (into `nodes`)
 /// ```
 struct FlatTrie {
     nodes: Vec<u8>,
@@ -71,8 +71,8 @@ impl FlatTrie {
         }
         let mut off = 0usize;
         for (depth, &label) in labels.iter().enumerate() {
-            let child_count = read_u16(&self.nodes, off + 2) as usize;
-            let entries = off + 4;
+            let child_count = read_u32(&self.nodes, off + 2) as usize;
+            let entries = off + 6;
 
             // Binary search children by label.
             let target = label.as_bytes();
@@ -85,7 +85,7 @@ impl FlatTrie {
                 let lbl = self.label_at(e);
                 match lbl.cmp(target) {
                     Ordering::Equal => {
-                        found_off = Some(read_u32(&self.nodes, e + 5) as usize);
+                        found_off = Some(read_u32(&self.nodes, e + 6) as usize);
                         break;
                     }
                     Ordering::Less => lo = mid + 1,
@@ -106,7 +106,7 @@ impl FlatTrie {
     #[inline]
     fn label_at(&self, entry_off: usize) -> &[u8] {
         let lo = read_u32(&self.nodes, entry_off) as usize;
-        let len = self.nodes[entry_off + 4] as usize;
+        let len = read_u16(&self.nodes, entry_off + 4) as usize;
         &self.labels[lo..lo + len]
     }
 }
@@ -177,9 +177,14 @@ impl BuildNode {
         let mut sorted: Vec<(&Box<str>, &BuildNode)> = node.children.iter().collect();
         sorted.sort_unstable_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
 
-        // Header: terminal_value + child_count
+        // Header: terminal_value (u16) + child_count (u32). child_count is u32
+        // because a single TLD node can hold well over 65 535 second-level
+        // domains on large blocklists; a u16 here silently truncated the count
+        // and made `lookup`'s binary search miss children (domains stopped
+        // being blocked).
         nodes.extend_from_slice(&node.terminal.to_le_bytes());
-        nodes.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
+        let child_count = u32::try_from(sorted.len()).expect("child count exceeds u32");
+        nodes.extend_from_slice(&child_count.to_le_bytes());
 
         // Reserve space for child entries (filled after recursive serialization).
         let entries_start = nodes.len();
@@ -187,15 +192,17 @@ impl BuildNode {
 
         for (i, (label, child)) in sorted.iter().enumerate() {
             let label_offset = labels.len() as u32;
-            let label_len = label.len() as u8;
+            // u16 (not u8): the rule parser does not bound label length, so an
+            // over-long label would otherwise truncate and corrupt lookups.
+            let label_len = u16::try_from(label.len()).expect("label length exceeds u16");
             labels.extend_from_slice(label.as_bytes());
 
             let child_offset = Self::serialize(child, nodes, labels, tc);
 
             let e = entries_start + i * CHILD_ENTRY;
             nodes[e..e + 4].copy_from_slice(&label_offset.to_le_bytes());
-            nodes[e + 4] = label_len;
-            nodes[e + 5..e + 9].copy_from_slice(&child_offset.to_le_bytes());
+            nodes[e + 4..e + 6].copy_from_slice(&label_len.to_le_bytes());
+            nodes[e + 6..e + 10].copy_from_slice(&child_offset.to_le_bytes());
         }
 
         offset
@@ -415,5 +422,76 @@ impl FilterEngine {
         let exact_block = self.exact_block.as_fst().as_bytes().len();
         let exact_allow = self.exact_allow.as_fst().as_bytes().len();
         block_trie + allow_trie + exact_block + exact_allow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_subdomain(domain: &str) -> ParsedRule {
+        ParsedRule {
+            domain: domain.to_string(),
+            action: RuleAction::Block,
+            is_subdomain: true,
+        }
+    }
+
+    /// A single trie node can hold more than `u16::MAX` children on large
+    /// blocklists (tens of thousands of second-level domains under one TLD).
+    /// Regression: the child count was serialized as `u16`, so it truncated
+    /// past 65 535 and `lookup`'s binary search missed children — silently
+    /// unblocking domains on exactly the large-list workload the engine targets.
+    #[test]
+    fn trie_lookup_survives_more_than_u16_children_under_one_node() {
+        let n: u32 = 70_000; // > u16::MAX (65 535)
+        // Zero-padded so lexicographic (sorted) order matches numeric order;
+        // every `d#####` label lands under the shared `com` node.
+        let block_rules: Vec<(ParsedRule, String)> = (0..n)
+            .map(|i| {
+                (
+                    block_subdomain(&format!("d{i:05}.com")),
+                    "test-list".to_string(),
+                )
+            })
+            .collect();
+        let engine = FilterEngine::from_named_rules(block_rules, Vec::new());
+
+        // Domains whose sorted position sits past the old u16 truncation point.
+        assert!(
+            matches!(engine.check("d69999.com"), FilterResult::Blocked { .. }),
+            "child beyond the u16 boundary must still be blocked"
+        );
+        assert!(matches!(
+            engine.check("d65535.com"),
+            FilterResult::Blocked { .. }
+        ));
+        assert!(matches!(
+            engine.check("d00000.com"),
+            FilterResult::Blocked { .. }
+        ));
+        // A domain that was never inserted stays allowed.
+        assert!(matches!(
+            engine.check("d70000.com"),
+            FilterResult::Allowed { .. }
+        ));
+    }
+
+    /// The rule parser does not bound label length, so a label longer than 255
+    /// bytes must round-trip. Regression: label length was serialized as `u8`
+    /// and truncated (e.g. 300 → 44), corrupting the stored label and breaking
+    /// lookup.
+    #[test]
+    fn trie_lookup_survives_label_longer_than_u8() {
+        let long_label = "a".repeat(300);
+        let domain = format!("{long_label}.com");
+        let engine = FilterEngine::from_named_rules(
+            vec![(block_subdomain(&domain), "test-list".to_string())],
+            Vec::new(),
+        );
+        assert!(
+            matches!(engine.check(&domain), FilterResult::Blocked { .. }),
+            "a >255-byte label must round-trip and still block"
+        );
     }
 }
