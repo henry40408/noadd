@@ -1583,7 +1583,9 @@ function absTime(ts) {
 
 function timeAgo(ts) {
   if (!ts) return 'never';
-  return `<span title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
+  // data-ts lets a periodic ticker recompute the relative text in place
+  // (see LogsPage._refreshTimes) without re-rendering the whole row.
+  return `<span class="timeago" data-ts="${ts}" title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
 }
 
 function formatTime(ts) {
@@ -3332,6 +3334,7 @@ class LogsPage extends HTMLElement {
     this.typeFilter = '';
     this._live = false;
     this._es = null;
+    this._timeTimer = null;
   }
 
   connectedCallback() {
@@ -3397,10 +3400,31 @@ class LogsPage extends HTMLElement {
     };
     this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
     this.load();
+    this._startTimeTicker();
   }
 
   disconnectedCallback() {
     this._stopLive();
+    this._stopTimeTicker();
+  }
+
+  // Relative times ("2 seconds ago") are baked in at render/insert time, so
+  // rows already on screen would otherwise freeze — most visibly during a live
+  // tail. Recompute the visible spans in place once a second.
+  _startTimeTicker() {
+    this._stopTimeTicker();
+    this._timeTimer = setInterval(() => this._refreshTimes(), 1000);
+  }
+
+  _stopTimeTicker() {
+    if (this._timeTimer) { clearInterval(this._timeTimer); this._timeTimer = null; }
+  }
+
+  _refreshTimes() {
+    this.querySelectorAll('.timeago').forEach(el => {
+      const ts = Number(el.dataset.ts);
+      if (ts) el.textContent = timeAgoText(ts);
+    });
   }
 
   _toggleLive() {
