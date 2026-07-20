@@ -150,7 +150,7 @@ async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
     for _ in 0..100 {
         let req = Request::builder()
             .uri("/api/filter/rebuild-status")
-            .header("cookie", format!("session={}", token))
+            .header("cookie", format!("session={token}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -160,11 +160,11 @@ async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let rebuilding = body
             .get("rebuilding")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         let last_completed_at = body
             .get("last_completed_at")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
         if !rebuilding && last_completed_at >= before {
             return;
@@ -194,7 +194,7 @@ async fn batch_add_rejects_empty() {
         .method("POST")
         .uri("/api/lists/batch")
         .header("content-type", "application/json")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::from(r#"{"items":[]}"#))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -212,7 +212,7 @@ async fn batch_add_rejects_oversized() {
         .method("POST")
         .uri("/api/lists/batch")
         .header("content-type", "application/json")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::from(body.to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -241,7 +241,7 @@ async fn batch_add_all_success() {
         .method("POST")
         .uri("/api/lists/batch")
         .header("content-type", "application/json")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::from(body.to_string()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -276,7 +276,7 @@ async fn batch_add_partial_failure() {
         .method("POST")
         .uri("/api/lists/batch")
         .header("content-type", "application/json")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::from(body.to_string()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -295,7 +295,7 @@ async fn batch_add_partial_failure() {
     // OK list exists; BAD list was rolled back and is absent.
     let lists_req = Request::builder()
         .uri("/api/lists")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
     let lists_resp = app.oneshot(lists_req).await.unwrap();
@@ -332,7 +332,7 @@ async fn registry_filters_returns_cached_data() {
 
     let req = Request::builder()
         .uri("/api/registry/filters")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -350,7 +350,7 @@ async fn rebuild_status_initial_is_idle() {
     let (app, token) = setup().await;
     let req = Request::builder()
         .uri("/api/filter/rebuild-status")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -360,16 +360,21 @@ async fn rebuild_status_initial_is_idle() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        body.get("rebuilding").and_then(|v| v.as_bool()),
+        body.get("rebuilding").and_then(serde_json::Value::as_bool),
         Some(false)
     );
-    assert_eq!(body.get("started_at").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(
-        body.get("last_completed_at").and_then(|v| v.as_i64()),
+        body.get("started_at").and_then(serde_json::Value::as_i64),
         Some(0)
     );
     assert_eq!(
-        body.get("last_duration_ms").and_then(|v| v.as_u64()),
+        body.get("last_completed_at")
+            .and_then(serde_json::Value::as_i64),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("last_duration_ms")
+            .and_then(serde_json::Value::as_u64),
         Some(0)
     );
 }
@@ -395,7 +400,7 @@ async fn test_health_endpoint_exposes_dropped_log_count() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let drops = body
         .get("dropped_log_count")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .expect("dropped_log_count should be present and a u64");
     assert_eq!(drops, 0, "fresh handler should have zero drops");
 }
@@ -482,7 +487,7 @@ async fn test_settings_with_auth() {
         .oneshot(
             Request::builder()
                 .uri("/api/settings")
-                .header("cookie", format!("session={}", token))
+                .header("cookie", format!("session={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -546,7 +551,7 @@ async fn test_login_wrong_password() {
 #[tokio::test]
 async fn test_lists_crud() {
     let (app, token) = setup().await;
-    let cookie = format!("session={}", token);
+    let cookie = format!("session={token}");
 
     // Add a list
     let response = app
@@ -591,7 +596,7 @@ async fn test_lists_crud() {
 #[tokio::test]
 async fn test_rules_unified_api() {
     let (app, token) = setup().await;
-    let cookie = format!("session={}", token);
+    let cookie = format!("session={token}");
 
     // Add allow rule (@@|| prefix → auto-detected as allow)
     let response = app
@@ -690,7 +695,7 @@ async fn test_stats_summary_with_auth() {
         .oneshot(
             Request::builder()
                 .uri("/api/stats/summary")
-                .header("cookie", format!("session={}", token))
+                .header("cookie", format!("session={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -710,7 +715,7 @@ async fn test_stats_summary_with_auth() {
 #[tokio::test]
 async fn test_logs_endpoint() {
     let (app, token) = setup().await;
-    let cookie = format!("session={}", token);
+    let cookie = format!("session={token}");
 
     // Get logs (empty)
     let response = app
@@ -1366,7 +1371,7 @@ async fn setup_rejects_short_password_with_400() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        msg.to_lowercase().contains("at least") || msg.contains("8"),
+        msg.to_lowercase().contains("at least") || msg.contains('8'),
         "expected a too-short error message mentioning the minimum, got: {body}"
     );
 }
@@ -1387,7 +1392,10 @@ async fn setup_accepts_eight_char_password_with_200() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body.get("success").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        body.get("success").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 }
 
 #[tokio::test]
@@ -1864,7 +1872,7 @@ async fn test_logs_stream_sse_delivers_published_entry() {
     // oneshot() returns is guaranteed to be delivered to this subscriber.
     let req = Request::builder()
         .uri("/api/logs/stream")
-        .header("cookie", format!("session={}", token))
+        .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

@@ -381,7 +381,7 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
         lookup_set.spawn(async move {
             let addrs = tokio::net::lookup_host(lookup_target)
                 .await
-                .map(|it| it.collect::<Vec<_>>());
+                .map(std::iter::Iterator::collect::<Vec<_>>);
             (idx, server, spec, addrs)
         });
     }
@@ -893,7 +893,7 @@ mod tests {
         let soa = SOA::new(
             Name::from_ascii("ns1.example.com.").unwrap(),
             Name::from_ascii("hostmaster.example.com.").unwrap(),
-            2026042954,
+            2_026_042_954,
             1200,
             144,
             1_814_400,

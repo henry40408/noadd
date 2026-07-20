@@ -322,8 +322,9 @@ impl FilterEngine {
         // Build FST set for exact allow.
         exact_allow_entries.sort();
         exact_allow_entries.dedup();
-        let exact_allow = FstSet::from_iter(exact_allow_entries.iter().map(|d| d.as_str()))
-            .expect("sorted exact_allow");
+        let exact_allow =
+            FstSet::from_iter(exact_allow_entries.iter().map(std::string::String::as_str))
+                .expect("sorted exact_allow");
 
         Self {
             list_names,

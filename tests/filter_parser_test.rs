@@ -93,7 +93,7 @@ fn test_parse_hosts_localhost_entry_skipped() {
 
 #[test]
 fn test_parse_list_multiple_rules() {
-    let content = r#"
+    let content = r"
 # Comment line
 ! Another comment
 ||ads.example.com^
@@ -102,7 +102,7 @@ fn test_parse_list_multiple_rules() {
 127.0.0.1 localhost
 malware.bad.com
 
-"#;
+";
     let rules = parse_list(content);
     assert_eq!(rules.len(), 4);
     assert_eq!(rules[0].domain, "ads.example.com");

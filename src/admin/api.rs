@@ -1300,7 +1300,7 @@ async fn batch_add_lists(
                 .get(&url)
                 .send()
                 .await
-                .and_then(|r| r.error_for_status());
+                .and_then(reqwest::Response::error_for_status);
             match fetch {
                 Ok(resp) => {
                     let content = match resp.text().await {

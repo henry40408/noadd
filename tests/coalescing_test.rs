@@ -58,9 +58,8 @@ async fn spawn_mock_upstream(delay: Duration) -> (SocketAddr, Arc<AtomicU64>) {
     tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
-            let (len, src) = match socket.recv_from(&mut buf).await {
-                Ok(r) => r,
-                Err(_) => break,
+            let Ok((len, src)) = socket.recv_from(&mut buf).await else {
+                break;
             };
             counter_clone.fetch_add(1, Ordering::SeqCst);
             let response_data = build_mock_response(&buf[..len]);

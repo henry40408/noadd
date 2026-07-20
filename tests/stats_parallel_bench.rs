@@ -62,6 +62,10 @@ fn report(label: &str, mut samples: Vec<Duration>) {
     let total: Duration = samples.iter().sum();
     let min = samples[0];
     let median = samples[n / 2];
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "index derived from non-negative length times a positive fraction"
+    )]
     let p95 = samples[((n as f64) * 0.95) as usize];
     let max = samples[n - 1];
     eprintln!(
@@ -70,7 +74,7 @@ fn report(label: &str, mut samples: Vec<Duration>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore]
+#[ignore = "benchmark; run manually with --ignored"]
 async fn stats_parallel_bench() {
     let db_path = std::env::var("BENCH_DB").unwrap_or_else(|_| "/tmp/noadd-bench.db".into());
     let iters: usize = std::env::var("BENCH_ITERS")
@@ -83,11 +87,10 @@ async fn stats_parallel_bench() {
         _ => StatsRange::Days30,
     };
 
-    if !std::path::Path::new(&db_path).exists() {
-        panic!(
-            "BENCH_DB={db_path} not found — copy production DB to a scratch path before running"
-        );
-    }
+    assert!(
+        std::path::Path::new(&db_path).exists(),
+        "BENCH_DB={db_path} not found — copy production DB to a scratch path before running"
+    );
 
     let db = Database::open(&db_path).await.unwrap();
     let now = now_unix();

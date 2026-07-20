@@ -89,9 +89,8 @@ impl ListManager {
             let mut allow_rules: Vec<crate::filter::parser::ParsedRule> = Vec::new();
 
             for slot in parsed_lists {
-                let (name, parsed) = match slot {
-                    Some(v) => v,
-                    None => continue,
+                let Some((name, parsed)) = slot else {
+                    continue;
                 };
                 let list_idx = list_names.len() as u16;
                 let mut used = false;
@@ -160,9 +159,8 @@ impl ListManager {
     pub async fn download_and_update_list(&self, list_id: i64) -> Result<usize, ListError> {
         let lists = self.db.get_filter_lists().await?;
         let list = lists.iter().find(|l| l.id == list_id);
-        let list = match list {
-            Some(l) => l,
-            None => return Ok(0),
+        let Some(list) = list else {
+            return Ok(0);
         };
 
         let client = reqwest::Client::builder()

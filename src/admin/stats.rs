@@ -408,6 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::float_cmp, reason = "exact-value test assertion")]
     async fn db_health_derived_fields_zero_on_empty_db() {
         let db = Database::open(":memory:").await.unwrap();
         let h = compute_db_health(&db, 1_000_000).await.unwrap();

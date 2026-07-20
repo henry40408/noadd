@@ -57,7 +57,7 @@ fn parse_multiple_cidrs_comma_separated() {
 fn parse_zero_prefix_matches_all() {
     let tp = TrustedProxies::parse("0.0.0.0/0").unwrap();
     assert!(tp.contains(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
-    assert!(tp.contains(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))));
+    assert!(tp.contains(IpAddr::V4(Ipv4Addr::BROADCAST)));
 }
 
 #[test]
@@ -80,6 +80,10 @@ fn parse_mixed_family_does_not_cross_match() {
 
 // --- extract_client_ip helper ---
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "returns Option to match the `extract_client_ip` connect-info argument shape"
+)]
 fn ci(addr: &str) -> Option<ConnectInfo<SocketAddr>> {
     Some(ConnectInfo(addr.parse().unwrap()))
 }

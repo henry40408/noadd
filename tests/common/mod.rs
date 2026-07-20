@@ -33,7 +33,7 @@ pub async fn spawn_fake_upstream(
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{}", addr)
+    format!("http://{addr}")
 }
 
 /// Variant that serves a given HTTP status code (for 404/500 tests).
@@ -48,5 +48,5 @@ pub async fn spawn_fake_upstream_status(path: &'static str, status: u16) -> Stri
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{}", addr)
+    format!("http://{addr}")
 }
