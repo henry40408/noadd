@@ -47,7 +47,7 @@ Gherkin features: `e2e/features/`; step definitions: `e2e/steps/`.
 `build.rs` does work beyond compiling — be aware when builds behave unexpectedly:
 - Downloads the six built-in filter lists via `curl` into `OUT_DIR/lists/`. On network failure it writes an empty file and warns rather than failing the build.
 - Renders `admin-ui/dist/favicon.svg` into `apple-touch-icon.png` (180px) via `resvg`.
-- Stamps the binary with `GIT_VERSION` from `git describe` (overridable via the `GIT_VERSION` env var).
+- Stamps the binary with `GIT_VERSION` from `git describe` (overridable via the `GIT_VERSION` env var; a literal `dev` counts as unset). `.dockerignore` keeps `.git` out of the build context, so image builds must pass `--build-arg GIT_VERSION=...` — the Docker workflow resolves it with `git describe` on the runner. An arg-less `docker build` produces a working image labelled `dev`.
 
 ## Admin UI
 

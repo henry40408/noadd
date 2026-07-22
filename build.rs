@@ -24,6 +24,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    // The Docker builder has no .git, so the version arrives as an env var; the
+    // target cache mount persists across builds and would otherwise keep the
+    // previously stamped version.
+    println!("cargo:rerun-if-env-changed=GIT_VERSION");
 
     let git_version = get_git_version();
     println!("cargo:rustc-env=GIT_VERSION={git_version}");
