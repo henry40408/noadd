@@ -116,6 +116,8 @@ Uses two data structures for domain matching:
 
 The engine is behind `ArcSwap` for lock-free reads. Filter updates build a new engine and atomically swap it in.
 
+`FilterEngine::new` partitions the rules first (exact vs subdomain), then builds the trie and the FST on separate threads via `std::thread::scope` — the two touch disjoint data and cost roughly the same on a large blocklist, so the rebuild pays for the slower one instead of their sum. The transient tree used to construct the trie hashes its labels with `FxHash` rather than the `std` default: its keys come from operator-configured blocklists (never from query traffic) and it is discarded before any query reaches the engine, so `SipHash`'s DoS resistance buys nothing at a million-plus hashes per rebuild.
+
 ### Async Query Logging
 
 The DNS handler sends log events through a `tokio::sync::mpsc` channel. A dedicated task batches entries and flushes to SQLite (every 500 entries or every 1 second). This keeps the query path non-blocking.

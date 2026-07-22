@@ -113,6 +113,63 @@ impl FlatTrie {
 
 // ── Flat trie builder ───────────────────────────────────────────────────
 
+/// `FxHash` — the hash rustc uses internally. `SipHash` (the `std` default) is
+/// DoS-resistant, which the trie build does not need: keys are DNS labels
+/// coming from operator-configured blocklists, never from query traffic, and
+/// the map is discarded before any query touches the engine. Over a million
+/// label hashes per rebuild, the cheaper mixer is worth the swap.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+/// Fractional part of the golden ratio, scaled to 64 bits — `FxHash`'s mixer.
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            self.add(u64::from_le_bytes(
+                chunk.try_into().expect("chunks_exact(8) yields 8 bytes"),
+            ));
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rem.len()].copy_from_slice(rem);
+            self.add(u64::from_le_bytes(buf));
+        }
+        // Mix the length so trailing zero bytes cannot alias a shorter label.
+        self.add(bytes.len() as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+#[derive(Default, Clone)]
+struct FxBuildHasher;
+
+impl std::hash::BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
+}
+
 /// Temporary tree node used only during construction, then serialized into
 /// a `FlatTrie` and dropped.
 ///
@@ -122,14 +179,14 @@ impl FlatTrie {
 /// (every `Vec::insert` shifted later siblings). Sorting happens once per
 /// node at serialize time instead.
 struct BuildNode {
-    children: HashMap<Box<str>, BuildNode>,
+    children: HashMap<Box<str>, BuildNode, FxBuildHasher>,
     terminal: u16,
 }
 
 impl BuildNode {
     fn new() -> Self {
         Self {
-            children: HashMap::new(),
+            children: HashMap::default(),
             terminal: NOT_TERMINAL,
         }
     }
@@ -270,10 +327,14 @@ impl FilterEngine {
         block_rules: Vec<(ParsedRule, u16)>,
         allow_rules: Vec<ParsedRule>,
     ) -> Self {
+        // Partition first, build second. Splitting exact from subdomain rules
+        // is cheap (a move per rule), and it leaves two wholly independent
+        // build jobs — the reverse-domain trie and the FST — that can then run
+        // on separate threads instead of one after the other.
         let mut exact_block_entries: Vec<(String, u16)> = Vec::with_capacity(block_rules.len() / 4);
-        let mut block_build = BuildNode::new();
+        let mut sub_block_rules: Vec<(String, u16)> = Vec::with_capacity(block_rules.len());
         let mut exact_allow_entries: Vec<String> = Vec::with_capacity(allow_rules.len() / 4);
-        let mut allow_build = BuildNode::new();
+        let mut sub_allow_rules: Vec<String> = Vec::with_capacity(allow_rules.len());
 
         for (rule, list_idx) in block_rules {
             debug_assert_eq!(rule.action, RuleAction::Block);
@@ -283,8 +344,7 @@ impl FilterEngine {
                 rule.domain
             );
             if rule.is_subdomain {
-                let labels = reversed_labels(&rule.domain);
-                block_build.insert(&labels, list_idx);
+                sub_block_rules.push((rule.domain, list_idx));
             } else {
                 exact_block_entries.push((rule.domain, list_idx));
             }
@@ -298,33 +358,60 @@ impl FilterEngine {
                 rule.domain
             );
             if rule.is_subdomain {
-                let labels = reversed_labels(&rule.domain);
-                allow_build.insert(&labels, ALLOW_MARKER);
+                sub_allow_rules.push(rule.domain);
             } else {
                 exact_allow_entries.push(rule.domain);
             }
         }
 
-        // Serialize trees into flat byte buffers and drop the build trees.
-        let block_trie = block_build.flatten();
-        let allow_trie = allow_build.flatten();
+        // The trie build and the FST build touch disjoint data, and on a large
+        // blocklist they cost roughly the same (tens of ms each). Running them
+        // concurrently makes the rebuild cost the slower of the two rather than
+        // their sum. `thread::scope` keeps the borrows here and needs no
+        // runtime — `new` is already called from a blocking worker.
+        let (block_trie, allow_trie, exact_block, exact_allow) = std::thread::scope(|scope| {
+            let block_trie_job = scope.spawn(|| {
+                let mut build = BuildNode::new();
+                for (domain, list_idx) in &sub_block_rules {
+                    build.insert(&reversed_labels(domain), *list_idx);
+                }
+                build.flatten()
+            });
+            let allow_trie_job = scope.spawn(|| {
+                let mut build = BuildNode::new();
+                for domain in &sub_allow_rules {
+                    build.insert(&reversed_labels(domain), ALLOW_MARKER);
+                }
+                build.flatten()
+            });
+            let exact_block_job = scope.spawn(|| {
+                // FST construction requires sorted, deduplicated input.
+                exact_block_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                exact_block_entries.dedup_by(|(a, _), (b, _)| a == b);
+                FstMap::from_iter(
+                    exact_block_entries
+                        .iter()
+                        .map(|(d, idx)| (d.as_str(), *idx as u64)),
+                )
+                .expect("sorted exact_block")
+            });
 
-        // Build FST map for exact block (requires sorted, deduplicated input).
-        exact_block_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        exact_block_entries.dedup_by(|(a, _), (b, _)| a == b);
-        let exact_block = FstMap::from_iter(
-            exact_block_entries
-                .iter()
-                .map(|(d, idx)| (d.as_str(), *idx as u64)),
-        )
-        .expect("sorted exact_block");
+            // Smallest job by far (allow lists are orders of magnitude shorter
+            // than block lists), so the caller's thread takes it rather than
+            // paying to spawn a fourth.
+            exact_allow_entries.sort();
+            exact_allow_entries.dedup();
+            let exact_allow =
+                FstSet::from_iter(exact_allow_entries.iter().map(std::string::String::as_str))
+                    .expect("sorted exact_allow");
 
-        // Build FST set for exact allow.
-        exact_allow_entries.sort();
-        exact_allow_entries.dedup();
-        let exact_allow =
-            FstSet::from_iter(exact_allow_entries.iter().map(std::string::String::as_str))
-                .expect("sorted exact_allow");
+            (
+                block_trie_job.join().expect("block trie build panicked"),
+                allow_trie_job.join().expect("allow trie build panicked"),
+                exact_block_job.join().expect("exact block build panicked"),
+                exact_allow,
+            )
+        });
 
         Self {
             list_names,
