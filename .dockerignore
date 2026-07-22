@@ -1,0 +1,28 @@
+# The builder only needs the Cargo manifests, src/, build.rs and admin-ui/dist.
+# Everything below is rebuilt inside the image, is local dev state, or is
+# secret — and without this file `COPY . .` ships a multi-gigabyte context.
+
+# Rebuilt in the builder stage, and shadowed by the target cache mount anyway.
+/target
+
+# e2e is a separate npm project; none of it reaches the binary.
+/e2e/node_modules
+/e2e/test-results
+/e2e/playwright-report
+/e2e/.features-gen
+/e2e/.auth
+/e2e/.tmp
+
+# Local runtime state — the SQLite DB carries password hashes and sessions.
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.db
+
+# Local dev TLS material and direnv environment.
+*.pem
+.envrc
+
+# build.rs stamps the binary with GIT_VERSION. Keeping .git out of the context
+# means its `git describe` fallback cannot run in the builder, so the Docker
+# workflow passes the describe output in as a build arg instead.
+.git

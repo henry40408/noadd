@@ -34,8 +34,11 @@ COPY . .
 # Map Docker's TARGETARCH onto the Rust musl triple and build. `rustup target
 # add` runs after the source (and rust-toolchain.toml) is in place, so it
 # resolves against the pinned toolchain rather than the base image's default.
-# build.rs reads GIT_VERSION (a literal "dev" is treated as unset, so it falls
-# back to `git describe` against the copied .git).
+#
+# build.rs stamps the binary with GIT_VERSION. `.dockerignore` excludes `.git`,
+# so its own `git describe` fallback cannot work here — the workflow passes the
+# describe output in as a build arg. The literal "dev" default means an arg-less
+# `docker build` still produces a working image, just labelled `dev`.
 ARG TARGETARCH
 ARG GIT_VERSION=dev
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
