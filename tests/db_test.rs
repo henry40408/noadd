@@ -499,7 +499,7 @@ async fn test_users_crud() {
 
     let auth = db.get_user_auth("alice").await.unwrap().unwrap();
     assert_eq!(auth.id, id);
-    assert_eq!(auth.password_hash.as_deref(), Some("hash-a"));
+    assert_eq!(auth.password_hash, "hash-a");
     assert!(db.get_user_auth("nobody").await.unwrap().is_none());
 
     assert_eq!(db.get_username(id).await.unwrap().as_deref(), Some("alice"));
@@ -546,11 +546,19 @@ async fn test_create_user_no_password() {
 
     let auth = db.get_user_auth("dave").await.unwrap().unwrap();
     assert_eq!(auth.id, id);
-    assert!(
-        auth.password_hash.is_none(),
-        "forward-auth-provisioned account must have no password"
+    assert_eq!(
+        auth.password_hash,
+        noadd::admin::auth::NO_PASSWORD_SENTINEL,
+        "forward-auth-provisioned account must hold the sentinel, not a real hash"
     );
-    assert!(db.get_user_password_hash(id).await.unwrap().is_none());
+    assert_eq!(
+        db.get_user_password_hash(id).await.unwrap().as_deref(),
+        Some(noadd::admin::auth::NO_PASSWORD_SENTINEL)
+    );
+    // The sentinel is not a valid PHC string, so verifying against it fails to
+    // parse rather than returning `Ok(false)` — exactly why `login` must guard
+    // with `has_no_password` before calling `verify_password`.
+    assert!(noadd::admin::auth::verify_password("anything", &auth.password_hash).is_err());
 
     // The username UNIQUE constraint still applies to passwordless accounts.
     assert!(db.create_user_no_password("dave", 2000).await.is_err());

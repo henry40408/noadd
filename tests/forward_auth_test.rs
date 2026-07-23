@@ -281,6 +281,12 @@ async fn forward_auth_header_sent_twice_is_rejected() {
     assert_eq!(db.count_users().await.unwrap(), 1);
 }
 
+/// A forward-auth-provisioned account stores a sentinel hash that cannot be
+/// parsed as a PHC string, so `verify_password` would return `Err` for it.
+/// This is the regression guard ensuring `login` checks `has_no_password`
+/// before `verify_password` and returns the ordinary 401 rather than letting
+/// that `Err` surface as a 500, which would also leak which accounts are
+/// forward-auth-provisioned.
 #[tokio::test]
 async fn provisioned_operator_cannot_password_login() {
     let (app, db, _token) = build_app(Some(forward_auth_cfg())).await;
