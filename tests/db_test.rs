@@ -499,7 +499,7 @@ async fn test_users_crud() {
 
     let auth = db.get_user_auth("alice").await.unwrap().unwrap();
     assert_eq!(auth.id, id);
-    assert_eq!(auth.password_hash, "hash-a");
+    assert_eq!(auth.password_hash.as_deref(), Some("hash-a"));
     assert!(db.get_user_auth("nobody").await.unwrap().is_none());
 
     assert_eq!(db.get_username(id).await.unwrap().as_deref(), Some("alice"));
@@ -536,6 +536,24 @@ async fn test_users_crud() {
         DeleteUserOutcome::NotFound
     );
     assert_eq!(db.count_users().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn test_create_user_no_password() {
+    let db = test_db().await;
+
+    let id = db.create_user_no_password("dave", 1000).await.unwrap();
+
+    let auth = db.get_user_auth("dave").await.unwrap().unwrap();
+    assert_eq!(auth.id, id);
+    assert!(
+        auth.password_hash.is_none(),
+        "forward-auth-provisioned account must have no password"
+    );
+    assert!(db.get_user_password_hash(id).await.unwrap().is_none());
+
+    // The username UNIQUE constraint still applies to passwordless accounts.
+    assert!(db.create_user_no_password("dave", 2000).await.is_err());
 }
 
 #[tokio::test]
