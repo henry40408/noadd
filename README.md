@@ -107,6 +107,9 @@ Options:
       --acme-email <ACME_EMAIL>      Let's Encrypt contact email [env: NOADD_ACME_EMAIL]
       --acme-cache <ACME_CACHE>      ACME certificate cache directory [default: acme-cache] [env: NOADD_ACME_CACHE]
       --acme-prod                    Use Let's Encrypt production (default: staging) [env: NOADD_ACME_PROD]
+      --cookie-secure [<COOKIE_SECURE>]
+                                     Set Secure on the admin session cookie [default: on when noadd
+                                     terminates TLS] [env: NOADD_COOKIE_SECURE]
       --forward-auth-header <FORWARD_AUTH_HEADER>
                                      Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
       --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>

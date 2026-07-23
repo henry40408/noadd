@@ -106,6 +106,7 @@ async fn build(
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        cookie_secure: false,
         list_manager,
         rebuild,
         registry,
