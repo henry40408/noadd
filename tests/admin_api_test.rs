@@ -52,6 +52,21 @@ async fn build_app(
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
 ) {
+    build_app_opts(registry_url, set_password, false).await
+}
+
+/// `build_app` with control over `AppState::cookie_secure`, for the tests that
+/// assert the `Secure` attribute on the session cookie.
+async fn build_app_opts(
+    registry_url: &str,
+    set_password: bool,
+    cookie_secure: bool,
+) -> (
+    axum::Router,
+    String,
+    DnsCache,
+    tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
+) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
     let path = dir.keep().join("test.db");
@@ -126,6 +141,7 @@ async fn build_app(
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        cookie_secure,
         list_manager,
         rebuild,
         registry,
@@ -530,6 +546,56 @@ async fn test_login_success() {
     );
 }
 
+/// Log in against `app` and return the raw `Set-Cookie` value.
+async fn login_set_cookie(app: axum::Router) -> String {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"username":"admin","password":"admin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+        .headers()
+        .get("set-cookie")
+        .expect("login must emit a Set-Cookie header")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_login_cookie_secure_when_enabled() {
+    let (app, _token, _cache, _events) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let cookie = login_set_cookie(app).await;
+    assert!(
+        cookie.contains("Secure"),
+        "cookie_secure must put Secure on the session cookie: {cookie}"
+    );
+    // The other attributes must survive alongside it.
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+}
+
+#[tokio::test]
+async fn test_login_cookie_not_secure_when_disabled() {
+    // TLS terminates upstream (or not at all): a Secure cookie would be
+    // dropped by the browser over plain HTTP and lock the operator out.
+    let (app, _token, _cache, _events) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let cookie = login_set_cookie(app).await;
+    assert!(
+        !cookie.contains("Secure"),
+        "session cookie must not be Secure when cookie_secure is off: {cookie}"
+    );
+}
+
 #[tokio::test]
 async fn test_login_wrong_password() {
     let (app, _token) = setup().await;
@@ -790,6 +856,7 @@ async fn test_setup_initial_password() {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        cookie_secure: false,
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
         registry: registry.clone(),
@@ -827,6 +894,7 @@ async fn test_setup_initial_password() {
             http_addr: "127.0.0.1:3000".into(),
             tls_enabled: false,
         },
+        cookie_secure: false,
         list_manager,
         rebuild,
         registry,

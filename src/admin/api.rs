@@ -49,6 +49,12 @@ pub struct AppState {
     pub handler: Arc<DnsHandler>,
     pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
     pub server_info: ServerInfo,
+    /// Whether to set `Secure` on the admin session cookie. Resolved once at
+    /// startup by [`crate::config::resolve_cookie_secure`]. Kept off
+    /// [`ServerInfo`] deliberately — that struct is serialized to
+    /// `/api/server-info`, and this is a cookie-emission detail, not part of
+    /// the public API surface.
+    pub cookie_secure: bool,
     pub list_manager: Arc<ListManager>,
     pub rebuild: Arc<RebuildCoordinator>,
     pub registry: Arc<RegistryClient>,
@@ -517,6 +523,7 @@ async fn login(
     let cookie = Cookie::build(("session", token))
         .path("/")
         .http_only(true)
+        .secure(state.cookie_secure)
         .same_site(axum_extra::extract::cookie::SameSite::Strict)
         .max_age(time::Duration::seconds(
             crate::admin::auth::SESSION_MAX_AGE_SECS,

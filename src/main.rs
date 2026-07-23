@@ -187,10 +187,16 @@ async fn main() -> anyhow::Result<()> {
     let session_store_for_flush = session_store.clone();
     let db_for_flush = db.clone();
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    // noadd terminates TLS itself either from user-supplied certs or via ACME.
+    // Both count: the listener below picks whichever is configured, so
+    // `tls_enabled` must cover both or it misreports an ACME deployment.
+    let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
+    let use_acme = !args.acme_domain.is_empty();
+    let tls_enabled = use_tls || use_acme;
     let server_info = ServerInfo {
         dns_addr: args.dns_addr.clone(),
         http_addr: args.http_addr.clone(),
-        tls_enabled: args.tls_cert.is_some() && args.tls_key.is_some(),
+        tls_enabled,
     };
     let admin_routes = admin_router(AppState {
         db: db.clone(),
@@ -202,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
         handler: handler.clone(),
         log_events: log_events.clone(),
         server_info,
+        cookie_secure: noadd::config::resolve_cookie_secure(args.cookie_secure, tls_enabled),
         list_manager: list_manager.clone(),
         rebuild: rebuild.clone(),
         registry: registry.clone(),
@@ -321,9 +328,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-
-    let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
-    let use_acme = !args.acme_domain.is_empty();
 
     if use_acme {
         // Let's Encrypt automatic TLS via rustls-acme

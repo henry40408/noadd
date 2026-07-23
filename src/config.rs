@@ -61,6 +61,15 @@ pub struct CliArgs {
     #[arg(long, env = "NOADD_ACME_PROD")]
     pub acme_prod: bool,
 
+    // Unset derives from whether noadd is terminating TLS itself; see
+    // `resolve_cookie_secure` for why it is derived rather than defaulted on.
+    // Set it explicitly when a reverse proxy terminates TLS in front of noadd,
+    // since noadd only ever sees plain HTTP in that case.
+    /// Set `Secure` on the admin session cookie [default: on when noadd
+    /// terminates TLS]
+    #[arg(long, env = "NOADD_COOKIE_SECURE", num_args = 0..=1, default_missing_value = "true")]
+    pub cookie_secure: Option<bool>,
+
     /// Log output format
     #[arg(long, default_value = "full", env = "LOG_FORMAT")]
     pub log_format: LogFormat,
@@ -115,6 +124,23 @@ pub struct CliArgs {
     /// default — a request with no known peer address is never trusted.
     #[arg(long, default_value = "", env = "NOADD_FORWARD_AUTH_TRUSTED_PROXIES")]
     pub forward_auth_trusted_proxies: String,
+}
+
+/// Whether the admin session cookie should carry the `Secure` attribute.
+///
+/// `override_value` (`--cookie-secure` / `NOADD_COOKIE_SECURE`) wins when set;
+/// otherwise the answer is `tls_enabled`, i.e. whether noadd is terminating
+/// TLS itself. That is a runtime fact rather than a configuration string a
+/// deployment can get wrong, which makes it a better default than deriving
+/// from a declared public URL.
+///
+/// It is deliberately *not* forced on: when TLS terminates upstream noadd
+/// cannot tell HTTPS from HTTP, and a browser silently discards a `Secure`
+/// cookie delivered over plain HTTP — defaulting it on would lock those
+/// operators out of the admin UI with no visible error. Such setups opt in
+/// with the override.
+pub fn resolve_cookie_secure(override_value: Option<bool>, tls_enabled: bool) -> bool {
+    override_value.unwrap_or(tls_enabled)
 }
 
 /// Default on-disk database filename for a fresh install.
@@ -216,6 +242,22 @@ mod tests {
     use super::*;
     use tracing::level_filters::LevelFilter;
     use tracing_subscriber::Registry;
+
+    #[test]
+    fn cookie_secure_defaults_to_tls_enabled() {
+        // Unset → follow whether noadd is terminating TLS itself.
+        assert!(resolve_cookie_secure(None, true));
+        assert!(!resolve_cookie_secure(None, false));
+    }
+
+    #[test]
+    fn cookie_secure_override_wins_in_both_directions() {
+        // Reverse proxy terminates TLS: noadd sees plain HTTP but the cookie
+        // must still be Secure.
+        assert!(resolve_cookie_secure(Some(true), false));
+        // And an explicit off beats the derived on (debugging a TLS install).
+        assert!(!resolve_cookie_secure(Some(false), true));
+    }
 
     #[test]
     fn resolve_db_path_honours_explicit() {
