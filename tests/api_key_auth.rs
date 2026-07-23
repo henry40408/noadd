@@ -73,6 +73,7 @@ async fn build_app() -> (axum::Router, Database) {
         rebuild,
         registry,
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
+        forward_auth: None,
     };
     (admin_router(state), db)
 }

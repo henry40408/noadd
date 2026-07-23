@@ -107,6 +107,10 @@ Options:
       --acme-email <ACME_EMAIL>      Let's Encrypt contact email [env: NOADD_ACME_EMAIL]
       --acme-cache <ACME_CACHE>      ACME certificate cache directory [default: acme-cache] [env: NOADD_ACME_CACHE]
       --acme-prod                    Use Let's Encrypt production (default: staging) [env: NOADD_ACME_PROD]
+      --forward-auth-header <FORWARD_AUTH_HEADER>
+                                     Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
+      --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
+                                     CIDRs allowed to set the forward-auth header [env: NOADD_FORWARD_AUTH_TRUSTED_PROXIES]
   -h, --help                         Print help
 ```
 
@@ -147,6 +151,29 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
   --acme-domain dns.example.com \
   --acme-email you@example.com \
   --acme-prod
+```
+
+## Reverse proxy authentication
+
+noadd can trust an operator identity set by a fronting proxy (Authelia,
+Authentik, oauth2-proxy, ...) instead of its own login form. Set
+`--forward-auth-header` to the injected header (e.g. `Remote-User`) **and**
+`--forward-auth-trusted-proxies` to the proxy's CIDR — both required
+together, and unlike `--trusted-proxies` above, loopback is **not** trusted
+implicitly: a forged header grants full admin access. Unknown usernames are
+auto-provisioned password-less; password login and API keys keep working.
+The HTTP listener must not be reachable except through the proxy.
+
+```bash
+./target/release/noadd --forward-auth-header Remote-User \
+  --forward-auth-trusted-proxies 172.18.0.0/16
+```
+
+Example nginx (Authelia-style):
+
+```nginx
+auth_request_set $user $upstream_http_remote_user;
+proxy_set_header Remote-User $user;
 ```
 
 ## Programmatic API

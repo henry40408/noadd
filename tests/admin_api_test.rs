@@ -130,6 +130,7 @@ async fn build_app(
         rebuild,
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+        forward_auth: None,
     });
     (router, token, cache, log_events)
 }
@@ -793,6 +794,7 @@ async fn test_setup_initial_password() {
         rebuild: rebuild.clone(),
         registry: registry.clone(),
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+        forward_auth: None,
     });
 
     // Setup should succeed
@@ -829,6 +831,7 @@ async fn test_setup_initial_password() {
         rebuild,
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
+        forward_auth: None,
     });
     let response = app2
         .oneshot(

@@ -100,6 +100,21 @@ pub struct CliArgs {
     /// header trust outside loopback.
     #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
     pub trusted_proxies: String,
+
+    /// Request header carrying the username authenticated by a reverse proxy
+    /// (e.g. `Remote-User` for Authelia/Authentik). Empty disables forward
+    /// auth. Requires `--forward-auth-trusted-proxies`: unlike the client-IP
+    /// headers above, a forged forward-auth header grants full admin access,
+    /// so loopback is NOT trusted implicitly and the proxy's address must be
+    /// listed explicitly.
+    #[arg(long, default_value = "", env = "NOADD_FORWARD_AUTH_HEADER")]
+    pub forward_auth_header: String,
+
+    /// Comma-separated CIDR list of reverse-proxy peers whose
+    /// `--forward-auth-header` is honoured. No implicit loopback trust and no
+    /// default — a request with no known peer address is never trusted.
+    #[arg(long, default_value = "", env = "NOADD_FORWARD_AUTH_TRUSTED_PROXIES")]
+    pub forward_auth_trusted_proxies: String,
 }
 
 /// Default on-disk database filename for a fresh install.

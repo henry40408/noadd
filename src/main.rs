@@ -167,6 +167,20 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let forward_auth = noadd::admin::forward_auth::ForwardAuthConfig::from_args(
+        &args.forward_auth_header,
+        &args.forward_auth_trusted_proxies,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to configure forward auth: {e}"))?
+    .map(Arc::new);
+    if let Some(cfg) = &forward_auth {
+        tracing::info!(
+            header = %cfg.header(),
+            cidrs = cfg.trusted_len(),
+            "forward auth enabled — the header is honoured only for peers matching --forward-auth-trusted-proxies"
+        );
+    }
+
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
@@ -192,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
         rebuild: rebuild.clone(),
         registry: registry.clone(),
         trusted_proxies: trusted_proxies.clone(),
+        forward_auth,
     });
 
     // Periodically persist session last_seen so it survives restarts.

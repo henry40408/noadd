@@ -53,6 +53,7 @@ pub struct AppState {
     pub rebuild: Arc<RebuildCoordinator>,
     pub registry: Arc<RegistryClient>,
     pub trusted_proxies: Arc<TrustedProxies>,
+    pub forward_auth: Option<Arc<crate::admin::forward_auth::ForwardAuthConfig>>,
 }
 
 impl AppState {
@@ -395,7 +396,53 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 return Ok(AuthedUser { user_id });
             }
         }
+        // 3. Reverse-proxy forward auth: a username header injected by a proxy
+        //    whose TCP peer matches --forward-auth-trusted-proxies. Last in the
+        //    chain so an explicit cookie/API key always wins.
+        if let Some(cfg) = &state.forward_auth {
+            let peer = parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ci| ci.0.ip());
+            if let Some(username) = cfg.resolve_username(peer, &parts.headers) {
+                return resolve_forward_auth_user(state, &username)
+                    .await
+                    .map(|user_id| AuthedUser { user_id })
+                    .map_err(|err| {
+                        tracing::error!(%err, "forward-auth operator lookup failed");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    });
+            }
+        }
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Map a forward-auth username to an operator id, provisioning the account on
+/// first sight. A concurrent first request can win the INSERT race, so a
+/// UNIQUE violation is resolved by re-reading rather than failing the
+/// request.
+async fn resolve_forward_auth_user(
+    state: &AppState,
+    username: &str,
+) -> Result<i64, crate::db::DbError> {
+    if let Some(auth) = state.db.get_user_auth(username).await? {
+        return Ok(auth.id);
+    }
+    match state
+        .db
+        .create_user_no_password(username, crate::now_unix())
+        .await
+    {
+        Ok(id) => {
+            tracing::info!(%username, "provisioned operator from forward-auth header");
+            Ok(id)
+        }
+        Err(e) if e.is_unique_violation() => match state.db.get_user_auth(username).await? {
+            Some(auth) => Ok(auth.id),
+            None => Err(e),
+        },
+        Err(e) => Err(e),
     }
 }
 
@@ -434,7 +481,11 @@ async fn login(
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let valid = verify_password(&body.password, &auth.password_hash)
+    // Forward-auth-provisioned accounts have no password by construction
+    // (NULL password_hash) — same generic 401 as any other failed login.
+    let password_hash = auth.password_hash.ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let valid = verify_password(&body.password, &password_hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
         tracing::warn!("login failed: invalid credentials");
@@ -507,6 +558,21 @@ async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
+    // Forward auth makes the setup wizard inapplicable: identity comes from
+    // the proxy, and the first proxied request provisions the operator — which
+    // is why `health` reports `needs_setup: false`. Leaving this
+    // unauthenticated endpoint live would let anyone who can reach the listener
+    // directly, bypassing the proxy, claim the first operator account during
+    // the window before that first proxied request arrives.
+    if state.forward_auth.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(SetupErrorResponse {
+                error: "setup is disabled when forward auth is configured".to_string(),
+            }),
+        ));
+    }
+
     let count = state.db.count_users().await.map_err(|_err| setup_ise())?;
     if count > 0 {
         return Err((
@@ -778,7 +844,9 @@ pub struct HealthResponse {
     /// Always `"ok"` while the process is up and serving requests.
     pub status: String,
     /// True when no operator account exists yet and `POST /api/auth/setup`
-    /// still needs to be called before the admin UI is usable.
+    /// still needs to be called before the admin UI is usable. Always false
+    /// when forward auth is configured, since identity comes from the proxy
+    /// and the first proxied request provisions an operator on its own.
     pub needs_setup: bool,
     /// Build version string (from `git describe`).
     pub version: &'static str,
@@ -797,7 +865,11 @@ pub struct HealthResponse {
     responses((status = 200, description = "Service health", body = HealthResponse))
 )]
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let needs_setup = state.db.count_users().await.is_ok_and(|n| n == 0);
+    // With forward auth on, identity comes from the proxy and the setup
+    // wizard would be a dead end — the first proxied request provisions the
+    // operator.
+    let needs_setup =
+        state.forward_auth.is_none() && state.db.count_users().await.is_ok_and(|n| n == 0);
     Json(HealthResponse {
         status: "ok".to_string(),
         needs_setup,
