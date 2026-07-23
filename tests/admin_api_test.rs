@@ -580,7 +580,7 @@ async fn test_login_cookie_secure_when_enabled() {
     );
     // The other attributes must survive alongside it.
     assert!(cookie.contains("HttpOnly"), "{cookie}");
-    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("SameSite=Lax"), "{cookie}");
 }
 
 #[tokio::test]

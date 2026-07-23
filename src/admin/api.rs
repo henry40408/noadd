@@ -524,7 +524,11 @@ async fn login(
         .path("/")
         .http_only(true)
         .secure(state.cookie_secure)
-        .same_site(axum_extra::extract::cookie::SameSite::Strict)
+        // Lax rather than Strict: it already blocks every cross-site POST /
+        // PUT / DELETE, which covers all of this API's mutations, while
+        // leaving room for a future redirect-back login flow (OIDC and
+        // friends) without a per-cookie exception.
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .max_age(time::Duration::seconds(
             crate::admin::auth::SESSION_MAX_AGE_SECS,
         ))
