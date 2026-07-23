@@ -191,6 +191,25 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     }
 }
 
+/// Stored in `users.password_hash` for operators provisioned from a trusted
+/// forward-auth header. `!` is not a valid PHC string, so it can never match a
+/// real Argon2 hash — the same convention `/etc/shadow` uses to mark an account
+/// as having no usable password, and it keeps the column `NOT NULL` so no
+/// schema migration is needed.
+///
+/// Every password-verifying path checks this explicitly rather than relying on
+/// the PHC parse failing: [`verify_password`] reports an unparseable stored hash
+/// as an `Err`, which callers surface as a 500. That is the right answer for a
+/// corrupted row, but the wrong answer for a passwordless account, which must be
+/// an ordinary 401.
+pub const NO_PASSWORD_SENTINEL: &str = "!";
+
+/// True when the stored hash marks an account that cannot authenticate with a
+/// password (see [`NO_PASSWORD_SENTINEL`]).
+pub fn has_no_password(hash: &str) -> bool {
+    hash == NO_PASSWORD_SENTINEL
+}
+
 /// Simple IP-based rate limiter for login attempts.
 ///
 /// Tracks the number of attempts per IP within a sliding window.
@@ -263,5 +282,23 @@ mod tests {
     fn hash_is_stable_and_distinct() {
         assert_eq!(hash_api_key("noadd_abc"), hash_api_key("noadd_abc"));
         assert_ne!(hash_api_key("noadd_abc"), hash_api_key("noadd_abd"));
+    }
+
+    #[test]
+    fn has_no_password_only_matches_the_sentinel() {
+        assert!(has_no_password(NO_PASSWORD_SENTINEL));
+        assert!(!has_no_password(&hash_password("whatever").unwrap()));
+        assert!(!has_no_password(""));
+    }
+
+    #[test]
+    fn verify_password_rejects_the_sentinel_as_unparseable() {
+        // This is exactly why callers must check `has_no_password` before
+        // calling `verify_password`: the sentinel is not a valid PHC string,
+        // so verifying against it fails to parse rather than returning
+        // `Ok(false)`, and a caller that mapped `Err` to 500 would turn a
+        // passwordless account's login attempt into a server error instead
+        // of an ordinary 401.
+        assert!(verify_password("anything", NO_PASSWORD_SENTINEL).is_err());
     }
 }

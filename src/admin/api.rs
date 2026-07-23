@@ -24,8 +24,8 @@ use utoipa::OpenApi as _;
 use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
-    RateLimiter, SessionInfo, SessionStore, generate_token, hash_api_key, hash_password,
-    store_session, validate_session, verify_password,
+    RateLimiter, SessionInfo, SessionStore, generate_token, has_no_password, hash_api_key,
+    hash_password, store_session, validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -481,11 +481,16 @@ async fn login(
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Forward-auth-provisioned accounts have no password by construction
-    // (NULL password_hash) — same generic 401 as any other failed login.
-    let password_hash = auth.password_hash.ok_or(StatusCode::UNAUTHORIZED)?;
+    // Forward-auth-provisioned accounts store a sentinel in place of a hash and
+    // can never authenticate with a password — same generic 401 as any other
+    // failed login. This must precede `verify_password`, which would otherwise
+    // fail to parse the sentinel and surface it as a 500, leaking which accounts
+    // are forward-auth-provisioned.
+    if has_no_password(&auth.password_hash) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
-    let valid = verify_password(&body.password, &password_hash)
+    let valid = verify_password(&body.password, &auth.password_hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
         tracing::warn!("login failed: invalid credentials");
@@ -757,6 +762,12 @@ async fn change_own_password(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    // Unreachable today — this endpoint is cookie-only and a passwordless
+    // account can never obtain a session — but guard anyway so the sentinel can
+    // never reach `verify_password` and turn a 401 into a 500.
+    if has_no_password(&hash) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let ok = verify_password(&body.current_password, &hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {

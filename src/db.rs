@@ -6,6 +6,8 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio_rusqlite::Connection;
 
+use crate::admin::auth::NO_PASSWORD_SENTINEL;
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite error: {0}")]
@@ -124,9 +126,10 @@ pub struct UserRow {
 #[derive(Debug, Clone)]
 pub struct UserAuth {
     pub id: i64,
-    /// `None` means the account was provisioned by forward auth and has no
-    /// password — password login is impossible for it by construction.
-    pub password_hash: Option<String>,
+    /// A forward-auth-provisioned account holds
+    /// [`NO_PASSWORD_SENTINEL`](crate::admin::auth::NO_PASSWORD_SENTINEL)
+    /// here instead of a real hash — password login is impossible for it.
+    pub password_hash: String,
 }
 
 /// Result of attempting to delete an operator.
@@ -392,11 +395,12 @@ impl Database {
                     CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT NOT NULL UNIQUE,
-                        -- NULL means the account was provisioned by forward
-                        -- auth (a trusted reverse proxy vouching for the
-                        -- username) and can never authenticate with a
-                        -- password.
-                        password_hash TEXT,
+                        -- An account provisioned by forward auth (a trusted
+                        -- reverse proxy vouching for the username) stores
+                        -- NO_PASSWORD_SENTINEL here instead of a real hash,
+                        -- so it can never authenticate with a password. The
+                        -- sentinel keeps this column NOT NULL.
+                        password_hash TEXT NOT NULL,
                         created_at INTEGER NOT NULL
                     );
 
@@ -514,41 +518,7 @@ impl Database {
             )?;
         }
 
-        if version < 9 {
-            // Make users.password_hash nullable: NULL marks an account
-            // provisioned from a forward-auth header, which must never
-            // satisfy a password login. SQLite has no "ALTER COLUMN DROP NOT
-            // NULL", so rebuild the table with foreign keys disabled for the
-            // duration — sessions/api_keys reference users(id), and SQLite
-            // refuses to toggle the foreign_keys pragma inside a transaction,
-            // so it must happen outside the rebuild's BEGIN/COMMIT.
-            let fk_was_on: bool =
-                conn.pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))? != 0;
-            conn.pragma_update(None, "foreign_keys", false)?;
-            let rebuilt = conn.execute_batch(
-                "BEGIN;
-                 CREATE TABLE users_new (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     username TEXT NOT NULL UNIQUE,
-                     password_hash TEXT,
-                     created_at INTEGER NOT NULL
-                 );
-                 INSERT INTO users_new (id, username, password_hash, created_at)
-                     SELECT id, username, password_hash, created_at FROM users;
-                 DROP TABLE users;
-                 ALTER TABLE users_new RENAME TO users;
-                 COMMIT;",
-            );
-            if rebuilt.is_err() {
-                let _ = conn.execute_batch("ROLLBACK;");
-            }
-            if fk_was_on {
-                conn.pragma_update(None, "foreign_keys", true)?;
-            }
-            rebuilt?;
-        }
-
-        const LATEST_VERSION: i64 = 9;
+        const LATEST_VERSION: i64 = 8;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1242,8 +1212,10 @@ impl Database {
     }
 
     /// Create an operator with no password, as provisioned from a trusted
-    /// forward-auth header. The NULL `password_hash` makes password login
-    /// impossible for this account by construction.
+    /// forward-auth header. Stores
+    /// [`NO_PASSWORD_SENTINEL`](crate::admin::auth::NO_PASSWORD_SENTINEL) in
+    /// place of a real hash, which makes password login impossible for this
+    /// account since no password can ever verify against it.
     pub async fn create_user_no_password(
         &self,
         username: &str,
@@ -1254,8 +1226,8 @@ impl Database {
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?1, NULL, ?2)",
-                    params![username, created_at],
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+                    params![username, NO_PASSWORD_SENTINEL, created_at],
                 )?;
                 Ok(conn.last_insert_rowid())
             })
@@ -1284,9 +1256,7 @@ impl Database {
         Ok(row)
     }
 
-    /// `None` covers both "no such user" and "user exists but has no password
-    /// (forward-auth-provisioned)" — every caller already maps `None` to 401,
-    /// which is the correct outcome for a passwordless account either way.
+    /// `None` means no such user.
     pub async fn get_user_password_hash(&self, id: i64) -> Result<Option<String>, DbError> {
         let val = self
             .reader()
@@ -1294,9 +1264,8 @@ impl Database {
                 let mut stmt =
                     conn.prepare_cached("SELECT password_hash FROM users WHERE id = ?1")?;
                 let r = stmt
-                    .query_row(params![id], |row| row.get::<_, Option<String>>(0))
-                    .optional()?
-                    .flatten();
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
                 Ok(r)
             })
             .await?;
@@ -2203,75 +2172,6 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].name, "ci");
         assert_eq!(keys[0].prefix, "noadd_dead");
-    }
-
-    #[tokio::test]
-    async fn migration_v9_makes_password_hash_nullable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v8.db");
-        let path_str = path.to_str().unwrap().to_string();
-
-        // Simulate a v8 database with the legacy NOT NULL password_hash
-        // column, plus a session and an API key referencing the user — the
-        // rebuild must preserve both FK relationships.
-        {
-            let conn = rusqlite::Connection::open(&path_str).unwrap();
-            conn.execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
-                 CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, ip TEXT, user_agent TEXT);
-                 CREATE TABLE api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, expires_at INTEGER);
-                 INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'op', 'x', 100);
-                 INSERT INTO sessions (id, token, user_id, created_at, last_seen) VALUES (1, 'tok', 1, 100, 100);
-                 INSERT INTO api_keys (id, user_id, name, token_hash, prefix, created_at) VALUES (1, 1, 'ci', 'hash', 'noadd_de', 100);
-                 PRAGMA user_version = 8;",
-            )
-            .unwrap();
-        }
-
-        let db = Database::open(&path_str).await.unwrap();
-
-        // Rows survived the rebuild with their ids intact.
-        let auth = db.get_user_auth("op").await.unwrap().unwrap();
-        assert_eq!(auth.id, 1);
-        assert_eq!(auth.password_hash.as_deref(), Some("x"));
-        let keys = db.list_api_keys_for_user(1).await.unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(db.validate_api_key("hash", 200).await.unwrap(), Some(1));
-
-        // password_hash is now nullable.
-        db.conn
-            .call(|conn| {
-                conn.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES ('x', NULL, 1)",
-                    [],
-                )?;
-                Ok::<_, tokio_rusqlite::Error>(())
-            })
-            .await
-            .unwrap();
-
-        // Foreign keys still resolve after the table rebuild.
-        let fk_violations = db
-            .reader()
-            .call(|conn| {
-                let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
-                let n = stmt.query_map([], |_| Ok(()))?.count();
-                Ok::<_, tokio_rusqlite::Error>(n)
-            })
-            .await
-            .unwrap();
-        assert_eq!(fk_violations, 0);
-
-        let version: i64 = db
-            .reader()
-            .call(|conn| {
-                conn.pragma_query_value(None, "user_version", |row| row.get(0))
-                    .map_err(tokio_rusqlite::Error::from)
-            })
-            .await
-            .unwrap();
-        assert_eq!(version, 9);
     }
 
     #[tokio::test]
