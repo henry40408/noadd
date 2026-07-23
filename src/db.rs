@@ -6,6 +6,8 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio_rusqlite::Connection;
 
+use crate::admin::auth::NO_PASSWORD_SENTINEL;
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite error: {0}")]
@@ -1220,16 +1222,16 @@ impl Database {
         created_at: i64,
     ) -> Result<i64, DbError> {
         let username = username.to_string();
-        let id =
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
+        let id = self
+            .conn
+            .call(move |conn| {
+                conn.execute(
                     "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
-                    params![username, crate::admin::auth::NO_PASSWORD_SENTINEL, created_at],
+                    params![username, NO_PASSWORD_SENTINEL, created_at],
                 )?;
-                    Ok(conn.last_insert_rowid())
-                })
-                .await?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
         Ok(id)
     }
 
