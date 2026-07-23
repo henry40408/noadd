@@ -107,9 +107,10 @@ Options:
       --acme-email <ACME_EMAIL>      Let's Encrypt contact email [env: NOADD_ACME_EMAIL]
       --acme-cache <ACME_CACHE>      ACME certificate cache directory [default: acme-cache] [env: NOADD_ACME_CACHE]
       --acme-prod                    Use Let's Encrypt production (default: staging) [env: NOADD_ACME_PROD]
-      --forward-auth-header <HEADER> Reverse-proxy username header (e.g. Remote-User) [env: NOADD_FORWARD_AUTH_HEADER]
-      --forward-auth-trusted-proxies <CIDRS>
-                                      Comma-separated CIDRs allowed to set --forward-auth-header [env: NOADD_FORWARD_AUTH_TRUSTED_PROXIES]
+      --forward-auth-header <FORWARD_AUTH_HEADER>
+                                     Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
+      --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
+                                     CIDRs allowed to set the forward-auth header [env: NOADD_FORWARD_AUTH_TRUSTED_PROXIES]
   -h, --help                         Print help
 ```
 

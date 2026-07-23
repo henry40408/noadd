@@ -558,6 +558,21 @@ async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
+    // Forward auth makes the setup wizard inapplicable: identity comes from
+    // the proxy, and the first proxied request provisions the operator — which
+    // is why `health` reports `needs_setup: false`. Leaving this
+    // unauthenticated endpoint live would let anyone who can reach the listener
+    // directly, bypassing the proxy, claim the first operator account during
+    // the window before that first proxied request arrives.
+    if state.forward_auth.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(SetupErrorResponse {
+                error: "setup is disabled when forward auth is configured".to_string(),
+            }),
+        ));
+    }
+
     let count = state.db.count_users().await.map_err(|_err| setup_ise())?;
     if count > 0 {
         return Err((

@@ -26,13 +26,13 @@ const TRUSTED_PEER: &str = "203.0.113.10:9000";
 const UNTRUSTED_PEER: &str = "198.51.100.10:9000";
 const HEADER: &str = "Remote-User";
 
-/// Build a router plus its backing `Database`, with an operator ("admin" /
-/// "adminpass") already seeded and holding a valid session token — mirrors
-/// `build_app` in `admin_api_test.rs`, parameterised on `forward_auth` so
-/// tests can turn the feature on or off.
-async fn build_app(
+/// Build a router plus its backing `Database`. When `seed_operator` is true,
+/// creates an operator ("admin" / "adminpass") with a valid session token.
+/// When false, the database is empty.
+async fn build(
     forward_auth: Option<Arc<ForwardAuthConfig>>,
-) -> (axum::Router, Database, String) {
+    seed_operator: bool,
+) -> (axum::Router, Database, Option<String>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
@@ -55,27 +55,32 @@ async fn build_app(
         log_tx,
     ));
 
-    let hash = hash_password("adminpass").unwrap();
-    let uid = db
-        .create_user("admin", &hash, noadd::now_unix())
-        .await
-        .unwrap();
-    let token = generate_token();
-    let now = noadd::now_unix();
-    let sid = db
-        .insert_session(&token, uid, now, now, None, None)
-        .await
-        .unwrap();
-    store_session(
-        &sessions,
-        &token,
-        SessionInfo {
-            session_id: sid,
-            user_id: uid,
-            created_at: now,
-            last_seen: now,
-        },
-    );
+    let token = if seed_operator {
+        let hash = hash_password("adminpass").unwrap();
+        let uid = db
+            .create_user("admin", &hash, noadd::now_unix())
+            .await
+            .unwrap();
+        let token = generate_token();
+        let now = noadd::now_unix();
+        let sid = db
+            .insert_session(&token, uid, now, now, None, None)
+            .await
+            .unwrap();
+        store_session(
+            &sessions,
+            &token,
+            SessionInfo {
+                session_id: sid,
+                user_id: uid,
+                created_at: now,
+                last_seen: now,
+            },
+        );
+        Some(token)
+    } else {
+        None
+    };
 
     let list_manager = Arc::new(noadd::filter::lists::ListManager::new(
         db.clone(),
@@ -109,6 +114,26 @@ async fn build_app(
     });
 
     (router, db, token)
+}
+
+/// Build a router plus its backing `Database`, with an operator ("admin" /
+/// "adminpass") already seeded and holding a valid session token — mirrors
+/// `build_app` in `admin_api_test.rs`, parameterised on `forward_auth` so
+/// tests can turn the feature on or off.
+async fn build_app(
+    forward_auth: Option<Arc<ForwardAuthConfig>>,
+) -> (axum::Router, Database, String) {
+    let (router, db, token) = build(forward_auth, true).await;
+    (router, db, token.unwrap())
+}
+
+/// Build a router plus its backing `Database` with no seeded operator — the
+/// database is empty and ready for tests that check initial setup behavior.
+async fn build_app_without_operator(
+    forward_auth: Option<Arc<ForwardAuthConfig>>,
+) -> (axum::Router, Database) {
+    let (router, db, _token) = build(forward_auth, false).await;
+    (router, db)
 }
 
 fn forward_auth_cfg() -> Arc<ForwardAuthConfig> {
@@ -296,4 +321,59 @@ async fn session_cookie_still_wins_without_forward_auth_header() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// When forward auth is configured, the setup wizard must refuse all requests,
+/// even on a fresh install with zero users. This prevents anyone who can reach
+/// the HTTP listener directly (bypassing the proxy) from claiming the first
+/// operator account before the proxy provisions one.
+#[tokio::test]
+async fn setup_is_refused_when_forward_auth_is_configured() {
+    let (app, db) = build_app_without_operator(Some(forward_auth_cfg())).await;
+    assert_eq!(db.count_users().await.unwrap(), 0);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"eve","password":"hunter2hunter2"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        db.count_users().await.unwrap(),
+        0,
+        "no operator was created"
+    );
+}
+
+/// When forward auth is disabled, the setup wizard must work normally on a
+/// fresh install. This is a regression guard to ensure that non-forward-auth
+/// deployments are unaffected by the new guard.
+#[tokio::test]
+async fn setup_still_works_without_forward_auth() {
+    let (app, db) = build_app_without_operator(None).await;
+    assert_eq!(db.count_users().await.unwrap(), 0);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"eve","password":"hunter2hunter2"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(db.count_users().await.unwrap(), 1, "operator was created");
 }
