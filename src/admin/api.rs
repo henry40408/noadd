@@ -812,9 +812,14 @@ struct SessionResponse {
 
 async fn list_sessions(
     State(state): State<AppState>,
+    _auth: AuthedUser,
     jar: CookieJar,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
-    let (_user_id, token) = current_session(&state, &jar)?;
+    // Authorization is `AuthedUser` (cookie, API key, or forward-auth header).
+    // The session cookie is only used to flag which listed session is the
+    // caller's own device; a forward-auth / API-key caller simply has none, so
+    // no row is marked current rather than the whole request being rejected.
+    let current_token = jar.get("session").map(|c| c.value().to_string());
     let rows = state
         .db
         .list_sessions()
@@ -833,7 +838,7 @@ async fn list_sessions(
                 last_seen,
                 ip: r.ip,
                 user_agent: r.user_agent,
-                is_current: r.token == token,
+                is_current: current_token.as_deref() == Some(r.token.as_str()),
             }
         })
         .collect();
@@ -842,10 +847,14 @@ async fn list_sessions(
 
 async fn revoke_session_by_id(
     State(state): State<AppState>,
+    _auth: AuthedUser,
     jar: CookieJar,
     Path(id): Path<i64>,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
-    let (_user_id, current_token) = current_session(&state, &jar)?;
+    // Authorized via `AuthedUser`; the cookie only tells us whether the revoked
+    // session is the caller's own device (so we clear its cookie). A forward-auth
+    // / API-key caller has none and just revokes the target session.
+    let current_token = jar.get("session").map(|c| c.value().to_string());
     let removed = state
         .db
         .delete_session_by_id(id)
@@ -854,7 +863,7 @@ async fn revoke_session_by_id(
     match removed {
         Some(token) => {
             crate::admin::auth::revoke_session(&state.sessions, &token);
-            if token == current_token {
+            if current_token.as_deref() == Some(token.as_str()) {
                 let removal = Cookie::build(("session", "")).path("/").build();
                 return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
             }

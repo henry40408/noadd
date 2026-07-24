@@ -330,6 +330,45 @@ async fn session_cookie_still_wins_without_forward_auth_header() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Regression: the account page calls `GET /api/sessions` on load. That
+/// handler used to be cookie-only (`current_session`), so a forward-auth user
+/// — who holds no `session` cookie — got a 401, which the admin UI turns into
+/// an "auth-required" redirect back to login even though they are authenticated.
+/// It must now authorize via the forward-auth header like every other page.
+#[tokio::test]
+async fn forward_auth_user_can_list_sessions() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+
+    let mut req = Request::builder()
+        .uri("/api/sessions")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = TRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// An untrusted peer (no valid auth of any kind) listing sessions is still
+/// rejected — the fix must not turn `/api/sessions` into an open endpoint.
+#[tokio::test]
+async fn untrusted_peer_cannot_list_sessions() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+
+    let mut req = Request::builder()
+        .uri("/api/sessions")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = UNTRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// When forward auth is configured, the setup wizard must refuse all requests,
 /// even on a fresh install with zero users. This prevents anyone who can reach
 /// the HTTP listener directly (bypassing the proxy) from claiming the first
