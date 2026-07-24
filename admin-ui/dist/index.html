@@ -1260,6 +1260,46 @@ rebuild-banner { display: block; }
 }
 
 /* ============================================================
+   Notice banner — in-flow, persistent, dismissible messages.
+   Deliberately NOT a floating auto-dismiss toast: banners stay in the
+   reading order, don't time out before assistive tech reaches them, and
+   are closed by the user. Shares the rebuild-banner visual language.
+   ============================================================ */
+#notice-host { display: flex; flex-direction: column; gap: 8px; }
+#notice-host:not(:empty) { margin-bottom: 16px; }
+.notice-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  animation: rebuild-strip-in 200ms ease-out;
+}
+.notice-banner.error   { border-left-color: var(--red);    background: linear-gradient(90deg, var(--red-dim),     var(--bg-panel) 55%); }
+.notice-banner.success { border-left-color: var(--green);  background: linear-gradient(90deg, var(--green-dim),   var(--bg-panel) 55%); }
+.notice-banner.info    { border-left-color: var(--accent); background: linear-gradient(90deg, var(--accent-glow), var(--bg-panel) 55%); }
+.notice-banner .icon { display: inline-flex; flex-shrink: 0; width: 18px; height: 18px; }
+.notice-banner .icon svg { width: 18px; height: 18px; }
+.notice-banner.error   .icon { color: var(--red); }
+.notice-banner.success .icon { color: var(--green); }
+.notice-banner.info    .icon { color: var(--accent); }
+.notice-banner .msg { flex: 1; min-width: 0; font-size: 0.9rem; color: var(--text-primary); word-break: break-word; }
+.notice-banner .close {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0;
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dim);
+}
+.notice-banner .close:hover { color: var(--text-primary); }
+.notice-banner .close svg { width: 15px; height: 15px; }
+@media (prefers-reduced-motion: reduce) {
+  .notice-banner { animation: none; }
+}
+
+/* ============================================================
    Registry Modal — filter picker dialog
    ============================================================ */
 .registry-overlay {
@@ -1633,6 +1673,40 @@ const icons = {
 };
 
 // ============================================================
+// Notice banners (in-flow, dismissible; replaces alert())
+// ============================================================
+const NOTICE_ICONS = {
+  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="7" x2="12" y2="13"/><circle cx="12" cy="16.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="8 12.5 11 15.5 16 9"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
+};
+
+// Show an in-flow banner at the top of the page content. type: 'error' |
+// 'success' | 'info'. Persistent (no auto-dismiss) with a manual close
+// button; error banners announce assertively, others politely. Duplicate
+// message+type banners are collapsed. Returns the banner element, or null
+// when the app shell (and its #notice-host) isn't mounted.
+function showBanner(msg, type = 'info') {
+  const host = document.getElementById('notice-host');
+  if (!host) return null;
+  const kind = NOTICE_ICONS[type] ? type : 'info';
+  // Collapse an identical banner rather than stacking a second copy.
+  const dupe = [...host.children].find(c => c.dataset.key === `${kind}:${msg}`);
+  if (dupe) { host.appendChild(dupe); return dupe; }
+  const el = document.createElement('div');
+  el.className = `notice-banner ${kind}`;
+  el.dataset.key = `${kind}:${msg}`;
+  // role="alert" is assertive (errors interrupt); status is polite otherwise.
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.innerHTML = `<span class="icon">${NOTICE_ICONS[kind]}</span>`
+    + `<span class="msg">${esc(msg)}</span>`
+    + `<button class="close" type="button" aria-label="Dismiss">${icons.close}</button>`;
+  el.querySelector('.close').onclick = () => el.remove();
+  host.appendChild(el);
+  return el;
+}
+
+// ============================================================
 // Web Components
 // ============================================================
 
@@ -1776,6 +1850,7 @@ class AppShell extends HTMLElement {
           <button class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
         </header>
         <main class="main-content">
+          <div id="notice-host"></div>
           <rebuild-banner></rebuild-banner>
           <next-step-banner></next-step-banner>
           <div id="page-content"></div>
@@ -1811,6 +1886,8 @@ class AppShell extends HTMLElement {
       this.querySelectorAll('.nav-item[data-route]').forEach(b => {
         b.classList.toggle('active', b.dataset.route === hash);
       });
+      // Clear page-scoped banners when navigating to another page.
+      this.querySelector('#notice-host').replaceChildren();
     };
     window.addEventListener('hashchange', updateActive);
     updateActive();
@@ -1913,7 +1990,7 @@ class AccountPage extends HTMLElement {
         await api.post('/api/auth/revoke-all');
         window.dispatchEvent(new CustomEvent('auth-required'));
       } catch (e) {
-        alert('Could not revoke sessions. Please try again.');
+        showBanner('Could not revoke sessions. Please try again.', 'error');
       }
     };
     this.querySelector('#api-key-add').onclick = () => this.createApiKey();
@@ -1957,7 +2034,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/users/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not delete operator.');
+          showBanner('Could not delete operator.', 'error');
           return;
         }
         this.loadOperators();
@@ -1989,7 +2066,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/sessions/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not revoke session.');
+          showBanner('Could not revoke session.', 'error');
           return;
         }
         if (btn.dataset.current === 'true') { window.dispatchEvent(new CustomEvent('auth-required')); return; }
@@ -2067,7 +2144,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/api-keys/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not revoke API key.');
+          showBanner('Could not revoke API key.', 'error');
           return;
         }
         this.loadApiKeys();
@@ -3726,7 +3803,7 @@ class FiltersPage extends HTMLElement {
         this.querySelector('#add-rule-input').value = '';
         this.loadRules();
       } catch (e) {
-        alert('Invalid rule syntax');
+        showBanner('Invalid rule syntax', 'error');
       }
     };
     this.querySelector('#add-rule-input').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-rule-btn').click(); };
@@ -4145,7 +4222,7 @@ class SettingsPage extends HTMLElement {
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
-      if (token.includes('/')) { alert('Token cannot contain /'); return; }
+      if (token.includes('/')) { showBanner('Token cannot contain /', 'error'); return; }
       await api.post('/api/doh-tokens', { token });
       this.querySelector('#token-value').value = '';
       this.loadTokens();
