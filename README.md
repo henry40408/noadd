@@ -114,6 +114,8 @@ Options:
                                      Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
       --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
                                      CIDRs allowed to set the forward-auth header [env: NOADD_FORWARD_AUTH_TRUSTED_PROXIES]
+      --forward-auth-logout-url <FORWARD_AUTH_LOGOUT_URL>
+                                     Proxy/SSO logout URL the SPA redirects to on logout [env: NOADD_FORWARD_AUTH_LOGOUT_URL]
   -h, --help                         Print help
 ```
 
@@ -166,6 +168,14 @@ together, and unlike `--trusted-proxies` above, loopback is **not** trusted
 implicitly: a forged header grants full admin access. Unknown usernames are
 auto-provisioned password-less; password login and API keys keep working.
 The HTTP listener must not be reachable except through the proxy.
+
+Logout is stateless too: noadd holds no session for a forward-auth caller, so
+there is nothing for it to revoke server-side. Set
+`--forward-auth-logout-url` to the proxy/SSO logout endpoint (e.g. Authelia's
+`/logout`) and the admin UI redirects a forward-auth caller's browser there on logout to end the
+upstream session. Without it, clicking logout only clears noadd's own state —
+the proxy re-injects the identity header on the next request, so the user
+must log out at the proxy directly.
 
 ```bash
 ./target/release/noadd --forward-auth-header Remote-User \

@@ -40,6 +40,7 @@ pub enum ForwardAuthConfigError {
 pub struct ForwardAuthConfig {
     header: HeaderName,
     trusted: TrustedProxies,
+    logout_url: Option<String>,
 }
 
 impl ForwardAuthConfig {
@@ -48,7 +49,11 @@ impl ForwardAuthConfig {
     /// is left off (both empty). Either flag set without the other is a
     /// startup error — a header with no allow-list would trust any client,
     /// and an allow-list with no header does nothing.
-    pub fn from_args(header: &str, cidrs: &str) -> Result<Option<Self>, ForwardAuthConfigError> {
+    pub fn from_args(
+        header: &str,
+        cidrs: &str,
+        logout_url: &str,
+    ) -> Result<Option<Self>, ForwardAuthConfigError> {
         let header = header.trim();
         let cidrs = cidrs.trim();
 
@@ -73,9 +78,19 @@ impl ForwardAuthConfig {
             return Err(ForwardAuthConfigError::MissingTrustedProxies);
         }
 
+        let logout_url = {
+            let t = logout_url.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+
         Ok(Some(ForwardAuthConfig {
             header: header_name,
             trusted,
+            logout_url,
         }))
     }
 
@@ -87,6 +102,11 @@ impl ForwardAuthConfig {
     /// Number of configured trusted CIDRs, for startup logging.
     pub fn trusted_len(&self) -> usize {
         self.trusted.len()
+    }
+
+    /// The configured proxy/SSO logout URL, if any.
+    pub fn logout_url(&self) -> Option<&str> {
+        self.logout_url.as_deref()
     }
 
     /// Resolve the operator username asserted by the proxy, or `None` if the
@@ -144,13 +164,13 @@ mod tests {
 
     #[test]
     fn both_empty_disables_forward_auth() {
-        assert!(ForwardAuthConfig::from_args("", "").unwrap().is_none());
+        assert!(ForwardAuthConfig::from_args("", "", "").unwrap().is_none());
     }
 
     #[test]
     fn header_without_cidrs_is_an_error() {
         assert!(matches!(
-            ForwardAuthConfig::from_args("Remote-User", ""),
+            ForwardAuthConfig::from_args("Remote-User", "", ""),
             Err(ForwardAuthConfigError::MissingTrustedProxies)
         ));
     }
@@ -158,7 +178,7 @@ mod tests {
     #[test]
     fn cidrs_without_header_is_an_error() {
         assert!(matches!(
-            ForwardAuthConfig::from_args("", "127.0.0.1/32"),
+            ForwardAuthConfig::from_args("", "127.0.0.1/32", ""),
             Err(ForwardAuthConfigError::MissingHeader)
         ));
     }
@@ -166,7 +186,7 @@ mod tests {
     #[test]
     fn cidrs_that_parse_to_nothing_is_an_error() {
         assert!(matches!(
-            ForwardAuthConfig::from_args("Remote-User", ",,"),
+            ForwardAuthConfig::from_args("Remote-User", ",,", ""),
             Err(ForwardAuthConfigError::MissingTrustedProxies)
         ));
     }
@@ -174,7 +194,7 @@ mod tests {
     #[test]
     fn bad_header_name_is_an_error() {
         assert!(matches!(
-            ForwardAuthConfig::from_args("bad header\n", "127.0.0.1/32"),
+            ForwardAuthConfig::from_args("bad header\n", "127.0.0.1/32", ""),
             Err(ForwardAuthConfigError::InvalidHeader(_))
         ));
     }
@@ -182,14 +202,14 @@ mod tests {
     #[test]
     fn bad_cidr_is_an_error() {
         assert!(matches!(
-            ForwardAuthConfig::from_args("Remote-User", "not-a-cidr"),
+            ForwardAuthConfig::from_args("Remote-User", "not-a-cidr", ""),
             Err(ForwardAuthConfigError::InvalidCidr(_))
         ));
     }
 
     #[test]
     fn resolve_username_none_without_peer() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let headers = headers_with("Remote-User", "alice");
@@ -199,7 +219,7 @@ mod tests {
     #[test]
     fn resolve_username_none_for_untrusted_loopback_peer() {
         // Loopback is NOT implicitly trusted here, unlike extract_client_ip.
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let headers = headers_with("Remote-User", "alice");
@@ -209,7 +229,7 @@ mod tests {
 
     #[test]
     fn resolve_username_none_without_header() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -221,7 +241,7 @@ mod tests {
 
     #[test]
     fn resolve_username_none_for_empty_username() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -231,7 +251,7 @@ mod tests {
 
     #[test]
     fn resolve_username_none_for_oversized_username() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -242,7 +262,7 @@ mod tests {
 
     #[test]
     fn resolve_username_none_for_control_char_username() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -256,7 +276,7 @@ mod tests {
 
     #[test]
     fn resolve_username_none_for_duplicated_header() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -268,7 +288,7 @@ mod tests {
 
     #[test]
     fn resolve_username_trims_and_returns_trusted_peer() {
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -283,7 +303,7 @@ mod tests {
     fn header_matching_is_case_insensitive() {
         // Configured with mixed case; sent all-lowercase, as HTTP header names
         // require case-insensitive matching.
-        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8")
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
@@ -292,5 +312,25 @@ mod tests {
             cfg.resolve_username(Some(peer), &headers),
             Some("alice".to_string())
         );
+    }
+
+    #[test]
+    fn from_args_trims_and_returns_logout_url() {
+        let cfg = ForwardAuthConfig::from_args(
+            "Remote-User",
+            "10.0.0.0/8",
+            "  https://sso.example/logout  ",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cfg.logout_url(), Some("https://sso.example/logout"));
+    }
+
+    #[test]
+    fn from_args_empty_logout_url_is_none() {
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "   ")
+            .unwrap()
+            .unwrap();
+        assert!(cfg.logout_url().is_none());
     }
 }

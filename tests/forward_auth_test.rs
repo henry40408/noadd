@@ -138,11 +138,29 @@ async fn build_app_without_operator(
 }
 
 fn forward_auth_cfg() -> Arc<ForwardAuthConfig> {
+    forward_auth_cfg_with_logout_url("")
+}
+
+fn forward_auth_cfg_with_logout_url(logout_url: &str) -> Arc<ForwardAuthConfig> {
     Arc::new(
-        ForwardAuthConfig::from_args(HEADER, TRUSTED_CIDR)
+        ForwardAuthConfig::from_args(HEADER, TRUSTED_CIDR, logout_url)
             .unwrap()
             .unwrap(),
     )
+}
+
+/// `POST /api/auth/logout` from a trusted forward-auth peer, no session
+/// cookie attached.
+fn forward_auth_logout_request() -> Request<Body> {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = TRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
 }
 
 /// `GET /api/settings` with an optional `ConnectInfo` peer and an optional
@@ -514,4 +532,67 @@ async fn setup_still_works_without_forward_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(db.count_users().await.unwrap(), 1, "operator was created");
+}
+
+/// A forward-auth caller (trusted peer + header, no session cookie) logging
+/// out gets a 200 with the configured proxy logout URL handed back, so the
+/// SPA can redirect the browser there to actually end the upstream session.
+#[tokio::test]
+async fn forward_auth_logout_with_configured_url_returns_redirect() {
+    const LOGOUT_URL: &str = "https://sso.example/logout";
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg_with_logout_url(LOGOUT_URL))).await;
+
+    let resp = app.oneshot(forward_auth_logout_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["redirect_to"], LOGOUT_URL);
+    assert_eq!(body["via_forward_auth"], true);
+}
+
+/// Same as above but with no logout URL configured: still 200 (no more
+/// 401 for forward-auth callers), `redirect_to` is `null` since there is
+/// nowhere for the SPA to send the browser.
+#[tokio::test]
+async fn forward_auth_logout_without_configured_url_returns_null() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+
+    let resp = app.oneshot(forward_auth_logout_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["redirect_to"].is_null());
+    assert_eq!(body["via_forward_auth"], true);
+}
+
+/// A genuine cookie/password user logging out must NOT be redirected to the
+/// proxy logout URL, even in a deployment where one is configured — their
+/// session is revoked server-side, so `via_forward_auth` is false and
+/// `redirect_to` stays null. Pins the gating in the logout handler.
+#[tokio::test]
+async fn cookie_user_logout_ignores_configured_logout_url() {
+    const LOGOUT_URL: &str = "https://sso.example/logout";
+    let (app, _db, token) = build_app(Some(forward_auth_cfg_with_logout_url(LOGOUT_URL))).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["redirect_to"].is_null(),
+        "cookie user must not be redirected to the proxy logout"
+    );
+    assert_eq!(body["via_forward_auth"], false);
 }

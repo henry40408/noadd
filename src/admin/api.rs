@@ -571,6 +571,15 @@ pub struct SetupResponse {
     pub success: bool,
 }
 
+#[derive(Serialize)]
+pub struct LogoutResponse {
+    /// Where the SPA should send the browser to end the upstream (proxy/SSO)
+    /// session; `None` when no forward-auth logout URL is configured.
+    pub redirect_to: Option<String>,
+    /// Whether this request authenticated via the forward-auth proxy header.
+    pub via_forward_auth: bool,
+}
+
 /// Minimum length for the admin password set via `POST /api/auth/setup`.
 const MIN_PASSWORD_LENGTH: usize = 8;
 
@@ -657,20 +666,40 @@ async fn revoke_others(
     Ok(StatusCode::OK)
 }
 
-/// Log out the current session only: revoke this token, delete from DB, and
-/// expire the client's session cookie. Other devices' sessions are untouched.
+/// Log out the current session: revoke this token, delete from DB, and expire
+/// the client's session cookie. Other devices' sessions are untouched. Also
+/// reports whether the caller authenticated via forward auth and, if so,
+/// hands back the configured proxy/SSO logout URL so the SPA can complete the
+/// handoff — a forward-auth caller holds no session for us to revoke, so that
+/// redirect is the only way for them to actually end their session.
 async fn logout(
     State(state): State<AppState>,
+    auth: AuthedUser,
     jar: CookieJar,
-) -> Result<(CookieJar, StatusCode), StatusCode> {
-    current_session(&state, &jar)?;
-    if let Some(c) = jar.get("session") {
+) -> Result<(CookieJar, Json<LogoutResponse>), StatusCode> {
+    let jar = if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
         let _ = state.db.delete_session_by_token(&token).await;
-    }
-    let removal = Cookie::build(("session", "")).path("/").build();
-    Ok((jar.remove(removal), StatusCode::OK))
+        jar.remove(Cookie::build(("session", "")).path("/").build())
+    } else {
+        jar
+    };
+    let redirect_to = if auth.via_forward_auth {
+        state
+            .forward_auth
+            .as_ref()
+            .and_then(|c| c.logout_url().map(str::to_string))
+    } else {
+        None
+    };
+    Ok((
+        jar,
+        Json(LogoutResponse {
+            redirect_to,
+            via_forward_auth: auth.via_forward_auth,
+        }),
+    ))
 }
 
 // --- Operator management ---

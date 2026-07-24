@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
     let forward_auth = noadd::admin::forward_auth::ForwardAuthConfig::from_args(
         &args.forward_auth_header,
         &args.forward_auth_trusted_proxies,
+        &args.forward_auth_logout_url,
     )
     .map_err(|e| anyhow::anyhow!("failed to configure forward auth: {e}"))?
     .map(Arc::new);

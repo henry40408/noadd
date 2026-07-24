@@ -124,6 +124,12 @@ pub struct CliArgs {
     /// default — a request with no known peer address is never trusted.
     #[arg(long, default_value = "", env = "NOADD_FORWARD_AUTH_TRUSTED_PROXIES")]
     pub forward_auth_trusted_proxies: String,
+
+    /// URL to redirect the browser to on logout when behind a forward-auth
+    /// proxy — the proxy/SSO logout endpoint (e.g. Authelia's `/logout`).
+    /// Only meaningful with forward auth enabled; empty disables the redirect.
+    #[arg(long, default_value = "", env = "NOADD_FORWARD_AUTH_LOGOUT_URL")]
+    pub forward_auth_logout_url: String,
 }
 
 /// Whether the admin session cookie should carry the `Secure` attribute.
