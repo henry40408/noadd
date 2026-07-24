@@ -70,16 +70,20 @@ Then('I see a sign-in error telling me the password is incorrect', async ({ page
   await expect(err).toContainText(/incorrect password/i);
 });
 
-When('I revoke all sessions', async ({ page }) => {
+When('I log out all other sessions', async ({ page }) => {
   page.once('dialog', (d) => d.accept());
-  await page.getByTestId('revoke-sessions').click();
+  await page.getByTestId('logout-other-sessions').click();
 });
 
-Then('I am returned to the sign-in screen', async ({ page }) => {
-  await expect(page.getByTestId('login-submit')).toBeVisible();
+Then('I stay signed in on the account page', async ({ page }) => {
+  // The current session is kept, so we remain on the account page rather than
+  // being bounced to the sign-in screen.
+  await expect(page.getByTestId('logout-other-sessions')).toBeVisible();
+  await expect(page.getByTestId('login-submit')).toHaveCount(0);
 });
 
-Then('reloading the admin UI still shows the sign-in screen', async ({ page }) => {
+Then('reloading the admin UI keeps me signed in', async ({ page }) => {
   await page.reload();
-  await expect(page.getByTestId('login-submit')).toBeVisible();
+  await expect(page.getByTestId('app-shell')).toBeVisible();
+  await expect(page.getByTestId('login-submit')).toHaveCount(0);
 });

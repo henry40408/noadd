@@ -330,6 +330,137 @@ async fn session_cookie_still_wins_without_forward_auth_header() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Regression: the account page calls `GET /api/sessions` on load. That
+/// handler used to be cookie-only (`current_session`), so a forward-auth user
+/// — who holds no `session` cookie — got a 401, which the admin UI turns into
+/// an "auth-required" redirect back to login even though they are authenticated.
+/// It must now authorize via the forward-auth header like every other page.
+#[tokio::test]
+async fn forward_auth_user_can_list_sessions() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+
+    let mut req = Request::builder()
+        .uri("/api/sessions")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = TRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// An untrusted peer (no valid auth of any kind) listing sessions is still
+/// rejected — the fix must not turn `/api/sessions` into an open endpoint.
+#[tokio::test]
+async fn untrusted_peer_cannot_list_sessions() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+
+    let mut req = Request::builder()
+        .uri("/api/sessions")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = UNTRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// `GET /api/auth/me` reports `via_sso: true` for a forward-auth request so the
+/// account page can tell the operator their session is proxy-managed.
+#[tokio::test]
+async fn forward_auth_me_reports_via_sso() {
+    let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
+    let mut req = Request::builder()
+        .uri("/api/auth/me")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = TRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("\"via_sso\":true"), "got: {text}");
+}
+
+/// A cookie session is not SSO, so `me` reports `via_sso: false`.
+#[tokio::test]
+async fn cookie_session_me_reports_not_via_sso() {
+    let (app, _db, token) = build_app(Some(forward_auth_cfg())).await;
+    let req = Request::builder()
+        .uri("/api/auth/me")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("\"via_sso\":false"), "got: {text}");
+}
+
+/// `POST /api/auth/revoke-others` from a cookie session keeps that session and
+/// removes every other device's session.
+#[tokio::test]
+async fn revoke_others_keeps_the_current_session() {
+    let (app, db, token) = build_app(Some(forward_auth_cfg())).await;
+    // Seed a second session (another device) for the same operator.
+    let uid = db.get_user_auth("admin").await.unwrap().unwrap().id;
+    let other = generate_token();
+    let now = noadd::now_unix();
+    db.insert_session(&other, uid, now, now, None, None)
+        .await
+        .unwrap();
+    assert_eq!(db.list_sessions().await.unwrap().len(), 2);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/revoke-others")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let remaining = db.list_sessions().await.unwrap();
+    assert_eq!(remaining.len(), 1, "only the caller's session remains");
+    assert_eq!(
+        remaining[0].token, token,
+        "the kept session is the caller's"
+    );
+}
+
+/// A forward-auth caller holds no session cookie, so "log out other sessions"
+/// clears every session (none is their own device).
+#[tokio::test]
+async fn forward_auth_revoke_others_removes_all_sessions() {
+    let (app, db, _token) = build_app(Some(forward_auth_cfg())).await;
+    assert_eq!(db.list_sessions().await.unwrap().len(), 1);
+
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/revoke-others")
+        .header(HEADER, "alice")
+        .body(Body::empty())
+        .unwrap();
+    let addr: SocketAddr = TRUSTED_PEER.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(db.list_sessions().await.unwrap().len(), 0);
+}
+
 /// When forward auth is configured, the setup wizard must refuse all requests,
 /// even on a fresh install with zero users. This prevents anyone who can reach
 /// the HTTP listener directly (bypassing the proxy) from claiming the first

@@ -155,7 +155,7 @@ pub fn admin_router(state: AppState) -> Router {
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
-        .route("/api/auth/revoke-all", post(revoke_all))
+        .route("/api/auth/revoke-others", post(revoke_others))
         .route("/api/auth/logout", post(logout))
         // Health + server info (no auth required for health)
         .route("/api/health", get(health))
@@ -376,11 +376,15 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
 }
 
-/// An authenticated operator, resolved from either the browser `session` cookie
-/// or an `Authorization: Bearer <api key>` header. Downstream handlers depend
-/// only on `user_id`, so cookie and API-key requests are indistinguishable.
+/// An authenticated operator, resolved from either the browser `session` cookie,
+/// an `Authorization: Bearer <api key>` header, or a reverse-proxy forward-auth
+/// header. Most handlers depend only on `user_id`; `via_forward_auth` lets the
+/// account page tell the operator their session is proxy-managed (SSO).
 pub struct AuthedUser {
     pub user_id: i64,
+    /// True only when the request was authenticated by the forward-auth header
+    /// (SSO), i.e. neither a session cookie nor an API key.
+    pub via_forward_auth: bool,
 }
 
 impl axum::extract::FromRequestParts<AppState> for AuthedUser {
@@ -395,14 +399,20 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         if let Some(cookie) = jar.get("session")
             && let Some(user_id) = validate_session(&state.sessions, cookie.value())
         {
-            return Ok(AuthedUser { user_id });
+            return Ok(AuthedUser {
+                user_id,
+                via_forward_auth: false,
+            });
         }
         // 2. Bearer API key (programmatic path).
         if let Some(token) = bearer_token(&parts.headers) {
             let hash = hash_api_key(&token);
             let now = crate::now_unix();
             if let Ok(Some(user_id)) = state.db.validate_api_key(&hash, now).await {
-                return Ok(AuthedUser { user_id });
+                return Ok(AuthedUser {
+                    user_id,
+                    via_forward_auth: false,
+                });
             }
         }
         // 3. Reverse-proxy forward auth: a username header injected by a proxy
@@ -416,7 +426,10 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
             if let Some(username) = cfg.resolve_username(peer, &parts.headers) {
                 return resolve_forward_auth_user(state, &username)
                     .await
-                    .map(|user_id| AuthedUser { user_id })
+                    .map(|user_id| AuthedUser {
+                        user_id,
+                        via_forward_auth: true,
+                    })
                     .map_err(|err| {
                         tracing::error!(%err, "forward-auth operator lookup failed");
                         StatusCode::INTERNAL_SERVER_ERROR
@@ -629,11 +642,16 @@ async fn setup(
     Ok(Json(SetupResponse { success: true }))
 }
 
-async fn revoke_all(
+/// Log out every *other* session, keeping the caller's current one signed in.
+/// A forward-auth / API-key caller has no session cookie, so all sessions are
+/// revoked (none is their own device).
+async fn revoke_others(
     State(state): State<AppState>,
     _auth: AuthedUser,
+    jar: CookieJar,
 ) -> Result<StatusCode, StatusCode> {
-    crate::admin::auth::revoke_all_sessions(&state.sessions, &state.db)
+    let current_token = jar.get("session").map(|c| c.value().to_string());
+    crate::admin::auth::revoke_other_sessions(&state.sessions, &state.db, current_token.as_deref())
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -661,6 +679,10 @@ async fn logout(
 struct MeResponse {
     id: i64,
     username: String,
+    /// True when this request was authenticated by the reverse-proxy
+    /// forward-auth header (SSO), so the UI can note the session is
+    /// proxy-managed and not listed/revocable here.
+    via_sso: bool,
 }
 
 async fn get_me(
@@ -676,6 +698,7 @@ async fn get_me(
     Ok(Json(MeResponse {
         id: auth.user_id,
         username,
+        via_sso: auth.via_forward_auth,
     }))
 }
 
@@ -812,9 +835,14 @@ struct SessionResponse {
 
 async fn list_sessions(
     State(state): State<AppState>,
+    _auth: AuthedUser,
     jar: CookieJar,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
-    let (_user_id, token) = current_session(&state, &jar)?;
+    // Authorization is `AuthedUser` (cookie, API key, or forward-auth header).
+    // The session cookie is only used to flag which listed session is the
+    // caller's own device; a forward-auth / API-key caller simply has none, so
+    // no row is marked current rather than the whole request being rejected.
+    let current_token = jar.get("session").map(|c| c.value().to_string());
     let rows = state
         .db
         .list_sessions()
@@ -833,7 +861,7 @@ async fn list_sessions(
                 last_seen,
                 ip: r.ip,
                 user_agent: r.user_agent,
-                is_current: r.token == token,
+                is_current: current_token.as_deref() == Some(r.token.as_str()),
             }
         })
         .collect();
@@ -842,10 +870,14 @@ async fn list_sessions(
 
 async fn revoke_session_by_id(
     State(state): State<AppState>,
+    _auth: AuthedUser,
     jar: CookieJar,
     Path(id): Path<i64>,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
-    let (_user_id, current_token) = current_session(&state, &jar)?;
+    // Authorized via `AuthedUser`; the cookie only tells us whether the revoked
+    // session is the caller's own device (so we clear its cookie). A forward-auth
+    // / API-key caller has none and just revokes the target session.
+    let current_token = jar.get("session").map(|c| c.value().to_string());
     let removed = state
         .db
         .delete_session_by_id(id)
@@ -854,7 +886,7 @@ async fn revoke_session_by_id(
     match removed {
         Some(token) => {
             crate::admin::auth::revoke_session(&state.sessions, &token);
-            if token == current_token {
+            if current_token.as_deref() == Some(token.as_str()) {
                 let removal = Cookie::build(("session", "")).path("/").build();
                 return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
             }
