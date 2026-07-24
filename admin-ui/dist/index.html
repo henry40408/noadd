@@ -1292,8 +1292,8 @@ rebuild-banner { display: block; }
 .toast.error   { border-left-color: var(--red);    background: linear-gradient(90deg, var(--red-dim),     var(--bg-panel) 55%); }
 .toast.success { border-left-color: var(--green);  background: linear-gradient(90deg, var(--green-dim),   var(--bg-panel) 55%); }
 .toast.info    { border-left-color: var(--accent); background: linear-gradient(90deg, var(--accent-glow), var(--bg-panel) 55%); }
-.toast .icon { display: inline-flex; flex-shrink: 0; width: 16px; height: 16px; }
-.toast .icon svg { width: 16px; height: 16px; }
+.toast .icon { display: inline-flex; flex-shrink: 0; width: 18px; height: 18px; }
+.toast .icon svg { width: 18px; height: 18px; }
 .toast.error   .icon { color: var(--red); }
 .toast.success .icon { color: var(--green); }
 .toast.info    .icon { color: var(--accent); }
@@ -1686,9 +1686,9 @@ const icons = {
 // Toast notifications (transient, non-blocking; replaces alert())
 // ============================================================
 const TOAST_ICONS = {
-  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
-  success: icons.check,
-  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="7" x2="12" y2="13"/><circle cx="12" cy="16.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="8 12.5 11 15.5 16 9"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
 };
 
 // Show a floating toast. type: 'error' | 'success' | 'info'. Auto-dismisses
