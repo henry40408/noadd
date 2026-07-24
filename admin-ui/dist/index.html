@@ -1884,7 +1884,7 @@ class AppShell extends HTMLElement {
         return;
       }
       if (resp && resp.via_forward_auth) {
-        alert('You are signed in via your reverse proxy. To end your session, log out at your proxy or SSO provider.');
+        showBanner('You are signed in via your reverse proxy. To end your session, log out at your proxy or SSO provider.', 'info');
         return;
       }
       window.dispatchEvent(new CustomEvent('auth-required'));
