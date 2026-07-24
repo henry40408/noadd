@@ -179,6 +179,46 @@ auth_request_set $user $upstream_http_remote_user;
 proxy_set_header Remote-User $user;
 ```
 
+### Paths to exclude from the proxy's authentication
+
+Forward auth is meant to protect the admin UI and its `/api/*` data
+endpoints, and the browser flow needs **no exceptions**: the proxy
+authenticates the request before it reaches noadd, then noadd trusts the
+injected `Remote-User` header. What *does* break is any client that cannot
+complete an interactive SSO login — DNS resolvers, health probes, devices
+fetching a config profile, API-key CLIs. Those endpoints authenticate
+themselves and must be excluded from the proxy's auth (`policy: bypass`):
+
+| Path | Used by | Note |
+| --- | --- | --- |
+| `/dns-query`, `/dns-query/{token}` | DoH resolvers | **Mandatory** — gating this breaks all DNS-over-HTTPS. Authenticated by URL token / the DoH access policy, never the admin session. |
+| `/api/health` | Uptime / container health probes | No auth by design. |
+| `/api/mobileconfig/{token}` | A device downloading the Apple config profile | Token-authenticated. |
+
+Programmatic clients that authenticate with an API key
+(`Authorization: Bearer …`) under `/api/*` also cannot do SSO — either
+exclude those routes too, or configure the proxy to let requests carrying a
+Bearer token through.
+
+Example Authelia `access_control` (bypass the non-interactive endpoints,
+require login for everything else):
+
+```yaml
+access_control:
+  default_policy: two_factor
+  rules:
+    # noadd endpoints used by clients that can't complete an SSO login
+    - domain: dns.example.com
+      resources:
+        - '^/dns-query(/.*)?$'
+        - '^/api/health$'
+        - '^/api/mobileconfig/.*$'
+      policy: bypass
+    # admin UI + the rest of /api/* stay behind login
+    - domain: dns.example.com
+      policy: two_factor
+```
+
 ## Programmatic API
 
 Most `/api/*` endpoints accept an **API key** in addition to the browser
