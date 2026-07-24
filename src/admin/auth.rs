@@ -163,13 +163,22 @@ pub async fn flush_last_seen(
     db.flush_sessions_last_seen(&entries).await
 }
 
-/// Revoke all sessions (logout everywhere): clear the store and the table.
-pub async fn revoke_all_sessions(
+/// Revoke every session except `keep` (log out other devices, staying signed
+/// in on the current one). When `keep` is `None` — e.g. a forward-auth caller
+/// that holds no session cookie — every session is revoked, since none of them
+/// is the caller's own device.
+pub async fn revoke_other_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
+    keep: Option<&str>,
 ) -> Result<(), crate::db::DbError> {
-    store.lock().clear();
-    db.delete_all_sessions().await
+    if let Some(token) = keep {
+        store.lock().retain(|t, _| t == token);
+        db.delete_sessions_except(token).await
+    } else {
+        store.lock().clear();
+        db.delete_all_sessions().await
+    }
 }
 
 /// Hash a password using Argon2 with a random salt.

@@ -1425,6 +1425,19 @@ impl Database {
         Ok(())
     }
 
+    /// Delete every session except the one holding `token` (log out other
+    /// devices while keeping the caller signed in).
+    pub async fn delete_sessions_except(&self, token: &str) -> Result<(), DbError> {
+        let token = token.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
         let rows = self
             .reader()

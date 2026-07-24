@@ -71,9 +71,9 @@ Feature: First-run setup and authentication
     Then the next-step banner is no longer shown
     And reloading the admin UI does not show the next-step banner again
 
-  Scenario: Revoking all sessions returns to the sign-in screen
+  Scenario: Logging out other sessions keeps the current session signed in
     Given I am signed in to the admin UI
     When I go to the "Account" tab
-    And I revoke all sessions
-    Then I am returned to the sign-in screen
-    And reloading the admin UI still shows the sign-in screen
+    And I log out all other sessions
+    Then I stay signed in on the account page
+    And reloading the admin UI keeps me signed in

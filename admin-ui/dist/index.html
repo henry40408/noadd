@@ -1954,11 +1954,15 @@ class AccountPage extends HTMLElement {
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Active Sessions</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days.</p>
+        <div class="notice-banner info" id="sess-sso-note" role="status" style="display:none;margin-bottom:12px">
+          <span class="icon">${NOTICE_ICONS.info}</span>
+          <span class="msg">You're signed in via SSO, managed by your reverse proxy. Only password-login sessions are listed here; SSO access can't be revoked from noadd — sign out at your proxy instead.</span>
+        </div>
         <div class="table-wrap"><table>
           <thead><tr><th>Operator</th><th>IP</th><th>Browser</th><th>Signed in</th><th>Last seen</th><th></th></tr></thead>
           <tbody id="sess-body"></tbody>
         </table></div>
-        <button class="btn btn-danger" id="revoke-all" data-testid="revoke-sessions" style="margin-top:14px">Revoke All Sessions</button>
+        <button class="btn btn-danger" id="logout-others" data-testid="logout-other-sessions" style="margin-top:14px">Log Out Other Sessions</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.15s">
         <div class="card-title">API Keys</div>
@@ -1984,13 +1988,14 @@ class AccountPage extends HTMLElement {
 
     this.querySelector('#pw-save').onclick = () => this.changePassword();
     this.querySelector('#op-add').onclick = () => this.addOperator();
-    this.querySelector('#revoke-all').onclick = async () => {
-      if (!confirm('Revoke all sessions and log out everywhere?')) return;
+    this.querySelector('#logout-others').onclick = async () => {
+      if (!confirm('Log out all other sessions? Your current session stays signed in.')) return;
       try {
-        await api.post('/api/auth/revoke-all');
-        window.dispatchEvent(new CustomEvent('auth-required'));
+        await api.post('/api/auth/revoke-others');
+        this.loadSessions();
+        showBanner('Signed out all other sessions.', 'success');
       } catch (e) {
-        showBanner('Could not revoke sessions. Please try again.', 'error');
+        showBanner('Could not sign out other sessions. Please try again.', 'error');
       }
     };
     this.querySelector('#api-key-add').onclick = () => this.createApiKey();
@@ -2000,8 +2005,12 @@ class AccountPage extends HTMLElement {
   async load() {
     try {
       this._me = await api.get('/api/auth/me');
+      const sso = this._me.via_sso
+        ? ` <span style="color:var(--text-dim)">· via SSO</span>` : '';
       this.querySelector('#acct-whoami').innerHTML =
-        `Signed in as <code style="color:var(--accent);font-size:0.85rem">${esc(this._me.username)}</code>`;
+        `Signed in as <code style="color:var(--accent);font-size:0.85rem">${esc(this._me.username)}</code>${sso}`;
+      const note = this.querySelector('#sess-sso-note');
+      if (note) note.style.display = this._me.via_sso ? 'flex' : 'none';
     } catch (e) {}
     this.loadOperators();
     this.loadSessions();
