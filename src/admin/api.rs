@@ -222,6 +222,9 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/docs", get(scalar_docs))
         .fallback(serve_static)
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            crate::admin::csrf::csrf_origin_guard,
+        ))
 }
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
