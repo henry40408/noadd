@@ -1260,6 +1260,56 @@ rebuild-banner { display: block; }
 }
 
 /* ============================================================
+   Toast — transient, non-blocking notifications (floating)
+   ============================================================ */
+#toast-host {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  pointer-events: auto;
+  animation: toast-in 180ms ease-out;
+}
+.toast.error   { border-left-color: var(--red);    background: linear-gradient(90deg, var(--red-dim),     var(--bg-panel) 55%); }
+.toast.success { border-left-color: var(--green);  background: linear-gradient(90deg, var(--green-dim),   var(--bg-panel) 55%); }
+.toast.info    { border-left-color: var(--accent); background: linear-gradient(90deg, var(--accent-glow), var(--bg-panel) 55%); }
+.toast .icon { display: inline-flex; flex-shrink: 0; width: 16px; height: 16px; }
+.toast .icon svg { width: 16px; height: 16px; }
+.toast.error   .icon { color: var(--red); }
+.toast.success .icon { color: var(--green); }
+.toast.info    .icon { color: var(--accent); }
+.toast .msg { min-width: 0; word-break: break-word; }
+.toast.leaving { animation: toast-out 160ms ease-in forwards; }
+@keyframes toast-in  { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateX(12px); } }
+@media (max-width: 640px) {
+  #toast-host { top: 8px; right: 8px; left: 8px; max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+  .toast.leaving { animation: none; }
+}
+
+/* ============================================================
    Registry Modal — filter picker dialog
    ============================================================ */
 .registry-overlay {
@@ -1633,6 +1683,43 @@ const icons = {
 };
 
 // ============================================================
+// Toast notifications (transient, non-blocking; replaces alert())
+// ============================================================
+const TOAST_ICONS = {
+  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  success: icons.check,
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+};
+
+// Show a floating toast. type: 'error' | 'success' | 'info'. Auto-dismisses
+// after `duration` ms; click to dismiss early. Returns the toast element.
+function showToast(msg, type = 'info', duration = 4000) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const kind = TOAST_ICONS[type] ? type : 'info';
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  // role="alert" is assertive (errors interrupt); status is polite otherwise.
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.innerHTML = `<span class="icon">${TOAST_ICONS[kind]}</span><span class="msg">${esc(msg)}</span>`;
+  host.appendChild(el);
+  const dismiss = () => {
+    if (!el.isConnected || el.classList.contains('leaving')) return;
+    el.classList.add('leaving');
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+    // Fallback for reduced-motion (no animationend fires).
+    setTimeout(() => el.remove(), 200);
+  };
+  const timer = setTimeout(dismiss, duration);
+  el.addEventListener('click', () => { clearTimeout(timer); dismiss(); });
+  return el;
+}
+
+// ============================================================
 // Web Components
 // ============================================================
 
@@ -1913,7 +2000,7 @@ class AccountPage extends HTMLElement {
         await api.post('/api/auth/revoke-all');
         window.dispatchEvent(new CustomEvent('auth-required'));
       } catch (e) {
-        alert('Could not revoke sessions. Please try again.');
+        showToast('Could not revoke sessions. Please try again.', 'error');
       }
     };
     this.querySelector('#api-key-add').onclick = () => this.createApiKey();
@@ -1957,7 +2044,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/users/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not delete operator.');
+          showToast('Could not delete operator.', 'error');
           return;
         }
         this.loadOperators();
@@ -1989,7 +2076,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/sessions/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not revoke session.');
+          showToast('Could not revoke session.', 'error');
           return;
         }
         if (btn.dataset.current === 'true') { window.dispatchEvent(new CustomEvent('auth-required')); return; }
@@ -2067,7 +2154,7 @@ class AccountPage extends HTMLElement {
         try {
           await api.del(`/api/api-keys/${btn.dataset.id}`);
         } catch (e) {
-          alert('Could not revoke API key.');
+          showToast('Could not revoke API key.', 'error');
           return;
         }
         this.loadApiKeys();
@@ -3726,7 +3813,7 @@ class FiltersPage extends HTMLElement {
         this.querySelector('#add-rule-input').value = '';
         this.loadRules();
       } catch (e) {
-        alert('Invalid rule syntax');
+        showToast('Invalid rule syntax', 'error');
       }
     };
     this.querySelector('#add-rule-input').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-rule-btn').click(); };
@@ -4145,7 +4232,7 @@ class SettingsPage extends HTMLElement {
     this.querySelector('#add-token').onclick = async () => {
       const token = this.querySelector('#token-value').value.trim();
       if (!token) return;
-      if (token.includes('/')) { alert('Token cannot contain /'); return; }
+      if (token.includes('/')) { showToast('Token cannot contain /', 'error'); return; }
       await api.post('/api/doh-tokens', { token });
       this.querySelector('#token-value').value = '';
       this.loadTokens();
