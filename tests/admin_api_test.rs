@@ -1997,3 +1997,53 @@ async fn test_logs_stream_sse_delivers_published_entry() {
         "SSE stream did not deliver the published entry; got: {seen}"
     );
 }
+
+#[tokio::test]
+async fn logout_cookie_session_revokes_and_clears_cookie() {
+    let (app, token) = setup().await;
+
+    let res = app
+        .clone()
+        .oneshot(authed("POST", "/api/auth/logout", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(
+        set_cookie.contains("session="),
+        "logout must clear the session cookie: {set_cookie}"
+    );
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["via_forward_auth"], false);
+    assert!(body["redirect_to"].is_null());
+
+    // The session was revoked, so a follow-up authenticated call 401s.
+    let res = app
+        .oneshot(authed("GET", "/api/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_without_any_auth_returns_401() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
