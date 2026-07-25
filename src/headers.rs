@@ -31,3 +31,39 @@ pub async fn no_store(req: Request, next: Next) -> Response {
     }
     resp
 }
+
+/// Stamp `Strict-Transport-Security` on every response. Registered only when
+/// [`crate::config::resolve_hsts`] says so, so the check is not repeated per
+/// request.
+pub async fn hsts(
+    axum::extract::State(value): axum::extract::State<HeaderValue>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .insert(header::STRICT_TRANSPORT_SECURITY, value);
+    resp
+}
+
+/// Build the header value. `includeSubDomains` and `preload` are omitted on
+/// purpose: noadd cannot know whether the operator serves other things on
+/// sibling subdomains, and `preload` is effectively irreversible.
+pub fn hsts_value(max_age: u64) -> HeaderValue {
+    HeaderValue::from_str(&format!("max-age={max_age}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("max-age=31536000"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsts_value_formats_max_age() {
+        let value = hsts_value(31_536_000);
+        assert_eq!(value, HeaderValue::from_static("max-age=31536000"));
+        let value = value.to_str().unwrap();
+        assert!(!value.contains("includeSubDomains"));
+        assert!(!value.contains("preload"));
+    }
+}

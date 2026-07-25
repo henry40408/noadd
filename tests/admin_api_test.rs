@@ -2290,6 +2290,21 @@ async fn static_assets_keep_no_cache_and_etag() {
     assert!(res.headers().contains_key("etag"));
 }
 
+/// `Strict-Transport-Security` is layered onto the *merged* app in
+/// `src/main.rs`, not inside `admin_router` — a `DoH`-only deployment must
+/// get the header too, so it cannot live on the admin router alone. Pin that
+/// by asserting `admin_router` in isolation never emits it.
+#[tokio::test]
+async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(!res.headers().contains_key("strict-transport-security"));
+}
+
 /// The mobileconfig download carries authenticated DNS-over-HTTPS config
 /// (the token in the URL is itself the credential), so it must not be stored.
 #[tokio::test]

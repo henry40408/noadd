@@ -70,6 +70,19 @@ pub struct CliArgs {
     #[arg(long, env = "NOADD_COOKIE_SECURE", num_args = 0..=1, default_missing_value = "true")]
     pub cookie_secure: Option<bool>,
 
+    // Mirrors `--cookie-secure`: derived from whether noadd terminates TLS
+    // itself rather than defaulted on, because forcing HSTS on an HTTP-only
+    // internal deployment pins the browser to an https:// origin that does not
+    // exist, locking the operator out with no obvious cause and no way to
+    // clear it short of the browser's HSTS settings.
+    /// Send `Strict-Transport-Security` [default: on when noadd terminates TLS]
+    #[arg(long, env = "NOADD_HSTS", num_args = 0..=1, default_missing_value = "true")]
+    pub hsts: Option<bool>,
+
+    /// `max-age` in seconds for `Strict-Transport-Security`
+    #[arg(long, default_value_t = 31_536_000, env = "NOADD_HSTS_MAX_AGE")]
+    pub hsts_max_age: u64,
+
     /// Log output format
     #[arg(long, default_value = "full", env = "LOG_FORMAT")]
     pub log_format: LogFormat,
@@ -153,6 +166,23 @@ pub struct CliArgs {
 /// operators out of the admin UI with no visible error. Such setups opt in
 /// with the override.
 pub fn resolve_cookie_secure(override_value: Option<bool>, tls_enabled: bool) -> bool {
+    override_value.unwrap_or(tls_enabled)
+}
+
+/// Whether to send `Strict-Transport-Security`.
+///
+/// Same derivation as [`resolve_cookie_secure`]: `override_value`
+/// (`--hsts` / `NOADD_HSTS`) wins, otherwise the answer is `tls_enabled` —
+/// whether noadd is terminating TLS itself.
+///
+/// Deliberately *not* forced on. HSTS is sticky by design: a browser that
+/// receives it will refuse plain HTTP to this host for `max-age` seconds, and
+/// the operator cannot undo that from the server side. On an HTTP-only
+/// internal deployment that is a self-inflicted outage. When TLS terminates at
+/// a reverse proxy, that proxy is the right place to send HSTS — it is the hop
+/// that actually speaks HTTPS to the browser — so noadd stays quiet and the
+/// operator opts in only if they want noadd to own the header.
+pub fn resolve_hsts(override_value: Option<bool>, tls_enabled: bool) -> bool {
     override_value.unwrap_or(tls_enabled)
 }
 
@@ -270,6 +300,21 @@ mod tests {
         assert!(resolve_cookie_secure(Some(true), false));
         // And an explicit off beats the derived on (debugging a TLS install).
         assert!(!resolve_cookie_secure(Some(false), true));
+    }
+
+    #[test]
+    fn resolve_hsts_defaults_to_tls_enabled() {
+        // Unset → follow whether noadd is terminating TLS itself.
+        assert!(resolve_hsts(None, true));
+        assert!(!resolve_hsts(None, false));
+    }
+
+    #[test]
+    fn resolve_hsts_override_wins() {
+        // Reverse proxy terminates TLS: an explicit on beats the derived off.
+        assert!(resolve_hsts(Some(true), false));
+        // And an explicit off beats the derived on (self-terminated TLS).
+        assert!(!resolve_hsts(Some(false), true));
     }
 
     #[test]

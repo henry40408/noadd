@@ -258,6 +258,20 @@ async fn main() -> anyhow::Result<()> {
 
     let app = doh_routes.merge(admin_routes);
 
+    // HSTS covers the whole listener (admin UI *and* DoH): both are only
+    // reachable over the same scheme, and a DoH client that gets pinned to
+    // https:// is fine — DoH is https-only by definition.
+    let app = if noadd::config::resolve_hsts(args.hsts, tls_enabled) {
+        let value = noadd::headers::hsts_value(args.hsts_max_age);
+        tracing::info!(max_age = args.hsts_max_age, "HSTS enabled");
+        app.layer(axum::middleware::from_fn_with_state(
+            value,
+            noadd::headers::hsts,
+        ))
+    } else {
+        app
+    };
+
     let http_addr: SocketAddr = args.http_addr.parse()?;
 
     // Background list update scheduler (every 24h)

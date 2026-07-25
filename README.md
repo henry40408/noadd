@@ -110,6 +110,10 @@ Options:
       --cookie-secure [<COOKIE_SECURE>]
                                      Set Secure on the admin session cookie [default: on when noadd
                                      terminates TLS] [env: NOADD_COOKIE_SECURE]
+      --hsts [<HSTS>]                Send Strict-Transport-Security [default: on when noadd
+                                     terminates TLS] [env: NOADD_HSTS]
+      --hsts-max-age <HSTS_MAX_AGE>  max-age in seconds for Strict-Transport-Security
+                                     [default: 31536000] [env: NOADD_HSTS_MAX_AGE]
       --trusted-proxies <TRUSTED_PROXIES>
                                      CIDRs of reverse-proxy hops permitted to set X-Forwarded-For /
                                      X-Real-IP [env: NOADD_TRUSTED_PROXIES]
@@ -160,6 +164,18 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
   --acme-email you@example.com \
   --acme-prod
 ```
+
+### HSTS
+
+When noadd terminates TLS itself (`--tls-cert`/`--tls-key` or `--acme-domain`),
+it sends `Strict-Transport-Security` by default. `--hsts` / `NOADD_HSTS` lets a
+reverse-proxy deployment opt in (or a self-terminated one opt out with
+`--hsts=false`); `--hsts-max-age` controls the `max-age`.
+
+**Warning:** HSTS is sticky. Once a browser receives the header, it refuses
+plain HTTP to that host for `max-age` seconds (default one year) — there is no
+way to undo this from the server side, so only enable it once TLS is set up
+and expected to stay that way.
 
 ## Client IP behind a reverse proxy
 
