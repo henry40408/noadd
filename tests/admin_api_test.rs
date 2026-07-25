@@ -2289,6 +2289,31 @@ async fn logout_cookie_session_revokes_and_clears_cookie() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Logout must ask the browser to drop cookies/cache/storage for this
+/// origin, so "log out, then press Back" cannot show the admin screen
+/// again. `executionContexts` is deliberately excluded (it would reload the
+/// SPA before it can read `redirect_to` and hand off to forward-auth logout).
+#[tokio::test]
+async fn logout_sends_clear_site_data() {
+    let (app, token) = setup().await;
+
+    let res = app
+        .oneshot(authed("POST", "/api/auth/logout", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let header = res
+        .headers()
+        .get("clear-site-data")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert_eq!(header, r#""cache", "cookies", "storage""#);
+    assert!(
+        !header.contains("executionContexts"),
+        "Clear-Site-Data must not include executionContexts, it would kill the SPA before it reads redirect_to: {header}"
+    );
+}
+
 #[tokio::test]
 async fn logout_without_any_auth_returns_401() {
     let (app, _token) = setup().await;

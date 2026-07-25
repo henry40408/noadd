@@ -783,7 +783,14 @@ async fn logout(
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<(CookieJar, Json<LogoutResponse>), StatusCode> {
+) -> Result<
+    (
+        CookieJar,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<LogoutResponse>,
+    ),
+    StatusCode,
+> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
     let jar = if let Some(token) = session_cookie_value(&jar) {
         crate::admin::auth::revoke_session(&state.sessions, &token);
@@ -811,6 +818,19 @@ async fn logout(
     };
     Ok((
         jar,
+        // Ask the browser to drop this origin's cookies, cached responses and
+        // storage. `Set-Cookie` above already expires our own cookie; this is
+        // the belt-and-braces version that also evicts cached API responses
+        // and any storage a future UI revision might add.
+        //
+        // Deliberately *not* including "executionContexts": that directive
+        // reloads/closes the browsing context, which would kill the SPA before
+        // it can read `redirect_to` from this very response and hand off to the
+        // forward-auth proxy's logout URL.
+        [(
+            axum::http::HeaderName::from_static("clear-site-data"),
+            r#""cache", "cookies", "storage""#,
+        )],
         Json(LogoutResponse {
             redirect_to,
             via_forward_auth: auth.via_forward_auth,
