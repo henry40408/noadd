@@ -1438,6 +1438,32 @@ impl Database {
         Ok(())
     }
 
+    /// Delete every session belonging to `user_id` except the one holding
+    /// `keep_token`. Passing `None` revokes all of that user's sessions. Other
+    /// operators' sessions are never touched. Returns the number of rows deleted.
+    pub async fn delete_user_sessions_except(
+        &self,
+        user_id: i64,
+        keep_token: Option<&str>,
+    ) -> Result<usize, DbError> {
+        let keep_token = keep_token.map(str::to_string);
+        let deleted =
+            self.conn
+                .call(move |conn| {
+                    let n = match &keep_token {
+                        Some(token) => conn.execute(
+                            "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
+                            params![user_id, token],
+                        )?,
+                        None => conn
+                            .execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?,
+                    };
+                    Ok(n)
+                })
+                .await?;
+        Ok(deleted)
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
         let rows = self
             .reader()

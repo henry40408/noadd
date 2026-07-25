@@ -9,7 +9,8 @@ use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, new_session_store,
+    store_session,
 };
 use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use noadd::db::{Database, QueryLogEntry};
@@ -52,11 +53,15 @@ async fn build_app(
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
 ) {
-    build_app_opts(registry_url, set_password, false).await
+    let (router, token, cache, log_events, _db, _sessions) =
+        build_app_opts(registry_url, set_password, false).await;
+    (router, token, cache, log_events)
 }
 
 /// `build_app` with control over `AppState::cookie_secure`, for the tests that
-/// assert the `Secure` attribute on the session cookie.
+/// assert the `Secure` attribute on the session cookie. Also hands back the
+/// `Database` and `SessionStore` backing the router, so tests can seed extra
+/// sessions directly into the same state the app queries.
 async fn build_app_opts(
     registry_url: &str,
     set_password: bool,
@@ -66,6 +71,8 @@ async fn build_app_opts(
     String,
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
+    Database,
+    SessionStore,
 ) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
@@ -128,8 +135,8 @@ async fn build_app_opts(
     let log_events = tokio::sync::broadcast::channel(256).0;
 
     let router = admin_router(AppState {
-        db,
-        sessions,
+        db: db.clone(),
+        sessions: sessions.clone(),
         filter,
         cache: cache.clone(),
         rate_limiter,
@@ -148,7 +155,7 @@ async fn build_app_opts(
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
     });
-    (router, token, cache, log_events)
+    (router, token, cache, log_events, db, sessions)
 }
 
 #[tokio::test]
@@ -571,7 +578,7 @@ async fn login_set_cookie(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn test_login_cookie_secure_when_enabled() {
-    let (app, _token, _cache, _events) =
+    let (app, _token, _cache, _events, _db, _sessions) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let cookie = login_set_cookie(app).await;
     assert!(
@@ -587,7 +594,7 @@ async fn test_login_cookie_secure_when_enabled() {
 async fn test_login_cookie_not_secure_when_disabled() {
     // TLS terminates upstream (or not at all): a Secure cookie would be
     // dropped by the browser over plain HTTP and lock the operator out.
-    let (app, _token, _cache, _events) =
+    let (app, _token, _cache, _events, _db, _sessions) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let cookie = login_set_cookie(app).await;
     assert!(
@@ -1728,6 +1735,175 @@ async fn change_own_password_requires_correct_current() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_revokes_other_sessions_of_same_user() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    // Seed a second session (token B) for the same user, bypassing login.
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Token B was revoked by the password change.
+    let res_b = app
+        .clone()
+        .oneshot(authed("GET", "/api/auth/me", &token_b, None))
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), StatusCode::UNAUTHORIZED);
+
+    // Token A (the device that made the change) stays signed in.
+    let res_a = app
+        .oneshot(authed("GET", "/api/auth/me", &token_a, None))
+        .await
+        .unwrap();
+    assert_eq!(res_a.status(), StatusCode::OK);
+}
+
+/// Regression guard: `change_own_password` must revoke only the caller's own
+/// sessions via `revoke_user_sessions_except`, never the global
+/// `revoke_other_sessions` (which would log out every operator).
+#[tokio::test]
+async fn change_password_keeps_other_operators_signed_in() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    // A second, unrelated operator with their own session (token C).
+    let hash = hash_password("bobpass1").unwrap();
+    let bob_id = db
+        .create_user("bob", &hash, noadd::now_unix())
+        .await
+        .unwrap();
+    let token_c = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_c, bob_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_c,
+        SessionInfo {
+            session_id: sid,
+            user_id: bob_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res_c = app
+        .oneshot(authed("GET", "/api/auth/me", &token_c, None))
+        .await
+        .unwrap();
+    assert_eq!(res_c.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_password_deletes_revoked_rows_from_db() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res = app
+        .oneshot(authed("GET", "/api/sessions", &token_a, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the revoked session row must be deleted from the DB, not just memory"
+    );
+    assert_eq!(rows[0]["is_current"], true);
 }
 
 #[tokio::test]

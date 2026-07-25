@@ -815,12 +815,32 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
+/// Change the caller's own password and revoke that operator's other
+/// sessions (OWASP: renew/invalidate sessions on a privilege-level change).
+///
+/// This endpoint is cookie-only today, so `keep` passed to
+/// [`revoke_user_sessions_except`] is always `Some` — the caller's own device
+/// stays signed in. If this ever grows an `AuthedUser`-based path (API key /
+/// forward-auth callers changing their own password), `keep` must become
+/// `None` there and still go through `revoke_user_sessions_except`, never
+/// `revoke_other_sessions` — the latter is global across all operators and
+/// would log out unrelated accounts. Similarly, an admin-resets-another-user
+/// password endpoint (none exists yet) must call
+/// `revoke_user_sessions_except(store, db, target_user_id, None)` so the
+/// reset account keeps no session at all.
+///
+/// If revocation fails after the password write has already committed, the
+/// failure is logged via `tracing::error!` but the response still succeeds
+/// with 204: the password change is done and cannot be un-done, so returning
+/// 500 here would only mislead the caller into retrying. Worst case, other
+/// sessions survive until they expire naturally — the same as today's
+/// behavior before this fix.
 async fn change_own_password(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (user_id, _token) = current_session(&state, &jar)?;
+    let (user_id, token) = current_session(&state, &jar)?;
     if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -848,6 +868,27 @@ async fn change_own_password(
         .update_user_password(user_id, &new_hash)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match crate::admin::auth::revoke_user_sessions_except(
+        &state.sessions,
+        &state.db,
+        user_id,
+        Some(&token),
+    )
+    .await
+    {
+        Ok(revoked) => tracing::info!(
+            event = "session.destroyed",
+            reason = "password_change",
+            user_id,
+            revoked,
+            "revoked other sessions after password change"
+        ),
+        Err(err) => tracing::error!(
+            %err,
+            user_id,
+            "password changed but revoking other sessions failed"
+        ),
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

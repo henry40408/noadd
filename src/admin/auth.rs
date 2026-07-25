@@ -181,6 +181,24 @@ pub async fn revoke_other_sessions(
     }
 }
 
+/// Revoke every session owned by `user_id` except `keep` (the caller's own
+/// device). `keep = None` revokes all of that user's sessions. Unlike
+/// [`revoke_other_sessions`], other operators are unaffected — which is the
+/// required semantics after a password change, where only the account whose
+/// credential changed may be logged out.
+pub async fn revoke_user_sessions_except(
+    store: &SessionStore,
+    db: &crate::db::Database,
+    user_id: i64,
+    keep: Option<&str>,
+) -> Result<usize, crate::db::DbError> {
+    let removed = db.delete_user_sessions_except(user_id, keep).await?;
+    store
+        .lock()
+        .retain(|t, info| info.user_id != user_id || keep == Some(t.as_str()));
+    Ok(removed)
+}
+
 /// Hash a password using Argon2 with a random salt.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRngCompat);
