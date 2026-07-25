@@ -372,6 +372,19 @@ fn log_safe(value: &str, max: usize) -> &str {
     &value[..end]
 }
 
+/// The `User-Agent` value to log, distinguishing an absent header
+/// (`<none>`) from one present but not representable as ASCII
+/// (`<non-ascii>`). Collapsing both into a single `Option<&str>` — as
+/// `headers.get(...).and_then(|v| v.to_str().ok())` does — loses that
+/// distinction, so a plain request that simply sent no `User-Agent` at all
+/// would otherwise be logged with the false claim that it sent a garbled one.
+fn user_agent_log_value(headers: &HeaderMap) -> &str {
+    match headers.get(axum::http::header::USER_AGENT) {
+        None => "<none>",
+        Some(v) => v.to_str().unwrap_or("<non-ascii>"),
+    }
+}
+
 // --- Auth helper ---
 
 /// Read the session token from either accepted cookie name, preferring the
@@ -403,23 +416,49 @@ fn session_cookie_candidates(jar: &CookieJar) -> impl Iterator<Item = String> {
     .filter_map(|name| jar.get(name).map(|c| c.value().to_string()))
 }
 
-/// Build the expiring cookie that clears whichever session cookie the request
-/// actually carried. Removing by the wrong name leaves the browser holding a
-/// cookie for an already-revoked token.
+/// Build one removal cookie per accepted session-cookie name **present in
+/// the jar**, not just the positionally-first. A browser can hold both
+/// accepted names at once (see [`session_cookie_candidates`]) — the very
+/// case this whole mechanism exists for — and clearing only one leaves the
+/// other sitting in the browser with no later request able to clear it,
+/// since the removal is driven by what *this* request's cookie header
+/// contains.
 ///
 /// A `__Host-`-prefixed `Set-Cookie` is silently ignored by the browser
 /// unless it also carries `Secure` (RFC 6265bis §5.5: a `__Host-` cookie can
 /// only be overwritten — or cleared — by a cookie that itself satisfies the
-/// prefix's conditions), so the removal must set `Secure` too whenever it is
-/// clearing that name, not just the original `Set-Cookie` from login.
-fn session_cookie_removal(jar: &CookieJar) -> Cookie<'static> {
-    let is_host = jar.get(crate::admin::auth::SESSION_COOKIE_HOST).is_some();
-    let name = if is_host {
-        crate::admin::auth::SESSION_COOKIE_HOST
-    } else {
-        crate::admin::auth::SESSION_COOKIE
-    };
-    Cookie::build((name, "")).path("/").secure(is_host).build()
+/// prefix's conditions), so the `__Host-session` removal carries `Secure`
+/// even when the plain `session` removal alongside it does not.
+fn session_cookie_removals(jar: &CookieJar) -> Vec<Cookie<'static>> {
+    [
+        crate::admin::auth::SESSION_COOKIE_HOST,
+        crate::admin::auth::SESSION_COOKIE,
+    ]
+    .into_iter()
+    .filter(|name| jar.get(name).is_some())
+    .map(|name| {
+        Cookie::build((name, ""))
+            .path("/")
+            .secure(name == crate::admin::auth::SESSION_COOKIE_HOST)
+            .build()
+    })
+    .collect()
+}
+
+/// The session token this request is actually authenticated by, for handlers
+/// that act on "my current session" rather than merely reading a cookie.
+///
+/// `session_cookie_value` answers "which cookie is present", which is a
+/// different question: a browser can carry both accepted names at once (see
+/// [`session_cookie_candidates`]), and acting on the wrong one means logout
+/// revoking nothing while reporting success, or revoke-others treating the
+/// caller's own session as somebody else's. Membership in the store is
+/// checked rather than `validate_session` because the authenticating token
+/// was already validated for this request by `AuthedUser`, and a second
+/// validation would refresh `last_seen` and evict entries as a side effect.
+fn live_session_token(state: &AppState, jar: &CookieJar) -> Option<String> {
+    let sessions = state.sessions.lock();
+    session_cookie_candidates(jar).find(|token| sessions.contains_key(token))
 }
 
 /// Returns `(user_id, token)` for the current authenticated session, or 401.
@@ -513,34 +552,56 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ci| ci.0.ip());
             if let Some(username) = cfg.resolve_username(peer, &parts.headers) {
-                return resolve_forward_auth_user(state, &username)
-                    .await
-                    .map(|user_id| AuthedUser {
+                return match resolve_forward_auth_user(state, &username).await {
+                    Ok(user_id) => Ok(AuthedUser {
                         user_id,
                         via_forward_auth: true,
-                    })
-                    .map_err(|err| {
+                    }),
+                    Err(err) => {
                         tracing::error!(%err, "forward-auth operator lookup failed");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    });
+                        // This exit bypasses the shared tail below, so the
+                        // pending `auth.failed` warning must be emitted here
+                        // too — otherwise a bad `noadd_…` key alongside a
+                        // forward-auth header whose operator lookup hits a DB
+                        // error drops the failed key attempt from the audit
+                        // trail entirely.
+                        emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                };
             }
         }
-        if let Some(prefix) = failed_key_prefix {
-            let ip = extract_client_ip(
-                parts.extensions.get::<ConnectInfo<SocketAddr>>(),
-                &parts.headers,
-                &state.trusted_proxies,
-            );
-            tracing::warn!(
-                event = "auth.failed",
-                method = "api_key",
-                %ip,
-                prefix = %prefix,
-                "api key authentication failed"
-            );
-        }
+        emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Emit the deferred `auth.failed` warning for a bearer token that looked
+/// like a noadd API key (`failed_key_prefix`, see the comment at its
+/// declaration in `from_request_parts`) but did not validate — a no-op when
+/// `prefix` is `None`. Factored out so every non-success exit of
+/// `from_request_parts` emits through the same call rather than each exit
+/// needing its own copy of the lookup-and-log logic.
+fn emit_failed_key_warning(
+    parts: &axum::http::request::Parts,
+    state: &AppState,
+    prefix: Option<&str>,
+) {
+    let Some(prefix) = prefix else {
+        return;
+    };
+    let ip = extract_client_ip(
+        parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+        &parts.headers,
+        &state.trusted_proxies,
+    );
+    tracing::warn!(
+        event = "auth.failed",
+        method = "api_key",
+        %ip,
+        %prefix,
+        "api key authentication failed"
+    );
 }
 
 /// Map a forward-auth username to an operator id, provisioning the account on
@@ -621,7 +682,7 @@ async fn login(
             event = "auth.failed",
             method = "password",
             %ip,
-            user_agent = %log_safe(user_agent.unwrap_or("<non-ascii>"), LOG_SAFE_MAX),
+            user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
             "login failed"
         );
     };
@@ -677,7 +738,7 @@ async fn login(
         session_id,
         sid_hash = %session_log_id(&token),
         %ip,
-        user_agent = %log_safe(user_agent.unwrap_or("<non-ascii>"), LOG_SAFE_MAX),
+        user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
         "login successful"
     );
 
@@ -805,7 +866,7 @@ async fn revoke_others(
     jar: CookieJar,
 ) -> Result<StatusCode, StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let current_token = session_cookie_value(&jar);
+    let current_token = live_session_token(&state, &jar);
     let revoked_rows = crate::admin::auth::revoke_other_sessions(
         &state.sessions,
         &state.db,
@@ -852,7 +913,13 @@ async fn logout(
     StatusCode,
 > {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let jar = if let Some(token) = session_cookie_value(&jar) {
+    // Prefer the token that actually authenticated this request; fall back to
+    // the positionally-first cookie only when neither candidate is still in
+    // the store (e.g. lazily evicted by `validate_session`), so that session's
+    // DB row and cookie still get cleaned up even though nothing live remains
+    // to revoke in memory.
+    let token = live_session_token(&state, &jar).or_else(|| session_cookie_value(&jar));
+    let jar = if let Some(token) = token {
         let revoked = crate::admin::auth::revoke_session(&state.sessions, &token);
         let _ = state.db.delete_session_by_token(&token).await;
         // Only log a destruction event when a session actually existed under
@@ -872,8 +939,9 @@ async fn logout(
                 "logged out"
             );
         }
-        let removal = session_cookie_removal(&jar);
-        jar.remove(removal)
+        session_cookie_removals(&jar)
+            .into_iter()
+            .fold(jar, CookieJar::remove)
     } else {
         jar
     };
@@ -1166,7 +1234,7 @@ async fn list_sessions(
     // The session cookie is only used to flag which listed session is the
     // caller's own device; a forward-auth / API-key caller simply has none, so
     // no row is marked current rather than the whole request being rejected.
-    let current_token = session_cookie_value(&jar);
+    let current_token = live_session_token(&state, &jar);
     let rows = state
         .db
         .list_sessions()
@@ -1204,7 +1272,10 @@ async fn revoke_session_by_id(
     // session is the caller's own device (so we clear its cookie). A forward-auth
     // / API-key caller has none and just revokes the target session.
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let current_token = session_cookie_value(&jar);
+    // Captured before `revoke_session` below evicts the target from the
+    // store: if the caller's own session is the one being revoked, this must
+    // still see it as live to correctly clear its cookie.
+    let current_token = live_session_token(&state, &jar);
     let removed = state
         .db
         .delete_session_by_id(id)
@@ -1222,8 +1293,10 @@ async fn revoke_session_by_id(
                 "revoked session by id"
             );
             if current_token.as_deref() == Some(token.as_str()) {
-                let removal = session_cookie_removal(&jar);
-                return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
+                let jar = session_cookie_removals(&jar)
+                    .into_iter()
+                    .fold(jar, CookieJar::remove);
+                return Ok((jar, StatusCode::NO_CONTENT));
             }
             Ok((jar, StatusCode::NO_CONTENT))
         }

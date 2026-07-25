@@ -858,56 +858,78 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
     ];
 
     for case in cases {
-        // `now` is captured immediately before driving the in-memory
-        // predicate, which reads the wall clock internally and cannot be
-        // handed a fake `now` — the SQL predicate below reuses this exact
-        // value, so it alone stays fully deterministic.
-        let now = noadd::now_unix();
-        let created_at = now + case.created_offset;
-        let last_seen = now + case.last_seen_offset;
+        // `prune_expired` reads the wall clock itself rather than accepting
+        // an injected `now`, so if the second ticks over between capturing
+        // `now` below and that internal read, a boundary case computed
+        // against the now-stale `now` can flip expired/not-expired and fail
+        // for no reason the test is actually asserting about. Retry the
+        // whole case (bounded, so a genuinely broken predicate still fails
+        // rather than looping forever) whenever that race is detected,
+        // rather than weakening what is asserted.
+        const MAX_ATTEMPTS: u32 = 5;
+        for attempt in 1..=MAX_ATTEMPTS {
+            // `now` is captured immediately before driving the in-memory
+            // predicate, which reads the wall clock internally and cannot be
+            // handed a fake `now` — the SQL predicate below reuses this exact
+            // value, so it alone stays fully deterministic.
+            let now = noadd::now_unix();
+            let created_at = now + case.created_offset;
+            let last_seen = now + case.last_seen_offset;
 
-        // In-memory side: the real prune_expired predicate.
-        let store = new_session_store();
-        store_session(
-            &store,
-            "tok",
-            SessionInfo {
-                session_id: 1,
-                user_id: 1,
-                created_at,
-                last_seen,
-            },
-        );
-        let evicted = prune_expired(&store) == 1;
-        assert_eq!(
-            evicted, case.expect_expired,
-            "{}: in-memory prune_expired disagreed with the expectation",
-            case.label
-        );
+            // In-memory side: the real prune_expired predicate.
+            let store = new_session_store();
+            store_session(
+                &store,
+                "tok",
+                SessionInfo {
+                    session_id: 1,
+                    user_id: 1,
+                    created_at,
+                    last_seen,
+                },
+            );
+            let evicted = prune_expired(&store) == 1;
 
-        // SQL side: the same fixture through purge_expired_sessions.
-        let db = test_db().await;
-        let uid = db.create_user("op", "h", 0).await.unwrap();
-        db.insert_session("tok", uid, created_at, last_seen, None, None)
-            .await
-            .unwrap();
-        let deleted = db
-            .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
-            .await
-            .unwrap()
-            == 1;
-        assert_eq!(
-            deleted, case.expect_expired,
-            "{}: purge_expired_sessions disagreed with the expectation",
-            case.label
-        );
+            if noadd::now_unix() != now {
+                assert!(
+                    attempt < MAX_ATTEMPTS,
+                    "{}: clock kept ticking over across {MAX_ATTEMPTS} attempts",
+                    case.label
+                );
+                continue;
+            }
 
-        // The two predicates must agree with each other, not merely each
-        // independently match the expectation.
-        assert_eq!(
-            evicted, deleted,
-            "{}: SQL predicate and in-memory predicate disagreed",
-            case.label
-        );
+            assert_eq!(
+                evicted, case.expect_expired,
+                "{}: in-memory prune_expired disagreed with the expectation",
+                case.label
+            );
+
+            // SQL side: the same fixture through purge_expired_sessions.
+            let db = test_db().await;
+            let uid = db.create_user("op", "h", 0).await.unwrap();
+            db.insert_session("tok", uid, created_at, last_seen, None, None)
+                .await
+                .unwrap();
+            let deleted = db
+                .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+                .await
+                .unwrap()
+                == 1;
+            assert_eq!(
+                deleted, case.expect_expired,
+                "{}: purge_expired_sessions disagreed with the expectation",
+                case.label
+            );
+
+            // The two predicates must agree with each other, not merely each
+            // independently match the expectation.
+            assert_eq!(
+                evicted, deleted,
+                "{}: SQL predicate and in-memory predicate disagreed",
+                case.label
+            );
+            break;
+        }
     }
 }

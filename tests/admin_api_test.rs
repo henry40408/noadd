@@ -747,6 +747,111 @@ async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
 }
 
 #[tokio::test]
+async fn logout_revokes_the_session_that_authenticated_the_request() {
+    // Reproduces the bug: a browser can hold a stale `__Host-session`
+    // alongside a live `session` cookie (see `session_cookie_candidates`).
+    // `AuthedUser` correctly authenticates via the live one, but `logout`
+    // used to act on whichever cookie was positionally first — clearing only
+    // the stale name and reporting success while the live token, the one
+    // that actually authenticated this very request, stayed valid.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header(
+                    "cookie",
+                    format!("__Host-session=stalegarbage; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let set_cookies: Vec<String> = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        set_cookies.iter().any(|c| c.starts_with("__Host-session=")),
+        "logout must clear the __Host-session cookie too: {set_cookies:?}"
+    );
+    assert!(
+        set_cookies.iter().any(|c| c.starts_with("session=")),
+        "logout must clear the plain session cookie: {set_cookies:?}"
+    );
+
+    let me = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the session that actually authenticated the logout request, \
+         not merely the positionally-first cookie"
+    );
+}
+
+#[tokio::test]
+async fn revoke_others_keeps_the_authenticated_session() {
+    // Same two-cookie shape as `logout_revokes_the_session_that_authenticated_the_request`:
+    // `revoke_others` used to pass the positionally-first cookie (the stale
+    // `__Host-session`) as `keep`, so `retain`/`DELETE ... WHERE token != stale`
+    // matched nothing and the caller's own live session — the one this
+    // request authenticated with — was revoked along with everyone else's,
+    // even though the endpoint is documented as "stay signed in on this
+    // device".
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/revoke-others")
+                .header(
+                    "cookie",
+                    format!("__Host-session=stalegarbage; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let me = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me.status(),
+        StatusCode::OK,
+        "revoke-others must keep the session that authenticated the request signed in"
+    );
+}
+
+#[tokio::test]
 async fn test_login_wrong_password() {
     let (app, _token) = setup().await;
 

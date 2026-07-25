@@ -176,9 +176,13 @@ pub fn resolve_cookie_secure(override_value: Option<bool>, tls_enabled: bool) ->
 /// whether noadd is terminating TLS itself.
 ///
 /// Deliberately *not* forced on. HSTS is sticky by design: a browser that
-/// receives it will refuse plain HTTP to this host for `max-age` seconds, and
-/// the operator cannot undo that from the server side. On an HTTP-only
-/// internal deployment that is a self-inflicted outage. When TLS terminates at
+/// receives it will refuse plain HTTP to this host for `max-age` seconds.
+/// That is retractable while HTTPS still works — serving
+/// `--hsts --hsts-max-age 0` for a while tells a revisiting browser to forget
+/// the pin — but a host that has lost HTTPS entirely is stuck: the retraction
+/// itself must be served over HTTPS, and a client that never revisits keeps
+/// enforcing the old pin regardless. On an HTTP-only internal deployment that
+/// is a self-inflicted outage. When TLS terminates at
 /// a reverse proxy, that proxy is the right place to send HSTS — it is the hop
 /// that actually speaks HTTPS to the browser — so noadd stays quiet and the
 /// operator opts in only if they want noadd to own the header.
