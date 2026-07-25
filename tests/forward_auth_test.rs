@@ -544,6 +544,16 @@ async fn forward_auth_logout_with_configured_url_returns_redirect() {
 
     let resp = app.oneshot(forward_auth_logout_request()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    // Clear-Site-Data must still be present alongside redirect_to: the SPA
+    // reads redirect_to from the body before the browser acts on the header,
+    // so the two are not in tension, but a regression here would mean either
+    // the header regressed or the forward-auth handoff broke while adding it.
+    let clear_site_data = resp
+        .headers()
+        .get("clear-site-data")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert_eq!(clear_site_data, r#""cache", "cookies", "storage""#);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();

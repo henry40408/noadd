@@ -1415,27 +1415,53 @@ impl Database {
         Ok(token)
     }
 
-    pub async fn delete_all_sessions(&self) -> Result<(), DbError> {
-        self.conn
-            .call(|conn| {
-                conn.execute("DELETE FROM sessions", [])?;
-                Ok(())
-            })
+    /// Delete every session. Returns the number of rows removed.
+    pub async fn delete_all_sessions(&self) -> Result<usize, DbError> {
+        let n = self
+            .conn
+            .call(|conn| conn.execute("DELETE FROM sessions", []))
             .await?;
-        Ok(())
+        Ok(n)
     }
 
     /// Delete every session except the one holding `token` (log out other
-    /// devices while keeping the caller signed in).
-    pub async fn delete_sessions_except(&self, token: &str) -> Result<(), DbError> {
+    /// devices while keeping the caller signed in). Returns the number of
+    /// rows removed.
+    pub async fn delete_sessions_except(&self, token: &str) -> Result<usize, DbError> {
         let token = token.to_string();
-        self.conn
+        let n = self
+            .conn
             .call(move |conn| {
-                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])?;
-                Ok(())
+                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])
             })
             .await?;
-        Ok(())
+        Ok(n)
+    }
+
+    /// Delete every session belonging to `user_id` except the one holding
+    /// `keep_token`. Passing `None` revokes all of that user's sessions. Other
+    /// operators' sessions are never touched. Returns the number of rows deleted.
+    pub async fn delete_user_sessions_except(
+        &self,
+        user_id: i64,
+        keep_token: Option<&str>,
+    ) -> Result<usize, DbError> {
+        let keep_token = keep_token.map(str::to_string);
+        let deleted =
+            self.conn
+                .call(move |conn| {
+                    let n = match &keep_token {
+                        Some(token) => conn.execute(
+                            "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
+                            params![user_id, token],
+                        )?,
+                        None => conn
+                            .execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?,
+                    };
+                    Ok(n)
+                })
+                .await?;
+        Ok(deleted)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
@@ -1467,18 +1493,55 @@ impl Database {
         Ok(rows)
     }
 
+    /// Predicate shared by `purge_expired_sessions` and `load_sessions`.
+    ///
+    /// Deliberately `<=`, not `<`: `validate_session` and `prune_expired` in
+    /// `src/admin/auth.rs` expire a session with `>=` (`now - created_at >=
+    /// SESSION_MAX_AGE_SECS`, likewise for `last_seen`), so at the exact
+    /// boundary this must agree by deleting too, not by leaving the row for
+    /// the in-memory side to reject on next access.
+    const PURGE_EXPIRED_SESSIONS_SQL: &str =
+        "DELETE FROM sessions WHERE created_at <= ?1 OR last_seen <= ?2";
+
+    /// Delete session rows that have hit either the absolute or the idle timeout.
+    /// Returns the number of rows removed. Shared by startup restore
+    /// (`load_sessions`) and the periodic sweep so both use identical rules —
+    /// anything this deletes is already dead to `validate_session`.
+    pub async fn purge_expired_sessions(
+        &self,
+        max_age_secs: i64,
+        idle_secs: i64,
+        now: i64,
+    ) -> Result<usize, DbError> {
+        let absolute_cutoff = now - max_age_secs;
+        let idle_cutoff = now - idle_secs;
+        let deleted = self
+            .conn
+            .call(move |conn| {
+                let n = conn.execute(
+                    Self::PURGE_EXPIRED_SESSIONS_SQL,
+                    params![absolute_cutoff, idle_cutoff],
+                )?;
+                Ok(n)
+            })
+            .await?;
+        Ok(deleted)
+    }
+
     pub async fn load_sessions(
         &self,
         max_age_secs: i64,
+        idle_secs: i64,
         now: i64,
     ) -> Result<Vec<LoadedSession>, DbError> {
-        let cutoff = now - max_age_secs;
+        let absolute_cutoff = now - max_age_secs;
+        let idle_cutoff = now - idle_secs;
         let rows = self
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "DELETE FROM sessions WHERE created_at < ?1",
-                    params![cutoff],
+                    Self::PURGE_EXPIRED_SESSIONS_SQL,
+                    params![absolute_cutoff, idle_cutoff],
                 )?;
                 let mut stmt =
                     conn.prepare("SELECT token, id, user_id, created_at, last_seen FROM sessions")?;

@@ -1962,7 +1962,7 @@ class AccountPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Active Sessions</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days.</p>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days, or 48 hours after a device last contacted the server.</p>
         <div class="notice-banner info" id="sess-sso-note" role="status" style="display:none;margin-bottom:12px">
           <span class="icon">${NOTICE_ICONS.info}</span>
           <span class="msg">You're signed in via SSO, managed by your reverse proxy. Only password-login sessions are listed here; SSO access can't be revoked from noadd — sign out at your proxy instead.</span>

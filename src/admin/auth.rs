@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use argon2::password_hash::SaltString;
@@ -38,6 +38,28 @@ impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 /// Session expiry in seconds (7 days).
 pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 
+/// Idle (inactivity) expiry in seconds (48 hours). Deliberately the same order
+/// of magnitude as [`SESSION_MAX_AGE_SECS`] rather than OWASP's 15-30 minute
+/// suggestion: noadd is a self-hosted appliance whose operators expect a
+/// long-lived admin tab, and the requirement being satisfied here is that both
+/// an idle layer and an absolute layer exist — not a specific figure.
+///
+/// This window measures time since the last *request* this device made, not
+/// time since a human last looked at the screen — a conventional
+/// simplification for a server-side idle timeout, but narrower than it
+/// sounds in practice: the admin SPA polls `/api/filter/rebuild-status`
+/// every 2s and the dashboard every 10s while a tab is open, and both trips
+/// refresh `last_seen` via `validate_session`, so this layer only actually
+/// expires sessions whose browser tab was closed (or whose machine slept).
+///
+/// `last_seen` is only flushed to disk every 60s (see `flush_last_seen`), so a
+/// value reloaded after a restart can lag reality by up to that long. Against
+/// a 48h window that's a 0.03% error and requires no compensation. If a future
+/// maintainer lowers this constant to the same order of magnitude as the flush
+/// interval (e.g. below ~15 minutes), the flush interval must be shortened — or
+/// a `flush_last_seen` call added to the graceful shutdown path — first.
+pub const SESSION_IDLE_TIMEOUT_SECS: i64 = 2 * 86400;
+
 /// In-memory session metadata. Persisted to the `sessions` table on creation
 /// and revocation; `last_seen` is flushed periodically (see `flush_last_seen`).
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +89,30 @@ pub fn generate_token() -> String {
         .collect()
 }
 
+/// Session cookie name on a plain-HTTP deployment.
+pub const SESSION_COOKIE: &str = "session";
+
+/// Session cookie name when the cookie carries `Secure`. The `__Host-` prefix
+/// makes the browser itself enforce `Secure` + `Path=/` + no `Domain`, and
+/// blocks a subdomain from overwriting it (session fixation).
+pub const SESSION_COOKIE_HOST: &str = "__Host-session";
+
+/// The cookie name to *emit*. Conditional on `cookie_secure`: a browser
+/// silently rejects a `__Host-`-prefixed cookie that is not `Secure` and not
+/// delivered over HTTPS, so emitting it unconditionally would make login
+/// appear to succeed and then fail on the next request — on exactly the
+/// HTTP-only internal deployments `resolve_cookie_secure` exists to support.
+/// The reverse move (an HTTPS deployment dropped back to HTTP) is not covered
+/// by this fallback: a browser holding `__Host-session` will not send it over
+/// plain HTTP, so that operator has to log in again once.
+pub fn session_cookie_name(cookie_secure: bool) -> &'static str {
+    if cookie_secure {
+        SESSION_COOKIE_HOST
+    } else {
+        SESSION_COOKIE
+    }
+}
+
 /// Prefix identifying a noadd programmatic API key (useful for secret scanners).
 const API_KEY_PREFIX: &str = "noadd_";
 /// Random body length; 40 alphanumeric chars ≈ 238 bits of entropy.
@@ -83,6 +129,103 @@ pub fn hash_api_key(token: &str) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// Process-wide salt for [`session_log_id`]. Installed once at startup from the
+/// value persisted in `settings` (see [`load_or_create_session_log_salt`]) so
+/// log identifiers stay correlatable across restarts. If it is never
+/// installed (unit tests), a random salt is generated on first use — never an
+/// empty or fixed one, so an unsalted digest can never reach a log.
+static SESSION_LOG_SALT: OnceLock<[u8; 16]> = OnceLock::new();
+
+/// Settings key holding the hex-encoded audit-log salt.
+pub const SESSION_LOG_SALT_KEY: &str = "session_log_salt";
+
+/// Install the process-wide audit salt. The first call wins; later calls are
+/// no-ops other than a warning. Must run before any session event of any kind
+/// is logged: a `sid_hash` computed before this call would be salted with a
+/// temporary random value instead of the persisted one, and would then never
+/// correlate with anything logged afterwards under the real salt.
+pub fn init_session_log_salt(salt: [u8; 16]) {
+    if SESSION_LOG_SALT.set(salt).is_err() {
+        tracing::warn!(
+            "audit salt already initialised; session log ids will not correlate across restarts"
+        );
+    }
+}
+
+/// Read the persisted audit salt from `settings`, generating and storing one
+/// on first run.
+pub async fn load_or_create_session_log_salt(
+    db: &crate::db::Database,
+) -> Result<[u8; 16], crate::db::DbError> {
+    if let Some(hex) = db.get_setting(SESSION_LOG_SALT_KEY).await?
+        && let Some(salt) = decode_hex_salt(&hex)
+    {
+        return Ok(salt);
+    }
+    let mut salt = [0u8; 16];
+    salt.fill_with(rand::random);
+    use std::fmt::Write as _;
+    let hex = salt.iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    db.set_setting(SESSION_LOG_SALT_KEY, &hex).await?;
+    Ok(salt)
+}
+
+/// Decode a 32-character lower-hex string into 16 bytes, or `None` if it is
+/// the wrong length or contains non-hex characters — a corrupted or
+/// hand-edited setting falls back to generating a fresh salt rather than
+/// panicking.
+fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let s = std::str::from_utf8(chunk).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Salted, truncated `BLAKE2b` digest of a session token: a stable,
+/// non-reversible identifier safe to write to logs, so session events can be
+/// correlated without ever disclosing the token. Never log the token itself.
+///
+/// Deliberately not called for a successful session validation: that path
+/// runs on every request, so logging it there would drown the audit log
+/// without adding anything an audit needs — only a session's creation and
+/// destruction are lifecycle events worth recording. A successful API key use
+/// is likewise not logged per-call; it is already tracked via
+/// `api_keys.last_used_at`.
+pub fn session_log_id(token: &str) -> String {
+    let salt = SESSION_LOG_SALT.get_or_init(|| {
+        let mut s = [0u8; 16];
+        s.fill_with(rand::random);
+        s
+    });
+    session_log_id_with(salt, token)
+}
+
+/// [`session_log_id`]'s digest under an explicit salt, split out so the
+/// salting property itself is directly testable — a test driving the
+/// process-wide `OnceLock` can only ever exercise one salt value per process.
+fn session_log_id_with(salt: &[u8; 16], token: &str) -> String {
+    let mut hasher = Blake2b512::new();
+    hasher.update(salt);
+    hasher.update(token.as_bytes());
+    use std::fmt::Write as _;
+    // 16 hex chars (64 bits) is far more than enough to correlate the handful
+    // of sessions one appliance ever has, and keeps log lines readable.
+    hasher.finalize()[..8]
+        .iter()
+        .fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 /// Mint a fresh API key. Returns `(full_token, display_prefix, token_hash)`.
@@ -108,23 +251,71 @@ pub fn store_session(store: &SessionStore, token: &str, info: SessionInfo) {
 /// or `None` if missing/expired (expired entries are dropped).
 pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
     let now = now_secs();
-    let mut map = store.lock();
-    if let Some(info) = map.get_mut(token) {
-        if now - info.created_at < SESSION_MAX_AGE_SECS {
-            info.last_seen = now;
-            return Some(info.user_id);
+    // Reason for eviction, resolved under the lock and logged after it is
+    // dropped so no log formatting happens while the store is held.
+    let mut expired: Option<(i64, &'static str)> = None;
+    {
+        let mut map = store.lock();
+        if let Some(info) = map.get_mut(token) {
+            // Order matters: the idle check must read `last_seen` *before*
+            // this request refreshes it, otherwise it can never fire. A clock
+            // going backwards just makes these subtractions negative, which
+            // compares as "not expired" rather than misfiring.
+            let reason = if now - info.created_at >= SESSION_MAX_AGE_SECS {
+                Some("expired_absolute")
+            } else if now - info.last_seen >= SESSION_IDLE_TIMEOUT_SECS {
+                Some("expired_idle")
+            } else {
+                None
+            };
+            match reason {
+                None => {
+                    info.last_seen = now;
+                    return Some(info.user_id);
+                }
+                Some(r) => {
+                    expired = Some((info.session_id, r));
+                    map.remove(token);
+                }
+            }
         }
-        map.remove(token);
+    }
+    if let Some((session_id, reason)) = expired {
+        tracing::info!(
+            event = "session.destroyed",
+            reason,
+            session_id,
+            sid_hash = %session_log_id(token),
+            "session expired"
+        );
     }
     None
+}
+
+/// Drop in-memory sessions that have hit either timeout. Returns how many were
+/// evicted. `validate_session` expires lazily (only on access), so a session
+/// nobody touches stays in the map until this runs.
+pub fn prune_expired(store: &SessionStore) -> usize {
+    let now = now_secs();
+    let mut map = store.lock();
+    let before = map.len();
+    map.retain(|_, info| {
+        now - info.created_at < SESSION_MAX_AGE_SECS
+            && now - info.last_seen < SESSION_IDLE_TIMEOUT_SECS
+    });
+    before - map.len()
 }
 
 /// Revoke a single session token (logout this device only).
 ///
 /// Leaves every other session intact. Persistence to the database is the
-/// caller's responsibility (see `delete_session_by_token`).
-pub fn revoke_session(store: &SessionStore, token: &str) {
-    store.lock().remove(token);
+/// caller's responsibility (see `delete_session_by_token`). Returns the
+/// evicted session's info, or `None` if `token` did not name a live session —
+/// callers that log a `session.destroyed` event must gate on `Some` so an
+/// unvalidated/fabricated token (e.g. read from a client-supplied cookie)
+/// cannot inject a destruction event for a session that never existed.
+pub fn revoke_session(store: &SessionStore, token: &str) -> Option<SessionInfo> {
+    store.lock().remove(token)
 }
 
 /// Load persisted sessions from the `sessions` table into the store.
@@ -134,7 +325,9 @@ pub async fn load_sessions_from_db(
     db: &crate::db::Database,
 ) -> Result<(), crate::db::DbError> {
     let now = now_secs();
-    let loaded = db.load_sessions(SESSION_MAX_AGE_SECS, now).await?;
+    let loaded = db
+        .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await?;
     let mut map = store.lock();
     for s in loaded {
         map.insert(
@@ -163,15 +356,35 @@ pub async fn flush_last_seen(
     db.flush_sessions_last_seen(&entries).await
 }
 
+/// Sweep expired sessions from both the in-memory store and the `sessions`
+/// table. Returns `(evicted_from_memory, deleted_rows)`.
+///
+/// The caller must flush `last_seen` first (see `flush_last_seen`): the DB
+/// predicate reads `last_seen`, which lags memory by up to one flush interval.
+/// With a 48 h idle window a 60 s lag is immaterial, but flushing first keeps
+/// the two views from diverging on principle.
+pub async fn sweep_expired(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(usize, usize), crate::db::DbError> {
+    let evicted = prune_expired(store);
+    let now = now_secs();
+    let deleted = db
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await?;
+    Ok((evicted, deleted))
+}
+
 /// Revoke every session except `keep` (log out other devices, staying signed
 /// in on the current one). When `keep` is `None` — e.g. a forward-auth caller
 /// that holds no session cookie — every session is revoked, since none of them
-/// is the caller's own device.
+/// is the caller's own device. Returns the number of sessions revoked, for
+/// the caller's audit log.
 pub async fn revoke_other_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
     keep: Option<&str>,
-) -> Result<(), crate::db::DbError> {
+) -> Result<usize, crate::db::DbError> {
     if let Some(token) = keep {
         store.lock().retain(|t, _| t == token);
         db.delete_sessions_except(token).await
@@ -179,6 +392,33 @@ pub async fn revoke_other_sessions(
         store.lock().clear();
         db.delete_all_sessions().await
     }
+}
+
+/// Revoke every session owned by `user_id` except `keep` (the caller's own
+/// device). `keep = None` revokes all of that user's sessions. Unlike
+/// [`revoke_other_sessions`], other operators are unaffected — which is the
+/// required semantics after a password change, where only the account whose
+/// credential changed may be logged out.
+///
+/// Returns the number of sessions actually evicted from the in-memory store —
+/// the in-memory `retain` below is what actually terminates authentication,
+/// not the row count the DB delete returns, and the two can diverge in both
+/// directions: a lazily-expired session's row lingers in the DB until the
+/// periodic sweep (counted in rows, not evicted from memory), while a session
+/// already swept from the DB can still be live in memory (evicted here, not
+/// counted in rows). For "how many devices did this action sign out?", the
+/// in-memory count is the number an operator actually reads it as.
+pub async fn revoke_user_sessions_except(
+    store: &SessionStore,
+    db: &crate::db::Database,
+    user_id: i64,
+    keep: Option<&str>,
+) -> Result<usize, crate::db::DbError> {
+    db.delete_user_sessions_except(user_id, keep).await?;
+    let mut map = store.lock();
+    let before = map.len();
+    map.retain(|t, info| info.user_id != user_id || keep == Some(t.as_str()));
+    Ok(before - map.len())
 }
 
 /// Hash a password using Argon2 with a random salt.
@@ -309,5 +549,51 @@ mod tests {
         // passwordless account's login attempt into a server error instead
         // of an ordinary 401.
         assert!(verify_password("anything", NO_PASSWORD_SENTINEL).is_err());
+    }
+
+    #[test]
+    fn session_log_id_with_actually_depends_on_the_salt() {
+        // An unsalted `blake2b(token)` would pass every determinism/distinctness/
+        // shape assertion the integration test makes just as well as a salted
+        // one — the only thing that proves salting is happening at all is that
+        // two different salts over the *same* token produce different ids.
+        let token = "same-token-both-times";
+        let salt_a = [0x11u8; 16];
+        let salt_b = [0x22u8; 16];
+        let id_a = session_log_id_with(&salt_a, token);
+        let id_b = session_log_id_with(&salt_b, token);
+        assert_ne!(id_a, id_b);
+        for id in [&id_a, &id_b] {
+            assert_eq!(id.len(), 16);
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            );
+        }
+    }
+
+    #[test]
+    fn decode_hex_salt_round_trips_a_valid_hex_string() {
+        let salt: [u8; 16] = std::array::from_fn(|i| i as u8);
+        use std::fmt::Write as _;
+        let hex = salt.iter().fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+        assert_eq!(decode_hex_salt(&hex), Some(salt));
+    }
+
+    #[test]
+    fn decode_hex_salt_rejects_the_wrong_length() {
+        let too_short = "a".repeat(31);
+        let too_long = "a".repeat(33);
+        assert_eq!(decode_hex_salt(&too_short), None);
+        assert_eq!(decode_hex_salt(&too_long), None);
+    }
+
+    #[test]
+    fn decode_hex_salt_rejects_non_hex_characters() {
+        let non_hex = "g".repeat(32);
+        assert_eq!(decode_hex_salt(&non_hex), None);
     }
 }

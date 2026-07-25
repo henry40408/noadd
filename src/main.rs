@@ -12,7 +12,10 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
-use noadd::admin::auth::{RateLimiter, load_sessions_from_db, new_session_store};
+use noadd::admin::auth::{
+    RateLimiter, init_session_log_salt, load_or_create_session_log_salt, load_sessions_from_db,
+    new_session_store,
+};
 use noadd::cache::DnsCache;
 use noadd::config::CliArgs;
 use noadd::db::Database;
@@ -183,6 +186,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
+    // Must happen before any code path that can log a session event runs —
+    // not specifically because of `load_sessions_from_db` (its startup
+    // restore purges expired rows in SQL and emits nothing), but as a general
+    // rule: any `session.*` event logged before the salt is installed would
+    // carry a `sid_hash` computed under a temporary random salt instead of
+    // the persisted one, breaking correlation with everything logged
+    // before/after it.
+    let session_log_salt = load_or_create_session_log_salt(&db).await?;
+    init_session_log_salt(session_log_salt);
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
     let session_store_for_flush = session_store.clone();
@@ -217,18 +229,52 @@ async fn main() -> anyhow::Result<()> {
         forward_auth,
     });
 
-    // Periodically persist session last_seen so it survives restarts.
+    // Periodically persist session last_seen so it survives restarts, and
+    // sweep expired rows every tenth tick (~10 min) so they do not accumulate
+    // on a long-running instance — the startup restore is otherwise the only
+    // thing that ever deletes them.
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         tick.tick().await; // skip immediate fire
+        let mut ticks: u32 = 0;
         loop {
             tick.tick().await;
             let _ =
                 noadd::admin::auth::flush_last_seen(&session_store_for_flush, &db_for_flush).await;
+            ticks = (ticks + 1) % 10;
+            if ticks == 0 {
+                match noadd::admin::auth::sweep_expired(&session_store_for_flush, &db_for_flush)
+                    .await
+                {
+                    Ok((evicted, deleted)) if evicted > 0 || deleted > 0 => tracing::info!(
+                        event = "session.destroyed",
+                        reason = "swept",
+                        evicted,
+                        deleted,
+                        "swept expired sessions"
+                    ),
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!(%err, "session sweep failed; will retry next cycle"),
+                }
+            }
         }
     });
 
     let app = doh_routes.merge(admin_routes);
+
+    // HSTS covers the whole listener (admin UI *and* DoH): both are only
+    // reachable over the same scheme, and a DoH client that gets pinned to
+    // https:// is fine — DoH is https-only by definition.
+    let app = if noadd::config::resolve_hsts(args.hsts, tls_enabled) {
+        let value = noadd::headers::hsts_value(args.hsts_max_age);
+        tracing::info!(max_age = args.hsts_max_age, "HSTS enabled");
+        app.layer(axum::middleware::from_fn_with_state(
+            value,
+            noadd::headers::hsts,
+        ))
+    } else {
+        app
+    };
 
     let http_addr: SocketAddr = args.http_addr.parse()?;
 

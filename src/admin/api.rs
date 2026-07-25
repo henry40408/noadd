@@ -25,7 +25,7 @@ use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, has_no_password, hash_api_key,
-    hash_password, store_session, validate_session, verify_password,
+    hash_password, session_log_id, store_session, validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -225,6 +225,7 @@ pub fn admin_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::admin::csrf::csrf_origin_guard,
         ))
+        .layer(axum::middleware::from_fn(crate::headers::no_store))
 }
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
@@ -353,18 +354,114 @@ fn client_ip(
     extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
+/// Bound on the client-controlled `User-Agent` / API-key-prefix text written
+/// to an audit log line, so a hostile client cannot inflate log volume.
+const LOG_SAFE_MAX: usize = 256;
+
+/// Truncate a client-controlled string to a bounded, UTF-8-safe prefix before
+/// it reaches a log line, cutting on a `char` boundary so multi-byte UTF-8 is
+/// never split mid-sequence.
+fn log_safe(value: &str, max: usize) -> &str {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// The `User-Agent` value to log, distinguishing an absent header
+/// (`<none>`) from one present but not representable as ASCII
+/// (`<non-ascii>`). Collapsing both into a single `Option<&str>` — as
+/// `headers.get(...).and_then(|v| v.to_str().ok())` does — loses that
+/// distinction, so a plain request that simply sent no `User-Agent` at all
+/// would otherwise be logged with the false claim that it sent a garbled one.
+fn user_agent_log_value(headers: &HeaderMap) -> &str {
+    match headers.get(axum::http::header::USER_AGENT) {
+        None => "<none>",
+        Some(v) => v.to_str().unwrap_or("<non-ascii>"),
+    }
+}
+
 // --- Auth helper ---
 
+/// The session cookie names to try, innermost-first. Both are accepted so a
+/// deployment that gains or loses `Secure` mid-session keeps working; the
+/// caller must try them **in order and keep the first that validates**,
+/// not merely the first that is present. A browser can hold both at once —
+/// a `__Host-` cookie set while noadd terminated TLS survives a move to a
+/// TLS-terminating proxy, where the origin is still https:// so the browser
+/// keeps sending it — and a stale one would otherwise shadow the live cookie
+/// on every request with no way to clear it.
+fn session_cookie_candidates(jar: &CookieJar) -> impl Iterator<Item = String> {
+    [
+        crate::admin::auth::SESSION_COOKIE_HOST,
+        crate::admin::auth::SESSION_COOKIE,
+    ]
+    .into_iter()
+    .filter_map(|name| jar.get(name).map(|c| c.value().to_string()))
+}
+
+/// Expire one cookie per accepted session-cookie name **present in the
+/// jar**, not just the positionally-first. A browser can hold both accepted
+/// names at once (see [`session_cookie_candidates`]) — the very case this
+/// whole mechanism exists for — and clearing only one leaves the other
+/// sitting in the browser with no later request able to clear it, since the
+/// removal is driven by what *this* request's cookie header contains.
+///
+/// A `__Host-`-prefixed `Set-Cookie` is silently ignored by the browser
+/// unless it also carries `Secure` (RFC 6265bis §5.5: a `__Host-` cookie can
+/// only be overwritten — or cleared — by a cookie that itself satisfies the
+/// prefix's conditions), so the `__Host-session` removal carries `Secure`
+/// even when the plain `session` removal alongside it does not.
+fn clear_session_cookies(jar: CookieJar) -> CookieJar {
+    let present: Vec<&str> = [
+        crate::admin::auth::SESSION_COOKIE_HOST,
+        crate::admin::auth::SESSION_COOKIE,
+    ]
+    .into_iter()
+    .filter(|name| jar.get(name).is_some())
+    .collect();
+    present
+        .into_iter()
+        .map(|name| {
+            Cookie::build((name, ""))
+                .path("/")
+                .secure(name == crate::admin::auth::SESSION_COOKIE_HOST)
+                .build()
+        })
+        .fold(jar, CookieJar::remove)
+}
+
+/// The session token this request is actually authenticated by, for handlers
+/// that act on "my current session" rather than merely reading a cookie.
+///
+/// Naively taking the positionally-first present cookie answers "which
+/// cookie is present", which is a different question: a browser can carry
+/// both accepted names at once (see [`session_cookie_candidates`]), and
+/// acting on the wrong one means logout revoking nothing while reporting
+/// success, or revoke-others treating the caller's own session as somebody
+/// else's. Membership in the store is checked rather than `validate_session`
+/// because the authenticating token
+/// was already validated for this request by `AuthedUser`, and a second
+/// validation would refresh `last_seen` and evict entries as a side effect.
+fn live_session_token(state: &AppState, jar: &CookieJar) -> Option<String> {
+    let sessions = state.sessions.lock();
+    session_cookie_candidates(jar).find(|token| sessions.contains_key(token))
+}
+
 /// Returns `(user_id, token)` for the current authenticated session, or 401.
+///
+/// Walks [`session_cookie_candidates`] in order and keeps the first token
+/// that actually validates, rather than the positionally-first cookie
+/// present — see that function's doc comment for why a stale `__Host-`
+/// cookie must not be allowed to shadow a live `session` cookie.
 fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
-    let token = jar
-        .get("session")
-        .map(|c| c.value().to_string())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    match validate_session(&state.sessions, &token) {
-        Some(user_id) => Ok((user_id, token)),
-        None => Err(StatusCode::UNAUTHORIZED),
-    }
+    session_cookie_candidates(jar)
+        .find_map(|token| validate_session(&state.sessions, &token).map(|user_id| (user_id, token)))
+        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 /// Extract a bearer token from the `Authorization` header, if present.
@@ -394,10 +491,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Session cookie (browser path).
+        // 1. Session cookie (browser path). Walk both candidate names,
+        // in-order, and keep the first that validates — see
+        // `session_cookie_candidates` for why a stale `__Host-` cookie must
+        // not be allowed to shadow a live `session` cookie.
         let jar = CookieJar::from_headers(&parts.headers);
-        if let Some(cookie) = jar.get("session")
-            && let Some(user_id) = validate_session(&state.sessions, cookie.value())
+        if let Some(user_id) = session_cookie_candidates(&jar)
+            .find_map(|token| validate_session(&state.sessions, &token))
         {
             return Ok(AuthedUser {
                 user_id,
@@ -405,6 +505,18 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
             });
         }
         // 2. Bearer API key (programmatic path).
+        //
+        // Emission of the `auth.failed` warning is deferred to the terminal
+        // rejection below rather than fired inline here: the rule is to warn
+        // whenever the request as a whole does not end up authenticated, not
+        // whenever this one step fails. A bearer token that fails against the
+        // API-key table may still go on to authenticate via step 3's
+        // forward-auth header, and logging inline would emit a spurious
+        // `auth.failed` on every such request even though authentication
+        // ultimately succeeds. `failed_key_prefix` is only populated for a
+        // token that actually looks like a noadd key (`noadd_` prefix), so it
+        // is never `Some` on the request's eventual success path.
+        let mut failed_key_prefix: Option<String> = None;
         if let Some(token) = bearer_token(&parts.headers) {
             let hash = hash_api_key(&token);
             let now = crate::now_unix();
@@ -413,6 +525,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                     user_id,
                     via_forward_auth: false,
                 });
+            }
+            // Not logged via `hash_api_key`'s output (that would still allow
+            // reconstructing which key was tried offline against a known
+            // set); the prefix is the same non-secret identifier already
+            // shown to the operator when the key was created.
+            if token.starts_with("noadd_") {
+                failed_key_prefix = Some(log_safe(&token, 10).to_string());
             }
         }
         // 3. Reverse-proxy forward auth: a username header injected by a proxy
@@ -424,20 +543,56 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ci| ci.0.ip());
             if let Some(username) = cfg.resolve_username(peer, &parts.headers) {
-                return resolve_forward_auth_user(state, &username)
-                    .await
-                    .map(|user_id| AuthedUser {
+                return match resolve_forward_auth_user(state, &username).await {
+                    Ok(user_id) => Ok(AuthedUser {
                         user_id,
                         via_forward_auth: true,
-                    })
-                    .map_err(|err| {
+                    }),
+                    Err(err) => {
                         tracing::error!(%err, "forward-auth operator lookup failed");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    });
+                        // This exit bypasses the shared tail below, so the
+                        // pending `auth.failed` warning must be emitted here
+                        // too — otherwise a bad `noadd_…` key alongside a
+                        // forward-auth header whose operator lookup hits a DB
+                        // error drops the failed key attempt from the audit
+                        // trail entirely.
+                        emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                };
             }
         }
+        emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Emit the deferred `auth.failed` warning for a bearer token that looked
+/// like a noadd API key (`failed_key_prefix`, see the comment at its
+/// declaration in `from_request_parts`) but did not validate — a no-op when
+/// `prefix` is `None`. Factored out so every non-success exit of
+/// `from_request_parts` emits through the same call rather than each exit
+/// needing its own copy of the lookup-and-log logic.
+fn emit_failed_key_warning(
+    parts: &axum::http::request::Parts,
+    state: &AppState,
+    prefix: Option<&str>,
+) {
+    let Some(prefix) = prefix else {
+        return;
+    };
+    let ip = extract_client_ip(
+        parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+        &parts.headers,
+        &state.trusted_proxies,
+    );
+    tracing::warn!(
+        event = "auth.failed",
+        method = "api_key",
+        %ip,
+        %prefix,
+        "api key authentication failed"
+    );
 }
 
 /// Map a forward-auth username to an operator id, provisioning the account on
@@ -457,7 +612,11 @@ async fn resolve_forward_auth_user(
         .await
     {
         Ok(id) => {
-            tracing::info!(%username, "provisioned operator from forward-auth header");
+            tracing::info!(
+                event = "forward_auth.provisioned",
+                %username,
+                "provisioned operator from forward-auth header"
+            );
             Ok(id)
         }
         Err(e) if e.is_unique_violation() => match state.db.get_user_auth(username).await? {
@@ -489,19 +648,46 @@ async fn login(
     Json(body): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
     if !state.rate_limiter.check(ip) {
-        tracing::warn!(%ip, "login rate limited");
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "rate_limited",
+            %ip,
+            "login rate limited"
+        );
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     state.rate_limiter.record(ip);
 
+    // Every 401 out of this handler is an authentication failure worth
+    // auditing, not just the wrong-password one: an unknown username is the
+    // ordinary shape of a brute-force attempt, and a password login against a
+    // forward-auth account is the same signal. The event deliberately carries
+    // no username — the response does not distinguish these cases either.
+    let log_failed = || {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            %ip,
+            user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
+            "login failed"
+        );
+    };
+
     // Generic 401 whether the username is unknown or the password is wrong.
-    let auth = state
+    let Some(auth) = state
         .db
         .get_user_auth(body.username.trim())
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    else {
+        log_failed();
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
     // Forward-auth-provisioned accounts store a sentinel in place of a hash and
     // can never authenticate with a password — same generic 401 as any other
@@ -509,21 +695,19 @@ async fn login(
     // fail to parse the sentinel and surface it as a 500, leaking which accounts
     // are forward-auth-provisioned.
     if has_no_password(&auth.password_hash) {
+        log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
 
     let valid = verify_password(&body.password, &auth.password_hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
-        tracing::warn!("login failed: invalid credentials");
+        log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
 
     let now = crate::now_unix();
     let token = generate_token();
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
     let session_id = state
         .db
         .insert_session(&token, auth.id, now, now, Some(&ip.to_string()), user_agent)
@@ -539,23 +723,34 @@ async fn login(
             last_seen: now,
         },
     );
-    tracing::info!(user_id = auth.id, "login successful");
+    tracing::info!(
+        event = "session.created",
+        user_id = auth.id,
+        session_id,
+        sid_hash = %session_log_id(&token),
+        %ip,
+        user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
+        "login successful"
+    );
 
-    let cookie = Cookie::build(("session", token))
-        .path("/")
-        .http_only(true)
-        .secure(state.cookie_secure)
-        // Lax rather than Strict: Lax already withholds the cookie from every
-        // cross-site POST / PUT / DELETE, which covers every mutation this API
-        // exposes, and no GET handler writes. The only thing Strict would
-        // additionally block — a cross-site top-level GET navigation carrying
-        // the cookie — is not an attack vector here, so Strict buys no extra
-        // protection, only logged-out deep links.
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .max_age(time::Duration::seconds(
-            crate::admin::auth::SESSION_MAX_AGE_SECS,
-        ))
-        .build();
+    let cookie = Cookie::build((
+        crate::admin::auth::session_cookie_name(state.cookie_secure),
+        token,
+    ))
+    .path("/")
+    .http_only(true)
+    .secure(state.cookie_secure)
+    // Lax rather than Strict: Lax already withholds the cookie from every
+    // cross-site POST / PUT / DELETE, which covers every mutation this API
+    // exposes, and no GET handler writes. The only thing Strict would
+    // additionally block — a cross-site top-level GET navigation carrying
+    // the cookie — is not an attack vector here, so Strict buys no extra
+    // protection, only logged-out deep links.
+    .same_site(axum_extra::extract::cookie::SameSite::Lax)
+    .max_age(time::Duration::seconds(
+        crate::admin::auth::SESSION_MAX_AGE_SECS,
+    ))
+    .build();
 
     Ok((jar.add(cookie), Json(LoginResponse { success: true })))
 }
@@ -656,35 +851,90 @@ async fn setup(
 /// revoked (none is their own device).
 async fn revoke_others(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, StatusCode> {
-    let current_token = jar.get("session").map(|c| c.value().to_string());
-    crate::admin::auth::revoke_other_sessions(&state.sessions, &state.db, current_token.as_deref())
-        .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+    let current_token = live_session_token(&state, &jar);
+    let revoked_rows = crate::admin::auth::revoke_other_sessions(
+        &state.sessions,
+        &state.db,
+        current_token.as_deref(),
+    )
+    .await
+    .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // `revoke_other_sessions` deletes globally (every operator's sessions
+    // except `current_token`), so `scope` and the `_rows` suffix are load
+    // bearing: without them this reads as "this operator's other sessions",
+    // and the count is DB rows, which can exceed the number of live sessions
+    // actually taken down (a session `validate_session` already evicted from
+    // memory keeps its row until the periodic sweep).
+    tracing::info!(
+        event = "session.destroyed",
+        reason = "revoked_others",
+        scope = "all_operators",
+        user_id = auth.user_id,
+        %ip,
+        revoked_rows,
+        "revoked other sessions across all operators"
+    );
     Ok(StatusCode::OK)
 }
 
-/// Log out the current session: revoke this token, delete from DB, and expire
-/// the client's session cookie. Other devices' sessions are untouched. Also
-/// reports whether the caller authenticated via forward auth and, if so,
-/// hands back the configured proxy/SSO logout URL so the SPA can complete the
-/// handoff — a forward-auth caller holds no session for us to revoke, so that
-/// redirect is the only way for them to actually end their session.
+/// Log out the current session: revoke every session named by a cookie on
+/// this request, delete each from the DB, and expire the client's session
+/// cookies. Other devices' sessions are untouched. Also reports whether the
+/// caller authenticated via forward auth and, if so, hands back the
+/// configured proxy/SSO logout URL so the SPA can complete the handoff — a
+/// forward-auth caller holds no session for us to revoke, so that redirect
+/// is the only way for them to actually end their session.
 async fn logout(
     State(state): State<AppState>,
     auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
-) -> Result<(CookieJar, Json<LogoutResponse>), StatusCode> {
-    let jar = if let Some(c) = jar.get("session") {
-        let token = c.value().to_string();
-        crate::admin::auth::revoke_session(&state.sessions, &token);
-        let _ = state.db.delete_session_by_token(&token).await;
-        jar.remove(Cookie::build(("session", "")).path("/").build())
-    } else {
-        jar
-    };
+) -> Result<
+    (
+        CookieJar,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<LogoutResponse>,
+    ),
+    StatusCode,
+> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+    // Revoke *every* token named by a cookie on this request, not just the
+    // one that authenticated it. A browser can hold both accepted cookie
+    // names at once, each naming a live session (log in over plain HTTP,
+    // then again once the operator turns on TLS / `--cookie-secure`), and
+    // `clear_session_cookies` below clears both regardless — so revoking
+    // only one would expire a cookie whose session stays live server-side,
+    // orphaned and replayable, for up to the idle/absolute window.
+    let candidates: Vec<String> = session_cookie_candidates(&jar).collect();
+    for token in &candidates {
+        let revoked = crate::admin::auth::revoke_session(&state.sessions, token);
+        let _ = state.db.delete_session_by_token(token).await;
+        // Only log a destruction event when a session actually existed under
+        // this token. The cookie value is unvalidated client input and
+        // `AuthedUser` may have resolved via API key or forward-auth, so a
+        // stale or fabricated cookie must not be able to inject an arbitrary
+        // `session.destroyed` event — nor be attributed to `auth.user_id`,
+        // which may not even be the owner of whatever token was sent.
+        if let Some(info) = revoked {
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "logout",
+                user_id = info.user_id,
+                session_id = info.session_id,
+                sid_hash = %session_log_id(token),
+                %ip,
+                "logged out"
+            );
+        }
+    }
+    let jar = clear_session_cookies(jar);
     let redirect_to = if auth.via_forward_auth {
         state
             .forward_auth
@@ -695,6 +945,19 @@ async fn logout(
     };
     Ok((
         jar,
+        // Ask the browser to drop this origin's cookies, cached responses and
+        // storage. `Set-Cookie` above already expires our own cookie; this is
+        // the belt-and-braces version that also evicts cached API responses
+        // and any storage a future UI revision might add.
+        //
+        // Deliberately *not* including "executionContexts": that directive
+        // reloads/closes the browsing context, which would kill the SPA before
+        // it can read `redirect_to` from this very response and hand off to the
+        // forward-auth proxy's logout URL.
+        [(
+            axum::http::HeaderName::from_static("clear-site-data"),
+            r#""cache", "cookies", "storage""#,
+        )],
         Json(LogoutResponse {
             redirect_to,
             via_forward_auth: auth.via_forward_auth,
@@ -777,9 +1040,12 @@ async fn create_user_handler(
 
 async fn delete_user_handler(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     // The last-operator guard and the delete run atomically inside the DB layer,
     // so two concurrent deletes can never drop the instance to zero operators.
     match state
@@ -804,6 +1070,19 @@ async fn delete_user_handler(
             for t in &tokens {
                 crate::admin::auth::revoke_session(&state.sessions, t);
             }
+            // `user_id` is the acting operator, matching every other event on
+            // this branch; the deleted operator is `target_user_id`. Logging
+            // `id` under `user_id` here would name the wrong user and discard
+            // the only thing that makes this event auditable — who did it.
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "user_deleted",
+                user_id = auth.user_id,
+                target_user_id = id,
+                %ip,
+                revoked = tokens.len(),
+                "revoked sessions for deleted user"
+            );
             Ok(StatusCode::NO_CONTENT)
         }
     }
@@ -815,12 +1094,53 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
+/// Change the caller's own password and invalidate that operator's *other*
+/// sessions (OWASP: invalidate other sessions on a privilege-level change).
+///
+/// This only invalidates; it does not renew. The caller keeps the same
+/// session token after the change — nothing here mints a fresh one, so the
+/// "renew the session ID" half of the cited OWASP guidance is a deliberate
+/// not-yet, not something already covered: it is the half that defends
+/// against a token that leaked through a channel not requiring ongoing
+/// browser access (a proxy log, a shared terminal history), which is
+/// unaffected by revoking every *other* session.
+///
+/// API keys are **not** touched by this endpoint. `revoke_user_sessions_except`
+/// only deletes rows from `sessions`; `POST /api/api-keys` is gated by
+/// `AuthedUser` alone and `validate_api_key` never consults the password
+/// hash. So an attacker who already holds a stolen session cookie can mint a
+/// long-lived `noadd_`-prefixed key before the victim reacts, and that key
+/// keeps working after this call returns 204. An operator responding to a
+/// suspected compromise must revoke their API keys separately — changing
+/// the password alone does not lock out an attacker holding a session
+/// cookie or a minted key.
+///
+/// This endpoint is cookie-only today, so `keep` passed to
+/// [`revoke_user_sessions_except`] is always `Some` — the caller's own device
+/// stays signed in. If this ever grows an `AuthedUser`-based path (API key /
+/// forward-auth callers changing their own password), `keep` must become
+/// `None` there and still go through `revoke_user_sessions_except`, never
+/// `revoke_other_sessions` — the latter is global across all operators and
+/// would log out unrelated accounts. Similarly, an admin-resets-another-user
+/// password endpoint (none exists yet) must call
+/// `revoke_user_sessions_except(store, db, target_user_id, None)` so the
+/// reset account keeps no session at all.
+///
+/// If revocation fails after the password write has already committed, the
+/// failure is logged via `tracing::error!` but the response still succeeds
+/// with 204: the password change is done and cannot be un-done, so returning
+/// 500 here would only mislead the caller into retrying. Worst case, other
+/// sessions survive until they expire naturally — the same as today's
+/// behavior before this fix.
 async fn change_own_password(
     State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (user_id, _token) = current_session(&state, &jar)?;
+    let (user_id, token) = current_session(&state, &jar)?;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -839,6 +1159,18 @@ async fn change_own_password(
     let ok = verify_password(&body.current_password, &hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
+        // This is the only password-verification path outside `login`, and
+        // exactly the one an attacker holding a stolen session cookie uses to
+        // try to take the account over permanently — a rejected attempt here
+        // must not be silent the way it is today.
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "change_password",
+            user_id,
+            %ip,
+            "current password rejected"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
     let new_hash =
@@ -848,6 +1180,27 @@ async fn change_own_password(
         .update_user_password(user_id, &new_hash)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match crate::admin::auth::revoke_user_sessions_except(
+        &state.sessions,
+        &state.db,
+        user_id,
+        Some(&token),
+    )
+    .await
+    {
+        Ok(revoked) => tracing::info!(
+            event = "session.destroyed",
+            reason = "password_change",
+            user_id,
+            revoked,
+            "revoked other sessions after password change"
+        ),
+        Err(err) => tracing::error!(
+            %err,
+            user_id,
+            "password changed but revoking other sessions failed"
+        ),
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -871,7 +1224,7 @@ async fn list_sessions(
     // The session cookie is only used to flag which listed session is the
     // caller's own device; a forward-auth / API-key caller simply has none, so
     // no row is marked current rather than the whole request being rejected.
-    let current_token = jar.get("session").map(|c| c.value().to_string());
+    let current_token = live_session_token(&state, &jar);
     let rows = state
         .db
         .list_sessions()
@@ -899,14 +1252,20 @@ async fn list_sessions(
 
 async fn revoke_session_by_id(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(id): Path<i64>,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
     // Authorized via `AuthedUser`; the cookie only tells us whether the revoked
     // session is the caller's own device (so we clear its cookie). A forward-auth
     // / API-key caller has none and just revokes the target session.
-    let current_token = jar.get("session").map(|c| c.value().to_string());
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+    // Captured before `revoke_session` below evicts the target from the
+    // store: if the caller's own session is the one being revoked, this must
+    // still see it as live to correctly clear its cookie.
+    let current_token = live_session_token(&state, &jar);
     let removed = state
         .db
         .delete_session_by_id(id)
@@ -915,9 +1274,18 @@ async fn revoke_session_by_id(
     match removed {
         Some(token) => {
             crate::admin::auth::revoke_session(&state.sessions, &token);
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "revoked_by_id",
+                user_id = auth.user_id,
+                session_id = id,
+                sid_hash = %session_log_id(&token),
+                %ip,
+                "revoked session by id"
+            );
             if current_token.as_deref() == Some(token.as_str()) {
-                let removal = Cookie::build(("session", "")).path("/").build();
-                return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
+                let jar = clear_session_cookies(jar);
+                return Ok((jar, StatusCode::NO_CONTENT));
             }
             Ok((jar, StatusCode::NO_CONTENT))
         }
@@ -1776,6 +2144,14 @@ async fn create_api_key(
         .insert_api_key(auth.user_id, &name, &hash, &prefix, now, body.expires_at)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::info!(
+        event = "apikey.created",
+        user_id = auth.user_id,
+        key_id = id,
+        %prefix,
+        expires_at = body.expires_at,
+        "api key created"
+    );
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
@@ -1812,6 +2188,12 @@ async fn delete_api_key(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if deleted {
+        tracing::info!(
+            event = "apikey.destroyed",
+            user_id = auth.user_id,
+            key_id = id,
+            "api key deleted"
+        );
         Ok(StatusCode::OK)
     } else {
         Err(StatusCode::NOT_FOUND)

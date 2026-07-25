@@ -1,17 +1,33 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, revoke_session,
-    store_session, validate_session, verify_password,
+    RateLimiter, SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, generate_token,
+    hash_password, new_session_store, prune_expired, revoke_session, session_log_id, store_session,
+    sweep_expired, validate_session, verify_password,
 };
+use noadd::db::Database;
+use tempfile::tempdir;
 
-fn info(user_id: i64) -> SessionInfo {
+async fn test_db() -> Database {
+    let dir = tempdir().unwrap();
+    // Persist the tempdir (no Drop cleanup) so it lives for the duration of the test.
+    let path = dir.keep().join("test.db");
+    let path_str = path.to_str().unwrap().to_string();
+    Database::open(&path_str).await.unwrap()
+}
+
+fn info_at(user_id: i64, created_at: i64, last_seen: i64) -> SessionInfo {
     SessionInfo {
         session_id: 1,
         user_id,
-        created_at: noadd::now_unix(),
-        last_seen: noadd::now_unix(),
+        created_at,
+        last_seen,
     }
+}
+
+fn info(user_id: i64) -> SessionInfo {
+    let now = noadd::now_unix();
+    info_at(user_id, now, now)
 }
 
 #[test]
@@ -42,6 +58,28 @@ fn test_session_create_and_validate() {
 }
 
 #[test]
+fn session_log_id_is_stable_and_distinct() {
+    let token = generate_token();
+    let other_token = generate_token();
+
+    let id = session_log_id(&token);
+    // Deterministic for the same token...
+    assert_eq!(id, session_log_id(&token));
+    // ...but distinct across tokens.
+    assert_ne!(id, session_log_id(&other_token));
+
+    // 16 hex chars (64 bits).
+    assert_eq!(id.len(), 16);
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    // Whether salting actually happens (as opposed to, say, an unsalted
+    // `blake2b(token)[..8]`, which would pass every assertion above just as
+    // well) is exercised directly against `session_log_id_with` in
+    // `src/admin/auth.rs`'s unit tests, using two explicit salts over the
+    // same token — that property is not observable through this process-wide
+    // `session_log_id`, which only ever runs under one salt per test binary.
+}
+
+#[test]
 fn test_revoke_session_removes_only_that_token() {
     let store = new_session_store();
     let t1 = generate_token();
@@ -51,6 +89,132 @@ fn test_revoke_session_removes_only_that_token() {
     revoke_session(&store, &t1);
     assert_eq!(validate_session(&store, &t1), None);
     assert_eq!(validate_session(&store, &t2), Some(2));
+}
+
+#[test]
+fn session_expires_after_idle_timeout() {
+    let store = new_session_store();
+    let token = generate_token();
+    let now = noadd::now_unix();
+    // Absolute timeout not reached (created_at = now), but idle window is.
+    store_session(
+        &store,
+        &token,
+        info_at(1, now, now - SESSION_IDLE_TIMEOUT_SECS - 1),
+    );
+    assert_eq!(validate_session(&store, &token), None);
+}
+
+#[test]
+fn idle_session_is_removed_from_the_store() {
+    let store = new_session_store();
+    let token = generate_token();
+    let now = noadd::now_unix();
+    store_session(
+        &store,
+        &token,
+        info_at(1, now, now - SESSION_IDLE_TIMEOUT_SECS - 1),
+    );
+    assert_eq!(validate_session(&store, &token), None);
+    // Second call sees no entry at all (already evicted), not just "still idle".
+    assert_eq!(validate_session(&store, &token), None);
+    assert!(store.lock().is_empty());
+}
+
+#[test]
+fn active_session_survives_past_the_idle_window() {
+    let store = new_session_store();
+    let token = generate_token();
+    let now = noadd::now_unix();
+    let stale_last_seen = now - SESSION_IDLE_TIMEOUT_SECS + 600;
+    store_session(&store, &token, info_at(1, now, stale_last_seen));
+    assert_eq!(validate_session(&store, &token), Some(1));
+    // The 600s of headroom before the idle window means a second call would
+    // pass regardless of whether the first refreshed `last_seen` — that
+    // wouldn't distinguish "refresh happened" from "refresh is a no-op", so
+    // assert the refresh directly: `last_seen` must have moved forward from
+    // the fixture's stale value to (at least) `now`.
+    let refreshed_last_seen = store.lock().get(&token).unwrap().last_seen;
+    assert!(refreshed_last_seen > stale_last_seen);
+    assert!(refreshed_last_seen >= now);
+    // With the refresh confirmed, a second call re-evaluated from "now" still passes.
+    assert_eq!(validate_session(&store, &token), Some(1));
+}
+
+#[test]
+fn session_expires_after_absolute_timeout_even_when_active() {
+    let store = new_session_store();
+    let token = generate_token();
+    let now = noadd::now_unix();
+    // last_seen is fresh (idle check would pass), but created_at is past the
+    // absolute limit — proves the two layers are independent.
+    store_session(
+        &store,
+        &token,
+        info_at(1, now - SESSION_MAX_AGE_SECS - 1, now),
+    );
+    assert_eq!(validate_session(&store, &token), None);
+}
+
+#[test]
+fn prune_expired_evicts_only_expired_entries() {
+    let store = new_session_store();
+    let now = noadd::now_unix();
+    store_session(&store, &generate_token(), info_at(1, now, now)); // active
+    store_session(
+        &store,
+        &generate_token(),
+        info_at(2, now, now - SESSION_IDLE_TIMEOUT_SECS - 1), // idle-expired
+    );
+    store_session(
+        &store,
+        &generate_token(),
+        info_at(3, now - SESSION_MAX_AGE_SECS - 1, now), // absolute-expired
+    );
+    assert_eq!(prune_expired(&store), 2);
+    assert_eq!(store.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn sweep_expired_reports_both_counts() {
+    let db = test_db().await;
+    let uid = db.create_user("judy", "h", 0).await.unwrap();
+    let now = noadd::now_unix();
+
+    // Persist matching rows in the DB so purge_expired_sessions (which reads
+    // last_seen from disk) agrees with what the in-memory store holds.
+    db.insert_session("active", uid, now - 1_000, now, None, None)
+        .await
+        .unwrap();
+    db.insert_session(
+        "idle",
+        uid,
+        now - 1_000,
+        now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let store = new_session_store();
+    store_session(&store, "active", info_at(uid, now - 1_000, now));
+    store_session(
+        &store,
+        "idle",
+        info_at(uid, now - 1_000, now - SESSION_IDLE_TIMEOUT_SECS - 1),
+    );
+
+    let (evicted, deleted) = sweep_expired(&store, &db).await.unwrap();
+    assert_eq!(evicted, 1);
+    assert_eq!(deleted, 1);
+
+    assert_eq!(validate_session(&store, "active"), Some(uid));
+    assert_eq!(validate_session(&store, "idle"), None);
+
+    let remaining = db.list_sessions().await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].token, "active");
 }
 
 #[test]

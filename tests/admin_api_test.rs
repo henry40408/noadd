@@ -9,7 +9,8 @@ use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, new_session_store,
+    store_session,
 };
 use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use noadd::db::{Database, QueryLogEntry};
@@ -52,11 +53,15 @@ async fn build_app(
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
 ) {
-    build_app_opts(registry_url, set_password, false).await
+    let (router, token, cache, log_events, _db, _sessions) =
+        build_app_opts(registry_url, set_password, false).await;
+    (router, token, cache, log_events)
 }
 
 /// `build_app` with control over `AppState::cookie_secure`, for the tests that
-/// assert the `Secure` attribute on the session cookie.
+/// assert the `Secure` attribute on the session cookie. Also hands back the
+/// `Database` and `SessionStore` backing the router, so tests can seed extra
+/// sessions directly into the same state the app queries.
 async fn build_app_opts(
     registry_url: &str,
     set_password: bool,
@@ -66,6 +71,8 @@ async fn build_app_opts(
     String,
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
+    Database,
+    SessionStore,
 ) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
@@ -128,8 +135,8 @@ async fn build_app_opts(
     let log_events = tokio::sync::broadcast::channel(256).0;
 
     let router = admin_router(AppState {
-        db,
-        sessions,
+        db: db.clone(),
+        sessions: sessions.clone(),
         filter,
         cache: cache.clone(),
         rate_limiter,
@@ -148,7 +155,7 @@ async fn build_app_opts(
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
     });
-    (router, token, cache, log_events)
+    (router, token, cache, log_events, db, sessions)
 }
 
 #[tokio::test]
@@ -571,7 +578,7 @@ async fn login_set_cookie(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn test_login_cookie_secure_when_enabled() {
-    let (app, _token, _cache, _events) =
+    let (app, _token, _cache, _events, _db, _sessions) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let cookie = login_set_cookie(app).await;
     assert!(
@@ -581,18 +588,356 @@ async fn test_login_cookie_secure_when_enabled() {
     // The other attributes must survive alongside it.
     assert!(cookie.contains("HttpOnly"), "{cookie}");
     assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+    // `Secure` implies the `__Host-` prefix, which gets the browser to also
+    // enforce `Path=/` and no `Domain` and blocks a subdomain override.
+    assert!(
+        cookie.starts_with("__Host-session="),
+        "cookie_secure must emit the __Host- prefixed name: {cookie}"
+    );
 }
 
 #[tokio::test]
 async fn test_login_cookie_not_secure_when_disabled() {
     // TLS terminates upstream (or not at all): a Secure cookie would be
     // dropped by the browser over plain HTTP and lock the operator out.
-    let (app, _token, _cache, _events) =
+    let (app, _token, _cache, _events, _db, _sessions) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let cookie = login_set_cookie(app).await;
     assert!(
         !cookie.contains("Secure"),
         "session cookie must not be Secure when cookie_secure is off: {cookie}"
+    );
+    // A browser silently rejects `__Host-`-prefixed cookies that aren't
+    // `Secure`, so the plain-HTTP name must stay unprefixed.
+    assert!(
+        cookie.starts_with("session=") && !cookie.contains("__Host-"),
+        "cookie_secure=false must keep the plain session cookie name: {cookie}"
+    );
+}
+
+#[tokio::test]
+async fn host_prefixed_cookie_is_accepted_on_read() {
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("__Host-session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn legacy_cookie_name_still_accepted_when_secure() {
+    // A restart that flips `cookie_secure` on (new TLS cert, added
+    // `--cookie-secure`) must not invalidate sessions issued under the old,
+    // unprefixed name.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_clears_the_host_prefixed_cookie() {
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("cookie", format!("__Host-session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get("set-cookie")
+        .expect("logout must clear the session cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        set_cookie.starts_with("__Host-session="),
+        "logout must clear the name actually present on the request: {set_cookie}"
+    );
+    assert!(
+        set_cookie.contains("Max-Age=0"),
+        "cleared cookie must expire immediately: {set_cookie}"
+    );
+    // RFC 6265bis §5.5: a browser ignores a `__Host-`-prefixed `Set-Cookie`
+    // that isn't `Secure`, so without this the removal is silently dropped
+    // and the browser keeps sending the "deleted" cookie forever.
+    assert!(
+        set_cookie.contains("Secure"),
+        "the __Host- removal must carry Secure or browsers ignore it entirely: {set_cookie}"
+    );
+}
+
+#[tokio::test]
+async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
+    // Reproduces the lockout: an operator's browser holds a stale
+    // `__Host-session` (e.g. from before TLS termination moved to a reverse
+    // proxy) alongside a freshly-issued, valid `session` cookie. Auth must
+    // fall through to the cookie that actually validates rather than getting
+    // stuck on the positionally-preferred but dead `__Host-` one.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header(
+                    "cookie",
+                    format!("__Host-session=not-a-real-token; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a valid `session` cookie must authenticate even alongside an invalid __Host-session"
+    );
+}
+
+#[tokio::test]
+async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
+    // Mirror case: a valid `__Host-session` alongside a stale unprefixed
+    // `session` cookie must still authenticate via the valid one.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header(
+                    "cookie",
+                    format!("__Host-session={token}; session=not-a-real-token"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a valid __Host-session cookie must authenticate even alongside an invalid session"
+    );
+}
+
+#[tokio::test]
+async fn logout_revokes_the_session_that_authenticated_the_request() {
+    // Reproduces the bug: a browser can hold a stale `__Host-session`
+    // alongside a live `session` cookie (see `session_cookie_candidates`).
+    // `AuthedUser` correctly authenticates via the live one, but `logout`
+    // used to act on whichever cookie was positionally first — clearing only
+    // the stale name and reporting success while the live token, the one
+    // that actually authenticated this very request, stayed valid.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header(
+                    "cookie",
+                    format!("__Host-session=stalegarbage; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let set_cookies: Vec<String> = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        set_cookies.iter().any(|c| c.starts_with("__Host-session=")),
+        "logout must clear the __Host-session cookie too: {set_cookies:?}"
+    );
+    assert!(
+        set_cookies.iter().any(|c| c.starts_with("session=")),
+        "logout must clear the plain session cookie: {set_cookies:?}"
+    );
+
+    let me = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the session that actually authenticated the logout request, \
+         not merely the positionally-first cookie"
+    );
+}
+
+#[tokio::test]
+async fn logout_revokes_every_live_session_named_by_a_cookie() {
+    // Both accepted cookie names can each name a *live* session at once (log
+    // in over plain HTTP, then again once the operator turns on TLS /
+    // --cookie-secure). `logout` used to resolve a single token and revoke
+    // only that one, even though it clears both cookie names regardless —
+    // leaving the other session live server-side, still listed in
+    // `GET /api/sessions` and replayable by anyone holding its token, for up
+    // to the idle/absolute window.
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    // Seed a second, independently-live session (token B) for the same operator.
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header(
+                    "cookie",
+                    format!("__Host-session={token_a}; session={token_b}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let me_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me_a.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the __Host-session token"
+    );
+
+    let me_b = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me_b.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke every live session named by a cookie, not just the one \
+         that authenticated the request"
+    );
+}
+
+#[tokio::test]
+async fn revoke_others_keeps_the_authenticated_session() {
+    // Same two-cookie shape as `logout_revokes_the_session_that_authenticated_the_request`:
+    // `revoke_others` used to pass the positionally-first cookie (the stale
+    // `__Host-session`) as `keep`, so `retain`/`DELETE ... WHERE token != stale`
+    // matched nothing and the caller's own live session — the one this
+    // request authenticated with — was revoked along with everyone else's,
+    // even though the endpoint is documented as "stay signed in on this
+    // device".
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/revoke-others")
+                .header(
+                    "cookie",
+                    format!("__Host-session=stalegarbage; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let me = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me.status(),
+        StatusCode::OK,
+        "revoke-others must keep the session that authenticated the request signed in"
     );
 }
 
@@ -1731,6 +2076,175 @@ async fn change_own_password_requires_correct_current() {
 }
 
 #[tokio::test]
+async fn change_password_revokes_other_sessions_of_same_user() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    // Seed a second session (token B) for the same user, bypassing login.
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Token B was revoked by the password change.
+    let res_b = app
+        .clone()
+        .oneshot(authed("GET", "/api/auth/me", &token_b, None))
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), StatusCode::UNAUTHORIZED);
+
+    // Token A (the device that made the change) stays signed in.
+    let res_a = app
+        .oneshot(authed("GET", "/api/auth/me", &token_a, None))
+        .await
+        .unwrap();
+    assert_eq!(res_a.status(), StatusCode::OK);
+}
+
+/// Regression guard: `change_own_password` must revoke only the caller's own
+/// sessions via `revoke_user_sessions_except`, never the global
+/// `revoke_other_sessions` (which would log out every operator).
+#[tokio::test]
+async fn change_password_keeps_other_operators_signed_in() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    // A second, unrelated operator with their own session (token C).
+    let hash = hash_password("bobpass1").unwrap();
+    let bob_id = db
+        .create_user("bob", &hash, noadd::now_unix())
+        .await
+        .unwrap();
+    let token_c = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_c, bob_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_c,
+        SessionInfo {
+            session_id: sid,
+            user_id: bob_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res_c = app
+        .oneshot(authed("GET", "/api/auth/me", &token_c, None))
+        .await
+        .unwrap();
+    assert_eq!(res_c.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_password_deletes_revoked_rows_from_db() {
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res = app
+        .oneshot(authed("GET", "/api/sessions", &token_a, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the revoked session row must be deleted from the DB, not just memory"
+    );
+    assert_eq!(rows[0]["is_current"], true);
+}
+
+#[tokio::test]
 async fn setup_creates_first_operator_when_empty() {
     let app = unconfigured_app().await;
     let res = app
@@ -2032,6 +2546,31 @@ async fn logout_cookie_session_revokes_and_clears_cookie() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Logout must ask the browser to drop cookies/cache/storage for this
+/// origin, so "log out, then press Back" cannot show the admin screen
+/// again. `executionContexts` is deliberately excluded (it would reload the
+/// SPA before it can read `redirect_to` and hand off to forward-auth logout).
+#[tokio::test]
+async fn logout_sends_clear_site_data() {
+    let (app, token) = setup().await;
+
+    let res = app
+        .oneshot(authed("POST", "/api/auth/logout", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let header = res
+        .headers()
+        .get("clear-site-data")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert_eq!(header, r#""cache", "cookies", "storage""#);
+    assert!(
+        !header.contains("executionContexts"),
+        "Clear-Site-Data must not include executionContexts, it would kill the SPA before it reads redirect_to: {header}"
+    );
+}
+
 #[tokio::test]
 async fn logout_without_any_auth_returns_401() {
     let (app, _token) = setup().await;
@@ -2046,4 +2585,125 @@ async fn logout_without_any_auth_returns_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Every authenticated admin JSON response carries a caching policy that
+/// forbids storage — nothing in `/api/*` sets its own `Cache-Control`, so the
+/// `no_store` layer must be the one stamping it (see `src/headers.rs`).
+#[tokio::test]
+async fn api_responses_are_not_stored() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+    assert_eq!(
+        res.headers().get("pragma").and_then(|v| v.to_str().ok()),
+        Some("no-cache")
+    );
+}
+
+/// The `no_store` layer sits outside the `AuthedUser` extractor, so even a
+/// bare 401 rejection (no handler ever ran) carries the no-store headers.
+#[tokio::test]
+async fn unauthenticated_rejections_are_not_stored() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/settings")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+}
+
+/// Regression guard: the `no_store` layer keys on "response already declares
+/// a `Cache-Control`" and must not clobber the embedded SPA shell's existing
+/// `no-cache` + `ETag` revalidation headers.
+#[tokio::test]
+async fn static_assets_keep_no_cache_and_etag() {
+    let (app, _token) = setup().await;
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache")
+    );
+    assert!(res.headers().contains_key("etag"));
+}
+
+/// `Strict-Transport-Security` is layered onto the *merged* app in
+/// `src/main.rs`, not inside `admin_router` — a `DoH`-only deployment must
+/// get the header too, so it cannot live on the admin router alone. Pin that
+/// by asserting `admin_router` in isolation never emits it.
+#[tokio::test]
+async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(!res.headers().contains_key("strict-transport-security"));
+}
+
+/// The mobileconfig download carries authenticated DNS-over-HTTPS config
+/// (the token in the URL is itself the credential), so it must not be stored.
+#[tokio::test]
+async fn mobileconfig_is_not_stored() {
+    let (app, token, _cache, _log_events, db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    db.set_setting("public_url", "https://dns.example.com")
+        .await
+        .unwrap();
+
+    let add_res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/doh-tokens",
+            &token,
+            Some(r#"{"token":"mobiletoken"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(add_res.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .uri("/api/mobileconfig/mobiletoken")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
 }

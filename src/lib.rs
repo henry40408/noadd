@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod dns;
 pub mod filter;
+pub mod headers;
 pub mod logger;
 pub mod net;
 pub mod registry;
