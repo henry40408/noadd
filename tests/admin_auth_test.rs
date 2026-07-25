@@ -126,13 +126,18 @@ fn active_session_survives_past_the_idle_window() {
     let store = new_session_store();
     let token = generate_token();
     let now = noadd::now_unix();
-    store_session(
-        &store,
-        &token,
-        info_at(1, now, now - SESSION_IDLE_TIMEOUT_SECS + 600),
-    );
+    let stale_last_seen = now - SESSION_IDLE_TIMEOUT_SECS + 600;
+    store_session(&store, &token, info_at(1, now, stale_last_seen));
     assert_eq!(validate_session(&store, &token), Some(1));
-    // last_seen was refreshed, so a second call (re-evaluated from "now") still passes.
+    // The 600s of headroom before the idle window means a second call would
+    // pass regardless of whether the first refreshed `last_seen` — that
+    // wouldn't distinguish "refresh happened" from "refresh is a no-op", so
+    // assert the refresh directly: `last_seen` must have moved forward from
+    // the fixture's stale value to (at least) `now`.
+    let refreshed_last_seen = store.lock().get(&token).unwrap().last_seen;
+    assert!(refreshed_last_seen > stale_last_seen);
+    assert!(refreshed_last_seen >= now);
+    // With the refresh confirmed, a second call re-evaluated from "now" still passes.
     assert_eq!(validate_session(&store, &token), Some(1));
 }
 

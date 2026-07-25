@@ -807,6 +807,96 @@ async fn logout_revokes_the_session_that_authenticated_the_request() {
 }
 
 #[tokio::test]
+async fn logout_revokes_every_live_session_named_by_a_cookie() {
+    // Both accepted cookie names can each name a *live* session at once (log
+    // in over plain HTTP, then again once the operator turns on TLS /
+    // --cookie-secure). `logout` used to resolve a single token and revoke
+    // only that one, even though it clears both cookie names regardless —
+    // leaving the other session live server-side, still listed in
+    // `GET /api/sessions` and replayable by anyone holding its token, for up
+    // to the idle/absolute window.
+    let (app, token_a, _cache, _events, db, sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let admin_id = db
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|u| u.username == "admin")
+        .unwrap()
+        .id;
+
+    // Seed a second, independently-live session (token B) for the same operator.
+    let token_b = generate_token();
+    let now = noadd::now_unix();
+    let sid = db
+        .insert_session(&token_b, admin_id, now, now, None, None)
+        .await
+        .unwrap();
+    store_session(
+        &sessions,
+        &token_b,
+        SessionInfo {
+            session_id: sid,
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header(
+                    "cookie",
+                    format!("__Host-session={token_a}; session={token_b}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let me_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me_a.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the __Host-session token"
+    );
+
+    let me_b = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        me_b.status(),
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke every live session named by a cookie, not just the one \
+         that authenticated the request"
+    );
+}
+
+#[tokio::test]
 async fn revoke_others_keeps_the_authenticated_session() {
     // Same two-cookie shape as `logout_revokes_the_session_that_authenticated_the_request`:
     // `revoke_others` used to pass the positionally-first cookie (the stale

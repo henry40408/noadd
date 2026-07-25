@@ -387,18 +387,6 @@ fn user_agent_log_value(headers: &HeaderMap) -> &str {
 
 // --- Auth helper ---
 
-/// Read the session token from either accepted cookie name, preferring the
-/// `__Host-` form. Both are accepted on read so a restart that flips
-/// `cookie_secure` (a new TLS cert, an added `--cookie-secure`) does not
-/// invalidate every in-flight session; the security property is enforced by
-/// the browser at *set* time, so accepting the legacy name on read costs
-/// nothing.
-fn session_cookie_value(jar: &CookieJar) -> Option<String> {
-    jar.get(crate::admin::auth::SESSION_COOKIE_HOST)
-        .or_else(|| jar.get(crate::admin::auth::SESSION_COOKIE))
-        .map(|c| c.value().to_string())
-}
-
 /// The session cookie names to try, innermost-first. Both are accepted so a
 /// deployment that gains or loses `Secure` mid-session keeps working; the
 /// caller must try them **in order and keep the first that validates**,
@@ -416,44 +404,47 @@ fn session_cookie_candidates(jar: &CookieJar) -> impl Iterator<Item = String> {
     .filter_map(|name| jar.get(name).map(|c| c.value().to_string()))
 }
 
-/// Build one removal cookie per accepted session-cookie name **present in
-/// the jar**, not just the positionally-first. A browser can hold both
-/// accepted names at once (see [`session_cookie_candidates`]) — the very
-/// case this whole mechanism exists for — and clearing only one leaves the
-/// other sitting in the browser with no later request able to clear it,
-/// since the removal is driven by what *this* request's cookie header
-/// contains.
+/// Expire one cookie per accepted session-cookie name **present in the
+/// jar**, not just the positionally-first. A browser can hold both accepted
+/// names at once (see [`session_cookie_candidates`]) — the very case this
+/// whole mechanism exists for — and clearing only one leaves the other
+/// sitting in the browser with no later request able to clear it, since the
+/// removal is driven by what *this* request's cookie header contains.
 ///
 /// A `__Host-`-prefixed `Set-Cookie` is silently ignored by the browser
 /// unless it also carries `Secure` (RFC 6265bis §5.5: a `__Host-` cookie can
 /// only be overwritten — or cleared — by a cookie that itself satisfies the
 /// prefix's conditions), so the `__Host-session` removal carries `Secure`
 /// even when the plain `session` removal alongside it does not.
-fn session_cookie_removals(jar: &CookieJar) -> Vec<Cookie<'static>> {
-    [
+fn clear_session_cookies(jar: CookieJar) -> CookieJar {
+    let present: Vec<&str> = [
         crate::admin::auth::SESSION_COOKIE_HOST,
         crate::admin::auth::SESSION_COOKIE,
     ]
     .into_iter()
     .filter(|name| jar.get(name).is_some())
-    .map(|name| {
-        Cookie::build((name, ""))
-            .path("/")
-            .secure(name == crate::admin::auth::SESSION_COOKIE_HOST)
-            .build()
-    })
-    .collect()
+    .collect();
+    present
+        .into_iter()
+        .map(|name| {
+            Cookie::build((name, ""))
+                .path("/")
+                .secure(name == crate::admin::auth::SESSION_COOKIE_HOST)
+                .build()
+        })
+        .fold(jar, CookieJar::remove)
 }
 
 /// The session token this request is actually authenticated by, for handlers
 /// that act on "my current session" rather than merely reading a cookie.
 ///
-/// `session_cookie_value` answers "which cookie is present", which is a
-/// different question: a browser can carry both accepted names at once (see
-/// [`session_cookie_candidates`]), and acting on the wrong one means logout
-/// revoking nothing while reporting success, or revoke-others treating the
-/// caller's own session as somebody else's. Membership in the store is
-/// checked rather than `validate_session` because the authenticating token
+/// Naively taking the positionally-first present cookie answers "which
+/// cookie is present", which is a different question: a browser can carry
+/// both accepted names at once (see [`session_cookie_candidates`]), and
+/// acting on the wrong one means logout revoking nothing while reporting
+/// success, or revoke-others treating the caller's own session as somebody
+/// else's. Membership in the store is checked rather than `validate_session`
+/// because the authenticating token
 /// was already validated for this request by `AuthedUser`, and a second
 /// validation would refresh `last_seen` and evict entries as a side effect.
 fn live_session_token(state: &AppState, jar: &CookieJar) -> Option<String> {
@@ -516,15 +507,15 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         // 2. Bearer API key (programmatic path).
         //
         // Emission of the `auth.failed` warning is deferred to the terminal
-        // rejection below rather than fired inline here: a bearer token that
-        // fails against the API-key table may still belong to a legitimate
-        // forward-auth request (oauth2-proxy's `--pass-authorization-header`
-        // and Authelia both forward a JWT alongside their own trusted
-        // header), and logging inline would emit a spurious `auth.failed` on
-        // every such request even though it goes on to authenticate
-        // successfully via step 3. `failed_key_prefix` is only populated for
-        // a token that actually looks like a noadd key — a foreign
-        // credential's prefix must never reach the log.
+        // rejection below rather than fired inline here: the rule is to warn
+        // whenever the request as a whole does not end up authenticated, not
+        // whenever this one step fails. A bearer token that fails against the
+        // API-key table may still go on to authenticate via step 3's
+        // forward-auth header, and logging inline would emit a spurious
+        // `auth.failed` on every such request even though authentication
+        // ultimately succeeds. `failed_key_prefix` is only populated for a
+        // token that actually looks like a noadd key (`noadd_` prefix), so it
+        // is never `Some` on the request's eventual success path.
         let mut failed_key_prefix: Option<String> = None;
         if let Some(token) = bearer_token(&parts.headers) {
             let hash = hash_api_key(&token);
@@ -892,12 +883,13 @@ async fn revoke_others(
     Ok(StatusCode::OK)
 }
 
-/// Log out the current session: revoke this token, delete from DB, and expire
-/// the client's session cookie. Other devices' sessions are untouched. Also
-/// reports whether the caller authenticated via forward auth and, if so,
-/// hands back the configured proxy/SSO logout URL so the SPA can complete the
-/// handoff — a forward-auth caller holds no session for us to revoke, so that
-/// redirect is the only way for them to actually end their session.
+/// Log out the current session: revoke every session named by a cookie on
+/// this request, delete each from the DB, and expire the client's session
+/// cookies. Other devices' sessions are untouched. Also reports whether the
+/// caller authenticated via forward auth and, if so, hands back the
+/// configured proxy/SSO logout URL so the SPA can complete the handoff — a
+/// forward-auth caller holds no session for us to revoke, so that redirect
+/// is the only way for them to actually end their session.
 async fn logout(
     State(state): State<AppState>,
     auth: AuthedUser,
@@ -913,15 +905,17 @@ async fn logout(
     StatusCode,
 > {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    // Prefer the token that actually authenticated this request; fall back to
-    // the positionally-first cookie only when neither candidate is still in
-    // the store (e.g. lazily evicted by `validate_session`), so that session's
-    // DB row and cookie still get cleaned up even though nothing live remains
-    // to revoke in memory.
-    let token = live_session_token(&state, &jar).or_else(|| session_cookie_value(&jar));
-    let jar = if let Some(token) = token {
-        let revoked = crate::admin::auth::revoke_session(&state.sessions, &token);
-        let _ = state.db.delete_session_by_token(&token).await;
+    // Revoke *every* token named by a cookie on this request, not just the
+    // one that authenticated it. A browser can hold both accepted cookie
+    // names at once, each naming a live session (log in over plain HTTP,
+    // then again once the operator turns on TLS / `--cookie-secure`), and
+    // `clear_session_cookies` below clears both regardless — so revoking
+    // only one would expire a cookie whose session stays live server-side,
+    // orphaned and replayable, for up to the idle/absolute window.
+    let candidates: Vec<String> = session_cookie_candidates(&jar).collect();
+    for token in &candidates {
+        let revoked = crate::admin::auth::revoke_session(&state.sessions, token);
+        let _ = state.db.delete_session_by_token(token).await;
         // Only log a destruction event when a session actually existed under
         // this token. The cookie value is unvalidated client input and
         // `AuthedUser` may have resolved via API key or forward-auth, so a
@@ -934,17 +928,13 @@ async fn logout(
                 reason = "logout",
                 user_id = info.user_id,
                 session_id = info.session_id,
-                sid_hash = %session_log_id(&token),
+                sid_hash = %session_log_id(token),
                 %ip,
                 "logged out"
             );
         }
-        session_cookie_removals(&jar)
-            .into_iter()
-            .fold(jar, CookieJar::remove)
-    } else {
-        jar
-    };
+    }
+    let jar = clear_session_cookies(jar);
     let redirect_to = if auth.via_forward_auth {
         state
             .forward_auth
@@ -1262,7 +1252,7 @@ async fn list_sessions(
 
 async fn revoke_session_by_id(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     jar: CookieJar,
@@ -1287,15 +1277,14 @@ async fn revoke_session_by_id(
             tracing::info!(
                 event = "session.destroyed",
                 reason = "revoked_by_id",
+                user_id = auth.user_id,
                 session_id = id,
                 sid_hash = %session_log_id(&token),
                 %ip,
                 "revoked session by id"
             );
             if current_token.as_deref() == Some(token.as_str()) {
-                let jar = session_cookie_removals(&jar)
-                    .into_iter()
-                    .fold(jar, CookieJar::remove);
+                let jar = clear_session_cookies(jar);
                 return Ok((jar, StatusCode::NO_CONTENT));
             }
             Ok((jar, StatusCode::NO_CONTENT))
