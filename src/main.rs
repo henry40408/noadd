@@ -217,14 +217,34 @@ async fn main() -> anyhow::Result<()> {
         forward_auth,
     });
 
-    // Periodically persist session last_seen so it survives restarts.
+    // Periodically persist session last_seen so it survives restarts, and
+    // sweep expired rows every tenth tick (~10 min) so they do not accumulate
+    // on a long-running instance — the startup restore is otherwise the only
+    // thing that ever deletes them.
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         tick.tick().await; // skip immediate fire
+        let mut ticks: u32 = 0;
         loop {
             tick.tick().await;
             let _ =
                 noadd::admin::auth::flush_last_seen(&session_store_for_flush, &db_for_flush).await;
+            ticks = ticks.wrapping_add(1);
+            if ticks.is_multiple_of(10) {
+                match noadd::admin::auth::sweep_expired(&session_store_for_flush, &db_for_flush)
+                    .await
+                {
+                    Ok((evicted, deleted)) if evicted > 0 || deleted > 0 => tracing::info!(
+                        event = "session.destroyed",
+                        reason = "swept",
+                        evicted,
+                        deleted,
+                        "swept expired sessions"
+                    ),
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!(%err, "session sweep failed; will retry next cycle"),
+                }
+            }
         }
     });
 

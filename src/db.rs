@@ -1493,6 +1493,35 @@ impl Database {
         Ok(rows)
     }
 
+    /// Predicate shared by `purge_expired_sessions` and `load_sessions`.
+    const PURGE_EXPIRED_SESSIONS_SQL: &str =
+        "DELETE FROM sessions WHERE created_at < ?1 OR last_seen < ?2";
+
+    /// Delete session rows that have hit either the absolute or the idle timeout.
+    /// Returns the number of rows removed. Shared by startup restore
+    /// (`load_sessions`) and the periodic sweep so both use identical rules —
+    /// anything this deletes is already dead to `validate_session`.
+    pub async fn purge_expired_sessions(
+        &self,
+        max_age_secs: i64,
+        idle_secs: i64,
+        now: i64,
+    ) -> Result<usize, DbError> {
+        let absolute_cutoff = now - max_age_secs;
+        let idle_cutoff = now - idle_secs;
+        let deleted = self
+            .conn
+            .call(move |conn| {
+                let n = conn.execute(
+                    Self::PURGE_EXPIRED_SESSIONS_SQL,
+                    params![absolute_cutoff, idle_cutoff],
+                )?;
+                Ok(n)
+            })
+            .await?;
+        Ok(deleted)
+    }
+
     pub async fn load_sessions(
         &self,
         max_age_secs: i64,
@@ -1505,7 +1534,7 @@ impl Database {
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "DELETE FROM sessions WHERE created_at < ?1 OR last_seen < ?2",
+                    Self::PURGE_EXPIRED_SESSIONS_SQL,
                     params![absolute_cutoff, idle_cutoff],
                 )?;
                 let mut stmt =

@@ -681,3 +681,120 @@ async fn test_flush_last_seen() {
         .unwrap();
     assert_eq!(db.list_sessions().await.unwrap()[0].last_seen, 555);
 }
+
+/// Insert the four-row fixture shared by the `purge_expired_sessions` tests:
+/// one live row and one row expired via each timeout (individually and
+/// jointly), so a single purge call must remove exactly three of them.
+async fn insert_purge_fixture(db: &Database, uid: i64, now: i64) {
+    db.insert_session("normal", uid, now - 1_000, now, None, None)
+        .await
+        .unwrap();
+    db.insert_session(
+        "stale-created",
+        uid,
+        now - SESSION_MAX_AGE_SECS - 1,
+        now,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    db.insert_session(
+        "stale-seen",
+        uid,
+        now - 1_000,
+        now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    db.insert_session(
+        "stale-both",
+        uid,
+        now - SESSION_MAX_AGE_SECS - 1,
+        now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn purge_expired_sessions_removes_absolute_and_idle_expired_rows() {
+    let db = test_db().await;
+    let uid = db.create_user("gina", "h", 0).await.unwrap();
+    let now = 10_000_000;
+    insert_purge_fixture(&db, uid, now).await;
+
+    let deleted = db
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+
+    let remaining = db.list_sessions().await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].token, "normal");
+}
+
+#[tokio::test]
+async fn purge_expired_sessions_is_idempotent() {
+    let db = test_db().await;
+    let uid = db.create_user("hank", "h", 0).await.unwrap();
+    let now = 10_000_000;
+    insert_purge_fixture(&db, uid, now).await;
+
+    let first = db
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+    assert_eq!(first, 3);
+
+    let second = db
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+    assert_eq!(second, 0);
+}
+
+#[tokio::test]
+async fn load_sessions_and_purge_agree() {
+    // load_sessions and purge_expired_sessions must share one predicate, or
+    // startup restore and the periodic sweep could disagree on which rows are
+    // dead. Apply the same fixture to two independent DBs, one through each
+    // path, and check the surviving row set is identical.
+    let db_load = test_db().await;
+    let db_purge = test_db().await;
+    let now = 10_000_000;
+
+    let uid_load = db_load.create_user("ivy", "h", 0).await.unwrap();
+    insert_purge_fixture(&db_load, uid_load, now).await;
+    let uid_purge = db_purge.create_user("ivy", "h", 0).await.unwrap();
+    insert_purge_fixture(&db_purge, uid_purge, now).await;
+
+    let loaded = db_load
+        .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+    let deleted = db_purge
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+
+    let mut loaded_tokens: Vec<String> = loaded.into_iter().map(|s| s.token).collect();
+    loaded_tokens.sort();
+    let mut remaining_tokens: Vec<String> = db_purge
+        .list_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.token)
+        .collect();
+    remaining_tokens.sort();
+
+    assert_eq!(deleted, 3);
+    assert_eq!(loaded_tokens, remaining_tokens);
+    assert_eq!(loaded_tokens, vec!["normal".to_string()]);
+}

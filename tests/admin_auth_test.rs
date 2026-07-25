@@ -2,9 +2,19 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
     RateLimiter, SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, generate_token,
-    hash_password, new_session_store, prune_expired, revoke_session, store_session,
+    hash_password, new_session_store, prune_expired, revoke_session, store_session, sweep_expired,
     validate_session, verify_password,
 };
+use noadd::db::Database;
+use tempfile::tempdir;
+
+async fn test_db() -> Database {
+    let dir = tempdir().unwrap();
+    // Persist the tempdir (no Drop cleanup) so it lives for the duration of the test.
+    let path = dir.keep().join("test.db");
+    let path_str = path.to_str().unwrap().to_string();
+    Database::open(&path_str).await.unwrap()
+}
 
 fn info_at(user_id: i64, created_at: i64, last_seen: i64) -> SessionInfo {
     SessionInfo {
@@ -136,6 +146,48 @@ fn prune_expired_evicts_only_expired_entries() {
     );
     assert_eq!(prune_expired(&store), 2);
     assert_eq!(store.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn sweep_expired_reports_both_counts() {
+    let db = test_db().await;
+    let uid = db.create_user("judy", "h", 0).await.unwrap();
+    let now = noadd::now_unix();
+
+    // Persist matching rows in the DB so purge_expired_sessions (which reads
+    // last_seen from disk) agrees with what the in-memory store holds.
+    db.insert_session("active", uid, now - 1_000, now, None, None)
+        .await
+        .unwrap();
+    db.insert_session(
+        "idle",
+        uid,
+        now - 1_000,
+        now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let store = new_session_store();
+    store_session(&store, "active", info_at(uid, now - 1_000, now));
+    store_session(
+        &store,
+        "idle",
+        info_at(uid, now - 1_000, now - SESSION_IDLE_TIMEOUT_SECS - 1),
+    );
+
+    let (evicted, deleted) = sweep_expired(&store, &db).await.unwrap();
+    assert_eq!(evicted, 1);
+    assert_eq!(deleted, 1);
+
+    assert_eq!(validate_session(&store, "active"), Some(uid));
+    assert_eq!(validate_session(&store, "idle"), None);
+
+    let remaining = db.list_sessions().await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].token, "active");
 }
 
 #[test]

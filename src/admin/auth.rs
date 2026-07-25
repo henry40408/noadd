@@ -223,6 +223,25 @@ pub async fn flush_last_seen(
     db.flush_sessions_last_seen(&entries).await
 }
 
+/// Sweep expired sessions from both the in-memory store and the `sessions`
+/// table. Returns `(evicted_from_memory, deleted_rows)`.
+///
+/// The caller must flush `last_seen` first (see `flush_last_seen`): the DB
+/// predicate reads `last_seen`, which lags memory by up to one flush interval.
+/// With a 48 h idle window a 60 s lag is immaterial, but flushing first keeps
+/// the two views from diverging on principle.
+pub async fn sweep_expired(
+    store: &SessionStore,
+    db: &crate::db::Database,
+) -> Result<(usize, usize), crate::db::DbError> {
+    let evicted = prune_expired(store);
+    let now = now_secs();
+    let deleted = db
+        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await?;
+    Ok((evicted, deleted))
+}
+
 /// Revoke every session except `keep` (log out other devices, staying signed
 /// in on the current one). When `keep` is `None` — e.g. a forward-auth caller
 /// that holds no session cookie — every session is revoked, since none of them
