@@ -118,6 +118,31 @@ async fn same_origin_request_reaches_handler() {
     assert_ne!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+/// The `no_store` layer (`src/headers.rs`) is registered outside the CSRF
+/// guard, so even the guard's own 403 — which never reaches a handler — must
+/// carry the no-store headers.
+#[tokio::test]
+async fn csrf_rejection_is_not_stored() {
+    let app = build_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header("sec-fetch-site", "cross-site")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let cache_control = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+}
+
 #[tokio::test]
 async fn header_less_client_reaches_handler() {
     let app = build_app().await;

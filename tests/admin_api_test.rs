@@ -2223,3 +2223,109 @@ async fn logout_without_any_auth_returns_401() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// Every authenticated admin JSON response carries a caching policy that
+/// forbids storage — nothing in `/api/*` sets its own `Cache-Control`, so the
+/// `no_store` layer must be the one stamping it (see `src/headers.rs`).
+#[tokio::test]
+async fn api_responses_are_not_stored() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+    assert_eq!(
+        res.headers().get("pragma").and_then(|v| v.to_str().ok()),
+        Some("no-cache")
+    );
+}
+
+/// The `no_store` layer sits outside the `AuthedUser` extractor, so even a
+/// bare 401 rejection (no handler ever ran) carries the no-store headers.
+#[tokio::test]
+async fn unauthenticated_rejections_are_not_stored() {
+    let (app, _token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/settings")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+}
+
+/// Regression guard: the `no_store` layer keys on "response already declares
+/// a `Cache-Control`" and must not clobber the embedded SPA shell's existing
+/// `no-cache` + `ETag` revalidation headers.
+#[tokio::test]
+async fn static_assets_keep_no_cache_and_etag() {
+    let (app, _token) = setup().await;
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache")
+    );
+    assert!(res.headers().contains_key("etag"));
+}
+
+/// The mobileconfig download carries authenticated DNS-over-HTTPS config
+/// (the token in the URL is itself the credential), so it must not be stored.
+#[tokio::test]
+async fn mobileconfig_is_not_stored() {
+    let (app, token, _cache, _log_events, db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    db.set_setting("public_url", "https://dns.example.com")
+        .await
+        .unwrap();
+
+    let add_res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/doh-tokens",
+            &token,
+            Some(r#"{"token":"mobiletoken"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(add_res.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .uri("/api/mobileconfig/mobiletoken")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cache_control = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "expected no-store, got: {cache_control}"
+    );
+}
