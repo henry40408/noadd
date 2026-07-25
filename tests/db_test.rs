@@ -1,3 +1,4 @@
+use noadd::admin::auth::{SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS};
 use noadd::db::{Database, DeleteUserOutcome, QueryLogEntry};
 use tempfile::tempdir;
 
@@ -620,7 +621,9 @@ async fn test_load_sessions_drops_expired() {
         .unwrap();
 
     // max_age 100, now 1100 → cutoff 1000; "stale" (created_at 1) is purged.
-    let loaded = db.load_sessions(100, 1_100).await.unwrap();
+    // idle_secs is large enough that the idle check never fires here, so this
+    // exercises only the absolute-timeout branch.
+    let loaded = db.load_sessions(100, 10_000, 1_100).await.unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].token, "fresh");
     assert!(
@@ -629,6 +632,40 @@ async fn test_load_sessions_drops_expired() {
             .unwrap()
             .iter()
             .all(|s| s.token == "fresh")
+    );
+}
+
+#[tokio::test]
+async fn test_load_sessions_purges_idle_rows() {
+    let db = test_db().await;
+    let uid = db.create_user("frank", "h", 0).await.unwrap();
+    let now = 10_000_000;
+    db.insert_session(
+        "idle",
+        uid,
+        now - 1_000,
+        now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    db.insert_session("active", uid, now - 1_000, now, None, None)
+        .await
+        .unwrap();
+
+    let loaded = db
+        .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await
+        .unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].token, "active");
+    assert!(
+        db.list_sessions()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.token == "active")
     );
 }
 

@@ -38,6 +38,20 @@ impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 /// Session expiry in seconds (7 days).
 pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 
+/// Idle (inactivity) expiry in seconds (48 hours). Deliberately the same order
+/// of magnitude as [`SESSION_MAX_AGE_SECS`] rather than OWASP's 15-30 minute
+/// suggestion: noadd is a self-hosted appliance whose operators expect a
+/// long-lived admin tab, and the requirement being satisfied here is that both
+/// an idle layer and an absolute layer exist — not a specific figure.
+///
+/// `last_seen` is only flushed to disk every 60s (see `flush_last_seen`), so a
+/// value reloaded after a restart can lag reality by up to that long. Against
+/// a 48h window that's a 0.03% error and requires no compensation. If a future
+/// maintainer lowers this constant to the same order of magnitude as the flush
+/// interval (e.g. below ~15 minutes), the flush interval must be shortened — or
+/// a `flush_last_seen` call added to the graceful shutdown path — first.
+pub const SESSION_IDLE_TIMEOUT_SECS: i64 = 2 * 86400;
+
 /// In-memory session metadata. Persisted to the `sessions` table on creation
 /// and revocation; `last_seen` is flushed periodically (see `flush_last_seen`).
 #[derive(Debug, Clone, Copy)]
@@ -108,15 +122,59 @@ pub fn store_session(store: &SessionStore, token: &str, info: SessionInfo) {
 /// or `None` if missing/expired (expired entries are dropped).
 pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
     let now = now_secs();
-    let mut map = store.lock();
-    if let Some(info) = map.get_mut(token) {
-        if now - info.created_at < SESSION_MAX_AGE_SECS {
-            info.last_seen = now;
-            return Some(info.user_id);
+    // Reason for eviction, resolved under the lock and logged after it is
+    // dropped so no log formatting happens while the store is held.
+    let mut expired: Option<(i64, &'static str)> = None;
+    {
+        let mut map = store.lock();
+        if let Some(info) = map.get_mut(token) {
+            // Order matters: the idle check must read `last_seen` *before*
+            // this request refreshes it, otherwise it can never fire. A clock
+            // going backwards just makes these subtractions negative, which
+            // compares as "not expired" rather than misfiring.
+            let reason = if now - info.created_at >= SESSION_MAX_AGE_SECS {
+                Some("expired_absolute")
+            } else if now - info.last_seen >= SESSION_IDLE_TIMEOUT_SECS {
+                Some("expired_idle")
+            } else {
+                None
+            };
+            match reason {
+                None => {
+                    info.last_seen = now;
+                    return Some(info.user_id);
+                }
+                Some(r) => {
+                    expired = Some((info.session_id, r));
+                    map.remove(token);
+                }
+            }
         }
-        map.remove(token);
+    }
+    if let Some((session_id, reason)) = expired {
+        // P1-C wires `sid_hash` in here.
+        tracing::info!(
+            event = "session.destroyed",
+            reason,
+            session_id,
+            "session expired"
+        );
     }
     None
+}
+
+/// Drop in-memory sessions that have hit either timeout. Returns how many were
+/// evicted. `validate_session` expires lazily (only on access), so a session
+/// nobody touches stays in the map until this runs.
+pub fn prune_expired(store: &SessionStore) -> usize {
+    let now = now_secs();
+    let mut map = store.lock();
+    let before = map.len();
+    map.retain(|_, info| {
+        now - info.created_at < SESSION_MAX_AGE_SECS
+            && now - info.last_seen < SESSION_IDLE_TIMEOUT_SECS
+    });
+    before - map.len()
 }
 
 /// Revoke a single session token (logout this device only).
@@ -134,7 +192,9 @@ pub async fn load_sessions_from_db(
     db: &crate::db::Database,
 ) -> Result<(), crate::db::DbError> {
     let now = now_secs();
-    let loaded = db.load_sessions(SESSION_MAX_AGE_SECS, now).await?;
+    let loaded = db
+        .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+        .await?;
     let mut map = store.lock();
     for s in loaded {
         map.insert(

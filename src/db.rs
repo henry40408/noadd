@@ -1496,15 +1496,17 @@ impl Database {
     pub async fn load_sessions(
         &self,
         max_age_secs: i64,
+        idle_secs: i64,
         now: i64,
     ) -> Result<Vec<LoadedSession>, DbError> {
-        let cutoff = now - max_age_secs;
+        let absolute_cutoff = now - max_age_secs;
+        let idle_cutoff = now - idle_secs;
         let rows = self
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "DELETE FROM sessions WHERE created_at < ?1",
-                    params![cutoff],
+                    "DELETE FROM sessions WHERE created_at < ?1 OR last_seen < ?2",
+                    params![absolute_cutoff, idle_cutoff],
                 )?;
                 let mut stmt =
                     conn.prepare("SELECT token, id, user_id, created_at, last_seen FROM sessions")?;
