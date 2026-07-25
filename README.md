@@ -110,6 +110,9 @@ Options:
       --cookie-secure [<COOKIE_SECURE>]
                                      Set Secure on the admin session cookie [default: on when noadd
                                      terminates TLS] [env: NOADD_COOKIE_SECURE]
+      --trusted-proxies <TRUSTED_PROXIES>
+                                     CIDRs of reverse-proxy hops permitted to set X-Forwarded-For /
+                                     X-Real-IP [env: NOADD_TRUSTED_PROXIES]
       --forward-auth-header <FORWARD_AUTH_HEADER>
                                      Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
       --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
@@ -157,6 +160,76 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
   --acme-email you@example.com \
   --acme-prod
 ```
+
+## Client IP behind a reverse proxy
+
+noadd rate-limits logins and DoH queries per client IP and records that IP in
+the query log, so it has to resolve the real client from behind whatever sits
+in front of it. `--trusted-proxies` takes a comma-separated CIDR list of the
+proxies in the chain; loopback (127.0.0.0/8, `::1`) is always trusted so a
+same-host proxy needs no configuration.
+
+`X-Forwarded-For` is read **right to left**, and the first hop that is not a
+configured proxy is taken as the client. This matters because most proxies
+*append* rather than overwrite — nginx's usual `$proxy_add_x_forwarded_for` and
+Cloudflare both do — so a client that sends its own `X-Forwarded-For` keeps that
+value as the leftmost entry. Trusting the leftmost entry would let anyone mint a
+fresh rate-limit bucket per request and forge query-log entries.
+
+The practical consequence: **every proxy in the chain must be listed**, not just
+the one noadd talks to. A hop that is missing ends the walk and is treated as
+the client, so traffic is attributed to that proxy — imprecise, but not
+something a client can aim.
+
+The opposite mistake is the dangerous one. **List proxies only, never a range
+that clients can also live in.** The walk skips every hop the list covers, so a
+range like `192.168.1.0/24` chosen to mean "my LAN" makes noadd step over the
+real client and take whatever that client put to the left of itself — the exact
+forgery the right-to-left walk exists to prevent. Prefer the proxy's own address
+(`--trusted-proxies 192.168.1.5`) over the subnet it sits in.
+
+```bash
+# SWAG/nginx in another container on the Docker bridge
+./target/release/noadd --trusted-proxies 172.18.0.0/16
+```
+
+Behind Cloudflare, add Cloudflare's published ranges alongside your own proxy,
+since the edge address is the hop your proxy appends:
+
+```bash
+./target/release/noadd --trusted-proxies 172.18.0.0/16,173.245.48.0/20,103.21.244.0/22,…
+```
+
+Alternatively, have the fronting proxy collapse the chain to a single trustworthy
+value and let noadd read that. With Caddy, `trusted_proxies` and
+`client_ip_headers` are **global options in the `servers` block** — without the
+former, `{client_ip}` silently falls back to the address of the direct
+connection, which behind Cloudflare is the edge rather than the client:
+
+```caddyfile
+{
+	servers {
+		# Cloudflare's published ranges — see https://www.cloudflare.com/ips/
+		# (both families; noadd and Caddy match v4 and v6 separately).
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 … 2400:cb00::/32 2606:4700::/32 …
+		client_ip_headers CF-Connecting-IP
+	}
+}
+
+dns.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-For {client_ip}
+	}
+}
+```
+
+noadd then sees a one-entry chain from a loopback peer and needs no
+`--trusted-proxies` of its own. Note that `X-Real-IP` is only consulted when
+`X-Forwarded-For` is absent or unreadable.
+
+The HTTP listener must not be reachable except through the proxy: a client that
+can reach noadd (or the proxy) directly, bypassing Cloudflare, can send these
+headers itself.
 
 ## Reverse proxy authentication
 

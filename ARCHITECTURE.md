@@ -154,6 +154,16 @@ Most `/api/*` endpoints accept either the browser `session` cookie or an `Author
 
 `POST /api/auth/logout` is the one exception to "cookie-only acts on the session": it accepts any `AuthedUser` path, including forward auth, so a proxied caller is no longer 401'd trying to log out. It revokes and clears the `session` cookie when one is present (a no-op for forward auth, which holds no session to revoke) and always returns `{ redirect_to, via_forward_auth }`: `via_forward_auth` reports which path authenticated the request. For a forward-auth caller, `redirect_to` echoes `--forward-auth-logout-url` / `NOADD_FORWARD_AUTH_LOGOUT_URL` (`None` if unset) for the SPA to send the browser to, ending the upstream proxy/SSO session; for a cookie/password user, `redirect_to` is always `null` since their session is already revoked server-side. **Caveat:** for a forward-auth user without that URL configured, clearing noadd's own state does not truly log out — the proxy re-injects the identity header on their very next request — so they must log out at the proxy or SSO provider directly; the admin UI surfaces this with a notice rather than silently pretending the session ended.
 
+### Client IP Resolution
+
+`src/net.rs`'s `extract_client_ip` produces the address that the login limiter (`src/admin/api.rs`), the DoH query limiter (`src/dns/handler.rs`) and the query log all key on, so a caller who can steer it can mint a rate-limit bucket per request and forge log attribution. Two separate checks guard it. The **peer** must be loopback or match `--trusted-proxies` before any header is read at all. The **header** is then walked right-to-left, returning the first hop that is not itself a configured proxy.
+
+The right-to-left walk is the non-obvious half. Trusting the peer says nothing about the *contents* of `X-Forwarded-For`, because the common proxy configurations append to the client's value rather than replace it — nginx's `$proxy_add_x_forwarded_for` and Cloudflare both do — so `XFF: <forged>, <real client>` arrives with an entirely trustworthy proxy in front of it. Reading the leftmost entry, as noadd did before, hands the attacker the result directly.
+
+An entry the walk cannot read ends it too. Stepping over an unreadable hop would carry the walk into entries no proxy vouched for, and the encodings that fail a bare `IpAddr` parse are ones real proxies emit — `1.2.3.4:53821` from Azure's gateways and IIS ARR, bracketed IPv6, RFC 7239 `for=` syntax leaking across from `Forwarded` — so `parse_forwarded_hop` normalises those rather than leaving the walk to skip past them.
+
+The cost of the walk is that the trust list must name every hop, not just the peer noadd talks to; an unlisted hop terminates the walk and is reported as the client, over-attributing traffic to a proxy. That direction is imprecise but not aimable. The reverse — a range wide enough to cover client addresses, `192.168.1.0/24` written to mean "my LAN" — is not safe at all: the walk skips every hop the list covers, so it steps over the real client onto whatever that client wrote, restoring exactly the primitive the leftmost read had. The list is a statement that only proxies hold these addresses.
+
 ## Data Storage
 
 Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noadd.db` from an older release is used automatically when present):
