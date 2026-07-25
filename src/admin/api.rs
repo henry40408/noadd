@@ -374,12 +374,33 @@ fn log_safe(value: &str, max: usize) -> &str {
 
 // --- Auth helper ---
 
+/// Read the session token from either accepted cookie name, preferring the
+/// `__Host-` form. Both are accepted on read so a restart that flips
+/// `cookie_secure` (a new TLS cert, an added `--cookie-secure`) does not
+/// invalidate every in-flight session; the security property is enforced by
+/// the browser at *set* time, so accepting the legacy name on read costs
+/// nothing.
+fn session_cookie_value(jar: &CookieJar) -> Option<String> {
+    jar.get(crate::admin::auth::SESSION_COOKIE_HOST)
+        .or_else(|| jar.get(crate::admin::auth::SESSION_COOKIE))
+        .map(|c| c.value().to_string())
+}
+
+/// Build the expiring cookie that clears whichever session cookie the request
+/// actually carried. Removing by the wrong name leaves the browser holding a
+/// cookie for an already-revoked token.
+fn session_cookie_removal(jar: &CookieJar) -> Cookie<'static> {
+    let name = if jar.get(crate::admin::auth::SESSION_COOKIE_HOST).is_some() {
+        crate::admin::auth::SESSION_COOKIE_HOST
+    } else {
+        crate::admin::auth::SESSION_COOKIE
+    };
+    Cookie::build((name, "")).path("/").build()
+}
+
 /// Returns `(user_id, token)` for the current authenticated session, or 401.
 fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
-    let token = jar
-        .get("session")
-        .map(|c| c.value().to_string())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = session_cookie_value(jar).ok_or(StatusCode::UNAUTHORIZED)?;
     match validate_session(&state.sessions, &token) {
         Some(user_id) => Ok((user_id, token)),
         None => Err(StatusCode::UNAUTHORIZED),
@@ -415,8 +436,8 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
     ) -> Result<Self, Self::Rejection> {
         // 1. Session cookie (browser path).
         let jar = CookieJar::from_headers(&parts.headers);
-        if let Some(cookie) = jar.get("session")
-            && let Some(user_id) = validate_session(&state.sessions, cookie.value())
+        if let Some(token) = session_cookie_value(&jar)
+            && let Some(user_id) = validate_session(&state.sessions, &token)
         {
             return Ok(AuthedUser {
                 user_id,
@@ -607,21 +628,24 @@ async fn login(
         "login successful"
     );
 
-    let cookie = Cookie::build(("session", token))
-        .path("/")
-        .http_only(true)
-        .secure(state.cookie_secure)
-        // Lax rather than Strict: Lax already withholds the cookie from every
-        // cross-site POST / PUT / DELETE, which covers every mutation this API
-        // exposes, and no GET handler writes. The only thing Strict would
-        // additionally block — a cross-site top-level GET navigation carrying
-        // the cookie — is not an attack vector here, so Strict buys no extra
-        // protection, only logged-out deep links.
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .max_age(time::Duration::seconds(
-            crate::admin::auth::SESSION_MAX_AGE_SECS,
-        ))
-        .build();
+    let cookie = Cookie::build((
+        crate::admin::auth::session_cookie_name(state.cookie_secure),
+        token,
+    ))
+    .path("/")
+    .http_only(true)
+    .secure(state.cookie_secure)
+    // Lax rather than Strict: Lax already withholds the cookie from every
+    // cross-site POST / PUT / DELETE, which covers every mutation this API
+    // exposes, and no GET handler writes. The only thing Strict would
+    // additionally block — a cross-site top-level GET navigation carrying
+    // the cookie — is not an attack vector here, so Strict buys no extra
+    // protection, only logged-out deep links.
+    .same_site(axum_extra::extract::cookie::SameSite::Lax)
+    .max_age(time::Duration::seconds(
+        crate::admin::auth::SESSION_MAX_AGE_SECS,
+    ))
+    .build();
 
     Ok((jar.add(cookie), Json(LoginResponse { success: true })))
 }
@@ -728,7 +752,7 @@ async fn revoke_others(
     jar: CookieJar,
 ) -> Result<StatusCode, StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let current_token = jar.get("session").map(|c| c.value().to_string());
+    let current_token = session_cookie_value(&jar);
     let revoked = crate::admin::auth::revoke_other_sessions(
         &state.sessions,
         &state.db,
@@ -761,8 +785,7 @@ async fn logout(
     jar: CookieJar,
 ) -> Result<(CookieJar, Json<LogoutResponse>), StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let jar = if let Some(c) = jar.get("session") {
-        let token = c.value().to_string();
+    let jar = if let Some(token) = session_cookie_value(&jar) {
         crate::admin::auth::revoke_session(&state.sessions, &token);
         let _ = state.db.delete_session_by_token(&token).await;
         tracing::info!(
@@ -773,7 +796,8 @@ async fn logout(
             %ip,
             "logged out"
         );
-        jar.remove(Cookie::build(("session", "")).path("/").build())
+        let removal = session_cookie_removal(&jar);
+        jar.remove(removal)
     } else {
         jar
     };
@@ -1011,7 +1035,7 @@ async fn list_sessions(
     // The session cookie is only used to flag which listed session is the
     // caller's own device; a forward-auth / API-key caller simply has none, so
     // no row is marked current rather than the whole request being rejected.
-    let current_token = jar.get("session").map(|c| c.value().to_string());
+    let current_token = session_cookie_value(&jar);
     let rows = state
         .db
         .list_sessions()
@@ -1049,7 +1073,7 @@ async fn revoke_session_by_id(
     // session is the caller's own device (so we clear its cookie). A forward-auth
     // / API-key caller has none and just revokes the target session.
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let current_token = jar.get("session").map(|c| c.value().to_string());
+    let current_token = session_cookie_value(&jar);
     let removed = state
         .db
         .delete_session_by_id(id)
@@ -1067,7 +1091,7 @@ async fn revoke_session_by_id(
                 "revoked session by id"
             );
             if current_token.as_deref() == Some(token.as_str()) {
-                let removal = Cookie::build(("session", "")).path("/").build();
+                let removal = session_cookie_removal(&jar);
                 return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
             }
             Ok((jar, StatusCode::NO_CONTENT))

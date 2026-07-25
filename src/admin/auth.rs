@@ -81,6 +81,30 @@ pub fn generate_token() -> String {
         .collect()
 }
 
+/// Session cookie name on a plain-HTTP deployment.
+pub const SESSION_COOKIE: &str = "session";
+
+/// Session cookie name when the cookie carries `Secure`. The `__Host-` prefix
+/// makes the browser itself enforce `Secure` + `Path=/` + no `Domain`, and
+/// blocks a subdomain from overwriting it (session fixation).
+pub const SESSION_COOKIE_HOST: &str = "__Host-session";
+
+/// The cookie name to *emit*. Conditional on `cookie_secure`: a browser
+/// silently rejects a `__Host-`-prefixed cookie that is not `Secure` and not
+/// delivered over HTTPS, so emitting it unconditionally would make login
+/// appear to succeed and then fail on the next request — on exactly the
+/// HTTP-only internal deployments `resolve_cookie_secure` exists to support.
+/// The reverse move (an HTTPS deployment dropped back to HTTP) is not covered
+/// by this fallback: a browser holding `__Host-session` will not send it over
+/// plain HTTP, so that operator has to log in again once.
+pub fn session_cookie_name(cookie_secure: bool) -> &'static str {
+    if cookie_secure {
+        SESSION_COOKIE_HOST
+    } else {
+        SESSION_COOKIE
+    }
+}
+
 /// Prefix identifying a noadd programmatic API key (useful for secret scanners).
 const API_KEY_PREFIX: &str = "noadd_";
 /// Random body length; 40 alphanumeric chars ≈ 238 bits of entropy.

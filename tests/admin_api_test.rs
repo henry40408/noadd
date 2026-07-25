@@ -588,6 +588,12 @@ async fn test_login_cookie_secure_when_enabled() {
     // The other attributes must survive alongside it.
     assert!(cookie.contains("HttpOnly"), "{cookie}");
     assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+    // `Secure` implies the `__Host-` prefix, which gets the browser to also
+    // enforce `Path=/` and no `Domain` and blocks a subdomain override.
+    assert!(
+        cookie.starts_with("__Host-session="),
+        "cookie_secure must emit the __Host- prefixed name: {cookie}"
+    );
 }
 
 #[tokio::test]
@@ -600,6 +606,81 @@ async fn test_login_cookie_not_secure_when_disabled() {
     assert!(
         !cookie.contains("Secure"),
         "session cookie must not be Secure when cookie_secure is off: {cookie}"
+    );
+    // A browser silently rejects `__Host-`-prefixed cookies that aren't
+    // `Secure`, so the plain-HTTP name must stay unprefixed.
+    assert!(
+        cookie.starts_with("session=") && !cookie.contains("__Host-"),
+        "cookie_secure=false must keep the plain session cookie name: {cookie}"
+    );
+}
+
+#[tokio::test]
+async fn host_prefixed_cookie_is_accepted_on_read() {
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("__Host-session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn legacy_cookie_name_still_accepted_when_secure() {
+    // A restart that flips `cookie_secure` on (new TLS cert, added
+    // `--cookie-secure`) must not invalidate sessions issued under the old,
+    // unprefixed name.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_clears_the_host_prefixed_cookie() {
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("cookie", format!("__Host-session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get("set-cookie")
+        .expect("logout must clear the session cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        set_cookie.starts_with("__Host-session="),
+        "logout must clear the name actually present on the request: {set_cookie}"
+    );
+    assert!(
+        set_cookie.contains("Max-Age=0"),
+        "cleared cookie must expire immediately: {set_cookie}"
     );
 }
 
