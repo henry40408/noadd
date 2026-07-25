@@ -26,6 +26,13 @@
 //! to appear in `--trusted-proxies` (for Cloudflare, its published ranges);
 //! a hop that is missing is attributed as the client, which over-attributes to
 //! a proxy — the safe direction — instead of honouring a forged value.
+//!
+//! The dangerous direction is a range that is too *wide*. The walk skips every
+//! hop the list covers, so a list covering addresses a client can hold — a
+//! whole LAN, a container bridge that carries clients as well as the proxy —
+//! makes the walk step over that client and land on whatever it wrote. A range
+//! here means "only proxies live at these addresses"; anything broader hands
+//! back the forgery this walk exists to prevent.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -175,6 +182,36 @@ impl TrustedProxies {
 /// the `DoH` hot path a thousand `IpAddr` parses per query.
 const MAX_XFF_HOPS: usize = 32;
 
+/// Parse one `X-Forwarded-For` entry, tolerating the forms proxies actually emit.
+///
+/// A bare address is the norm, but Azure's gateways and IIS ARR append
+/// `1.2.3.4:53821`, IPv6 hops turn up bracketed, and RFC 7239 `for=` syntax
+/// leaks across from `Forwarded`. Failing to read those is not cosmetic: an
+/// entry the walk cannot interpret is an entry it cannot attribute, and the
+/// caller has to stop there rather than step over it.
+fn parse_forwarded_hop(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    let hop = match hop.get(..4) {
+        Some(p) if p.eq_ignore_ascii_case("for=") => &hop[4..],
+        _ => hop,
+    };
+    let hop = hop.trim_matches('"').trim();
+
+    // `[2001:db8::1]` and `[2001:db8::1]:443` — the only forms in which an IPv6
+    // hop can carry a port unambiguously.
+    if let Some(rest) = hop.strip_prefix('[') {
+        let (addr, _port) = rest.split_once(']')?;
+        return addr.parse().ok();
+    }
+    if let Ok(ip) = hop.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    // Only `1.2.3.4:443` is left: a bare IPv6 would have parsed above, so a
+    // colon here separates an IPv4 host from its port.
+    let (addr, _port) = hop.rsplit_once(':')?;
+    addr.parse::<Ipv4Addr>().ok().map(IpAddr::V4)
+}
+
 /// Resolve the originating client IP for logging and rate limiting.
 ///
 /// `connect` is the TCP peer (None during unit tests that bypass the axum
@@ -200,28 +237,27 @@ pub fn extract_client_ip(
         && let Some(hv) = headers.get("x-forwarded-for")
         && let Ok(s) = hv.to_str()
     {
-        // Innermost (appended last, nearest noadd) first, so the walk starts at
-        // the hop the adjacent proxy vouched for and moves outwards.
-        let hops_inward_out: Vec<IpAddr> = s
-            .rsplit(',')
-            .take(MAX_XFF_HOPS)
-            .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
-            .collect();
-
-        // The first entry no configured proxy accounts for is where the vouched
-        // chain ends — everything beyond it is the client's own claim.
-        if let Some(&client) = hops_inward_out
-            .iter()
-            .find(|&&ip| !trusted.is_proxy_hop(ip))
-        {
-            return client;
+        // Walk innermost (appended last, nearest noadd) outwards, so the walk
+        // starts at the hop the adjacent proxy vouched for.
+        let mut outermost_proxy = None;
+        for hop in s.rsplit(',').take(MAX_XFF_HOPS) {
+            // Skipping a hop it cannot read would let the walk continue into
+            // entries no proxy vouched for, so an unreadable entry ends it.
+            let Some(ip) = parse_forwarded_hop(hop) else {
+                break;
+            };
+            // The first entry no configured proxy accounts for is where the
+            // vouched chain ends — beyond it is the client's own claim.
+            if !trusted.is_proxy_hop(ip) {
+                return ip;
+            }
+            outermost_proxy = Some(ip);
         }
-        // Every hop is a known proxy (or the header held only garbage). With no
-        // client to attribute, fall back to the outermost hop — the last of an
-        // inward-out list. An all-garbage header leaves the list empty and drops
-        // through to `X-Real-IP` / the peer.
-        if let Some(&outermost) = hops_inward_out.last() {
-            return outermost;
+        // Every hop read was a known proxy. With no client to attribute, fall
+        // back to the outermost one reached. A header whose innermost entry is
+        // unreadable yields nothing and drops through to `X-Real-IP` / the peer.
+        if let Some(ip) = outermost_proxy {
+            return ip;
         }
     }
     if trust_headers

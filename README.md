@@ -177,8 +177,16 @@ value as the leftmost entry. Trusting the leftmost entry would let anyone mint a
 fresh rate-limit bucket per request and forge query-log entries.
 
 The practical consequence: **every proxy in the chain must be listed**, not just
-the one noadd talks to. A hop that is missing is treated as the client, which
-attributes traffic to that proxy — imprecise, but not forgeable.
+the one noadd talks to. A hop that is missing ends the walk and is treated as
+the client, so traffic is attributed to that proxy — imprecise, but not
+something a client can aim.
+
+The opposite mistake is the dangerous one. **List proxies only, never a range
+that clients can also live in.** The walk skips every hop the list covers, so a
+range like `192.168.1.0/24` chosen to mean "my LAN" makes noadd step over the
+real client and take whatever that client put to the left of itself — the exact
+forgery the right-to-left walk exists to prevent. Prefer the proxy's own address
+(`--trusted-proxies 192.168.1.5`) over the subnet it sits in.
 
 ```bash
 # SWAG/nginx in another container on the Docker bridge
@@ -193,9 +201,31 @@ since the edge address is the hop your proxy appends:
 ```
 
 Alternatively, have the fronting proxy collapse the chain to a single trustworthy
-value and let noadd read that — with Caddy, `client_ip_headers CF-Connecting-IP`
-plus `header_up X-Forwarded-For {client_ip}`. Note that `X-Real-IP` is only
-consulted when `X-Forwarded-For` is absent or unparseable.
+value and let noadd read that. With Caddy, `trusted_proxies` and
+`client_ip_headers` are **global options in the `servers` block** — without the
+former, `{client_ip}` silently falls back to the address of the direct
+connection, which behind Cloudflare is the edge rather than the client:
+
+```caddyfile
+{
+	servers {
+		# Cloudflare's published ranges — see https://www.cloudflare.com/ips/
+		# (both families; noadd and Caddy match v4 and v6 separately).
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 … 2400:cb00::/32 2606:4700::/32 …
+		client_ip_headers CF-Connecting-IP
+	}
+}
+
+dns.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-For {client_ip}
+	}
+}
+```
+
+noadd then sees a one-entry chain from a loopback peer and needs no
+`--trusted-proxies` of its own. Note that `X-Real-IP` is only consulted when
+`X-Forwarded-For` is absent or unreadable.
 
 The HTTP listener must not be reachable except through the proxy: a client that
 can reach noadd (or the proxy) directly, bypassing Cloudflare, can send these

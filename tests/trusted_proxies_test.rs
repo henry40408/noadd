@@ -216,12 +216,90 @@ fn all_proxy_hops_attributes_the_outermost_proxy() {
 }
 
 #[test]
-fn garbage_hops_are_skipped_rather_than_aborting_the_walk() {
+fn unreadable_hop_ends_the_walk_instead_of_being_stepped_over() {
+    // Skipping the unreadable entry would carry the walk into `1.2.3.4`, which
+    // no proxy vouched for. Stopping attributes the last proxy actually read.
     let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
     let connect = ci("172.18.0.19:50000");
-    let headers = headers_xff("not-an-ip, 203.0.113.7, 172.18.0.19");
+    let headers = headers_xff("1.2.3.4, not-an-ip, 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(172, 18, 0, 19)));
+}
+
+#[test]
+fn unreadable_innermost_hop_falls_back_to_the_peer() {
+    // Nothing in the header was readable, so there is no hop to attribute and
+    // the peer — the one address the client cannot choose — stands in.
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("1.2.3.4, not-an-ip");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(172, 18, 0, 19)));
+}
+
+#[test]
+fn hop_carrying_a_port_is_read_as_its_address() {
+    // Azure's gateways and IIS ARR append `ip:port`. Failing to read that would
+    // end the walk one hop early and hand `1.2.3.4` the result.
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("1.2.3.4, 203.0.113.7:53821, 172.18.0.19");
     let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
     assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn bracketed_ipv6_hop_is_read_as_its_address() {
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("1.2.3.4, [2001:db8::5]:443, 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(
+        ip,
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 5))
+    );
+}
+
+#[test]
+fn rfc7239_for_parameter_leaking_into_the_header_is_read() {
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("1.2.3.4, for=\"203.0.113.7\", 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn walk_reaches_the_client_at_the_hop_limit_but_not_past_it() {
+    // Pins MAX_XFF_HOPS at 32: a client 32 hops in is still found, one hop
+    // further is not, and the walk falls back to the outermost proxy read.
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let proxies = |n: usize| {
+        std::iter::repeat_n("172.18.0.19", n)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let headers = headers_xff(&format!("203.0.113.7, {}", proxies(31)));
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+
+    let headers = headers_xff(&format!("203.0.113.7, {}", proxies(32)));
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(172, 18, 0, 19)));
+}
+
+#[test]
+fn client_inside_a_trusted_range_is_skipped_as_a_proxy_hop() {
+    // Documented failure mode, pinned so it cannot change silently: the walk
+    // skips every hop the list covers, so a range wide enough to hold clients
+    // steps over the real one. `--trusted-proxies` must name proxies only.
+    let tp = TrustedProxies::parse("192.168.1.0/24").unwrap();
+    let connect = ci("192.168.1.5:50000");
+    let headers = headers_xff("6.6.6.6, 192.168.1.77");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(6, 6, 6, 6)));
 }
 
 #[test]

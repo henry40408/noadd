@@ -111,7 +111,9 @@ pub struct CliArgs {
     /// The same list identifies proxy hops *within* `X-Forwarded-For`, which is
     /// read right-to-left up to the first hop that is not listed. List every
     /// proxy in the chain (behind Cloudflare, its published ranges too) — a
-    /// missing hop is attributed as the client.
+    /// missing hop is attributed as the client. List proxy addresses only: a
+    /// range wide enough to also cover clients makes the walk skip the real
+    /// client and honour the value it sent.
     #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
     pub trusted_proxies: String,
 

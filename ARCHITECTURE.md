@@ -160,7 +160,9 @@ Most `/api/*` endpoints accept either the browser `session` cookie or an `Author
 
 The right-to-left walk is the non-obvious half. Trusting the peer says nothing about the *contents* of `X-Forwarded-For`, because the common proxy configurations append to the client's value rather than replace it — nginx's `$proxy_add_x_forwarded_for` and Cloudflare both do — so `XFF: <forged>, <real client>` arrives with an entirely trustworthy proxy in front of it. Reading the leftmost entry, as noadd did before, hands the attacker the result directly.
 
-The cost of the walk is that the trust list must name every hop, not just the peer noadd talks to; an unlisted hop terminates the walk and is reported as the client. That failure mode over-attributes traffic to a proxy, which is imprecise but cannot be steered from outside — the opposite of the leftmost read, whose failure mode is silent and attacker-chosen.
+An entry the walk cannot read ends it too. Stepping over an unreadable hop would carry the walk into entries no proxy vouched for, and the encodings that fail a bare `IpAddr` parse are ones real proxies emit — `1.2.3.4:53821` from Azure's gateways and IIS ARR, bracketed IPv6, RFC 7239 `for=` syntax leaking across from `Forwarded` — so `parse_forwarded_hop` normalises those rather than leaving the walk to skip past them.
+
+The cost of the walk is that the trust list must name every hop, not just the peer noadd talks to; an unlisted hop terminates the walk and is reported as the client, over-attributing traffic to a proxy. That direction is imprecise but not aimable. The reverse — a range wide enough to cover client addresses, `192.168.1.0/24` written to mean "my LAN" — is not safe at all: the walk skips every hop the list covers, so it steps over the real client onto whatever that client wrote, restoring exactly the primitive the leftmost read had. The list is a statement that only proxies hold these addresses.
 
 ## Data Storage
 
