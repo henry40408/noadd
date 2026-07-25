@@ -12,7 +12,10 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
-use noadd::admin::auth::{RateLimiter, load_sessions_from_db, new_session_store};
+use noadd::admin::auth::{
+    RateLimiter, init_session_log_salt, load_or_create_session_log_salt, load_sessions_from_db,
+    new_session_store,
+};
 use noadd::cache::DnsCache;
 use noadd::config::CliArgs;
 use noadd::db::Database;
@@ -183,6 +186,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
+    // Must happen before `load_sessions_from_db`: its startup restore can
+    // trigger expiry events on first access, and those must be logged under
+    // the persisted salt, not a temporary random one.
+    let session_log_salt = load_or_create_session_log_salt(&db).await?;
+    init_session_log_salt(session_log_salt);
     let session_store = new_session_store();
     load_sessions_from_db(&session_store, &db).await?;
     let session_store_for_flush = session_store.clone();

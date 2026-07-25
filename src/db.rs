@@ -1415,27 +1415,27 @@ impl Database {
         Ok(token)
     }
 
-    pub async fn delete_all_sessions(&self) -> Result<(), DbError> {
-        self.conn
-            .call(|conn| {
-                conn.execute("DELETE FROM sessions", [])?;
-                Ok(())
-            })
+    /// Delete every session. Returns the number of rows removed.
+    pub async fn delete_all_sessions(&self) -> Result<usize, DbError> {
+        let n = self
+            .conn
+            .call(|conn| conn.execute("DELETE FROM sessions", []))
             .await?;
-        Ok(())
+        Ok(n)
     }
 
     /// Delete every session except the one holding `token` (log out other
-    /// devices while keeping the caller signed in).
-    pub async fn delete_sessions_except(&self, token: &str) -> Result<(), DbError> {
+    /// devices while keeping the caller signed in). Returns the number of
+    /// rows removed.
+    pub async fn delete_sessions_except(&self, token: &str) -> Result<usize, DbError> {
         let token = token.to_string();
-        self.conn
+        let n = self
+            .conn
             .call(move |conn| {
-                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])?;
-                Ok(())
+                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])
             })
             .await?;
-        Ok(())
+        Ok(n)
     }
 
     /// Delete every session belonging to `user_id` except the one holding

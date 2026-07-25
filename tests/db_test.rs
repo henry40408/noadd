@@ -54,6 +54,26 @@ async fn test_settings_get_missing_returns_none() {
 }
 
 #[tokio::test]
+async fn session_log_salt_is_persisted() {
+    let db = test_db().await;
+    let first = noadd::admin::auth::load_or_create_session_log_salt(&db)
+        .await
+        .unwrap();
+    let second = noadd::admin::auth::load_or_create_session_log_salt(&db)
+        .await
+        .unwrap();
+    assert_eq!(first, second);
+
+    let stored = db
+        .get_setting(noadd::admin::auth::SESSION_LOG_SALT_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.len(), 32);
+    assert!(stored.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
 async fn test_insert_and_query_logs() {
     let db = test_db().await;
     let entries = vec![

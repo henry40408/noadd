@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use argon2::password_hash::SaltString;
@@ -99,6 +99,92 @@ pub fn hash_api_key(token: &str) -> String {
     })
 }
 
+/// Process-wide salt for [`session_log_id`]. Installed once at startup from the
+/// value persisted in `settings` (see [`load_or_create_session_log_salt`]) so
+/// log identifiers stay correlatable across restarts. If it is never
+/// installed (unit tests), a random salt is generated on first use — never an
+/// empty or fixed one, so an unsalted digest can never reach a log.
+static SESSION_LOG_SALT: OnceLock<[u8; 16]> = OnceLock::new();
+
+/// Settings key holding the hex-encoded audit-log salt.
+pub const SESSION_LOG_SALT_KEY: &str = "session_log_salt";
+
+/// Install the process-wide audit salt. The first call wins; later calls are
+/// no-ops. Must run before any session event is logged — in particular,
+/// before `load_sessions_from_db`, whose startup restore can otherwise emit
+/// expiry events under a different (temporary random) salt than everything
+/// logged afterwards.
+pub fn init_session_log_salt(salt: [u8; 16]) {
+    let _ = SESSION_LOG_SALT.set(salt);
+}
+
+/// Read the persisted audit salt from `settings`, generating and storing one
+/// on first run.
+pub async fn load_or_create_session_log_salt(
+    db: &crate::db::Database,
+) -> Result<[u8; 16], crate::db::DbError> {
+    if let Some(hex) = db.get_setting(SESSION_LOG_SALT_KEY).await?
+        && let Some(salt) = decode_hex_salt(&hex)
+    {
+        return Ok(salt);
+    }
+    let mut salt = [0u8; 16];
+    salt.fill_with(rand::random);
+    use std::fmt::Write as _;
+    let hex = salt.iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    db.set_setting(SESSION_LOG_SALT_KEY, &hex).await?;
+    Ok(salt)
+}
+
+/// Decode a 32-character lower-hex string into 16 bytes, or `None` if it is
+/// the wrong length or contains non-hex characters — a corrupted or
+/// hand-edited setting falls back to generating a fresh salt rather than
+/// panicking.
+fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let s = std::str::from_utf8(chunk).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Salted, truncated `BLAKE2b` digest of a session token: a stable,
+/// non-reversible identifier safe to write to logs, so session events can be
+/// correlated without ever disclosing the token. Never log the token itself.
+///
+/// Deliberately not called for a successful session validation: that path
+/// runs on every request, so logging it there would drown the audit log
+/// without adding anything an audit needs — only a session's creation and
+/// destruction are lifecycle events worth recording. A successful API key use
+/// is likewise not logged per-call; it is already tracked via
+/// `api_keys.last_used_at`.
+pub fn session_log_id(token: &str) -> String {
+    let salt = SESSION_LOG_SALT.get_or_init(|| {
+        let mut s = [0u8; 16];
+        s.fill_with(rand::random);
+        s
+    });
+    let mut hasher = Blake2b512::new();
+    hasher.update(salt);
+    hasher.update(token.as_bytes());
+    use std::fmt::Write as _;
+    // 16 hex chars (64 bits) is far more than enough to correlate the handful
+    // of sessions one appliance ever has, and keeps log lines readable.
+    hasher.finalize()[..8]
+        .iter()
+        .fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
+
 /// Mint a fresh API key. Returns `(full_token, display_prefix, token_hash)`.
 /// The full token is shown to the user exactly once; only the hash is stored.
 pub fn generate_api_key() -> (String, String, String) {
@@ -152,11 +238,11 @@ pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
         }
     }
     if let Some((session_id, reason)) = expired {
-        // P1-C wires `sid_hash` in here.
         tracing::info!(
             event = "session.destroyed",
             reason,
             session_id,
+            sid_hash = %session_log_id(token),
             "session expired"
         );
     }
@@ -245,12 +331,13 @@ pub async fn sweep_expired(
 /// Revoke every session except `keep` (log out other devices, staying signed
 /// in on the current one). When `keep` is `None` — e.g. a forward-auth caller
 /// that holds no session cookie — every session is revoked, since none of them
-/// is the caller's own device.
+/// is the caller's own device. Returns the number of sessions revoked, for
+/// the caller's audit log.
 pub async fn revoke_other_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
     keep: Option<&str>,
-) -> Result<(), crate::db::DbError> {
+) -> Result<usize, crate::db::DbError> {
     if let Some(token) = keep {
         store.lock().retain(|t, _| t == token);
         db.delete_sessions_except(token).await

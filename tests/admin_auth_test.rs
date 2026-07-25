@@ -2,8 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
     RateLimiter, SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, generate_token,
-    hash_password, new_session_store, prune_expired, revoke_session, store_session, sweep_expired,
-    validate_session, verify_password,
+    hash_password, new_session_store, prune_expired, revoke_session, session_log_id, store_session,
+    sweep_expired, validate_session, verify_password,
 };
 use noadd::db::Database;
 use tempfile::tempdir;
@@ -55,6 +55,24 @@ fn test_session_create_and_validate() {
     store_session(&store, &token, info(42));
     assert_eq!(validate_session(&store, &token), Some(42));
     assert_eq!(validate_session(&store, "nope"), None);
+}
+
+#[test]
+fn session_log_id_is_stable_and_never_contains_the_token() {
+    let token = generate_token();
+    let other_token = generate_token();
+
+    let id = session_log_id(&token);
+    // Deterministic for the same token...
+    assert_eq!(id, session_log_id(&token));
+    // ...but distinct across tokens.
+    assert_ne!(id, session_log_id(&other_token));
+
+    // 16 hex chars (64 bits), and — the whole point of salting — never a
+    // substring of the token it was derived from.
+    assert_eq!(id.len(), 16);
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!id.contains(&token[..8]));
 }
 
 #[test]

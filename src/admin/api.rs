@@ -25,7 +25,7 @@ use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, has_no_password, hash_api_key,
-    hash_password, store_session, validate_session, verify_password,
+    hash_password, session_log_id, store_session, validate_session, verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -353,6 +353,24 @@ fn client_ip(
     extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
+/// Bound on the client-controlled `User-Agent` / API-key-prefix text written
+/// to an audit log line, so a hostile client cannot inflate log volume.
+const LOG_SAFE_MAX: usize = 256;
+
+/// Truncate a client-controlled string to a bounded, UTF-8-safe prefix before
+/// it reaches a log line, cutting on a `char` boundary so multi-byte UTF-8 is
+/// never split mid-sequence.
+fn log_safe(value: &str, max: usize) -> &str {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 // --- Auth helper ---
 
 /// Returns `(user_id, token)` for the current authenticated session, or 401.
@@ -414,6 +432,22 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                     via_forward_auth: false,
                 });
             }
+            // Failed key: not logged via `hash_api_key`'s output (that would
+            // still allow reconstructing which key was tried offline against a
+            // known set); the prefix is the same non-secret identifier already
+            // shown to the operator when the key was created.
+            let ip = extract_client_ip(
+                parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+                &parts.headers,
+                &state.trusted_proxies,
+            );
+            tracing::warn!(
+                event = "auth.failed",
+                method = "api_key",
+                %ip,
+                prefix = %log_safe(&token, 10),
+                "api key authentication failed"
+            );
         }
         // 3. Reverse-proxy forward auth: a username header injected by a proxy
         //    whose TCP peer matches --forward-auth-trusted-proxies. Last in the
@@ -457,7 +491,11 @@ async fn resolve_forward_auth_user(
         .await
     {
         Ok(id) => {
-            tracing::info!(%username, "provisioned operator from forward-auth header");
+            tracing::info!(
+                event = "forward_auth.provisioned",
+                %username,
+                "provisioned operator from forward-auth header"
+            );
             Ok(id)
         }
         Err(e) if e.is_unique_violation() => match state.db.get_user_auth(username).await? {
@@ -489,19 +527,40 @@ async fn login(
     Json(body): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
     if !state.rate_limiter.check(ip) {
         tracing::warn!(%ip, "login rate limited");
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     state.rate_limiter.record(ip);
 
+    // Every 401 out of this handler is an authentication failure worth
+    // auditing, not just the wrong-password one: an unknown username is the
+    // ordinary shape of a brute-force attempt, and a password login against a
+    // forward-auth account is the same signal. The event deliberately carries
+    // no username — the response does not distinguish these cases either.
+    let log_failed = || {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            %ip,
+            user_agent = %log_safe(user_agent.unwrap_or(""), LOG_SAFE_MAX),
+            "login failed"
+        );
+    };
+
     // Generic 401 whether the username is unknown or the password is wrong.
-    let auth = state
+    let Some(auth) = state
         .db
         .get_user_auth(body.username.trim())
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    else {
+        log_failed();
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
     // Forward-auth-provisioned accounts store a sentinel in place of a hash and
     // can never authenticate with a password — same generic 401 as any other
@@ -509,21 +568,19 @@ async fn login(
     // fail to parse the sentinel and surface it as a 500, leaking which accounts
     // are forward-auth-provisioned.
     if has_no_password(&auth.password_hash) {
+        log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
 
     let valid = verify_password(&body.password, &auth.password_hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !valid {
-        tracing::warn!("login failed: invalid credentials");
+        log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
 
     let now = crate::now_unix();
     let token = generate_token();
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
     let session_id = state
         .db
         .insert_session(&token, auth.id, now, now, Some(&ip.to_string()), user_agent)
@@ -539,7 +596,15 @@ async fn login(
             last_seen: now,
         },
     );
-    tracing::info!(user_id = auth.id, "login successful");
+    tracing::info!(
+        event = "session.created",
+        user_id = auth.id,
+        session_id,
+        sid_hash = %session_log_id(&token),
+        %ip,
+        user_agent = %log_safe(user_agent.unwrap_or(""), LOG_SAFE_MAX),
+        "login successful"
+    );
 
     let cookie = Cookie::build(("session", token))
         .path("/")
@@ -656,13 +721,28 @@ async fn setup(
 /// revoked (none is their own device).
 async fn revoke_others(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, StatusCode> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     let current_token = jar.get("session").map(|c| c.value().to_string());
-    crate::admin::auth::revoke_other_sessions(&state.sessions, &state.db, current_token.as_deref())
-        .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let revoked = crate::admin::auth::revoke_other_sessions(
+        &state.sessions,
+        &state.db,
+        current_token.as_deref(),
+    )
+    .await
+    .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::info!(
+        event = "session.destroyed",
+        reason = "revoked_others",
+        user_id = auth.user_id,
+        %ip,
+        revoked,
+        "revoked other sessions"
+    );
     Ok(StatusCode::OK)
 }
 
@@ -675,12 +755,23 @@ async fn revoke_others(
 async fn logout(
     State(state): State<AppState>,
     auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<(CookieJar, Json<LogoutResponse>), StatusCode> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     let jar = if let Some(c) = jar.get("session") {
         let token = c.value().to_string();
         crate::admin::auth::revoke_session(&state.sessions, &token);
         let _ = state.db.delete_session_by_token(&token).await;
+        tracing::info!(
+            event = "session.destroyed",
+            reason = "logout",
+            user_id = auth.user_id,
+            sid_hash = %session_log_id(&token),
+            %ip,
+            "logged out"
+        );
         jar.remove(Cookie::build(("session", "")).path("/").build())
     } else {
         jar
@@ -804,6 +895,13 @@ async fn delete_user_handler(
             for t in &tokens {
                 crate::admin::auth::revoke_session(&state.sessions, t);
             }
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "user_deleted",
+                user_id = id,
+                revoked = tokens.len(),
+                "revoked sessions for deleted user"
+            );
             Ok(StatusCode::NO_CONTENT)
         }
     }
@@ -941,12 +1039,15 @@ async fn list_sessions(
 async fn revoke_session_by_id(
     State(state): State<AppState>,
     _auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(id): Path<i64>,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
     // Authorized via `AuthedUser`; the cookie only tells us whether the revoked
     // session is the caller's own device (so we clear its cookie). A forward-auth
     // / API-key caller has none and just revokes the target session.
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     let current_token = jar.get("session").map(|c| c.value().to_string());
     let removed = state
         .db
@@ -956,6 +1057,14 @@ async fn revoke_session_by_id(
     match removed {
         Some(token) => {
             crate::admin::auth::revoke_session(&state.sessions, &token);
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "revoked_by_id",
+                session_id = id,
+                sid_hash = %session_log_id(&token),
+                %ip,
+                "revoked session by id"
+            );
             if current_token.as_deref() == Some(token.as_str()) {
                 let removal = Cookie::build(("session", "")).path("/").build();
                 return Ok((jar.remove(removal), StatusCode::NO_CONTENT));
@@ -1817,6 +1926,14 @@ async fn create_api_key(
         .insert_api_key(auth.user_id, &name, &hash, &prefix, now, body.expires_at)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::info!(
+        event = "apikey.created",
+        user_id = auth.user_id,
+        key_id = id,
+        %prefix,
+        expires_at = body.expires_at,
+        "api key created"
+    );
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
@@ -1853,6 +1970,12 @@ async fn delete_api_key(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if deleted {
+        tracing::info!(
+            event = "apikey.destroyed",
+            user_id = auth.user_id,
+            key_id = id,
+            "api key deleted"
+        );
         Ok(StatusCode::OK)
     } else {
         Err(StatusCode::NOT_FOUND)
