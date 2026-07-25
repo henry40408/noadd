@@ -1,4 +1,7 @@
-use noadd::admin::auth::{SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS};
+use noadd::admin::auth::{
+    SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, new_session_store, prune_expired,
+    store_session,
+};
 use noadd::db::{Database, DeleteUserOutcome, QueryLogEntry};
 use tempfile::tempdir;
 
@@ -633,7 +636,10 @@ async fn test_sessions_crud_and_cascade() {
 async fn test_load_sessions_drops_expired() {
     let db = test_db().await;
     let uid = db.create_user("dave", "h", 0).await.unwrap();
-    db.insert_session("fresh", uid, 1_000, 1_000, None, None)
+    // created_at 1_050 -> age 50, comfortably inside max_age 100 (not at the
+    // cutoff boundary, which purge_expired_sessions/load_sessions correctly
+    // treat as expired — see the boundary-matrix test).
+    db.insert_session("fresh", uid, 1_050, 1_050, None, None)
         .await
         .unwrap();
     db.insert_session("stale", uid, 1, 1, None, None)
@@ -779,42 +785,129 @@ async fn purge_expired_sessions_is_idempotent() {
     assert_eq!(second, 0);
 }
 
+/// One row of the boundary matrix exercised by
+/// `purge_expired_sessions_matches_in_memory_predicate_at_boundaries`.
+struct BoundaryCase {
+    label: &'static str,
+    /// Offset from `now` for the row's `created_at`.
+    created_offset: i64,
+    /// Offset from `now` for the row's `last_seen`.
+    last_seen_offset: i64,
+    /// Whether the row is expected to be expired under both predicates.
+    expect_expired: bool,
+}
+
 #[tokio::test]
-async fn load_sessions_and_purge_agree() {
-    // load_sessions and purge_expired_sessions must share one predicate, or
-    // startup restore and the periodic sweep could disagree on which rows are
-    // dead. Apply the same fixture to two independent DBs, one through each
-    // path, and check the surviving row set is identical.
-    let db_load = test_db().await;
-    let db_purge = test_db().await;
-    let now = 10_000_000;
+async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
+    // The SQL predicate (`Database::PURGE_EXPIRED_SESSIONS_SQL`) and the
+    // in-memory predicate (`admin::auth::prune_expired`, sharing its
+    // comparison with `validate_session`) must agree on every row, including
+    // exactly at the absolute and idle boundaries — that boundary is what a
+    // prior bug got wrong (SQL used `<`, memory used `>=`). This drives both
+    // predicates with identical fixtures and checks they agree with each
+    // other, not just with a hand-derived expectation restated in the test.
+    let cases = [
+        BoundaryCase {
+            label: "created_at exactly at the absolute-timeout boundary",
+            created_offset: -SESSION_MAX_AGE_SECS,
+            last_seen_offset: 0,
+            expect_expired: true,
+        },
+        BoundaryCase {
+            label: "created_at one second inside the absolute-timeout boundary",
+            created_offset: -SESSION_MAX_AGE_SECS + 1,
+            last_seen_offset: 0,
+            expect_expired: false,
+        },
+        BoundaryCase {
+            label: "created_at one second past the absolute-timeout boundary",
+            created_offset: -SESSION_MAX_AGE_SECS - 1,
+            last_seen_offset: 0,
+            expect_expired: true,
+        },
+        BoundaryCase {
+            label: "last_seen exactly at the idle-timeout boundary",
+            created_offset: -1,
+            last_seen_offset: -SESSION_IDLE_TIMEOUT_SECS,
+            expect_expired: true,
+        },
+        BoundaryCase {
+            label: "last_seen one second inside the idle-timeout boundary",
+            created_offset: -1,
+            last_seen_offset: -SESSION_IDLE_TIMEOUT_SECS + 1,
+            expect_expired: false,
+        },
+        BoundaryCase {
+            label: "last_seen one second past the idle-timeout boundary",
+            created_offset: -1,
+            last_seen_offset: -SESSION_IDLE_TIMEOUT_SECS - 1,
+            expect_expired: true,
+        },
+        BoundaryCase {
+            label: "both fields fresh",
+            created_offset: -1,
+            last_seen_offset: 0,
+            expect_expired: false,
+        },
+        BoundaryCase {
+            label: "both fields well past their boundaries",
+            created_offset: -SESSION_MAX_AGE_SECS - 100,
+            last_seen_offset: -SESSION_IDLE_TIMEOUT_SECS - 100,
+            expect_expired: true,
+        },
+    ];
 
-    let uid_load = db_load.create_user("ivy", "h", 0).await.unwrap();
-    insert_purge_fixture(&db_load, uid_load, now).await;
-    let uid_purge = db_purge.create_user("ivy", "h", 0).await.unwrap();
-    insert_purge_fixture(&db_purge, uid_purge, now).await;
+    for case in cases {
+        // `now` is captured immediately before driving the in-memory
+        // predicate, which reads the wall clock internally and cannot be
+        // handed a fake `now` — the SQL predicate below reuses this exact
+        // value, so it alone stays fully deterministic.
+        let now = noadd::now_unix();
+        let created_at = now + case.created_offset;
+        let last_seen = now + case.last_seen_offset;
 
-    let loaded = db_load
-        .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
-        .await
-        .unwrap();
-    let deleted = db_purge
-        .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
-        .await
-        .unwrap();
+        // In-memory side: the real prune_expired predicate.
+        let store = new_session_store();
+        store_session(
+            &store,
+            "tok",
+            SessionInfo {
+                session_id: 1,
+                user_id: 1,
+                created_at,
+                last_seen,
+            },
+        );
+        let evicted = prune_expired(&store) == 1;
+        assert_eq!(
+            evicted, case.expect_expired,
+            "{}: in-memory prune_expired disagreed with the expectation",
+            case.label
+        );
 
-    let mut loaded_tokens: Vec<String> = loaded.into_iter().map(|s| s.token).collect();
-    loaded_tokens.sort();
-    let mut remaining_tokens: Vec<String> = db_purge
-        .list_sessions()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.token)
-        .collect();
-    remaining_tokens.sort();
+        // SQL side: the same fixture through purge_expired_sessions.
+        let db = test_db().await;
+        let uid = db.create_user("op", "h", 0).await.unwrap();
+        db.insert_session("tok", uid, created_at, last_seen, None, None)
+            .await
+            .unwrap();
+        let deleted = db
+            .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
+            .await
+            .unwrap()
+            == 1;
+        assert_eq!(
+            deleted, case.expect_expired,
+            "{}: purge_expired_sessions disagreed with the expectation",
+            case.label
+        );
 
-    assert_eq!(deleted, 3);
-    assert_eq!(loaded_tokens, remaining_tokens);
-    assert_eq!(loaded_tokens, vec!["normal".to_string()]);
+        // The two predicates must agree with each other, not merely each
+        // independently match the expectation.
+        assert_eq!(
+            evicted, deleted,
+            "{}: SQL predicate and in-memory predicate disagreed",
+            case.label
+        );
+    }
 }

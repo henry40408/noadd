@@ -682,6 +682,68 @@ async fn logout_clears_the_host_prefixed_cookie() {
         set_cookie.contains("Max-Age=0"),
         "cleared cookie must expire immediately: {set_cookie}"
     );
+    // RFC 6265bis §5.5: a browser ignores a `__Host-`-prefixed `Set-Cookie`
+    // that isn't `Secure`, so without this the removal is silently dropped
+    // and the browser keeps sending the "deleted" cookie forever.
+    assert!(
+        set_cookie.contains("Secure"),
+        "the __Host- removal must carry Secure or browsers ignore it entirely: {set_cookie}"
+    );
+}
+
+#[tokio::test]
+async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
+    // Reproduces the lockout: an operator's browser holds a stale
+    // `__Host-session` (e.g. from before TLS termination moved to a reverse
+    // proxy) alongside a freshly-issued, valid `session` cookie. Auth must
+    // fall through to the cookie that actually validates rather than getting
+    // stuck on the positionally-preferred but dead `__Host-` one.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header(
+                    "cookie",
+                    format!("__Host-session=not-a-real-token; session={token}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a valid `session` cookie must authenticate even alongside an invalid __Host-session"
+    );
+}
+
+#[tokio::test]
+async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
+    // Mirror case: a valid `__Host-session` alongside a stale unprefixed
+    // `session` cookie must still authenticate via the valid one.
+    let (app, token, _cache, _events, _db, _sessions) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/me")
+                .header(
+                    "cookie",
+                    format!("__Host-session={token}; session=not-a-real-token"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a valid __Host-session cookie must authenticate even alongside an invalid session"
+    );
 }
 
 #[tokio::test]

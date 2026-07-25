@@ -1494,8 +1494,14 @@ impl Database {
     }
 
     /// Predicate shared by `purge_expired_sessions` and `load_sessions`.
+    ///
+    /// Deliberately `<=`, not `<`: `validate_session` and `prune_expired` in
+    /// `src/admin/auth.rs` expire a session with `>=` (`now - created_at >=
+    /// SESSION_MAX_AGE_SECS`, likewise for `last_seen`), so at the exact
+    /// boundary this must agree by deleting too, not by leaving the row for
+    /// the in-memory side to reject on next access.
     const PURGE_EXPIRED_SESSIONS_SQL: &str =
-        "DELETE FROM sessions WHERE created_at < ?1 OR last_seen < ?2";
+        "DELETE FROM sessions WHERE created_at <= ?1 OR last_seen <= ?2";
 
     /// Delete session rows that have hit either the absolute or the idle timeout.
     /// Returns the number of rows removed. Shared by startup restore

@@ -18,9 +18,14 @@ const NO_STORE: HeaderValue =
 /// deliberate: the embedded SPA assets set their own `no-cache` + `ETag`
 /// (see `static_response`) and must keep it — `no-store` there would defeat
 /// the revalidation/304 design for no benefit, since the shell carries no user
-/// data. Everything else — every `/api/*` JSON body, the mobileconfig plist,
-/// and the 401/403 rejections emitted by extractors and the CSRF guard —
-/// currently sets nothing and therefore gets `no-store`.
+/// data. Almost everything else — every `/api/*` JSON body, the mobileconfig
+/// plist, and the 401/403 rejections emitted by extractors and the CSRF guard
+/// — currently sets nothing and therefore gets `no-store`. The one exception
+/// is `GET /api/logs/stream`: axum's `Sse` response sets its own
+/// `Cache-Control: no-cache`, so the `contains_key` guard skips it and it
+/// lands on `no-cache` instead. That is acceptable because an SSE body is a
+/// stream of events, not a cacheable representation, so there is nothing for
+/// `no-store` to protect there that `no-cache` does not already cover.
 pub async fn no_store(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
@@ -50,8 +55,13 @@ pub async fn hsts(
 /// purpose: noadd cannot know whether the operator serves other things on
 /// sibling subdomains, and `preload` is effectively irreversible.
 pub fn hsts_value(max_age: u64) -> HeaderValue {
+    // `format!` over a `u64` can only ever produce ASCII digits, so this
+    // truly cannot fail. A silent fallback here would be worse than a panic:
+    // `--hsts-max-age 0` is the documented way to retract an HSTS pin (see
+    // README), and substituting a one-year default in that case would
+    // silently reinstate a policy the operator explicitly asked to remove.
     HeaderValue::from_str(&format!("max-age={max_age}"))
-        .unwrap_or_else(|_| HeaderValue::from_static("max-age=31536000"))
+        .expect("max-age=<u64> is always valid ASCII and a valid header value")
 }
 
 #[cfg(test)]
@@ -65,5 +75,49 @@ mod tests {
         let value = value.to_str().unwrap();
         assert!(!value.contains("includeSubDomains"));
         assert!(!value.contains("preload"));
+    }
+
+    /// Positive counterpart to
+    /// `hsts_header_is_not_sent_by_the_admin_router_alone` (in
+    /// `tests/admin_api_test.rs`), which only proves the header is absent when
+    /// the middleware was never attached. Nothing elsewhere drove a request
+    /// through the `hsts` middleware itself, so a wrong header name, an
+    /// inverted `resolve_hsts` branch, or a dropped `.layer(...)` call in
+    /// `main.rs` would all pass the suite unnoticed. The middleware is
+    /// router-agnostic, so this needs nothing from `main.rs`: build a minimal
+    /// router, attach it directly, and assert the header lands on the
+    /// response.
+    #[tokio::test]
+    async fn hsts_middleware_sets_the_header_on_a_response() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn ok() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/", get(ok))
+            .layer(axum::middleware::from_fn_with_state(hsts_value(600), hsts));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::STRICT_TRANSPORT_SECURITY)
+                .unwrap(),
+            "max-age=600"
+        );
     }
 }

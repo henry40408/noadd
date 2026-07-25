@@ -186,9 +186,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
-    // Must happen before `load_sessions_from_db`: its startup restore can
-    // trigger expiry events on first access, and those must be logged under
-    // the persisted salt, not a temporary random one.
+    // Must happen before any code path that can log a session event runs —
+    // not specifically because of `load_sessions_from_db` (its startup
+    // restore purges expired rows in SQL and emits nothing), but as a general
+    // rule: any `session.*` event logged before the salt is installed would
+    // carry a `sid_hash` computed under a temporary random salt instead of
+    // the persisted one, breaking correlation with everything logged
+    // before/after it.
     let session_log_salt = load_or_create_session_log_salt(&db).await?;
     init_session_log_salt(session_log_salt);
     let session_store = new_session_store();
@@ -237,8 +241,8 @@ async fn main() -> anyhow::Result<()> {
             tick.tick().await;
             let _ =
                 noadd::admin::auth::flush_last_seen(&session_store_for_flush, &db_for_flush).await;
-            ticks = ticks.wrapping_add(1);
-            if ticks.is_multiple_of(10) {
+            ticks = (ticks + 1) % 10;
+            if ticks == 0 {
                 match noadd::admin::auth::sweep_expired(&session_store_for_flush, &db_for_flush)
                     .await
                 {

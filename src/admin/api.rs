@@ -386,25 +386,52 @@ fn session_cookie_value(jar: &CookieJar) -> Option<String> {
         .map(|c| c.value().to_string())
 }
 
+/// The session cookie names to try, innermost-first. Both are accepted so a
+/// deployment that gains or loses `Secure` mid-session keeps working; the
+/// caller must try them **in order and keep the first that validates**,
+/// not merely the first that is present. A browser can hold both at once —
+/// a `__Host-` cookie set while noadd terminated TLS survives a move to a
+/// TLS-terminating proxy, where the origin is still https:// so the browser
+/// keeps sending it — and a stale one would otherwise shadow the live cookie
+/// on every request with no way to clear it.
+fn session_cookie_candidates(jar: &CookieJar) -> impl Iterator<Item = String> {
+    [
+        crate::admin::auth::SESSION_COOKIE_HOST,
+        crate::admin::auth::SESSION_COOKIE,
+    ]
+    .into_iter()
+    .filter_map(|name| jar.get(name).map(|c| c.value().to_string()))
+}
+
 /// Build the expiring cookie that clears whichever session cookie the request
 /// actually carried. Removing by the wrong name leaves the browser holding a
 /// cookie for an already-revoked token.
+///
+/// A `__Host-`-prefixed `Set-Cookie` is silently ignored by the browser
+/// unless it also carries `Secure` (RFC 6265bis §5.5: a `__Host-` cookie can
+/// only be overwritten — or cleared — by a cookie that itself satisfies the
+/// prefix's conditions), so the removal must set `Secure` too whenever it is
+/// clearing that name, not just the original `Set-Cookie` from login.
 fn session_cookie_removal(jar: &CookieJar) -> Cookie<'static> {
-    let name = if jar.get(crate::admin::auth::SESSION_COOKIE_HOST).is_some() {
+    let is_host = jar.get(crate::admin::auth::SESSION_COOKIE_HOST).is_some();
+    let name = if is_host {
         crate::admin::auth::SESSION_COOKIE_HOST
     } else {
         crate::admin::auth::SESSION_COOKIE
     };
-    Cookie::build((name, "")).path("/").build()
+    Cookie::build((name, "")).path("/").secure(is_host).build()
 }
 
 /// Returns `(user_id, token)` for the current authenticated session, or 401.
+///
+/// Walks [`session_cookie_candidates`] in order and keeps the first token
+/// that actually validates, rather than the positionally-first cookie
+/// present — see that function's doc comment for why a stale `__Host-`
+/// cookie must not be allowed to shadow a live `session` cookie.
 fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
-    let token = session_cookie_value(jar).ok_or(StatusCode::UNAUTHORIZED)?;
-    match validate_session(&state.sessions, &token) {
-        Some(user_id) => Ok((user_id, token)),
-        None => Err(StatusCode::UNAUTHORIZED),
-    }
+    session_cookie_candidates(jar)
+        .find_map(|token| validate_session(&state.sessions, &token).map(|user_id| (user_id, token)))
+        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 /// Extract a bearer token from the `Authorization` header, if present.
@@ -434,10 +461,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Session cookie (browser path).
+        // 1. Session cookie (browser path). Walk both candidate names,
+        // in-order, and keep the first that validates — see
+        // `session_cookie_candidates` for why a stale `__Host-` cookie must
+        // not be allowed to shadow a live `session` cookie.
         let jar = CookieJar::from_headers(&parts.headers);
-        if let Some(token) = session_cookie_value(&jar)
-            && let Some(user_id) = validate_session(&state.sessions, &token)
+        if let Some(user_id) = session_cookie_candidates(&jar)
+            .find_map(|token| validate_session(&state.sessions, &token))
         {
             return Ok(AuthedUser {
                 user_id,
@@ -445,6 +475,18 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
             });
         }
         // 2. Bearer API key (programmatic path).
+        //
+        // Emission of the `auth.failed` warning is deferred to the terminal
+        // rejection below rather than fired inline here: a bearer token that
+        // fails against the API-key table may still belong to a legitimate
+        // forward-auth request (oauth2-proxy's `--pass-authorization-header`
+        // and Authelia both forward a JWT alongside their own trusted
+        // header), and logging inline would emit a spurious `auth.failed` on
+        // every such request even though it goes on to authenticate
+        // successfully via step 3. `failed_key_prefix` is only populated for
+        // a token that actually looks like a noadd key — a foreign
+        // credential's prefix must never reach the log.
+        let mut failed_key_prefix: Option<String> = None;
         if let Some(token) = bearer_token(&parts.headers) {
             let hash = hash_api_key(&token);
             let now = crate::now_unix();
@@ -454,22 +496,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                     via_forward_auth: false,
                 });
             }
-            // Failed key: not logged via `hash_api_key`'s output (that would
-            // still allow reconstructing which key was tried offline against a
-            // known set); the prefix is the same non-secret identifier already
+            // Not logged via `hash_api_key`'s output (that would still allow
+            // reconstructing which key was tried offline against a known
+            // set); the prefix is the same non-secret identifier already
             // shown to the operator when the key was created.
-            let ip = extract_client_ip(
-                parts.extensions.get::<ConnectInfo<SocketAddr>>(),
-                &parts.headers,
-                &state.trusted_proxies,
-            );
-            tracing::warn!(
-                event = "auth.failed",
-                method = "api_key",
-                %ip,
-                prefix = %log_safe(&token, 10),
-                "api key authentication failed"
-            );
+            if token.starts_with("noadd_") {
+                failed_key_prefix = Some(log_safe(&token, 10).to_string());
+            }
         }
         // 3. Reverse-proxy forward auth: a username header injected by a proxy
         //    whose TCP peer matches --forward-auth-trusted-proxies. Last in the
@@ -491,6 +524,20 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                         StatusCode::INTERNAL_SERVER_ERROR
                     });
             }
+        }
+        if let Some(prefix) = failed_key_prefix {
+            let ip = extract_client_ip(
+                parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+                &parts.headers,
+                &state.trusted_proxies,
+            );
+            tracing::warn!(
+                event = "auth.failed",
+                method = "api_key",
+                %ip,
+                prefix = %prefix,
+                "api key authentication failed"
+            );
         }
         Err(StatusCode::UNAUTHORIZED)
     }
@@ -553,7 +600,13 @@ async fn login(
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
     if !state.rate_limiter.check(ip) {
-        tracing::warn!(%ip, "login rate limited");
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "rate_limited",
+            %ip,
+            "login rate limited"
+        );
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     state.rate_limiter.record(ip);
@@ -568,7 +621,7 @@ async fn login(
             event = "auth.failed",
             method = "password",
             %ip,
-            user_agent = %log_safe(user_agent.unwrap_or(""), LOG_SAFE_MAX),
+            user_agent = %log_safe(user_agent.unwrap_or("<non-ascii>"), LOG_SAFE_MAX),
             "login failed"
         );
     };
@@ -624,7 +677,7 @@ async fn login(
         session_id,
         sid_hash = %session_log_id(&token),
         %ip,
-        user_agent = %log_safe(user_agent.unwrap_or(""), LOG_SAFE_MAX),
+        user_agent = %log_safe(user_agent.unwrap_or("<non-ascii>"), LOG_SAFE_MAX),
         "login successful"
     );
 
@@ -753,20 +806,27 @@ async fn revoke_others(
 ) -> Result<StatusCode, StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
     let current_token = session_cookie_value(&jar);
-    let revoked = crate::admin::auth::revoke_other_sessions(
+    let revoked_rows = crate::admin::auth::revoke_other_sessions(
         &state.sessions,
         &state.db,
         current_token.as_deref(),
     )
     .await
     .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // `revoke_other_sessions` deletes globally (every operator's sessions
+    // except `current_token`), so `scope` and the `_rows` suffix are load
+    // bearing: without them this reads as "this operator's other sessions",
+    // and the count is DB rows, which can exceed the number of live sessions
+    // actually taken down (a session `validate_session` already evicted from
+    // memory keeps its row until the periodic sweep).
     tracing::info!(
         event = "session.destroyed",
         reason = "revoked_others",
+        scope = "all_operators",
         user_id = auth.user_id,
         %ip,
-        revoked,
-        "revoked other sessions"
+        revoked_rows,
+        "revoked other sessions across all operators"
     );
     Ok(StatusCode::OK)
 }
@@ -793,16 +853,25 @@ async fn logout(
 > {
     let ip = client_ip(&state, connect.as_deref(), &headers);
     let jar = if let Some(token) = session_cookie_value(&jar) {
-        crate::admin::auth::revoke_session(&state.sessions, &token);
+        let revoked = crate::admin::auth::revoke_session(&state.sessions, &token);
         let _ = state.db.delete_session_by_token(&token).await;
-        tracing::info!(
-            event = "session.destroyed",
-            reason = "logout",
-            user_id = auth.user_id,
-            sid_hash = %session_log_id(&token),
-            %ip,
-            "logged out"
-        );
+        // Only log a destruction event when a session actually existed under
+        // this token. The cookie value is unvalidated client input and
+        // `AuthedUser` may have resolved via API key or forward-auth, so a
+        // stale or fabricated cookie must not be able to inject an arbitrary
+        // `session.destroyed` event — nor be attributed to `auth.user_id`,
+        // which may not even be the owner of whatever token was sent.
+        if let Some(info) = revoked {
+            tracing::info!(
+                event = "session.destroyed",
+                reason = "logout",
+                user_id = info.user_id,
+                session_id = info.session_id,
+                sid_hash = %session_log_id(&token),
+                %ip,
+                "logged out"
+            );
+        }
         let removal = session_cookie_removal(&jar);
         jar.remove(removal)
     } else {
@@ -913,9 +982,12 @@ async fn create_user_handler(
 
 async fn delete_user_handler(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     // The last-operator guard and the delete run atomically inside the DB layer,
     // so two concurrent deletes can never drop the instance to zero operators.
     match state
@@ -940,10 +1012,16 @@ async fn delete_user_handler(
             for t in &tokens {
                 crate::admin::auth::revoke_session(&state.sessions, t);
             }
+            // `user_id` is the acting operator, matching every other event on
+            // this branch; the deleted operator is `target_user_id`. Logging
+            // `id` under `user_id` here would name the wrong user and discard
+            // the only thing that makes this event auditable — who did it.
             tracing::info!(
                 event = "session.destroyed",
                 reason = "user_deleted",
-                user_id = id,
+                user_id = auth.user_id,
+                target_user_id = id,
+                %ip,
                 revoked = tokens.len(),
                 "revoked sessions for deleted user"
             );
@@ -958,8 +1036,26 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
-/// Change the caller's own password and revoke that operator's other
-/// sessions (OWASP: renew/invalidate sessions on a privilege-level change).
+/// Change the caller's own password and invalidate that operator's *other*
+/// sessions (OWASP: invalidate other sessions on a privilege-level change).
+///
+/// This only invalidates; it does not renew. The caller keeps the same
+/// session token after the change — nothing here mints a fresh one, so the
+/// "renew the session ID" half of the cited OWASP guidance is a deliberate
+/// not-yet, not something already covered: it is the half that defends
+/// against a token that leaked through a channel not requiring ongoing
+/// browser access (a proxy log, a shared terminal history), which is
+/// unaffected by revoking every *other* session.
+///
+/// API keys are **not** touched by this endpoint. `revoke_user_sessions_except`
+/// only deletes rows from `sessions`; `POST /api/api-keys` is gated by
+/// `AuthedUser` alone and `validate_api_key` never consults the password
+/// hash. So an attacker who already holds a stolen session cookie can mint a
+/// long-lived `noadd_`-prefixed key before the victim reacts, and that key
+/// keeps working after this call returns 204. An operator responding to a
+/// suspected compromise must revoke their API keys separately — changing
+/// the password alone does not lock out an attacker holding a session
+/// cookie or a minted key.
 ///
 /// This endpoint is cookie-only today, so `keep` passed to
 /// [`revoke_user_sessions_except`] is always `Some` — the caller's own device
@@ -980,10 +1076,13 @@ struct ChangePasswordRequest {
 /// behavior before this fix.
 async fn change_own_password(
     State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let (user_id, token) = current_session(&state, &jar)?;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1002,6 +1101,18 @@ async fn change_own_password(
     let ok = verify_password(&body.current_password, &hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
+        // This is the only password-verification path outside `login`, and
+        // exactly the one an attacker holding a stolen session cookie uses to
+        // try to take the account over permanently — a rejected attempt here
+        // must not be silent the way it is today.
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "change_password",
+            user_id,
+            %ip,
+            "current password rejected"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
     let new_hash =

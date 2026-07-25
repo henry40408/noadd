@@ -58,7 +58,7 @@ fn test_session_create_and_validate() {
 }
 
 #[test]
-fn session_log_id_is_stable_and_never_contains_the_token() {
+fn session_log_id_is_stable_and_distinct() {
     let token = generate_token();
     let other_token = generate_token();
 
@@ -68,11 +68,15 @@ fn session_log_id_is_stable_and_never_contains_the_token() {
     // ...but distinct across tokens.
     assert_ne!(id, session_log_id(&other_token));
 
-    // 16 hex chars (64 bits), and — the whole point of salting — never a
-    // substring of the token it was derived from.
+    // 16 hex chars (64 bits).
     assert_eq!(id.len(), 16);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-    assert!(!id.contains(&token[..8]));
+    // Whether salting actually happens (as opposed to, say, an unsalted
+    // `blake2b(token)[..8]`, which would pass every assertion above just as
+    // well) is exercised directly against `session_log_id_with` in
+    // `src/admin/auth.rs`'s unit tests, using two explicit salts over the
+    // same token — that property is not observable through this process-wide
+    // `session_log_id`, which only ever runs under one salt per test binary.
 }
 
 #[test]

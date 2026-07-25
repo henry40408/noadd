@@ -44,6 +44,14 @@ pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 /// long-lived admin tab, and the requirement being satisfied here is that both
 /// an idle layer and an absolute layer exist — not a specific figure.
 ///
+/// This window measures time since the last *request* this device made, not
+/// time since a human last looked at the screen — a conventional
+/// simplification for a server-side idle timeout, but narrower than it
+/// sounds in practice: the admin SPA polls `/api/filter/rebuild-status`
+/// every 2s and the dashboard every 10s while a tab is open, and both trips
+/// refresh `last_seen` via `validate_session`, so this layer only actually
+/// expires sessions whose browser tab was closed (or whose machine slept).
+///
 /// `last_seen` is only flushed to disk every 60s (see `flush_last_seen`), so a
 /// value reloaded after a restart can lag reality by up to that long. Against
 /// a 48h window that's a 0.03% error and requires no compensation. If a future
@@ -134,12 +142,16 @@ static SESSION_LOG_SALT: OnceLock<[u8; 16]> = OnceLock::new();
 pub const SESSION_LOG_SALT_KEY: &str = "session_log_salt";
 
 /// Install the process-wide audit salt. The first call wins; later calls are
-/// no-ops. Must run before any session event is logged — in particular,
-/// before `load_sessions_from_db`, whose startup restore can otherwise emit
-/// expiry events under a different (temporary random) salt than everything
-/// logged afterwards.
+/// no-ops other than a warning. Must run before any session event of any kind
+/// is logged: a `sid_hash` computed before this call would be salted with a
+/// temporary random value instead of the persisted one, and would then never
+/// correlate with anything logged afterwards under the real salt.
 pub fn init_session_log_salt(salt: [u8; 16]) {
-    let _ = SESSION_LOG_SALT.set(salt);
+    if SESSION_LOG_SALT.set(salt).is_err() {
+        tracing::warn!(
+            "audit salt already initialised; session log ids will not correlate across restarts"
+        );
+    }
 }
 
 /// Read the persisted audit salt from `settings`, generating and storing one
@@ -195,6 +207,13 @@ pub fn session_log_id(token: &str) -> String {
         s.fill_with(rand::random);
         s
     });
+    session_log_id_with(salt, token)
+}
+
+/// [`session_log_id`]'s digest under an explicit salt, split out so the
+/// salting property itself is directly testable — a test driving the
+/// process-wide `OnceLock` can only ever exercise one salt value per process.
+fn session_log_id_with(salt: &[u8; 16], token: &str) -> String {
     let mut hasher = Blake2b512::new();
     hasher.update(salt);
     hasher.update(token.as_bytes());
@@ -290,9 +309,13 @@ pub fn prune_expired(store: &SessionStore) -> usize {
 /// Revoke a single session token (logout this device only).
 ///
 /// Leaves every other session intact. Persistence to the database is the
-/// caller's responsibility (see `delete_session_by_token`).
-pub fn revoke_session(store: &SessionStore, token: &str) {
-    store.lock().remove(token);
+/// caller's responsibility (see `delete_session_by_token`). Returns the
+/// evicted session's info, or `None` if `token` did not name a live session —
+/// callers that log a `session.destroyed` event must gate on `Some` so an
+/// unvalidated/fabricated token (e.g. read from a client-supplied cookie)
+/// cannot inject a destruction event for a session that never existed.
+pub fn revoke_session(store: &SessionStore, token: &str) -> Option<SessionInfo> {
+    store.lock().remove(token)
 }
 
 /// Load persisted sessions from the `sessions` table into the store.
@@ -376,17 +399,26 @@ pub async fn revoke_other_sessions(
 /// [`revoke_other_sessions`], other operators are unaffected — which is the
 /// required semantics after a password change, where only the account whose
 /// credential changed may be logged out.
+///
+/// Returns the number of sessions actually evicted from the in-memory store —
+/// the in-memory `retain` below is what actually terminates authentication,
+/// not the row count the DB delete returns, and the two can diverge in both
+/// directions: a lazily-expired session's row lingers in the DB until the
+/// periodic sweep (counted in rows, not evicted from memory), while a session
+/// already swept from the DB can still be live in memory (evicted here, not
+/// counted in rows). For "how many devices did this action sign out?", the
+/// in-memory count is the number an operator actually reads it as.
 pub async fn revoke_user_sessions_except(
     store: &SessionStore,
     db: &crate::db::Database,
     user_id: i64,
     keep: Option<&str>,
 ) -> Result<usize, crate::db::DbError> {
-    let removed = db.delete_user_sessions_except(user_id, keep).await?;
-    store
-        .lock()
-        .retain(|t, info| info.user_id != user_id || keep == Some(t.as_str()));
-    Ok(removed)
+    db.delete_user_sessions_except(user_id, keep).await?;
+    let mut map = store.lock();
+    let before = map.len();
+    map.retain(|t, info| info.user_id != user_id || keep == Some(t.as_str()));
+    Ok(before - map.len())
 }
 
 /// Hash a password using Argon2 with a random salt.
@@ -517,5 +549,51 @@ mod tests {
         // passwordless account's login attempt into a server error instead
         // of an ordinary 401.
         assert!(verify_password("anything", NO_PASSWORD_SENTINEL).is_err());
+    }
+
+    #[test]
+    fn session_log_id_with_actually_depends_on_the_salt() {
+        // An unsalted `blake2b(token)` would pass every determinism/distinctness/
+        // shape assertion the integration test makes just as well as a salted
+        // one — the only thing that proves salting is happening at all is that
+        // two different salts over the *same* token produce different ids.
+        let token = "same-token-both-times";
+        let salt_a = [0x11u8; 16];
+        let salt_b = [0x22u8; 16];
+        let id_a = session_log_id_with(&salt_a, token);
+        let id_b = session_log_id_with(&salt_b, token);
+        assert_ne!(id_a, id_b);
+        for id in [&id_a, &id_b] {
+            assert_eq!(id.len(), 16);
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            );
+        }
+    }
+
+    #[test]
+    fn decode_hex_salt_round_trips_a_valid_hex_string() {
+        let salt: [u8; 16] = std::array::from_fn(|i| i as u8);
+        use std::fmt::Write as _;
+        let hex = salt.iter().fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
+        assert_eq!(decode_hex_salt(&hex), Some(salt));
+    }
+
+    #[test]
+    fn decode_hex_salt_rejects_the_wrong_length() {
+        let too_short = "a".repeat(31);
+        let too_long = "a".repeat(33);
+        assert_eq!(decode_hex_salt(&too_short), None);
+        assert_eq!(decode_hex_salt(&too_long), None);
+    }
+
+    #[test]
+    fn decode_hex_salt_rejects_non_hex_characters() {
+        let non_hex = "g".repeat(32);
+        assert_eq!(decode_hex_salt(&non_hex), None);
     }
 }

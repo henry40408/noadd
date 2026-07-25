@@ -173,9 +173,13 @@ reverse-proxy deployment opt in (or a self-terminated one opt out with
 `--hsts=false`); `--hsts-max-age` controls the `max-age`.
 
 **Warning:** HSTS is sticky. Once a browser receives the header, it refuses
-plain HTTP to that host for `max-age` seconds (default one year) — there is no
-way to undo this from the server side, so only enable it once TLS is set up
-and expected to stay that way.
+plain HTTP to that host for `max-age` seconds (default one year). An operator
+who still has working HTTPS can retract it early by serving
+`--hsts --hsts-max-age 0` for a while — `max-age=0` tells the browser to
+forget the pin — but a host that has lost HTTPS entirely is stuck: the
+retraction itself must be served over HTTPS, and clients that have not
+revisited in the meantime keep enforcing the old pin. So only enable HSTS
+once TLS is set up and expected to stay that way.
 
 ## Client IP behind a reverse proxy
 
