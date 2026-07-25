@@ -146,10 +146,80 @@ fn trusted_proxy_peer_honours_x_real_ip() {
 }
 
 #[test]
-fn x_forwarded_for_first_hop_is_used() {
+fn x_forwarded_for_rightmost_non_proxy_hop_is_used() {
+    // 198.51.100.2 is not a configured proxy, so the chain is only vouched for
+    // up to that point — everything left of it is hearsay.
     let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
     let connect = ci("172.18.0.19:50000");
     let headers = headers_xff("203.0.113.7, 10.0.0.1, 198.51.100.2");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)));
+}
+
+#[test]
+fn configured_proxy_hops_are_skipped_to_reach_the_client() {
+    // The realistic shape: proxy appends its own peer, so the client sits to
+    // the left of the proxy hops and every proxy is in --trusted-proxies.
+    let tp = TrustedProxies::parse("172.18.0.0/16,10.0.0.0/8").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("203.0.113.7, 10.0.0.1, 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn client_supplied_x_forwarded_for_prefix_cannot_forge_the_client_ip() {
+    // Regression: nginx's `$proxy_add_x_forwarded_for` and Cloudflare both
+    // append, so a client-sent XFF survives as the leftmost entry. Honouring it
+    // would hand an attacker a fresh rate-limit bucket per request.
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("1.2.3.4, 203.0.113.7, 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn forged_prefix_of_many_hops_does_not_shift_the_result() {
+    // Padding the head is the cheapest evasion attempt; the walk starts at the
+    // tail so it changes nothing (and MAX_XFF_HOPS bounds the parse cost).
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let forged = std::iter::repeat_n("1.2.3.4", 200)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let headers = headers_xff(&format!("{forged}, 203.0.113.7, 172.18.0.19"));
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn same_host_proxy_hop_is_skipped() {
+    // Loopback entries are proxy hops for the same reason loopback peers are
+    // trusted: a reverse proxy sharing the host.
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("127.0.0.1:50000");
+    let headers = headers_xff("203.0.113.7, 127.0.0.1");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn all_proxy_hops_attributes_the_outermost_proxy() {
+    // Degenerate chain with no client entry. Over-attributing to the outermost
+    // proxy is the safe failure: it cannot be steered by a forged header.
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("172.18.0.4, 172.18.0.19");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(172, 18, 0, 4)));
+}
+
+#[test]
+fn garbage_hops_are_skipped_rather_than_aborting_the_walk() {
+    let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
+    let connect = ci("172.18.0.19:50000");
+    let headers = headers_xff("not-an-ip, 203.0.113.7, 172.18.0.19");
     let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
     assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
 }

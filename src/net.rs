@@ -14,6 +14,18 @@
 //! 3. Otherwise headers are client-controlled and must NOT be honoured —
 //!    spoofing the source IP would defeat per-IP rate limiting and pollute the
 //!    query log.
+//!
+//! Trusting the *peer* is only half the job: `X-Forwarded-For` is a list, and
+//! a trusted proxy may well have appended to a list the client started. nginx's
+//! ubiquitous `$proxy_add_x_forwarded_for` and Cloudflare both *append* rather
+//! than overwrite, so `XFF: <attacker value>, <real client>` reaches noadd with
+//! a perfectly trustworthy peer in front of it. The leftmost entry is therefore
+//! attacker-controlled in exactly the deployments noadd documents, which is why
+//! `extract_client_ip` walks the list from the right and returns the first hop
+//! that is *not* a configured proxy. Every proxy in the chain consequently has
+//! to appear in `--trusted-proxies` (for Cloudflare, its published ranges);
+//! a hop that is missing is attributed as the client, which over-attributes to
+//! a proxy — the safe direction — instead of honouring a forged value.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -148,13 +160,29 @@ impl TrustedProxies {
     pub fn contains(&self, ip: IpAddr) -> bool {
         self.cidrs.iter().any(|c| c.contains(ip))
     }
+
+    /// Return true if `ip` is a proxy hop rather than a client: loopback (a
+    /// same-host proxy, trusted implicitly as peers are) or a configured CIDR.
+    fn is_proxy_hop(&self, ip: IpAddr) -> bool {
+        ip.is_loopback() || self.contains(ip)
+    }
 }
+
+/// How many `X-Forwarded-For` hops are inspected, counting from the right.
+///
+/// Proxies append, so the entries that matter are always at the tail; a client
+/// can only pad the head. Capping the walk keeps a padded header from costing
+/// the `DoH` hot path a thousand `IpAddr` parses per query.
+const MAX_XFF_HOPS: usize = 32;
 
 /// Resolve the originating client IP for logging and rate limiting.
 ///
 /// `connect` is the TCP peer (None during unit tests that bypass the axum
 /// service stack); `headers` carries any proxy-supplied client-IP hints.
 /// `trusted` decides which non-loopback peers are allowed to set those hints.
+///
+/// `X-Forwarded-For` is walked right-to-left and the first non-proxy hop wins;
+/// see the module docs for why the leftmost entry must not be used.
 pub fn extract_client_ip(
     connect: Option<&ConnectInfo<SocketAddr>>,
     headers: &HeaderMap,
@@ -171,10 +199,30 @@ pub fn extract_client_ip(
     if trust_headers
         && let Some(hv) = headers.get("x-forwarded-for")
         && let Ok(s) = hv.to_str()
-        && let Some(first) = s.split(',').next()
-        && let Ok(ip) = first.trim().parse::<IpAddr>()
     {
-        return ip;
+        // Innermost (appended last, nearest noadd) first, so the walk starts at
+        // the hop the adjacent proxy vouched for and moves outwards.
+        let hops_inward_out: Vec<IpAddr> = s
+            .rsplit(',')
+            .take(MAX_XFF_HOPS)
+            .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+            .collect();
+
+        // The first entry no configured proxy accounts for is where the vouched
+        // chain ends — everything beyond it is the client's own claim.
+        if let Some(&client) = hops_inward_out
+            .iter()
+            .find(|&&ip| !trusted.is_proxy_hop(ip))
+        {
+            return client;
+        }
+        // Every hop is a known proxy (or the header held only garbage). With no
+        // client to attribute, fall back to the outermost hop — the last of an
+        // inward-out list. An all-garbage header leaves the list empty and drops
+        // through to `X-Real-IP` / the peer.
+        if let Some(&outermost) = hops_inward_out.last() {
+            return outermost;
+        }
     }
     if trust_headers
         && let Some(hv) = headers.get("x-real-ip")

@@ -110,6 +110,9 @@ Options:
       --cookie-secure [<COOKIE_SECURE>]
                                      Set Secure on the admin session cookie [default: on when noadd
                                      terminates TLS] [env: NOADD_COOKIE_SECURE]
+      --trusted-proxies <TRUSTED_PROXIES>
+                                     CIDRs of reverse-proxy hops permitted to set X-Forwarded-For /
+                                     X-Real-IP [env: NOADD_TRUSTED_PROXIES]
       --forward-auth-header <FORWARD_AUTH_HEADER>
                                      Reverse-proxy username header, e.g. Remote-User [env: NOADD_FORWARD_AUTH_HEADER]
       --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
@@ -157,6 +160,46 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
   --acme-email you@example.com \
   --acme-prod
 ```
+
+## Client IP behind a reverse proxy
+
+noadd rate-limits logins and DoH queries per client IP and records that IP in
+the query log, so it has to resolve the real client from behind whatever sits
+in front of it. `--trusted-proxies` takes a comma-separated CIDR list of the
+proxies in the chain; loopback (127.0.0.0/8, `::1`) is always trusted so a
+same-host proxy needs no configuration.
+
+`X-Forwarded-For` is read **right to left**, and the first hop that is not a
+configured proxy is taken as the client. This matters because most proxies
+*append* rather than overwrite — nginx's usual `$proxy_add_x_forwarded_for` and
+Cloudflare both do — so a client that sends its own `X-Forwarded-For` keeps that
+value as the leftmost entry. Trusting the leftmost entry would let anyone mint a
+fresh rate-limit bucket per request and forge query-log entries.
+
+The practical consequence: **every proxy in the chain must be listed**, not just
+the one noadd talks to. A hop that is missing is treated as the client, which
+attributes traffic to that proxy — imprecise, but not forgeable.
+
+```bash
+# SWAG/nginx in another container on the Docker bridge
+./target/release/noadd --trusted-proxies 172.18.0.0/16
+```
+
+Behind Cloudflare, add Cloudflare's published ranges alongside your own proxy,
+since the edge address is the hop your proxy appends:
+
+```bash
+./target/release/noadd --trusted-proxies 172.18.0.0/16,173.245.48.0/20,103.21.244.0/22,…
+```
+
+Alternatively, have the fronting proxy collapse the chain to a single trustworthy
+value and let noadd read that — with Caddy, `client_ip_headers CF-Connecting-IP`
+plus `header_up X-Forwarded-For {client_ip}`. Note that `X-Real-IP` is only
+consulted when `X-Forwarded-For` is absent or unparseable.
+
+The HTTP listener must not be reachable except through the proxy: a client that
+can reach noadd (or the proxy) directly, bypassing Cloudflare, can send these
+headers itself.
 
 ## Reverse proxy authentication
 

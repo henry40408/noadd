@@ -107,6 +107,11 @@ pub struct CliArgs {
     /// container reaching noadd over the bridge network
     /// (`NOADD_TRUSTED_PROXIES=172.18.0.0/16`). Empty disables proxy
     /// header trust outside loopback.
+    ///
+    /// The same list identifies proxy hops *within* `X-Forwarded-For`, which is
+    /// read right-to-left up to the first hop that is not listed. List every
+    /// proxy in the chain (behind Cloudflare, its published ranges too) — a
+    /// missing hop is attributed as the client.
     #[arg(long, default_value = "", env = "NOADD_TRUSTED_PROXIES")]
     pub trusted_proxies: String,
 
