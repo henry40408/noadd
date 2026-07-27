@@ -58,6 +58,61 @@ Then('the filter lists table shows a list named {string}', async ({ page }, name
   await expect(listRow(page, name)).toBeVisible();
 });
 
+// Kept out of the .feature file: a Cucumber expression {string} argument cannot
+// carry a double quote reliably, and the payload only needs to be readable here.
+const INJECTED_NAME = 'q" onmouseover="window.__xss=1';
+const INJECTED_URL = 'https://example.com/e2e-attr-injection.txt';
+
+When('I add a filter list whose name contains a double quote', async ({ page }) => {
+  await page.getByTestId('list-name-input').fill(INJECTED_NAME);
+  await page.getByTestId('list-url-input').fill(INJECTED_URL);
+  await page.getByTestId('list-add-submit').click();
+  // Both inputs are cleared once the POST resolves and the table reloads.
+  await expect(page.getByTestId('list-url-input')).toHaveValue('');
+});
+
+// Any on* attribute on a row means an interpolated value escaped its attribute:
+// nothing in the template writes one.
+Then('no filter list row carries an inline event handler', async ({ page }) => {
+  const handlers = await page.evaluate(() =>
+    [...document.querySelectorAll('[data-testid="filter-list-row"]')]
+      .flatMap((row) => [...row.attributes].map((a) => a.name))
+      .filter((name) => name.startsWith('on')));
+  expect(handlers, 'inline event handlers injected onto filter list rows').toEqual([]);
+});
+
+// Matched as text rather than through a [data-name="..."] selector, which the
+// quote in the name would break.
+Then('the quoted filter list name is shown as text', async ({ page }) => {
+  await expect(page.getByText(INJECTED_NAME, { exact: false }).first()).toBeVisible();
+});
+
+Given('the registry offers a filter whose homepage is a javascript: URL', async ({ page }) => {
+  await page.route('**/api/registry/filters', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      filters: [{
+        filterId: 990001,
+        name: 'Probe list',
+        description: 'registry entry with a hostile homepage',
+        homepage: 'javascript:window.__xss=1',
+        downloadUrl: 'https://example.com/e2e-registry-probe.txt',
+        groupId: 1,
+      }],
+      groups: [{ groupId: 1, groupName: 'Probe group' }],
+    }),
+  }));
+});
+
+Then('the registry entry is listed with no homepage link', async ({ page }) => {
+  // The row renders, so a missing link is the URL being rejected rather than the
+  // whole entry failing to load.
+  await expect(page.locator('.registry-row')).toHaveCount(1);
+  await expect(page.locator('.registry-row .name')).toHaveText('Probe list');
+  await expect(page.locator('.registry-row a.home')).toHaveCount(0);
+});
+
 // The registry modal is the only thing binding document-level keydown, so a
 // running net count of those registrations tracks exactly its Escape handler.
 Given('I am counting document keydown listeners', async ({ page }) => {

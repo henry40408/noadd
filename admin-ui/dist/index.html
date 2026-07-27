@@ -1696,10 +1696,30 @@ function fmtBucketLabel(tsSeconds, withTime) {
   return withTime ? `${date} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}` : date;
 }
 
+// Escapes a value for interpolation into markup, in text *and* attribute
+// position. Quotes are the reason this cannot go through textContent/innerHTML:
+// that round-trip escapes &, < and > but leaves " alone, while most callers here
+// interpolate into a double-quoted attribute. A raw " then closes the value
+// early and everything after it is parsed as further attributes — including
+// event handlers. A filter-list name of `x" onmouseover="alert(1)` was enough to
+// get a live handler onto its table row.
+const ESC_CHARS = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+  return String(s).replace(/[&<>"']/g, (c) => ESC_CHARS[c]);
+}
+
+// Escaping keeps a value inside its attribute; it does not make the value safe
+// to navigate to. Registry entries are fetched from a third-party URL at
+// runtime, so a javascript: homepage would run on click no matter how well the
+// string was escaped. Anything that is not http(s) yields '' and renders no link.
+function safeUrl(u) {
+  if (!u) return '';
+  try {
+    const parsed = new URL(u, window.location.origin);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : '';
+  } catch (e) {
+    return '';
+  }
 }
 
 function showFormError(el, msg) {
@@ -2564,7 +2584,8 @@ class RegistryModal extends LiveElement {
       const checked = this.selected.has(f.filterId);
       const groupName = groupsById.get(f.groupId)?.groupName || '';
       const groupCls = this.groupClassFor(f.groupId);
-      const home = f.homepage ? `<a class="home" href="${esc(f.homepage)}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
+      const homeUrl = safeUrl(f.homepage);
+      const home = homeUrl ? `<a class="home" href="${esc(homeUrl)}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
       return `
         <label class="registry-row">
           <input type="checkbox" data-id="${f.filterId}" ${checked ? 'checked' : ''} ${already ? 'disabled' : ''}>
