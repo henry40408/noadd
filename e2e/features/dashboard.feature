@@ -30,6 +30,16 @@ Feature: Dashboard and statistics
     When I toggle live mode
     Then live updates are active
 
+  Scenario: Stat card markers stay tinted by their value's colour
+    # The ▌ before each stat label is tinted by a :has() rule that reads the
+    # value's class. It once read the inline style attribute instead, so moving
+    # a colour to a utility class silently reverted the marker to green with
+    # nothing else changing and no test noticing.
+    Given I am on the "Dashboard" tab
+    Then every stat card marker matches its value colour
+    When I go to the "Statistics" tab
+    Then every stat card marker matches its value colour
+
   Scenario: No tab renders markup as escaped text
     # A fragment that should be Markup but reaches html`` as a plain string is
     # escaped and shows up as visible source — `<span class="timeago" …>` filling
