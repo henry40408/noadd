@@ -29,3 +29,24 @@ Feature: Dashboard and statistics
     Then live updates are paused
     When I toggle live mode
     Then live updates are active
+
+  Scenario: Rebuilding the app shell leaves no stale navigation handler
+    # showApp() replaces the whole app-shell, which is what happens after every
+    # sign-in. Without a disconnectedCallback the outgoing shell never
+    # unregisters its hashchange listener, so each rebuild strands one more —
+    # each holding the whole discarded shell subtree alive through its closure.
+    # Nothing breaks visibly (the stale handler just updates its own detached
+    # nodes), so the leak has to be measured at the registration level.
+    #
+    # The rebuild goes through the same 'login-success' event the login page
+    # dispatches, driving the production path without spending two more logins
+    # against the 5-per-minute login rate limiter.
+    Given I am on the "Dashboard" tab
+    And I am counting hashchange listener registrations
+    And I am recording uncaught page errors
+    When the app shell is rebuilt as it is after a fresh sign-in
+    And I go to the "Query Log" tab
+    And I go to the "Settings" tab
+    Then no hashchange listener was left behind
+    And exactly one app shell is mounted
+    And no uncaught page errors were recorded
