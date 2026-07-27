@@ -37,6 +37,38 @@ When('I toggle live mode', async ({ page }) => {
   await page.getByTestId('live-toggle').click();
 });
 
+Then('every stat card marker matches its value colour', async ({ page }) => {
+  await expect(page.locator('.stat-card').first()).toBeVisible();
+  const mismatches = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    // Resolve a custom property to the same rgb() form getComputedStyle returns.
+    const rgb = (name) => {
+      const d = document.createElement('div');
+      d.style.color = root.getPropertyValue(name).trim();
+      document.body.appendChild(d);
+      const v = getComputedStyle(d).color;
+      d.remove();
+      return v;
+    };
+    const out = [];
+    for (const card of document.querySelectorAll('.stat-card')) {
+      const value = card.querySelector('.stat-value');
+      const label = card.querySelector('.stat-label');
+      if (!value || !label) continue;
+      const cl = value.classList;
+      const expected = cl.contains('red') || cl.contains('text-red') ? rgb('--red')
+        : cl.contains('text-orange') ? rgb('--orange')
+          : rgb('--green');
+      const actual = getComputedStyle(label, '::before').color;
+      if (actual !== expected) {
+        out.push(`${label.textContent.trim()} [${value.className}]: marker ${actual}, expected ${expected}`);
+      }
+    }
+    return out;
+  });
+  expect(mismatches, 'stat markers not matching their value colour').toEqual([]);
+});
+
 When('I visit every tab', async ({ page, testState }) => {
   const leaked = [];
   for (const [label, testId] of Object.entries(NAV)) {
