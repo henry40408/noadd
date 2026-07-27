@@ -351,6 +351,22 @@ tr:hover td { background: var(--bg-hover); }
 .mono { font-family: var(--font-mono); letter-spacing: -0.01em; }
 td.mono, .mono { font-variant-numeric: tabular-nums; }
 
+/* Text colour utilities — the one deliberate exception to this stylesheet's
+   otherwise semantic naming. They cover the case where the only thing being
+   said is "this text is that colour" and no better name exists; anything with
+   a real role (.stat-value, .card-desc, .badge) keeps its own rule. Names
+   mirror the custom properties they set, so the mapping stays obvious.
+   Declared after the semantic rules so a bare utility wins over an inherited
+   colour, but note that a same-specificity rule later in the file still beats
+   it — these are for plain text, not for overriding components. */
+.text-dim { color: var(--text-dim); }
+.text-secondary { color: var(--text-secondary); }
+.text-primary { color: var(--text-primary); }
+.text-accent { color: var(--accent); }
+.text-red { color: var(--red); }
+.text-orange { color: var(--orange); }
+.text-green { color: var(--green); }
+
 /* Top-N tables: fixed layout keeps the right-hand count column visible
    even when the left-hand label (domain, upstream, client) is very long. */
 .top-table { table-layout: fixed; width: 100%; }
@@ -2122,7 +2138,7 @@ class AccountPage extends HTMLElement {
       <div class="card fade-in" style="animation-delay:0.15s">
         <div class="card-title">API Keys</div>
         <p class="card-desc">
-          For programmatic access via <code style="color:var(--accent);font-size:0.8rem">Authorization: Bearer &lt;token&gt;</code>. <a href="/api/docs" target="_blank" rel="noopener" style="color:var(--accent)">Interactive API reference</a>
+          For programmatic access via <code style="color:var(--accent);font-size:0.8rem">Authorization: Bearer &lt;token&gt;</code>. <a class="text-accent" href="/api/docs" target="_blank" rel="noopener">Interactive API reference</a>
         </p>
         <div class="table-wrap"><table>
           <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
@@ -2161,7 +2177,7 @@ class AccountPage extends HTMLElement {
     try {
       this._me = await api.get('/api/auth/me');
       const sso = this._me.via_sso
-        ? html` <span style="color:var(--text-dim)">· via SSO</span>` : '';
+        ? html` <span class="text-dim">· via SSO</span>` : '';
       this.querySelector('#acct-whoami').innerHTML =
         html`Signed in as <code style="color:var(--accent);font-size:0.85rem">${this._me.username}</code>${sso}`;
       const note = this.querySelector('#sess-sso-note');
@@ -2179,7 +2195,7 @@ class AccountPage extends HTMLElement {
       users = await api.get('/api/users');
     } catch (e) {
       if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td colspan="3" style="color:var(--red)">Failed to load operators</td></tr>';
+      body.innerHTML = '<tr><td class="text-red" colspan="3">Failed to load operators</td></tr>';
       return;
     }
     body.innerHTML = users.map(u => {
@@ -2187,7 +2203,7 @@ class AccountPage extends HTMLElement {
       const last = users.length <= 1;
       const disabled = isYou || last;
       return html`<tr>
-        <td class="mono" style="color:var(--text-primary)">${u.username}${isYou ? raw(' <span class="badge badge-allowed">you</span>') : ''}</td>
+        <td class="mono text-primary">${u.username}${isYou ? raw(' <span class="badge badge-allowed">you</span>') : ''}</td>
         <td>${u.created_at ? timeAgo(u.created_at) : '—'}</td>
         <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${u.id}" ${disabled ? raw('disabled style="opacity:.35"') : ''}>${icons.trash}</button></td>
       </tr>`;
@@ -2214,11 +2230,11 @@ class AccountPage extends HTMLElement {
       sessions = await api.get('/api/sessions');
     } catch (e) {
       if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td colspan="6" style="color:var(--red)">Failed to load sessions</td></tr>';
+      body.innerHTML = '<tr><td class="text-red" colspan="6">Failed to load sessions</td></tr>';
       return;
     }
     body.innerHTML = sessions.map(s => html`<tr>
-      <td class="mono" style="color:var(--text-primary)">${s.username}${s.is_current ? raw(' <span class="badge badge-allowed">this device</span>') : ''}</td>
+      <td class="mono text-primary">${s.username}${s.is_current ? raw(' <span class="badge badge-allowed">this device</span>') : ''}</td>
       <td class="mono">${s.ip || '—'}</td>
       <td>${s.user_agent || '—'}</td>
       <td>${s.created_at ? timeAgo(s.created_at) : '—'}</td>
@@ -2287,14 +2303,14 @@ class AccountPage extends HTMLElement {
       keys = await api.get('/api/api-keys');
     } catch (e) {
       if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td colspan="6" style="color:var(--red)">Failed to load API keys</td></tr>';
+      body.innerHTML = '<tr><td class="text-red" colspan="6">Failed to load API keys</td></tr>';
       return;
     }
     if (!keys.length) {
-      body.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim)">No API keys yet</td></tr>';
+      body.innerHTML = '<tr><td class="text-dim" colspan="6">No API keys yet</td></tr>';
     } else {
       body.innerHTML = keys.map(k => html`<tr>
-        <td style="color:var(--text-primary)">${k.name}</td>
+        <td class="text-primary">${k.name}</td>
         <td class="mono">${k.prefix}</td>
         <td>${timeAgo(k.created_at)}</td>
         <td>${k.last_used_at ? timeAgo(k.last_used_at) : '—'}</td>
@@ -3032,7 +3048,7 @@ class DashboardPage extends LiveElement {
   // head opens <table>...<tbody>; the matching '</tbody></table>' close is appended here.
   _renderTopTable(data, { target, card, prevKey, sigFn, limit, head, row }) {
     this._flashIfChanged(prevKey, data.map(sigFn).join(';'), card);
-    if (!data.length) { this.querySelector(target).innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    if (!data.length) { this.querySelector(target).innerHTML = '<p class="text-dim">No data</p>'; return; }
     const visible = limit ? data.slice(0, limit) : data;
     const sumVal = visible.reduce((a, d) => a + d.count, 0);
     // `head` is a literal from the caller and each row() returns Markup, so both
@@ -3069,8 +3085,8 @@ class DashboardPage extends LiveElement {
       <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
       <div class="stat-card" data-i="1" data-testid="stat-blocked-today"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
       <div class="stat-card" data-i="2" data-testid="stat-block-rate"><div class="stat-label">Block Rate</div><div class="stat-value red">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
-      <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value" style="color:var(--orange)">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
-      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value" style="color:var(--orange)">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
+      <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value text-orange">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
+      <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value text-orange">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
       <div class="stat-card" data-i="5"><div class="stat-label">Throughput</div><div class="stat-value accent">${qpsToday}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div><div class="stat-sub">7d: ${qps7d} / 30d: ${qps30d}</div></div>`;
 
     // Flash cards that changed (skip on first render)
@@ -3102,7 +3118,7 @@ class DashboardPage extends LiveElement {
       </p>
       <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
         Set the device's DNS server to:
-        <code class="mono" style="color:var(--text-primary)">${this._dnsAddr}</code>
+        <code class="mono text-primary">${this._dnsAddr}</code>
       </p>`;
     box.style.display = '';
     if (chart) chart.style.display = 'none';
@@ -3118,7 +3134,7 @@ class DashboardPage extends LiveElement {
     (d) => formatTime(d.timestamp),
     (d) => {
       const pct = d.total > 0 ? ((d.blocked / d.total) * 100).toFixed(0) : '0';
-      return html`${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(d.blocked)} blocked</span> (${pct}%)`;
+      return html`${formatTime(d.timestamp)}<br><span class="text-accent">${formatFull(d.total)} total</span> · <span class="text-red">${formatFull(d.blocked)} blocked</span> (${pct}%)`;
     });
   }
 
@@ -3191,21 +3207,21 @@ class StatsPage extends HTMLElement {
       <div class="stats-row-2col fade-in" style="animation-delay:0.1s">
         <div class="card" id="qtypes-card">
           <div class="card-title">Query Types</div>
-          <div id="qtypes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
+          <div id="qtypes-chart"><p class="text-dim">Loading…</p></div>
         </div>
         <div class="card" id="outcomes-card">
           <div class="card-title">Outcomes</div>
-          <div id="outcomes-chart"><p style="color:var(--text-dim)">Loading…</p></div>
+          <div id="outcomes-chart"><p class="text-dim">Loading…</p></div>
         </div>
       </div>
       <div class="stats-row-2col fade-in" style="animation-delay:0.15s">
         <div class="card" id="ranged-domains-card">
           <div class="card-title" id="ranged-domains-title">Top Domains (last 7d)</div>
-          <div id="ranged-domains"><p style="color:var(--text-dim)">Loading…</p></div>
+          <div id="ranged-domains"><p class="text-dim">Loading…</p></div>
         </div>
         <div class="card" id="ranged-clients-card">
           <div class="card-title" id="ranged-clients-title">Top Sources (last 7d)</div>
-          <div id="ranged-clients"><p style="color:var(--text-dim)">Loading…</p></div>
+          <div id="ranged-clients"><p class="text-dim">Loading…</p></div>
         </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.2s" id="health-card" data-testid="db-health-card">
@@ -3309,7 +3325,7 @@ class StatsPage extends HTMLElement {
       const cachedPct = formatPct(cached, d.total);
       const blockedStr = blockedPct ? `${formatFull(blocked)} blocked (${blockedPct})` : `${formatFull(blocked)} blocked`;
       const cachedStr = cachedPct ? `${formatFull(cached)} cached (${cachedPct})` : `${formatFull(cached)} cached`;
-      return html`${fmtBucketLabel(d.timestamp, subDay)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--orange)">${cachedStr}</span>`;
+      return html`${fmtBucketLabel(d.timestamp, subDay)}<br><span class="text-accent">${formatFull(d.total)} total</span> · <span class="text-red">${blockedStr}</span> · <span class="text-orange">${cachedStr}</span>`;
     });
   }
 
@@ -3384,7 +3400,7 @@ class StatsPage extends HTMLElement {
   _renderBarChart(containerId, entries, color) {
     const el = this.querySelector(containerId);
     if (!entries || !entries.length) {
-      el.innerHTML = '<p style="color:var(--text-dim)">No data yet</p>';
+      el.innerHTML = '<p class="text-dim">No data yet</p>';
       return;
     }
     const sorted = [...entries].sort((a, b) => b[1] - a[1]);
@@ -3415,7 +3431,7 @@ class StatsPage extends HTMLElement {
 
   _renderHealth(data) {
     const el = this.querySelector('#health-grid');
-    if (!data) { el.innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
+    if (!data) { el.innerHTML = '<p class="text-dim">No data</p>'; return; }
     const oldest = data.oldest_log_timestamp
       ? new Date(data.oldest_log_timestamp * 1000).toLocaleDateString()
       : '—';
@@ -3557,7 +3573,7 @@ class StatsPage extends HTMLElement {
       for (const b of bars) if (Math.abs(b.cx - svgX) < Math.abs(best.cx - svgX)) best = b;
       svg.classList.add('cursoring');
       highlight(best.i);
-      tooltip.innerHTML = html`${fmtBucketLabel(best.d.timestamp, subDay)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
+      tooltip.innerHTML = html`${fmtBucketLabel(best.d.timestamp, subDay)}<br><span class="text-red">${best.blockedPct.toFixed(1)}% blocked</span> · <span class="text-green">${best.cachedPct.toFixed(1)}% cached</span><br><span class="text-dim">${formatFull(best.d.total || 0)} total</span>`;
       tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
       const pxX = (best.cx / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
@@ -3840,7 +3856,7 @@ class LogsPage extends LiveElement {
         <td class="mono">${l.query_type}</td>
         <td class="mono">${l.client_ip}${l.doh_token ? html`<br><span style="color:var(--accent);font-size:0.85rem">${l.doh_token}</span>` : ''}</td>
         <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td>${l.cached ? html`<span class="badge badge-cached">cached</span>` : l.upstream ? html`<span class="mono" style="font-size:0.9rem">${l.upstream}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
+        <td>${l.cached ? html`<span class="badge badge-cached">cached</span>` : l.upstream ? html`<span class="mono" style="font-size:0.9rem">${l.upstream}</span>` : html`<span class="text-dim">-</span>`}</td>
         <td class="mono">${l.response_ms}</td>`;
   }
 
@@ -3856,7 +3872,7 @@ class LogsPage extends LiveElement {
         <div class="log-card-row2">
           <span class="lc-time">${timeAgo(l.timestamp)}</span>
           <span class="lc-type">${l.query_type}</span>
-          <span class="lc-client" style="color:var(--text-secondary)">${l.client_ip}</span>
+          <span class="lc-client text-secondary">${l.client_ip}</span>
           ${l.cached ? html`<span class="lc-cached">cached</span>` : l.upstream ? html`<span class="lc-up">${l.upstream}</span>` : ''}
           ${l.doh_token ? html`<span class="lc-token">${l.doh_token}</span>` : ''}
           <span class="lc-ms">${l.response_ms}ms</span>
@@ -3923,7 +3939,7 @@ class FiltersPage extends HTMLElement {
         </div>
         <div id="rules-list" data-testid="rules-list" style="margin-top:12px"></div>
         <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
-          <strong style="color:var(--text-secondary)">Syntax Reference</strong>
+          <strong class="text-secondary">Syntax Reference</strong>
           <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
             <div><code style="color:var(--text-secondary);font-size:0.75rem">||ads.example.com^</code><br>Block domain and all subdomains</div>
             <div><code style="color:var(--text-secondary);font-size:0.75rem">@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
@@ -3994,17 +4010,17 @@ class FiltersPage extends HTMLElement {
       if (res.action === 'blocked') {
         el.innerHTML = html`<span class="badge badge-blocked">Blocked</span>
           <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">
-            Rule: <code style="color:var(--text-primary)">${res.rule}</code>
-            &middot; List: <code style="color:var(--text-primary)">${res.list}</code>
+            Rule: <code class="text-primary">${res.rule}</code>
+            &middot; List: <code class="text-primary">${res.list}</code>
           </span>`;
       } else {
         let detail = res.rule
-          ? html` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code style="color:var(--text-primary)">${res.rule}</code></span>`
+          ? html` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code class="text-primary">${res.rule}</code></span>`
           : '';
         el.innerHTML = '<span class="badge badge-allowed">Allowed</span>' + detail;
       }
     } catch (e) {
-      el.innerHTML = '<span style="color:var(--red)">Error checking domain</span>';
+      el.innerHTML = '<span class="text-red">Error checking domain</span>';
     }
   }
 
@@ -4023,7 +4039,7 @@ class FiltersPage extends HTMLElement {
             <div class="toggle-thumb"></div>
           </label>
         </td>
-        <td style="color:var(--text-primary)">${l.name}</td>
+        <td class="text-primary">${l.name}</td>
         <td>${formatFull(l.rule_count)}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td style="white-space:nowrap">
@@ -4136,9 +4152,9 @@ class FiltersPage extends HTMLElement {
         const res = await api.post(`/api/lists/${id}/check`, { url: checkUrl || undefined });
         if (res.ok) {
           const size = res.content_length > 1024 ? (res.content_length / 1024).toFixed(0) + ' KB' : res.content_length + ' B';
-          healthEl.innerHTML = html`<span class="badge badge-allowed">OK</span> <span style="color:var(--text-secondary)">HTTP ${res.status} &middot; ${size}</span>`;
+          healthEl.innerHTML = html`<span class="badge badge-allowed">OK</span> <span class="text-secondary">HTTP ${res.status} &middot; ${size}</span>`;
         } else {
-          healthEl.innerHTML = html`<span class="badge badge-blocked">FAIL</span> <span style="color:var(--text-secondary)">${res.error || 'HTTP ' + res.status}</span>`;
+          healthEl.innerHTML = html`<span class="badge badge-blocked">FAIL</span> <span class="text-secondary">${res.error || 'HTTP ' + res.status}</span>`;
         }
       } catch (e) {
         healthEl.innerHTML = '<span class="badge badge-blocked">Error</span>';
@@ -4198,7 +4214,7 @@ class SettingsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
-        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code style="color:var(--accent)">ip:port</code>, <code style="color:var(--accent)">tls://host</code> (DoT), or <code style="color:var(--accent)">https://host/dns-query</code> (DoH)</p>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code class="text-accent">ip:port</code>, <code class="text-accent">tls://host</code> (DoT), or <code class="text-accent">https://host/dns-query</code> (DoH)</p>
         <textarea id="s-upstream" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853"></textarea>
         <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
           <button class="btn btn-sm btn-primary" id="apply-upstream">${icons.refresh} Save &amp; apply</button>
@@ -4306,7 +4322,7 @@ class SettingsPage extends HTMLElement {
           `</tbody></table></div>`;
         const rb = el.querySelector('#refresh-upstream');
         if (rb) rb.onclick = () => this.renderUpstreams();
-      } catch (e) { el.innerHTML = '<p style="color:var(--red)">Failed to load upstreams</p>'; }
+      } catch (e) { el.innerHTML = '<p class="text-red">Failed to load upstreams</p>'; }
     };
 
     this.querySelector('#apply-upstream').onclick = async () => {
@@ -4428,8 +4444,8 @@ class SettingsPage extends HTMLElement {
           : raw('<span class="badge badge-off">Plain</span>');
         this.querySelector('#server-info').innerHTML = html`
           <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px">
-            <span style="color:var(--text-dim)">DNS</span><span class="mono">${info.dns_addr}</span>
-            <span style="color:var(--text-dim)">HTTP</span><span><span class="mono">${info.http_addr}</span> ${tls}</span>
+            <span class="text-dim">DNS</span><span class="mono">${info.dns_addr}</span>
+            <span class="text-dim">HTTP</span><span><span class="mono">${info.http_addr}</span> ${tls}</span>
           </div>`;
       }
     } catch (e) { console.error(e); }
@@ -4447,7 +4463,7 @@ class SettingsPage extends HTMLElement {
       let markup = '<div class="table-wrap"><table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
       for (const t of tokens) {
         markup += html`<tr>
-          <td class="mono" style="color:var(--text-primary)">${t.token}</td>
+          <td class="mono text-primary">${t.token}</td>
           <td><code class="mono" style="color:var(--text-dim);font-size:0.75rem">/dns-query/${t.token}</code></td>
           <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${t.token}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
