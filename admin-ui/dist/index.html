@@ -235,6 +235,27 @@ body::after {
 .card-title::before { content: '┤ '; color: var(--text-dim); }
 .card-title::after { content: ' ├'; color: var(--text-dim); }
 
+/* Cheatsheet under the custom-rule list: a boxed panel whose <code> samples all
+   share one treatment, so they are styled by descent rather than one by one. */
+.syntax-ref {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.syntax-ref-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.syntax-ref code {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
 /* Explanatory line under a card title. */
 .card-desc {
   color: var(--text-secondary);
@@ -299,6 +320,8 @@ body::after {
 /* Database Health packs ten cards into one grid, so its values run smaller
    than the dashboard's headline stats. */
 #health-grid .stat-value { font-size: 1.4rem; }
+/* Highlights sits between the two: four cards, wider than Health's ten. */
+#highlights-grid .stat-value { font-size: 1.6rem; }
 
 .stat-sub {
   font-family: var(--font-mono);
@@ -3466,10 +3489,10 @@ class StatsPage extends HTMLElement {
     const hasLat = sample > 0;
     const fmtMs = (ms) => hasLat ? `${formatNum(ms)}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span>` : '—';
     el.innerHTML = `
-      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" style="font-size:1.6rem" title="${formatFull(data.unique_domains)}">${formatNumAdaptive(data.unique_domains, 10_000_000)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p50</div><div class="stat-value" style="font-size:1.6rem;color:var(--green)">${fmtMs(lat.p50_ms)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p95</div><div class="stat-value" style="font-size:1.6rem;color:var(--orange)">${fmtMs(lat.p95_ms)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p99</div><div class="stat-value" style="font-size:1.6rem;color:var(--red)">${fmtMs(lat.p99_ms)}</div></div>`;
+      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" title="${formatFull(data.unique_domains)}">${formatNumAdaptive(data.unique_domains, 10_000_000)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p50</div><div class="stat-value text-green">${fmtMs(lat.p50_ms)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p95</div><div class="stat-value text-orange">${fmtMs(lat.p95_ms)}</div></div>
+      <div class="stat-card"><div class="stat-label">Latency p99</div><div class="stat-value text-red">${fmtMs(lat.p99_ms)}</div></div>`;
   }
 
   _renderRangedTopDomains(rows) {
@@ -3938,13 +3961,13 @@ class FiltersPage extends HTMLElement {
           <button class="btn btn-primary btn-sm" id="add-rule-btn" data-testid="rule-submit">${icons.plus} Add</button>
         </div>
         <div id="rules-list" data-testid="rules-list" style="margin-top:12px"></div>
-        <div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;font-size:0.8rem;color:var(--text-dim)">
+        <div class="syntax-ref">
           <strong class="text-secondary">Syntax Reference</strong>
-          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
-            <div><code style="color:var(--text-secondary);font-size:0.75rem">||ads.example.com^</code><br>Block domain and all subdomains</div>
-            <div><code style="color:var(--text-secondary);font-size:0.75rem">@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
-            <div><code style="color:var(--text-secondary);font-size:0.75rem">example.com</code><br>Block exact domain only</div>
-            <div><code style="color:var(--text-secondary);font-size:0.75rem">0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
+          <div class="syntax-ref-list">
+            <div><code>||ads.example.com^</code><br>Block domain and all subdomains</div>
+            <div><code>@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
+            <div><code>example.com</code><br>Block exact domain only</div>
+            <div><code>0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
           </div>
         </div>
       </div>`;
