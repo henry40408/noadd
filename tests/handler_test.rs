@@ -58,7 +58,7 @@ async fn test_handler_blocks_domain() {
     let result = handler.handle(&query, client_ip, None).await.unwrap();
     let response = Message::from_bytes(&result.bytes).unwrap();
 
-    assert!(response.metadata.message_type == MessageType::Response);
+    assert_eq!(response.metadata.message_type, MessageType::Response);
     assert_eq!(response.metadata.id, 1234);
     assert!(!response.answers.is_empty(), "should have an answer");
 
@@ -113,7 +113,7 @@ async fn test_handler_forwards_allowed_domain() {
     assert!(!result.bytes.is_empty(), "response should be non-empty");
 
     let response = Message::from_bytes(&result.bytes).unwrap();
-    assert!(response.metadata.message_type == MessageType::Response);
+    assert_eq!(response.metadata.message_type, MessageType::Response);
 }
 
 #[tokio::test]
