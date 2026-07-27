@@ -235,8 +235,13 @@ pub async fn compute_stats_timeline(
         .await
 }
 
-pub async fn compute_heatmap(db: &Database, now: i64) -> Result<Vec<HeatmapCell>, DbError> {
-    db.hourly_heatmap_since(now - 30 * 86400).await
+pub async fn compute_heatmap(
+    db: &Database,
+    now: i64,
+    tz_offset_secs: i64,
+) -> Result<Vec<HeatmapCell>, DbError> {
+    db.hourly_heatmap_since(now - 30 * 86400, tz_offset_secs)
+        .await
 }
 
 pub async fn compute_breakdowns(

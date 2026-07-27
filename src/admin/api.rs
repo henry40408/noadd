@@ -2396,9 +2396,9 @@ async fn get_stats_top_upstreams(
 pub struct StatsRangeQuery {
     pub range: Option<String>,
     /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), used
-    /// to align timeline buckets to their local calendar. Only the timeline
-    /// endpoint reads it; other handlers sharing this struct ignore it. Clamped
-    /// to ±14h; missing ⇒ 0 (UTC-aligned).
+    /// to align timeline buckets and heatmap cells to their local calendar.
+    /// Only those two endpoints read it; other handlers sharing this struct
+    /// ignore it. Clamped to ±14h; missing ⇒ 0 (UTC-aligned).
     pub tz_offset: Option<i64>,
 }
 
@@ -2430,9 +2430,11 @@ async fn get_stats_v2_timeline(
 async fn get_stats_v2_heatmap(
     State(state): State<AppState>,
     _auth: AuthedUser,
+    Query(query): Query<StatsRangeQuery>,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
+    let tz_offset = resolve_tz_offset_secs(&query);
     let now = crate::now_unix();
-    let cells = stats::compute_heatmap(&state.db, now)
+    let cells = stats::compute_heatmap(&state.db, now, tz_offset)
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(cells))

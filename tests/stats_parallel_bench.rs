@@ -23,7 +23,7 @@ use noadd::now_unix;
 
 async fn run_sequential(db: &Database, now: i64, range: StatsRange) {
     compute_stats_timeline(db, now, range, 0).await.unwrap();
-    compute_heatmap(db, now).await.unwrap();
+    compute_heatmap(db, now, 0).await.unwrap();
     compute_breakdowns(db, now, range).await.unwrap();
     compute_db_health(db, now).await.unwrap();
     compute_highlights(db, now, range).await.unwrap();
@@ -46,7 +46,7 @@ async fn run_parallel(db: &Database, now: i64, range: StatsRange) -> [Duration; 
     }
     let (a, b, c, d, e, f, g) = tokio::join!(
         timed(compute_stats_timeline(db, now, range, 0)),
-        timed(compute_heatmap(db, now)),
+        timed(compute_heatmap(db, now, 0)),
         timed(compute_breakdowns(db, now, range)),
         timed(compute_db_health(db, now)),
         timed(compute_highlights(db, now, range)),
@@ -95,7 +95,7 @@ async fn stats_parallel_bench() {
     let db = Database::open(&db_path).await.unwrap();
     let now = now_unix();
     // sanity: ensure stats compile + return non-empty heatmap
-    let cells = stats::compute_heatmap(&db, now).await.unwrap();
+    let cells = stats::compute_heatmap(&db, now, 0).await.unwrap();
     eprintln!(
         "stats_parallel_bench: db={db_path} range={range:?} iters={iters} heatmap_cells={}",
         cells.len()

@@ -97,7 +97,7 @@ async fn heatmap_groups_by_weekday_and_hour() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let cells = db.hourly_heatmap_since(0).await.unwrap();
+    let cells = db.hourly_heatmap_since(0, 0).await.unwrap();
     let mon_0 = cells
         .iter()
         .find(|c| c.weekday == 1 && c.hour == 0)
@@ -111,9 +111,31 @@ async fn heatmap_groups_by_weekday_and_hour() {
 }
 
 #[tokio::test]
+async fn heatmap_shifts_cells_by_tz_offset() {
+    let db = test_db().await;
+    // 2024-01-01 00:00:00 UTC = Monday, hour 0.
+    let monday_midnight = 1_704_067_200;
+    db.insert_query_logs(&[entry(monday_midnight + 10, "A", false, false, None)])
+        .await
+        .unwrap();
+
+    // UTC+8 puts the same instant at Monday 08:00 local.
+    let cells = db.hourly_heatmap_since(0, 8 * 3600).await.unwrap();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].weekday, 1);
+    assert_eq!(cells[0].hour, 8);
+
+    // UTC-5 rolls it back over midnight to Sunday 19:00 local.
+    let cells = db.hourly_heatmap_since(0, -5 * 3600).await.unwrap();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].weekday, 0);
+    assert_eq!(cells[0].hour, 19);
+}
+
+#[tokio::test]
 async fn heatmap_empty_db() {
     let db = test_db().await;
-    let cells = db.hourly_heatmap_since(0).await.unwrap();
+    let cells = db.hourly_heatmap_since(0, 0).await.unwrap();
     assert!(cells.is_empty());
 }
 
