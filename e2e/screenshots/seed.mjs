@@ -67,9 +67,9 @@ export function generateSeedSql(nowMs) {
   const HOURS = 90 * 24;
   const rows = [];
   // Iterate absolute one-hour slots back from "now". Weight each slot by its
-  // REAL UTC hour-of-day and weekday — the Statistics heatmap groups by
-  // strftime('%w'/'%H', ..., 'unixepoch') (UTC), so the diurnal/weekly pattern
-  // must be anchored to UTC clock hours, not to hours-since-run.
+  // REAL UTC hour-of-day and weekday — the Statistics heatmap buckets by the
+  // viewer's local clock, and capture.mjs pins the browser to UTC, so the
+  // diurnal/weekly pattern must be anchored to UTC hours, not hours-since-run.
   for (let s = HOURS - 1; s >= 0; s--) {
     const slotStart = nowMs - (s + 1) * 3600_000;        // every slot fully in the past
     const dt = new Date(slotStart);

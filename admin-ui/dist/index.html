@@ -1751,6 +1751,13 @@ function formatTime(ts) {
   return new Date(normalizeTs(ts)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+// Browser's east-positive UTC offset in minutes (e.g. 480 for UTC+8), for the
+// stats endpoints that align buckets to the viewer's local calendar rather than
+// UTC-epoch boundaries. getTimezoneOffset() is UTC-minus-local, hence the sign flip.
+function tzOffsetMinutes() {
+  return -new Date().getTimezoneOffset();
+}
+
 // Tooltip label for the statistics Nd timeline / rate charts. Date for day
 // buckets; date + HH:mm for sub-day buckets (7d→1h, 30d→6h) so hourly points
 // sharing a date are distinguishable. tsSeconds is epoch seconds (charts 2/3);
@@ -3289,10 +3296,9 @@ class StatsPage extends HTMLElement {
   async _fetchRanged() {
     this._updateRangedTitles();
     try {
-      // Pass the browser's east-positive UTC offset (minutes) so the server
-      // aligns timeline buckets to the viewer's local calendar (local midnight
-      // / hour), not UTC-epoch boundaries. getTimezoneOffset() is UTC-minus-local.
-      const tzOffset = -new Date().getTimezoneOffset();
+      // Pass the viewer's UTC offset so the server aligns timeline buckets to
+      // their local calendar (local midnight / hour), not UTC-epoch boundaries.
+      const tzOffset = tzOffsetMinutes();
       const [timeline, breakdown, highlights, topDomains, topClients] = await Promise.all([
         api.get(`/api/stats/v2/timeline?range=${this._range}&tz_offset=${tzOffset}`),
         api.get(`/api/stats/v2/breakdown?range=${this._range}`),
@@ -3311,7 +3317,9 @@ class StatsPage extends HTMLElement {
 
   async _fetchHeatmap() {
     try {
-      const data = await api.get('/api/stats/v2/heatmap');
+      // Same local-calendar alignment as the timeline: without it the
+      // hour-of-day rows are shifted by the viewer's UTC offset.
+      const data = await api.get(`/api/stats/v2/heatmap?tz_offset=${tzOffsetMinutes()}`);
       this._renderHeatmap(data);
     } catch (e) { console.error(e); }
   }

@@ -1877,17 +1877,24 @@ impl Database {
         Ok(result)
     }
 
+    /// Bucket queries by weekday and hour-of-day in the viewer's local calendar,
+    /// shifting each timestamp by `tz_offset_secs` (their east-positive UTC
+    /// offset) before extracting the fields. Mirrors the alignment
+    /// [`Self::timeline_multi_since`] applies, and carries the same DST caveat:
+    /// a single offset can misplace rows recorded under the other DST phase.
+    /// Pass 0 for plain UTC buckets.
     pub async fn hourly_heatmap_since(
         &self,
         since: i64, // unix seconds
+        tz_offset_secs: i64,
     ) -> Result<Vec<HeatmapCell>, DbError> {
         let since_ms = since * 1000;
         let result = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch') AS INTEGER) AS wday, \
-                            CAST(strftime('%H', timestamp / 1000, 'unixepoch') AS INTEGER) AS hr, \
+                    "SELECT CAST(strftime('%w', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS wday, \
+                            CAST(strftime('%H', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS hr, \
                             COUNT(*) \
                      FROM query_logs \
                      WHERE timestamp >= ?1 \
@@ -1895,7 +1902,7 @@ impl Database {
                      ORDER BY wday, hr",
                 )?;
                 let rows = stmt
-                    .query_map(params![since_ms], |row| {
+                    .query_map(params![since_ms, tz_offset_secs], |row| {
                         Ok(HeatmapCell {
                             weekday: row.get(0)?,
                             hour: row.get(1)?,

@@ -148,7 +148,7 @@ async function main() {
         deviceScaleFactor: shot.deviceScaleFactor,
         isMobile: shot.isMobile ?? false,
         hasTouch: shot.hasTouch ?? false,
-        timezoneId: 'UTC',     // matches the UTC heatmap + seed's diurnal curve
+        timezoneId: 'UTC',     // tz_offset 0 ⇒ heatmap keeps the seed's UTC diurnal curve
         locale: 'en-US',
         reducedMotion: 'reduce',
       });
