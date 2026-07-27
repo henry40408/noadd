@@ -235,6 +235,20 @@ body::after {
 .card-title::before { content: '┤ '; color: var(--text-dim); }
 .card-title::after { content: ' ├'; color: var(--text-dim); }
 
+/* Explanatory line under a card title. */
+.card-desc {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+}
+
+/* Placeholder filling a chart or table area: "No data yet", "Loading…". */
+.panel-empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 40px;
+}
+
 /* Stat Grid */
 .stat-grid {
   display: grid;
@@ -282,6 +296,9 @@ body::after {
 .stat-value.green { color: var(--green); text-shadow: var(--glow); }
 .stat-value.red { color: var(--red); text-shadow: var(--glow-red); }
 .stat-value.accent { color: var(--accent); text-shadow: var(--glow); }
+/* Database Health packs ten cards into one grid, so its values run smaller
+   than the dashboard's headline stats. */
+#health-grid .stat-value { font-size: 1.4rem; }
 
 .stat-sub {
   font-family: var(--font-mono);
@@ -2067,7 +2084,7 @@ class AccountPage extends HTMLElement {
       <div class="page-header fade-in"><h2>Account</h2><p>Operator accounts and active sessions</p></div>
       <div class="card fade-in">
         <div class="card-title">This Account</div>
-        <p id="acct-whoami" style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Loading…</p>
+        <p id="acct-whoami" class="card-desc">Loading…</p>
         <div class="card-title" style="margin-top:4px">Change Password</div>
         <div class="login-error" id="pw-error" style="display:none"></div>
         <div class="input-row"><input type="password" id="pw-current" placeholder="current password" style="max-width:220px"></div>
@@ -2077,7 +2094,7 @@ class AccountPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Operators</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">All operators have full admin access. The last operator cannot be deleted; deleting one revokes all their sessions.</p>
+        <p class="card-desc">All operators have full admin access. The last operator cannot be deleted; deleting one revokes all their sessions.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
           <tbody id="ops-body"></tbody>
@@ -2091,7 +2108,7 @@ class AccountPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Active Sessions</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days, or 48 hours after a device last contacted the server.</p>
+        <p class="card-desc">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days, or 48 hours after a device last contacted the server.</p>
         <div class="notice-banner info" id="sess-sso-note" role="status" style="display:none;margin-bottom:12px">
           <span class="icon">${NOTICE_ICONS.info}</span>
           <span class="msg">You're signed in via SSO, managed by your reverse proxy. Only password-login sessions are listed here; SSO access can't be revoked from noadd — sign out at your proxy instead.</span>
@@ -2104,7 +2121,7 @@ class AccountPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.15s">
         <div class="card-title">API Keys</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+        <p class="card-desc">
           For programmatic access via <code style="color:var(--accent);font-size:0.8rem">Authorization: Bearer &lt;token&gt;</code>. <a href="/api/docs" target="_blank" rel="noopener" style="color:var(--accent)">Interactive API reference</a>
         </p>
         <div class="table-wrap"><table>
@@ -3092,7 +3109,7 @@ class DashboardPage extends LiveElement {
   }
 
   renderChart(rawData) {
-    if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>'; this._prevChart = null; return; }
+    if (!rawData || !rawData.length) { this.querySelector('#chart').innerHTML = '<p class="panel-empty">No data yet</p>'; this._prevChart = null; return; }
     this._flashIfChanged('_prevChart', rawData.map(d => d.total + ',' + d.blocked).join(';'), '#chart-card');
     renderTimelineChart(this.querySelector('#chart'), rawData, [
       { key: 'total', color: 'var(--accent)', label: 'total' },
@@ -3160,16 +3177,16 @@ class StatsPage extends HTMLElement {
       <div class="stats-row-2col fade-in" style="animation-delay:0.05s">
         <div class="card" id="timeline-card">
           <div class="card-title" id="timeline-title">Queries (last 7d)</div>
-          <div class="chart-container" id="timeline-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+          <div class="chart-container" id="timeline-chart"><p class="panel-empty">Loading…</p></div>
         </div>
         <div class="card" id="rate-trend-card">
           <div class="card-title" id="rate-trend-title">Block &amp; Cache rate (last 7d)</div>
-          <div class="rate-chart-container" id="rate-trend-chart"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+          <div class="rate-chart-container" id="rate-trend-chart"><p class="panel-empty">Loading…</p></div>
         </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.08s" id="heatmap-card">
         <div class="card-title">Activity by hour (last 30d)</div>
-        <div id="heatmap-container"><p style="color:var(--text-dim);text-align:center;padding:40px">Loading…</p></div>
+        <div id="heatmap-container"><p class="panel-empty">Loading…</p></div>
       </div>
       <div class="stats-row-2col fade-in" style="animation-delay:0.1s">
         <div class="card" id="qtypes-card">
@@ -3273,7 +3290,7 @@ class StatsPage extends HTMLElement {
   _renderTimeline(rawData) {
     const el = this.querySelector('#timeline-chart');
     if (!rawData || !rawData.length) {
-      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      el.innerHTML = '<p class="panel-empty">No data yet</p>';
       return;
     }
     // x-axis labels stay date-only; tooltips add HH:mm on sub-day buckets.
@@ -3315,7 +3332,7 @@ class StatsPage extends HTMLElement {
     const maxCount = Math.max(...allCounts, 1);
 
     if (!rawData || !rawData.length) {
-      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      el.innerHTML = '<p class="panel-empty">No data yet</p>';
       return;
     }
 
@@ -3413,16 +3430,16 @@ class StatsPage extends HTMLElement {
     const coverage = cov > 0 ? `${cov >= 10 ? Math.round(cov) : cov.toFixed(1)}d` : '—';
     const projected = data.projected_full_bytes ? this._formatBytes(data.projected_full_bytes) : '—';
     el.innerHTML = html`
-      <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.db_size_bytes)}</div></div>
-      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
-      <div class="stat-card"><div class="stat-label">Bytes / Log</div><div class="stat-value accent" style="font-size:1.4rem">${bytesPerLog}</div></div>
-      <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
+      <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent">${this._formatBytes(data.db_size_bytes)}</div></div>
+      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
+      <div class="stat-card"><div class="stat-label">Bytes / Log</div><div class="stat-value accent">${bytesPerLog}</div></div>
+      <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
       <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${oldest}</div></div>
-      <div class="stat-card"><div class="stat-label">Log Coverage</div><div class="stat-value accent" style="font-size:1.4rem">${coverage}</div></div>
-      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${retention}</div></div>
-      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${avgDay}</div></div>
-      <div class="stat-card"><div class="stat-label">Growth / Day</div><div class="stat-value accent" style="font-size:1.4rem">${growthPerDay}</div></div>
-      <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent" style="font-size:1.4rem">${projected}</div><div class="stat-sub">at full retention</div></div>`;
+      <div class="stat-card"><div class="stat-label">Log Coverage</div><div class="stat-value accent">${coverage}</div></div>
+      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent">${retention}</div></div>
+      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent">${avgDay}</div></div>
+      <div class="stat-card"><div class="stat-label">Growth / Day</div><div class="stat-value accent">${growthPerDay}</div></div>
+      <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent">${projected}</div><div class="stat-sub">at full retention</div></div>`;
   }
 
   _renderHighlights(data) {
@@ -3454,7 +3471,7 @@ class StatsPage extends HTMLElement {
   _renderRateTrend(rawData) {
     const el = this.querySelector('#rate-trend-chart');
     if (!rawData || !rawData.length) {
-      el.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px">No data yet</p>';
+      el.innerHTML = '<p class="panel-empty">No data yet</p>';
       return;
     }
     rawData = downsampleBuckets(rawData, MAX_BARS_GROUPED());
@@ -4202,7 +4219,7 @@ class SettingsPage extends HTMLElement {
         <div class="field-msg" id="msg-strategy"></div>
         <div id="ema-latency" style="margin-top:12px"></div>
         <div class="card-title" style="margin-top:16px">DNSSEC</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+        <p class="card-desc">
           Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
         </p>
         <label class="field-label" for="s-dnssec">DNSSEC status</label>
@@ -4214,7 +4231,7 @@ class SettingsPage extends HTMLElement {
         </div>
         <div class="field-msg" id="msg-dnssec"></div>
         <div class="card-title" style="margin-top:16px">Block mode</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+        <p class="card-desc">
           How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
         </p>
         <label class="field-label" for="s-block-mode">Response</label>
@@ -4250,7 +4267,7 @@ class SettingsPage extends HTMLElement {
       </div>
       <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
         <div class="card-title">DoH Access Control</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+        <p class="card-desc">
           Default policy for unauthenticated DoH requests (without a token in URL).
         </p>
         <label class="field-label" for="s-doh-policy">Default Policy</label>
@@ -4262,7 +4279,7 @@ class SettingsPage extends HTMLElement {
         </div>
         <div class="field-msg" id="msg-doh-policy"></div>
         <div class="card-title" style="margin-top:16px">DoH Tokens</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+        <p class="card-desc">
           Each token becomes a DoH URL path: <code style="color:var(--accent);font-size:0.8rem">/dns-query/your-token</code>. Always works regardless of policy.
         </p>
         <div class="input-row">
