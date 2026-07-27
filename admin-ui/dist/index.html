@@ -1890,7 +1890,13 @@ class AppShell extends HTMLElement {
       window.dispatchEvent(new CustomEvent('auth-required'));
     };
 
-    const updateActive = () => {
+    // Kept on the instance so disconnectedCallback can unregister it. showApp()
+    // builds a fresh app-shell on every login, and a listener left behind by a
+    // previous shell keeps that whole discarded subtree reachable through this
+    // closure — one leaked shell per re-login. It causes no visible breakage
+    // (the stale handler just updates nodes nobody can see), which is exactly
+    // why it needs the explicit teardown below.
+    this._updateActive = () => {
       const hash = location.hash || '#dashboard';
       this.querySelectorAll('.nav-item[data-route]').forEach(b => {
         b.classList.toggle('active', b.dataset.route === hash);
@@ -1898,8 +1904,8 @@ class AppShell extends HTMLElement {
       // Clear page-scoped banners when navigating to another page.
       this.querySelector('#notice-host').replaceChildren();
     };
-    window.addEventListener('hashchange', updateActive);
-    updateActive();
+    window.addEventListener('hashchange', this._updateActive);
+    this._updateActive();
 
     // One-time post-setup welcome strip. Shown once for the session that just
     // completed first-run setup (flag set in SetupPage.doSetup), then cleared
@@ -1924,6 +1930,13 @@ class AppShell extends HTMLElement {
                 style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
       welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
       main.insertBefore(welcome, main.firstChild);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._updateActive) {
+      window.removeEventListener('hashchange', this._updateActive);
+      this._updateActive = null;
     }
   }
 
