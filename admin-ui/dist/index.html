@@ -1651,9 +1651,11 @@ function formatPct(n, total) {
   if (!total || total <= 0 || n == null || Number.isNaN(n)) return '';
   return `${(n / total * 100).toFixed(1)}%`;
 }
+// Returns Markup so callers can interpolate it into html`` without it being
+// escaped as text.
 function sharePctSpan(count, sum) {
   const pct = formatPct(count, sum);
-  return pct ? ` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
+  return pct ? html` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
 }
 
 function normalizeTs(ts) {
@@ -1675,11 +1677,13 @@ function absTime(ts) {
   return new Date(normalizeTs(ts)).toLocaleString([], { hour12: false });
 }
 
+// Returns Markup, not text: callers interpolate it into html`` and the span has
+// to survive as an element.
 function timeAgo(ts) {
   if (!ts) return 'never';
   // data-ts lets a periodic ticker recompute the relative text in place
   // (see LogsPage._refreshTimes) without re-rendering the whole row.
-  return `<span class="timeago" data-ts="${ts}" title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
+  return html`<span class="timeago" data-ts="${ts}" title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
 }
 
 function formatTime(ts) {
@@ -1722,6 +1726,47 @@ function safeUrl(u) {
   }
 }
 
+// Markup that is already safe to emit as-is. Carrying it as a distinct type is
+// what lets html`` tell "this is a value to escape" apart from "this is markup I
+// built myself" without a flag at every interpolation. toString() means an
+// innerHTML assignment serialises it for free.
+class Markup {
+  constructor(value) { this.value = value; }
+  toString() { return this.value; }
+}
+
+// Wrap a string of markup you vouch for — a hand-written fragment, an inline
+// SVG. Every use is a place where escaping is deliberately skipped, so it should
+// only ever wrap a literal, never interpolated data.
+function raw(value) {
+  return new Markup(String(value));
+}
+
+// Tagged template for building markup: interpolations are escaped by default,
+// which is the whole point — forgetting to call esc() is no longer possible,
+// because not doing anything special is the safe path.
+//
+// Passed through untouched: Markup (so nested html`` and raw() compose) and
+// arrays of it (so `${rows.map(r => html`…`)}` needs no join). null and
+// undefined render as nothing rather than the strings "null"/"undefined".
+// Everything else is escaped and stringified, booleans included — attributes
+// like data-blocked="${l.blocked}" must still read "false", not empty.
+function html(strings, ...values) {
+  let out = '';
+  strings.forEach((chunk, i) => {
+    out += chunk;
+    if (i < values.length) out += flatten(values[i]);
+  });
+  return new Markup(out);
+}
+
+function flatten(value) {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Markup) return value.value;
+  if (Array.isArray(value)) return value.map(flatten).join('');
+  return esc(value);
+}
+
 function showFormError(el, msg) {
   el.textContent = msg;
   el.style.display = 'block';
@@ -1746,6 +1791,11 @@ const icons = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
 };
 
+// Marked once, here, rather than at each of the ~30 interpolation sites: these
+// are hand-written SVG literals, and html`` must emit them rather than escape
+// them. Doing it centrally also means no template needs raw() for an icon.
+for (const key of Object.keys(icons)) icons[key] = raw(icons[key]);
+
 // ============================================================
 // Notice banners (in-flow, dismissible; replaces alert())
 // ============================================================
@@ -1754,6 +1804,7 @@ const NOTICE_ICONS = {
   success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="8 12.5 11 15.5 16 9"/></svg>',
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
 };
+for (const key of Object.keys(NOTICE_ICONS)) NOTICE_ICONS[key] = raw(NOTICE_ICONS[key]);
 
 // Show an in-flow banner at the top of the page content. type: 'error' |
 // 'success' | 'info'. Persistent (no auto-dismiss) with a manual close
@@ -1772,9 +1823,9 @@ function showBanner(msg, type = 'info') {
   el.dataset.key = `${kind}:${msg}`;
   // role="alert" is assertive (errors interrupt); status is polite otherwise.
   el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-  el.innerHTML = `<span class="icon">${NOTICE_ICONS[kind]}</span>`
-    + `<span class="msg">${esc(msg)}</span>`
-    + `<button class="close" type="button" aria-label="Dismiss">${icons.close}</button>`;
+  el.innerHTML = html`<span class="icon">${NOTICE_ICONS[kind]}</span>`
+    + html`<span class="msg">${msg}</span>`
+    + html`<button class="close" type="button" aria-label="Dismiss">${icons.close}</button>`;
   el.querySelector('.close').onclick = () => el.remove();
   host.appendChild(el);
   return el;
@@ -1908,7 +1959,7 @@ customElements.define('login-page', LoginPage);
 // --- App Shell ---
 class AppShell extends LiveElement {
   connectedCallback() {
-    this.innerHTML = `
+    this.innerHTML = html`
       <div class="app-shell" data-testid="app-shell">
         <header class="topbar">
           <div class="brand">noadd <span class="v">${window.__noadd_version || ''}</span></div>
@@ -1932,7 +1983,7 @@ class AppShell extends LiveElement {
         <footer class="statusbar">
           <span class="live">ONLINE</span>
           <span>noadd ${window.__noadd_version || ''}</span>
-          <span class="right">${esc(location.host)}</span>
+          <span class="right">${location.host}</span>
         </footer>
         <nav class="fnbar">
           <button class="nav-item" data-route="#dashboard"><span class="fk">F1</span><b>dash</b></button>
@@ -2093,9 +2144,9 @@ class AccountPage extends HTMLElement {
     try {
       this._me = await api.get('/api/auth/me');
       const sso = this._me.via_sso
-        ? ` <span style="color:var(--text-dim)">· via SSO</span>` : '';
+        ? html` <span style="color:var(--text-dim)">· via SSO</span>` : '';
       this.querySelector('#acct-whoami').innerHTML =
-        `Signed in as <code style="color:var(--accent);font-size:0.85rem">${esc(this._me.username)}</code>${sso}`;
+        html`Signed in as <code style="color:var(--accent);font-size:0.85rem">${this._me.username}</code>${sso}`;
       const note = this.querySelector('#sess-sso-note');
       if (note) note.style.display = this._me.via_sso ? 'flex' : 'none';
     } catch (e) {}
@@ -2118,10 +2169,10 @@ class AccountPage extends HTMLElement {
       const isYou = this._me && u.id === this._me.id;
       const last = users.length <= 1;
       const disabled = isYou || last;
-      return `<tr>
-        <td class="mono" style="color:var(--text-primary)">${esc(u.username)}${isYou ? ' <span class="badge badge-allowed">you</span>' : ''}</td>
+      return html`<tr>
+        <td class="mono" style="color:var(--text-primary)">${u.username}${isYou ? raw(' <span class="badge badge-allowed">you</span>') : ''}</td>
         <td>${u.created_at ? timeAgo(u.created_at) : '—'}</td>
-        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${esc(String(u.id))}" ${disabled ? 'disabled style="opacity:.35"' : ''}>${icons.trash}</button></td>
+        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${u.id}" ${disabled ? raw('disabled style="opacity:.35"') : ''}>${icons.trash}</button></td>
       </tr>`;
     }).join('');
     body.querySelectorAll('.del-op:not([disabled])').forEach(btn => {
@@ -2149,13 +2200,13 @@ class AccountPage extends HTMLElement {
       body.innerHTML = '<tr><td colspan="6" style="color:var(--red)">Failed to load sessions</td></tr>';
       return;
     }
-    body.innerHTML = sessions.map(s => `<tr>
-      <td class="mono" style="color:var(--text-primary)">${esc(s.username)}${s.is_current ? ' <span class="badge badge-allowed">this device</span>' : ''}</td>
-      <td class="mono">${esc(s.ip || '—')}</td>
-      <td>${esc(s.user_agent || '—')}</td>
+    body.innerHTML = sessions.map(s => html`<tr>
+      <td class="mono" style="color:var(--text-primary)">${s.username}${s.is_current ? raw(' <span class="badge badge-allowed">this device</span>') : ''}</td>
+      <td class="mono">${s.ip || '—'}</td>
+      <td>${s.user_agent || '—'}</td>
       <td>${s.created_at ? timeAgo(s.created_at) : '—'}</td>
       <td>${s.last_seen ? timeAgo(s.last_seen) : '—'}</td>
-      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${esc(String(s.id))}" data-current="${s.is_current ? 'true' : 'false'}">${icons.trash}</button></td>
+      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${s.id}" data-current="${s.is_current ? 'true' : 'false'}">${icons.trash}</button></td>
     </tr>`).join('');
     body.querySelectorAll('.rev-sess').forEach(btn => {
       btn.onclick = async () => {
@@ -2225,13 +2276,13 @@ class AccountPage extends HTMLElement {
     if (!keys.length) {
       body.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim)">No API keys yet</td></tr>';
     } else {
-      body.innerHTML = keys.map(k => `<tr>
-        <td style="color:var(--text-primary)">${esc(k.name)}</td>
-        <td class="mono">${esc(k.prefix)}</td>
+      body.innerHTML = keys.map(k => html`<tr>
+        <td style="color:var(--text-primary)">${k.name}</td>
+        <td class="mono">${k.prefix}</td>
         <td>${timeAgo(k.created_at)}</td>
         <td>${k.last_used_at ? timeAgo(k.last_used_at) : '—'}</td>
         <td>${timeAgo(k.expires_at)}</td>
-        <td style="text-align:right"><button class="btn btn-danger btn-sm del-api-key" data-id="${esc(String(k.id))}">${icons.trash}</button></td>
+        <td style="text-align:right"><button class="btn btn-danger btn-sm del-api-key" data-id="${k.id}">${icons.trash}</button></td>
       </tr>`).join('');
     }
     body.querySelectorAll('.del-api-key').forEach(btn => {
@@ -2271,11 +2322,11 @@ class AccountPage extends HTMLElement {
   showApiKeyReveal(created) {
     const el = this.querySelector('#api-key-reveal');
     el.style.cssText = 'display:block;margin:12px 0;padding:12px;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--orange)';
-    el.innerHTML = `
-      <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">API key created: ${esc(created.name)}</div>
+    el.innerHTML = html`
+      <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">API key created: ${created.name}</div>
       <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Copy this token now — it won't be shown again.</div>
       <div class="input-row">
-        <input type="text" id="api-key-token" class="mono" value="${esc(created.token)}" readonly style="flex:1">
+        <input type="text" id="api-key-token" class="mono" value="${created.token}" readonly style="flex:1">
         <button class="btn btn-primary btn-sm" id="api-key-copy">Copy</button>
         <button class="btn btn-sm" id="api-key-dismiss">Dismiss</button>
       </div>`;
@@ -2349,14 +2400,14 @@ class RebuildBanner extends LiveElement {
       return;
     }
     const indicator = state === 'active'
-      ? '<span class="spin"></span>'
-      : `<span class="check">${icons.check}</span>`;
-    const metaHtml = meta ? `<span class="meta">${esc(meta)}</span>` : '';
-    this.innerHTML = `
+      ? raw('<span class="spin"></span>')
+      : html`<span class="check">${icons.check}</span>`;
+    const metaHtml = meta ? html`<span class="meta">${meta}</span>` : '';
+    this.innerHTML = html`
       <div class="rebuild-banner show ${state}" role="status" aria-live="polite">
         <span class="icon">${indicator}</span>
         <span class="text">
-          <span class="label">${esc(label)}</span>
+          <span class="label">${label}</span>
           ${metaHtml}
         </span>
       </div>`;
@@ -2422,11 +2473,11 @@ class NextStepBanner extends LiveElement {
     }
   }
   show() {
-    this.innerHTML = `
+    this.innerHTML = html`
       <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
         <span class="icon">${icons.dashboard}</span>
         <span class="text">
-          <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${esc(this.dnsAddr)}</strong>.</span>
+          <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${this.dnsAddr}</strong>.</span>
         </span>
         <button class="btn" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
       </div>`;
@@ -2585,18 +2636,18 @@ class RegistryModal extends LiveElement {
       const groupName = groupsById.get(f.groupId)?.groupName || '';
       const groupCls = this.groupClassFor(f.groupId);
       const homeUrl = safeUrl(f.homepage);
-      const home = homeUrl ? `<a class="home" href="${esc(homeUrl)}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
-      return `
+      const home = homeUrl ? html`<a class="home" href="${homeUrl}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
+      return html`
         <label class="registry-row">
-          <input type="checkbox" data-id="${f.filterId}" ${checked ? 'checked' : ''} ${already ? 'disabled' : ''}>
+          <input type="checkbox" data-id="${f.filterId}" ${checked ? raw('checked') : ''} ${already ? raw('disabled') : ''}>
           <div class="info">
             <div class="name-row">
-              <span class="name">${esc(f.name)}</span>
-              ${groupName ? `<span class="group-pill ${groupCls}">${esc(groupName)}</span>` : ''}
-              ${already ? '<span class="added-pill">Added</span>' : ''}
-              ${f.deprecated ? '<span class="dep-pill">Deprecated</span>' : ''}
+              <span class="name">${f.name}</span>
+              ${groupName ? html`<span class="group-pill ${groupCls}">${groupName}</span>` : ''}
+              ${already ? raw('<span class="added-pill">Added</span>') : ''}
+              ${f.deprecated ? raw('<span class="dep-pill">Deprecated</span>') : ''}
             </div>
-            <div class="desc">${esc(f.description || '')}</div>
+            <div class="desc">${f.description || ''}</div>
             ${home}
           </div>
         </label>`;
@@ -2640,8 +2691,9 @@ class RegistryModal extends LiveElement {
       const summary = this.querySelector('#reg-summary');
       summary.style.display = '';
       summary.classList.add('error');
-      const failedList = resp.failed.map(f => `${esc(f.name)} (${esc(f.error)})`).join('; ');
-      summary.innerHTML = `Added ${resp.added.length}, failed ${resp.failed.length}: ${failedList}`;
+      // Plain text, escaped once where it lands in markup rather than per part.
+      const failedList = resp.failed.map(f => `${f.name} (${f.error})`).join('; ');
+      summary.innerHTML = html`Added ${resp.added.length}, failed ${resp.failed.length}: ${failedList}`;
       this.selected.clear();
       this.existingUrls = new Set(
         [...this.existingUrls, ...resp.added.map(a => a.url)]
@@ -2743,8 +2795,9 @@ const MAX_BARS_GROUPED = () => (window.innerWidth <= 480 ? 14 : 30);
 // series  — [{ key, color, label }]; series[0] is the total, the rest are
 //           sub-categories (e.g. blocked, cached) stacked at the bottom.
 //           `label` is the legend caption (shown in the .tl-legend row below).
-// fmtX    — (row) => x-axis label HTML (must be pre-escaped)
-// fmtTooltip — (row) => tooltip HTML (must be pre-escaped)
+// fmtX    — (row) => x-axis label as plain text; escaped here
+// fmtTooltip — (row) => tooltip Markup, i.e. built with html`` (it carries markup
+//           of its own, so it cannot be escaped as text)
 function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   data = downsampleBuckets(data, MAX_BARS_STACKED());
   const len = data.length;
@@ -2794,7 +2847,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   const targetLabels = window.innerWidth <= 480 ? 4 : 6;
   const labelEvery = Math.max(1, Math.round(len / targetLabels));
   let labels = '<div class="chart-labels">';
-  for (let i = 0; i < len; i += labelEvery) labels += `<div class="chart-label">${fmtX(data[i])}</div>`;
+  for (let i = 0; i < len; i += labelEvery) labels += html`<div class="chart-label">${fmtX(data[i])}</div>`;
   labels += '</div>';
 
   const legend = '<div class="rate-legend tl-legend">' +
@@ -2965,9 +3018,11 @@ class DashboardPage extends LiveElement {
     if (!data.length) { this.querySelector(target).innerHTML = '<p style="color:var(--text-dim)">No data</p>'; return; }
     const visible = limit ? data.slice(0, limit) : data;
     const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    let html = head;
-    for (const d of visible) html += row(d, sumVal);
-    this.querySelector(target).innerHTML = html + '</tbody></table>';
+    // `head` is a literal from the caller and each row() returns Markup, so both
+    // pass through unescaped; only the values inside row() get escaped.
+    let markup = head;
+    for (const d of visible) markup += row(d, sumVal);
+    this.querySelector(target).innerHTML = markup + '</tbody></table>';
   }
 
   renderStats(s) {
@@ -3022,7 +3077,7 @@ class DashboardPage extends LiveElement {
       if (chart) chart.style.display = '';
       return;
     }
-    box.innerHTML = `
+    box.innerHTML = html`
       <div class="card-title">Point a device at noadd to get started</div>
       <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
         noadd hasn't served any DNS queries yet. To start filtering, configure a device or
@@ -3030,7 +3085,7 @@ class DashboardPage extends LiveElement {
       </p>
       <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">
         Set the device's DNS server to:
-        <code class="mono" style="color:var(--text-primary)">${esc(this._dnsAddr)}</code>
+        <code class="mono" style="color:var(--text-primary)">${this._dnsAddr}</code>
       </p>`;
     box.style.display = '';
     if (chart) chart.style.display = 'none';
@@ -3046,7 +3101,7 @@ class DashboardPage extends LiveElement {
     (d) => formatTime(d.timestamp),
     (d) => {
       const pct = d.total > 0 ? ((d.blocked / d.total) * 100).toFixed(0) : '0';
-      return `${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(d.blocked)} blocked</span> (${pct}%)`;
+      return html`${formatTime(d.timestamp)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${formatFull(d.blocked)} blocked</span> (${pct}%)`;
     });
   }
 
@@ -3055,7 +3110,7 @@ class DashboardPage extends LiveElement {
       target: '#top-domains', card: '#domains-card', prevKey: '_prevDomains',
       sigFn: d => d.domain + d.count, limit: 10,
       head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Domain</th><th style="text-align:right">Count</th></tr></thead><tbody>',
-      row: (d, sum) => `<tr><td><div class="truncate-cell" title="${esc(d.domain)}">${esc(d.domain)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`,
+      row: (d, sum) => html`<tr><td><div class="truncate-cell" title="${d.domain}">${d.domain}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`,
     });
   }
 
@@ -3066,9 +3121,9 @@ class DashboardPage extends LiveElement {
       head: '<table class="top-table"><colgroup><col><col style="width:140px"></colgroup><thead><tr><th>Client</th><th style="text-align:right">Count</th></tr></thead><tbody>',
       row: (d, sum) => {
         const tokenLine = d.doh_token
-          ? `<div class="truncate-cell" title="${esc(d.doh_token)}" style="color:var(--accent);font-size:0.7rem">${esc(d.doh_token)}</div>`
+          ? html`<div class="truncate-cell" title="${d.doh_token}" style="color:var(--accent);font-size:0.7rem">${d.doh_token}</div>`
           : '';
-        return `<tr><td><div class="truncate-cell mono" title="${esc(d.client_ip)}">${esc(d.client_ip)}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`;
+        return html`<tr><td><div class="truncate-cell mono" title="${d.client_ip}">${d.client_ip}</div>${tokenLine}</td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td></tr>`;
       },
     });
   }
@@ -3078,7 +3133,7 @@ class DashboardPage extends LiveElement {
       target: '#top-upstreams', card: '#upstreams-card', prevKey: '_prevUpstreams',
       sigFn: d => d.upstream + d.count,
       head: '<table class="top-table"><thead><tr><th>Upstream</th><th style="text-align:right;width:140px">Queries</th><th class="hide-mobile" style="text-align:right;width:120px">Avg Latency</th></tr></thead><tbody>',
-      row: (d, sum) => `<tr><td><div class="truncate-cell mono" title="${esc(d.upstream)}">${esc(d.upstream)}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`,
+      row: (d, sum) => html`<tr><td><div class="truncate-cell mono" title="${d.upstream}">${d.upstream}</div></td><td class="mono" style="text-align:right;white-space:nowrap">${formatFull(d.count)}${sharePctSpan(d.count, sum)}</td><td class="mono hide-mobile" style="text-align:right;white-space:nowrap">${d.avg_ms.toFixed(1)}ms</td></tr>`,
     });
   }
 }
@@ -3223,7 +3278,7 @@ class StatsPage extends HTMLElement {
     }
     // x-axis labels stay date-only; tooltips add HH:mm on sub-day buckets.
     const subDay = this._range !== '90d';
-    const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    const fmtDay = (d) => new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
     renderTimelineChart(el, rawData, [
       { key: 'total', color: 'var(--accent)', label: 'total' },
       { key: 'cached', color: 'var(--orange)', label: 'cached' },
@@ -3237,7 +3292,7 @@ class StatsPage extends HTMLElement {
       const cachedPct = formatPct(cached, d.total);
       const blockedStr = blockedPct ? `${formatFull(blocked)} blocked (${blockedPct})` : `${formatFull(blocked)} blocked`;
       const cachedStr = cachedPct ? `${formatFull(cached)} cached (${cachedPct})` : `${formatFull(cached)} cached`;
-      return `${esc(fmtBucketLabel(d.timestamp, subDay))}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--orange)">${cachedStr}</span>`;
+      return html`${fmtBucketLabel(d.timestamp, subDay)}<br><span style="color:var(--accent)">${formatFull(d.total)} total</span> · <span style="color:var(--red)">${blockedStr}</span> · <span style="color:var(--orange)">${cachedStr}</span>`;
     });
   }
 
@@ -3264,19 +3319,20 @@ class StatsPage extends HTMLElement {
       return;
     }
 
-    // Column labels row
-    let html = '<div class="heatmap-wrap"><div class="heatmap-col-labels"><div></div>';
+    // Column labels row. Named `markup` rather than `html` so it does not shadow
+    // the tagged template of that name.
+    let markup = '<div class="heatmap-wrap"><div class="heatmap-col-labels"><div></div>';
     for (let h = 0; h < 24; h++) {
       const label = (h === 0 || h === 6 || h === 12 || h === 18) ? String(h).padStart(2, '0') : '';
-      html += `<div class="heatmap-col-label">${label}</div>`;
+      markup += html`<div class="heatmap-col-label">${label}</div>`;
     }
-    html += '</div>';
+    markup += '</div>';
 
     // Data rows
-    html += '<div class="heatmap-table">';
+    markup += '<div class="heatmap-table">';
     for (let ri = 0; ri < 7; ri++) {
       const wd = displayOrder[ri];
-      html += `<div class="heatmap-row-label">${dayLabels[ri]}</div>`;
+      markup += html`<div class="heatmap-row-label">${dayLabels[ri]}</div>`;
       for (let h = 0; h < 24; h++) {
         const count = (grid[wd] && grid[wd][h]) ? grid[wd][h] : 0;
         const opacity = count > 0 ? Math.max(0.08, count / maxCount) : 0.04;
@@ -3285,13 +3341,13 @@ class StatsPage extends HTMLElement {
         if (ri === 0) edgeCls.push('edge-top');
         if (h <= 2) edgeCls.push('edge-left');
         if (h >= 21) edgeCls.push('edge-right');
-        html += `<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${formatFull(count)} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
+        markup += html`<div class="heatmap-cell${edgeCls.length ? ' ' + edgeCls.join(' ') : ''}" style="--cell-op:${opacity.toFixed(3)}" title="${formatFull(count)} queries · ${dayName} ${String(h).padStart(2,'0')}:00">
           <span class="heatmap-tooltip">${formatFull(count)} · ${dayName} ${String(h).padStart(2,'0')}:00</span>
         </div>`;
       }
     }
-    html += '</div></div>';
-    el.innerHTML = html;
+    markup += '</div></div>';
+    el.innerHTML = markup;
 
     // Touch: CSS :hover never fires on mobile, so tap a cell to show its tooltip,
     // tap another to switch, tap outside to dismiss. The listener lives on the
@@ -3318,20 +3374,20 @@ class StatsPage extends HTMLElement {
     const maxVal = Math.max(...sorted.map(e => e[1]), 1);
     const sumVal = sorted.reduce((a, e) => a + e[1], 0);
     const barThreshold = window.innerWidth <= 768 ? 100_000 : 1_000_000;
-    let html = '<div class="bar-list">';
+    let markup = '<div class="bar-list">';
     for (const [label, count] of sorted) {
       const barPct = (count / maxVal * 100).toFixed(1);
       const sharePct = formatPct(count, sumVal);
       const titleText = sharePct ? `${formatFull(count)} (${sharePct})` : formatFull(count);
-      const pctLine = sharePct ? `<div class="bar-row-pct">${sharePct}</div>` : '';
-      html += `<div class="bar-row">
-        <div class="bar-row-label" title="${esc(label)}">${esc(label)}</div>
+      const pctLine = sharePct ? html`<div class="bar-row-pct">${sharePct}</div>` : '';
+      markup += html`<div class="bar-row">
+        <div class="bar-row-label" title="${label}">${label}</div>
         <div class="bar-row-track"><div class="bar-row-fill" style="width:${barPct}%;background:${color}"></div></div>
         <div class="bar-row-count" title="${titleText}"><div>${formatNumAdaptive(count, barThreshold)}</div>${pctLine}</div>
       </div>`;
     }
-    html += '</div>';
-    el.innerHTML = html;
+    markup += '</div>';
+    el.innerHTML = markup;
   }
 
   _renderBreakdown(data) {
@@ -3356,15 +3412,15 @@ class StatsPage extends HTMLElement {
     const cov = data.log_coverage_days || 0;
     const coverage = cov > 0 ? `${cov >= 10 ? Math.round(cov) : cov.toFixed(1)}d` : '—';
     const projected = data.projected_full_bytes ? this._formatBytes(data.projected_full_bytes) : '—';
-    el.innerHTML = `
+    el.innerHTML = html`
       <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.db_size_bytes)}</div></div>
       <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" style="font-size:1.4rem" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
       <div class="stat-card"><div class="stat-label">Bytes / Log</div><div class="stat-value accent" style="font-size:1.4rem">${bytesPerLog}</div></div>
       <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent" style="font-size:1.4rem">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
-      <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${esc(oldest)}</div></div>
+      <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${oldest}</div></div>
       <div class="stat-card"><div class="stat-label">Log Coverage</div><div class="stat-value accent" style="font-size:1.4rem">${coverage}</div></div>
-      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${esc(retention)}</div></div>
-      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${esc(avgDay)}</div></div>
+      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent" style="font-size:1.4rem">${retention}</div></div>
+      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent" style="font-size:1.4rem">${avgDay}</div></div>
       <div class="stat-card"><div class="stat-label">Growth / Day</div><div class="stat-value accent" style="font-size:1.4rem">${growthPerDay}</div></div>
       <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent" style="font-size:1.4rem">${projected}</div><div class="stat-sub">at full retention</div></div>`;
   }
@@ -3448,11 +3504,11 @@ class StatsPage extends HTMLElement {
       ).join('') + '</div>';
     // x-axis labels stay date-only; tooltips add HH:mm on sub-day buckets.
     const subDay = this._range !== '90d';
-    const fmtDay = (d) => esc(new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    const fmtDay = (d) => new Date(d.timestamp * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
     const targetLabels = window.innerWidth <= 480 ? 4 : 6;
     const labelEvery = Math.max(1, Math.round(len / targetLabels));
     let labels = '<div class="chart-labels">';
-    for (let i = 0; i < len; i += labelEvery) labels += `<div class="chart-label">${fmtDay(rawData[i])}</div>`;
+    for (let i = 0; i < len; i += labelEvery) labels += html`<div class="chart-label">${fmtDay(rawData[i])}</div>`;
     labels += '</div>';
     el.innerHTML = `
       <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" class="rate-svg">
@@ -3484,7 +3540,7 @@ class StatsPage extends HTMLElement {
       for (const b of bars) if (Math.abs(b.cx - svgX) < Math.abs(best.cx - svgX)) best = b;
       svg.classList.add('cursoring');
       highlight(best.i);
-      tooltip.innerHTML = `${esc(fmtBucketLabel(best.d.timestamp, subDay))}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
+      tooltip.innerHTML = html`${fmtBucketLabel(best.d.timestamp, subDay)}<br><span style="color:var(--red)">${best.blockedPct.toFixed(1)}% blocked</span> · <span style="color:var(--green)">${best.cachedPct.toFixed(1)}% cached</span><br><span style="color:var(--text-dim)">${formatFull(best.d.total || 0)} total</span>`;
       tooltip.classList.add('active'); // display:block first so offsetWidth is measurable
       const pxX = (best.cx / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
@@ -3727,10 +3783,10 @@ class LogsPage extends LiveElement {
     const body = this.querySelector('#log-body');
     if (!logs.length) {
       body.innerHTML = noFilters
-        ? `<tr><td colspan="8" style="padding:0">${emptyGuideDesktop}</td></tr>`
+        ? html`<tr><td colspan="8" style="padding:0">${raw(emptyGuideDesktop)}</td></tr>`
         : '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">No logs found</td></tr>';
     } else {
-      body.innerHTML = logs.map(l => `<tr>${this._rowHtml(l)}</tr>`).join('');
+      body.innerHTML = logs.map(l => html`<tr>${this._rowHtml(l)}</tr>`).join('');
     }
 
     // Mobile card list
@@ -3751,41 +3807,41 @@ class LogsPage extends LiveElement {
     const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
     const hasPrev = this.offset > 0;
     const hasNext = currentPage < totalPages;
-    pag.innerHTML = `
-      <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} id="pg-prev">Prev</button>
+    pag.innerHTML = html`
+      <button class="btn btn-sm" ${hasPrev ? '' : raw('disabled')} id="pg-prev">Prev</button>
       <span>Page ${currentPage} / ${totalPages}</span>
-      <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} id="pg-next">Next</button>`;
+      <button class="btn btn-sm" ${hasNext ? '' : raw('disabled')} id="pg-next">Next</button>`;
     pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
     pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
   }
 
   _rowHtml(l) {
-    return `
+    return html`
         <td>${timeAgo(l.timestamp)}</td>
         <td style="text-align:center"><span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}">${l.blocked ? '✖' : '✔'}</span></td>
-        <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${esc(l.domain)}">${esc(l.domain)}</span>${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}</div>${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}</td>
-        <td class="mono">${esc(l.query_type)}</td>
-        <td class="mono">${esc(l.client_ip)}${l.doh_token ? '<br><span style="color:var(--accent);font-size:0.85rem">' + esc(l.doh_token) + '</span>' : ''}</td>
-        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
-        <td>${l.cached ? '<span class="badge badge-cached">cached</span>' : l.upstream ? '<span class="mono" style="font-size:0.9rem">' + esc(l.upstream) + '</span>' : '<span style="color:var(--text-dim)">-</span>'}</td>
+        <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${l.domain}">${l.domain}</span>${l.authenticated_data ? html`<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>` : ''}</div>${l.result ? html`<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.result}">→ ${l.result}</div>` : ''}</td>
+        <td class="mono">${l.query_type}</td>
+        <td class="mono">${l.client_ip}${l.doh_token ? html`<br><span style="color:var(--accent);font-size:0.85rem">${l.doh_token}</span>` : ''}</td>
+        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
+        <td>${l.cached ? html`<span class="badge badge-cached">cached</span>` : l.upstream ? html`<span class="mono" style="font-size:0.9rem">${l.upstream}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
         <td class="mono">${l.response_ms}</td>`;
   }
 
   _cardHtml(l) {
-    return `<div class="log-card">
+    return html`<div class="log-card">
         <div class="log-card-row1">
           <span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}" style="flex:0 0 auto">${l.blocked ? '✖' : '✔'}</span>
-          <span class="log-card-domain" title="${esc(l.domain)}">${esc(l.domain)}</span>
-          ${l.authenticated_data ? '<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>' : ''}
-          <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${esc(l.domain)}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
+          <span class="log-card-domain" title="${l.domain}">${l.domain}</span>
+          ${l.authenticated_data ? html`<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>` : ''}
+          <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
         </div>
-        ${l.result ? '<div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(l.result) + '">→ ' + esc(l.result) + '</div>' : ''}
+        ${l.result ? html`<div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.result}">→ ${l.result}</div>` : ''}
         <div class="log-card-row2">
           <span class="lc-time">${timeAgo(l.timestamp)}</span>
-          <span class="lc-type">${esc(l.query_type)}</span>
-          <span class="lc-client" style="color:var(--text-secondary)">${esc(l.client_ip)}</span>
-          ${l.cached ? '<span class="lc-cached">cached</span>' : l.upstream ? '<span class="lc-up">' + esc(l.upstream) + '</span>' : ''}
-          ${l.doh_token ? '<span class="lc-token">' + esc(l.doh_token) + '</span>' : ''}
+          <span class="lc-type">${l.query_type}</span>
+          <span class="lc-client" style="color:var(--text-secondary)">${l.client_ip}</span>
+          ${l.cached ? html`<span class="lc-cached">cached</span>` : l.upstream ? html`<span class="lc-up">${l.upstream}</span>` : ''}
+          ${l.doh_token ? html`<span class="lc-token">${l.doh_token}</span>` : ''}
           <span class="lc-ms">${l.response_ms}ms</span>
         </div>
       </div>`;
@@ -3919,14 +3975,14 @@ class FiltersPage extends HTMLElement {
     try {
       const res = await api.post('/api/filter/check', { domain });
       if (res.action === 'blocked') {
-        el.innerHTML = `<span class="badge badge-blocked">Blocked</span>
+        el.innerHTML = html`<span class="badge badge-blocked">Blocked</span>
           <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">
-            Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code>
-            &middot; List: <code style="color:var(--text-primary)">${esc(res.list)}</code>
+            Rule: <code style="color:var(--text-primary)">${res.rule}</code>
+            &middot; List: <code style="color:var(--text-primary)">${res.list}</code>
           </span>`;
       } else {
         let detail = res.rule
-          ? ` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code style="color:var(--text-primary)">${esc(res.rule)}</code></span>`
+          ? html` <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code style="color:var(--text-primary)">${res.rule}</code></span>`
           : '';
         el.innerHTML = '<span class="badge badge-allowed">Allowed</span>' + detail;
       }
@@ -3942,34 +3998,34 @@ class FiltersPage extends HTMLElement {
 
       // Desktop table
       const body = this.querySelector('#lists-body');
-      body.innerHTML = lists.map(l => `<tr data-testid="filter-list-row" data-name="${esc(l.name)}">
+      body.innerHTML = lists.map(l => html`<tr data-testid="filter-list-row" data-name="${l.name}">
         <td>
           <label class="toggle">
-            <input type="checkbox" data-testid="filter-list-toggle" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <input type="checkbox" data-testid="filter-list-toggle" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
             <div class="toggle-track"></div>
             <div class="toggle-thumb"></div>
           </label>
         </td>
-        <td style="color:var(--text-primary)">${esc(l.name)}</td>
+        <td style="color:var(--text-primary)">${l.name}</td>
         <td>${formatFull(l.rule_count)}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td style="white-space:nowrap">
-          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${esc(l.name)}" data-url="${esc(l.url)}">Edit</button>
+          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}">Edit</button>
           <button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
         </td>
       </tr>`).join('');
 
       // Mobile cards
       const cards = this.querySelector('#lists-cards');
-      cards.innerHTML = lists.map(l => `<div class="log-card">
+      cards.innerHTML = lists.map(l => html`<div class="log-card">
         <div class="log-card-row1">
           <label class="toggle">
-            <input type="checkbox" ${l.enabled ? 'checked' : ''} data-id="${l.id}">
+            <input type="checkbox" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
             <div class="toggle-track"></div>
             <div class="toggle-thumb"></div>
           </label>
-          <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${esc(l.name)}</span>
-          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${esc(l.name)}" data-url="${esc(l.url)}" style="flex-shrink:0">Edit</button>
+          <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${l.name}</span>
+          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}" style="flex-shrink:0">Edit</button>
           <button class="btn btn-danger btn-sm del-list" data-id="${l.id}" style="flex-shrink:0">${icons.trash}</button>
         </div>
         <div class="log-card-row2">
@@ -4032,13 +4088,13 @@ class FiltersPage extends HTMLElement {
 
     const overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
-    overlay.innerHTML = `
+    overlay.innerHTML = html`
       <div class="dialog">
         <div class="dialog-title">Edit Filter List</div>
         <label for="edit-name">Name</label>
-        <input type="text" id="edit-name" value="${esc(name)}">
+        <input type="text" id="edit-name" value="${name}">
         <label for="edit-url">URL</label>
-        <input type="url" id="edit-url" value="${esc(url)}">
+        <input type="url" id="edit-url" value="${url}">
         <div class="dialog-health" id="edit-health"></div>
         <div class="dialog-actions">
           <button class="btn btn-sm" id="edit-check">${icons.refresh} Check URL</button>
@@ -4063,9 +4119,9 @@ class FiltersPage extends HTMLElement {
         const res = await api.post(`/api/lists/${id}/check`, { url: checkUrl || undefined });
         if (res.ok) {
           const size = res.content_length > 1024 ? (res.content_length / 1024).toFixed(0) + ' KB' : res.content_length + ' B';
-          healthEl.innerHTML = `<span class="badge badge-allowed">OK</span> <span style="color:var(--text-secondary)">HTTP ${res.status} &middot; ${size}</span>`;
+          healthEl.innerHTML = html`<span class="badge badge-allowed">OK</span> <span style="color:var(--text-secondary)">HTTP ${res.status} &middot; ${size}</span>`;
         } else {
-          healthEl.innerHTML = `<span class="badge badge-blocked">FAIL</span> <span style="color:var(--text-secondary)">${esc(res.error || 'HTTP ' + res.status)}</span>`;
+          healthEl.innerHTML = html`<span class="badge badge-blocked">FAIL</span> <span style="color:var(--text-secondary)">${res.error || 'HTTP ' + res.status}</span>`;
         }
       } catch (e) {
         healthEl.innerHTML = '<span class="badge badge-blocked">Error</span>';
@@ -4089,19 +4145,19 @@ class FiltersPage extends HTMLElement {
       const rules = await api.get('/api/rules');
       const el = this.querySelector('#rules-list');
       if (!rules.length) { el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No rules</p>'; return; }
-      let html = '<table><tbody>';
+      let markup = '<table><tbody>';
       for (const r of rules) {
         const badge = r.rule_type === 'allow'
-          ? '<span class="badge badge-allowed">allow</span>'
-          : '<span class="badge badge-blocked">block</span>';
-        html += `<tr data-testid="rule-row" data-rule="${esc(r.rule)}" data-type="${esc(r.rule_type)}">
+          ? raw('<span class="badge badge-allowed">allow</span>')
+          : raw('<span class="badge badge-blocked">block</span>');
+        markup += html`<tr data-testid="rule-row" data-rule="${r.rule}" data-type="${r.rule_type}">
           <td style="width:70px">${badge}</td>
-          <td class="mono" style="color:var(--text-primary);font-size:0.85rem">${esc(r.rule)}</td>
+          <td class="mono" style="color:var(--text-primary);font-size:0.85rem">${r.rule}</td>
           <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-testid="rule-delete" data-id="${r.id}">${icons.trash}</button></td>
         </tr>`;
       }
-      html += '</tbody></table>';
-      el.innerHTML = html;
+      markup += '</tbody></table>';
+      el.innerHTML = markup;
       el.querySelectorAll('.del-rule').forEach(btn => {
         btn.onclick = async () => {
           await api.del(`/api/rules/${btn.dataset.id}`);
@@ -4223,13 +4279,13 @@ class SettingsPage extends HTMLElement {
       try {
         const rows = await api.get('/api/upstream/health');
         const transport = s => s.startsWith('tls://') ? ['dot','var(--accent)'] : s.startsWith('https://') ? ['doh','var(--accent)'] : ['plain','var(--orange)'];
-        el.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span class="card-title" style="margin-bottom:0">Active upstreams</span><button class="btn btn-sm" id="refresh-upstream">${icons.refresh} Recheck</button></div>
+        el.innerHTML = html`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span class="card-title" style="margin-bottom:0">Active upstreams</span><button class="btn btn-sm" id="refresh-upstream">${icons.refresh} Recheck</button></div>
           <div class="table-wrap"><table><thead><tr><th>Server</th><th>Transport</th><th>Health</th><th>Latency</th></tr></thead><tbody>` +
-          rows.map(r => { const [t,c] = transport(r.server); return `<tr>
-            <td class="mono">${esc(r.server)}</td>
+          rows.map(r => { const [t,c] = transport(r.server); return html`<tr>
+            <td class="mono">${r.server}</td>
             <td><span class="badge" style="color:${c}">${t}</span></td>
             <td><span class="st ${r.ok ? 'st-ok' : 'st-block'}">${r.ok ? '✔' : '✖'}</span></td>
-            <td class="mono">${r.ok ? esc(String(r.latency_ms)) + 'ms' : '—'}</td></tr>`; }).join('') +
+            <td class="mono">${r.ok ? r.latency_ms + 'ms' : '—'}</td></tr>`; }).join('') +
           `</tbody></table></div>`;
         const rb = el.querySelector('#refresh-upstream');
         if (rb) rb.onclick = () => this.renderUpstreams();
@@ -4350,11 +4406,13 @@ class SettingsPage extends HTMLElement {
         (s.block_mode === 'custom_ip') ? 'block' : 'none';
       this.loadEma();
       if (info) {
-        const tls = info.tls_enabled ? '<span class="badge badge-allowed">TLS</span>' : '<span class="badge badge-off">Plain</span>';
-        this.querySelector('#server-info').innerHTML = `
+        const tls = info.tls_enabled
+          ? raw('<span class="badge badge-allowed">TLS</span>')
+          : raw('<span class="badge badge-off">Plain</span>');
+        this.querySelector('#server-info').innerHTML = html`
           <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px">
-            <span style="color:var(--text-dim)">DNS</span><span class="mono">${esc(info.dns_addr)}</span>
-            <span style="color:var(--text-dim)">HTTP</span><span><span class="mono">${esc(info.http_addr)}</span> ${tls}</span>
+            <span style="color:var(--text-dim)">DNS</span><span class="mono">${info.dns_addr}</span>
+            <span style="color:var(--text-dim)">HTTP</span><span><span class="mono">${info.http_addr}</span> ${tls}</span>
           </div>`;
       }
     } catch (e) { console.error(e); }
@@ -4369,16 +4427,16 @@ class SettingsPage extends HTMLElement {
         el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No tokens configured</p>';
         return;
       }
-      let html = '<div class="table-wrap"><table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
+      let markup = '<div class="table-wrap"><table><thead><tr><th>Token</th><th>DoH URL</th><th></th></tr></thead><tbody>';
       for (const t of tokens) {
-        html += `<tr>
-          <td class="mono" style="color:var(--text-primary)">${esc(t.token)}</td>
-          <td><code class="mono" style="color:var(--text-dim);font-size:0.75rem">/dns-query/${esc(t.token)}</code></td>
-          <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${esc(t.token)}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
+        markup += html`<tr>
+          <td class="mono" style="color:var(--text-primary)">${t.token}</td>
+          <td><code class="mono" style="color:var(--text-dim);font-size:0.75rem">/dns-query/${t.token}</code></td>
+          <td style="white-space:nowrap"><a class="btn btn-sm" href="/api/mobileconfig/${t.token}" download style="text-decoration:none;margin-right:4px">Apple Profile</a><button class="btn btn-danger btn-sm del-token" data-id="${t.id}">${icons.trash} Delete</button></td>
         </tr>`;
       }
-      html += '</tbody></table></div>';
-      el.innerHTML = html;
+      markup += '</tbody></table></div>';
+      el.innerHTML = markup;
       el.querySelectorAll('.del-token').forEach(btn => {
         btn.onclick = async () => {
           if (confirm('Delete this token? Clients using it will lose DoH access.')) {
@@ -4403,13 +4461,13 @@ class SettingsPage extends HTMLElement {
         el.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">No latency data yet. Data will appear after queries are processed.</p>';
         return;
       }
-      let html = '<div class="table-wrap"><table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
+      let markup = '<div class="table-wrap"><table><thead><tr><th>Server</th><th>EMA Latency</th><th></th></tr></thead><tbody>';
       for (const d of data) {
-        const badge = d.preferred ? ' <span class="badge badge-allowed">preferred</span>' : '';
-        html += `<tr><td class="mono">${esc(d.server)}</td><td class="mono">${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
+        const badge = d.preferred ? raw(' <span class="badge badge-allowed">preferred</span>') : '';
+        markup += html`<tr><td class="mono">${d.server}</td><td class="mono">${d.ema_ms.toFixed(1)}ms</td><td>${badge}</td></tr>`;
       }
-      html += '</tbody></table></div>';
-      el.innerHTML = html;
+      markup += '</tbody></table></div>';
+      el.innerHTML = markup;
     } catch (e) {
       el.innerHTML = '';
     }
