@@ -27,3 +27,18 @@ Feature: Filter list management
   Scenario: Add a custom filter list
     When I add a custom filter list named "E2E Test List" with URL "https://example.com/e2e-test-list.txt"
     Then the filter lists table shows a list named "E2E Test List"
+
+  Scenario: The registry browser releases its Escape handler however it goes away
+    # The modal mounts on document.body rather than inside the page, and holds a
+    # document-level keydown listener while open. Nothing else clears that
+    # listener — a page change does not remove the modal — so teardown has to
+    # ride on the element's removal rather than on the close button's handler,
+    # which only covers one of the ways it can go.
+    And I am counting document keydown listeners
+    When I open the registry browser
+    And I dismiss the registry browser with the Escape key
+    Then the registry browser is gone
+    And no document keydown listener was left behind
+    When I open the registry browser
+    And the registry browser is removed without being closed
+    Then no document keydown listener was left behind

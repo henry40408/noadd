@@ -37,6 +37,48 @@ When('I toggle live mode', async ({ page }) => {
   await page.getByTestId('live-toggle').click();
 });
 
+// The dashboard is the only component polling on a 10s period, so tracking the
+// live interval ids registered at that period isolates its poll timer from the
+// banners' (2s/3s) and the log ticker's (1s).
+const DASHBOARD_POLL_MS = 10000;
+
+Given('I am counting dashboard poll timers', async ({ page }) => {
+  await page.evaluate((ms) => {
+    window.__polls = new Set();
+    const setI = window.setInterval.bind(window);
+    const clearI = window.clearInterval.bind(window);
+    window.setInterval = (fn, period, ...rest) => {
+      const id = setI(fn, period, ...rest);
+      if (period === ms) window.__polls.add(id);
+      return id;
+    };
+    window.clearInterval = (id) => {
+      window.__polls.delete(id);
+      return clearI(id);
+    };
+  }, DASHBOARD_POLL_MS);
+});
+
+// Holds /api/server-info open so the dashboard's connectedCallback parks on its
+// first await while the scenario navigates away underneath it.
+Given('the server-info request is delayed', async ({ page }) => {
+  await page.route('**/api/server-info', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+});
+
+When('the delayed request has arrived', async ({ page }) => {
+  // Outlast the route delay so the parked callback has resumed and done
+  // whatever it was going to do before the assertion looks.
+  await page.waitForTimeout(2500);
+});
+
+Then('no dashboard poll timer is left running', async ({ page }) => {
+  const live = await page.evaluate(() => window.__polls.size);
+  expect(live, 'dashboard poll timers still running after navigating away').toBe(0);
+});
+
 // A shell that fails to unregister its window listener leaves nothing visibly
 // broken — the handler keeps running harmlessly against its own detached
 // subtree — so the leak is only observable by counting registrations. Wrap

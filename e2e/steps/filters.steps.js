@@ -57,3 +57,46 @@ When(
 Then('the filter lists table shows a list named {string}', async ({ page }, name) => {
   await expect(listRow(page, name)).toBeVisible();
 });
+
+// The registry modal is the only thing binding document-level keydown, so a
+// running net count of those registrations tracks exactly its Escape handler.
+Given('I am counting document keydown listeners', async ({ page }) => {
+  await page.evaluate(() => {
+    window.__keydownDelta = 0;
+    const add = document.addEventListener.bind(document);
+    const remove = document.removeEventListener.bind(document);
+    document.addEventListener = (type, fn, opts) => {
+      if (type === 'keydown') window.__keydownDelta++;
+      return add(type, fn, opts);
+    };
+    document.removeEventListener = (type, fn, opts) => {
+      if (type === 'keydown') window.__keydownDelta--;
+      return remove(type, fn, opts);
+    };
+  });
+});
+
+When('I open the registry browser', async ({ page }) => {
+  await page.locator('#browse-registry').click();
+  await expect(page.locator('.registry-overlay')).toBeVisible();
+});
+
+When('I dismiss the registry browser with the Escape key', async ({ page }) => {
+  await page.keyboard.press('Escape');
+});
+
+// Removal that does not go through close(): the teardown contract has to hold
+// for any path that detaches the element, not just the button that calls close.
+When('the registry browser is removed without being closed', async ({ page }) => {
+  await page.evaluate(() => document.querySelector('registry-modal').remove());
+  await expect(page.locator('registry-modal')).toHaveCount(0);
+});
+
+Then('the registry browser is gone', async ({ page }) => {
+  await expect(page.locator('registry-modal')).toHaveCount(0);
+});
+
+Then('no document keydown listener was left behind', async ({ page }) => {
+  const delta = await page.evaluate(() => window.__keydownDelta);
+  expect(delta, 'net document keydown listeners after the modal went away').toBe(0);
+});
