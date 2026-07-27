@@ -30,6 +30,21 @@ Feature: Dashboard and statistics
     When I toggle live mode
     Then live updates are active
 
+  Scenario: Leaving the dashboard before it finishes loading strands no poll timer
+    # The dashboard's connectedCallback is async: it awaits server-info and a
+    # first stats fetch before starting its 10s poll timer. Navigating away in
+    # that window runs disconnectedCallback first — while there is still no
+    # timer to stop — and the callback then resumes and starts one against a
+    # page nobody will tear down again. The stranded timer keeps polling five
+    # stats endpoints every 10s for the lifetime of the tab.
+    Given I am on the "Settings" tab
+    And I am counting dashboard poll timers
+    And the server-info request is delayed
+    When I go to the "Dashboard" tab
+    And I go to the "Query Log" tab
+    And the delayed request has arrived
+    Then no dashboard poll timer is left running
+
   Scenario: Rebuilding the app shell leaves no stale navigation handler
     # showApp() replaces the whole app-shell, which is what happens after every
     # sign-in. Without a disconnectedCallback the outgoing shell never

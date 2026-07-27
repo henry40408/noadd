@@ -1554,6 +1554,60 @@ const api = {
 };
 
 // ============================================================
+// Component base
+// ============================================================
+// A custom element discards its own DOM when it is removed, but not what it
+// attached elsewhere: interval timers, EventSource connections, and listeners
+// on window/document. Those outlive the element, and each stranded closure also
+// keeps the element's whole discarded subtree reachable through `this`.
+//
+// Anything registered through these helpers is released on disconnect, so a
+// component cannot leak by forgetting to write a teardown. Subclasses that need
+// their own disconnectedCallback must call super.
+//
+// Ownership that is start/stop-able (a poll timer behind a live toggle, say)
+// stays hand-managed — registering it per start would pile up one dead entry
+// per cycle — so those register a single track() that calls their own stopper.
+//
+// The other half of the problem is timing, which no registry can fix: an async
+// connectedCallback resumes after its awaits, by which point the element may
+// already be gone, and disconnectedCallback has run *before* it acquires
+// anything. Guard resumption with `this.isConnected` — see DashboardPage.
+class LiveElement extends HTMLElement {
+  // Register an arbitrary teardown to run on disconnect.
+  track(fn) {
+    if (!this._cleanups) this._cleanups = [];
+    this._cleanups.push(fn);
+    return fn;
+  }
+
+  interval(fn, ms) {
+    const id = setInterval(fn, ms);
+    this.track(() => clearInterval(id));
+    return id;
+  }
+
+  // Listen on a target that outlives this element (window, document, ...).
+  // Returns the handler so callers can invoke it once for an initial paint.
+  listen(target, type, fn) {
+    target.addEventListener(type, fn);
+    this.track(() => target.removeEventListener(type, fn));
+    return fn;
+  }
+
+  disconnectedCallback() {
+    const cleanups = this._cleanups;
+    this._cleanups = null;
+    if (!cleanups) return;
+    // Reverse order, mirroring acquisition. One failure must not strand the
+    // rest, so each runs independently.
+    for (let i = cleanups.length - 1; i >= 0; i--) {
+      try { cleanups[i](); } catch (e) { /* nothing useful to do here */ }
+    }
+  }
+}
+
+// ============================================================
 // Router
 // ============================================================
 class AppRouter {
@@ -1832,7 +1886,7 @@ class LoginPage extends HTMLElement {
 customElements.define('login-page', LoginPage);
 
 // --- App Shell ---
-class AppShell extends HTMLElement {
+class AppShell extends LiveElement {
   connectedCallback() {
     this.innerHTML = `
       <div class="app-shell" data-testid="app-shell">
@@ -1890,22 +1944,20 @@ class AppShell extends HTMLElement {
       window.dispatchEvent(new CustomEvent('auth-required'));
     };
 
-    // Kept on the instance so disconnectedCallback can unregister it. showApp()
-    // builds a fresh app-shell on every login, and a listener left behind by a
-    // previous shell keeps that whole discarded subtree reachable through this
-    // closure — one leaked shell per re-login. It causes no visible breakage
-    // (the stale handler just updates nodes nobody can see), which is exactly
-    // why it needs the explicit teardown below.
-    this._updateActive = () => {
+    // showApp() builds a fresh app-shell on every login, so this listener must
+    // go when the shell does — otherwise each rebuild strands one more, holding
+    // its whole discarded subtree alive. It breaks nothing visibly (the stale
+    // handler just updates nodes nobody can see), which is why it needs the
+    // registry rather than a spot check.
+    const updateActive = this.listen(window, 'hashchange', () => {
       const hash = location.hash || '#dashboard';
       this.querySelectorAll('.nav-item[data-route]').forEach(b => {
         b.classList.toggle('active', b.dataset.route === hash);
       });
       // Clear page-scoped banners when navigating to another page.
       this.querySelector('#notice-host').replaceChildren();
-    };
-    window.addEventListener('hashchange', this._updateActive);
-    this._updateActive();
+    });
+    updateActive();
 
     // One-time post-setup welcome strip. Shown once for the session that just
     // completed first-run setup (flag set in SetupPage.doSetup), then cleared
@@ -1930,13 +1982,6 @@ class AppShell extends HTMLElement {
                 style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
       welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
       main.insertBefore(welcome, main.firstChild);
-    }
-  }
-
-  disconnectedCallback() {
-    if (this._updateActive) {
-      window.removeEventListener('hashchange', this._updateActive);
-      this._updateActive = null;
     }
   }
 
@@ -2238,17 +2283,17 @@ customElements.define('account-page', AccountPage);
 // --- Rebuild Banner ---
 // Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
 // the filter engine is rebuilding, plus a brief success flash on completion.
-class RebuildBanner extends HTMLElement {
+class RebuildBanner extends LiveElement {
   connectedCallback() {
     this.prev = null;         // last observed rebuilding flag
     this.doneTimer = null;    // timer handle for the post-rebuild flash
     this.render('', '');
-    this.timer = setInterval(() => this.tick(), 2000);
+    this.interval(() => this.tick(), 2000);
+    // doneTimer is re-armed on every completed rebuild, so it is cleared by
+    // reading whatever handle is current at teardown rather than registering
+    // one entry per arming.
+    this.track(() => { if (this.doneTimer) clearTimeout(this.doneTimer); });
     this.tick();
-  }
-  disconnectedCallback() {
-    clearInterval(this.timer);
-    if (this.doneTimer) clearTimeout(this.doneTimer);
   }
   async tick() {
     let body;
@@ -2304,17 +2349,12 @@ customElements.define('rebuild-banner', RebuildBanner);
 // and shows the server's DNS address. Auto-hides once a real DNS query has
 // been served (polls /api/stats/summary every 3s). Can be dismissed; the
 // dismissal persists server-side via PUT /api/settings.
-class NextStepBanner extends HTMLElement {
+class NextStepBanner extends LiveElement {
   connectedCallback() {
-    this._disconnected = false;
     this.timer = null;
     this.dnsAddr = '';
     this.innerHTML = '';   // render nothing until init decides
     this.init();
-  }
-  disconnectedCallback() {
-    this._disconnected = true;
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
   async init() {
     // 1) Respect a prior dismissal — if dismissed, never show or poll.
@@ -2341,9 +2381,11 @@ class NextStepBanner extends HTMLElement {
     if (await this.hasQueries()) {
       return;
     }
-    if (this._disconnected) return;
+    // Three awaits back; the banner may have been swapped out in the meantime,
+    // and a timer started now would never be torn down.
+    if (!this.isConnected) return;
     this.show();
-    this.timer = setInterval(() => this.poll(), 3000);
+    this.timer = this.interval(() => this.poll(), 3000);
   }
   async hasQueries() {
     try {
@@ -2385,7 +2427,7 @@ customElements.define('next-step-banner', NextStepBanner);
 
 // --- Registry Modal ---
 // Browse AdGuard HostlistsRegistry and batch-add selected filter lists.
-class RegistryModal extends HTMLElement {
+class RegistryModal extends LiveElement {
   constructor() {
     super();
     this.data = null;            // cached { filters, groups }
@@ -2427,16 +2469,18 @@ class RegistryModal extends HTMLElement {
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay && !this.adding) this.close();
     });
-    this.escHandler = (e) => { if (e.key === 'Escape' && !this.adding) this.close(); };
-    document.addEventListener('keydown', this.escHandler);
+    this.listen(document, 'keydown', (e) => {
+      if (e.key === 'Escape' && !this.adding) this.close();
+    });
     this.querySelector('#reg-close').onclick = () => { if (!this.adding) this.close(); };
     this.querySelector('#reg-cancel').onclick = () => { if (!this.adding) this.close(); };
 
     await this.load();
   }
 
+  // Teardown rides on removal rather than on this method, so the document-level
+  // Escape listener is released however the modal goes away.
   close() {
-    if (this.escHandler) document.removeEventListener('keydown', this.escHandler);
     this.remove();
   }
 
@@ -2778,7 +2822,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
 }
 
 // --- Dashboard Page ---
-class DashboardPage extends HTMLElement {
+class DashboardPage extends LiveElement {
   constructor() {
     super();
     this._pollTimer = null;
@@ -2829,19 +2873,25 @@ class DashboardPage extends HTMLElement {
       else this._stopPolling();
     };
 
+    // The poll timer is start/stop-able from the live toggle, so it registers a
+    // single teardown that defers to its own stopper.
+    this.track(() => this._stopPolling());
+
     try {
-        const info = await api.get('/api/server-info');
-        const raw = (info && info.dns_addr) || '';
-        const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : '';
-        this._dnsAddr = port ? `${window.location.hostname}:${port}` : window.location.hostname;
-      } catch (e) { this._dnsAddr = window.location.hostname; }
+      const info = await api.get('/api/server-info');
+      const raw = (info && info.dns_addr) || '';
+      const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : '';
+      this._dnsAddr = port ? `${window.location.hostname}:${port}` : window.location.hostname;
+    } catch (e) { this._dnsAddr = window.location.hostname; }
 
-      await this._fetchAll();
+    // Everything below resumes after an await, so the page may already have
+    // been swapped out — disconnectedCallback would have run back when there was
+    // still no timer to stop, leaving anything started now to poll forever.
+    if (!this.isConnected) return;
+
+    await this._fetchAll();
+    if (!this.isConnected) return;
     this._startPolling();
-  }
-
-  disconnectedCallback() {
-    this._stopPolling();
   }
 
   _startPolling() {
@@ -3431,7 +3481,7 @@ class StatsPage extends HTMLElement {
 customElements.define('stats-page', StatsPage);
 
 // --- Query Log Page ---
-class LogsPage extends HTMLElement {
+class LogsPage extends LiveElement {
   constructor() {
     super();
     this.offset = 0;
@@ -3507,13 +3557,11 @@ class LogsPage extends HTMLElement {
       }
     };
     this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
+    // Both the stream and the ticker are toggled on and off during the page's
+    // life, so they register single teardowns that defer to their own stoppers.
+    this.track(() => { this._stopLive(); this._stopTimeTicker(); });
     this.load();
     this._startTimeTicker();
-  }
-
-  disconnectedCallback() {
-    this._stopLive();
-    this._stopTimeTicker();
   }
 
   // Relative times ("2 seconds ago") are baked in at render/insert time, so
