@@ -30,6 +30,14 @@ Feature: Dashboard and statistics
     When I toggle live mode
     Then live updates are active
 
+  Scenario: No tab renders markup as escaped text
+    # A fragment that should be Markup but reaches html`` as a plain string is
+    # escaped and shows up as visible source — `<span class="timeago" …>` filling
+    # the Time column, say. Assertions on specific elements sail straight past
+    # that, so sweep every tab for text nodes that look like tags.
+    When I visit every tab
+    Then no tab showed raw markup as text
+
   Scenario: Leaving the dashboard before it finishes loading strands no poll timer
     # The dashboard's connectedCallback is async: it awaits server-info and a
     # first stats fetch before starting its 10s poll timer. Navigating away in

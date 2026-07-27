@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test';
-import { Given, When, Then } from './fixtures.js';
+import { Given, When, Then, NAV } from './fixtures.js';
 
 const SUMMARY = {
   'Blocked Today': 'stat-blocked-today',
@@ -35,6 +35,43 @@ Then('live updates are paused', async ({ page }) => {
 
 When('I toggle live mode', async ({ page }) => {
   await page.getByTestId('live-toggle').click();
+});
+
+When('I visit every tab', async ({ page, testState }) => {
+  const leaked = [];
+  for (const [label, testId] of Object.entries(NAV)) {
+    await page.getByTestId(testId).click();
+    await expect(page.getByTestId(testId)).toHaveClass(/active/);
+    // Each page fetches on connect; let those renders land before looking.
+    await page.waitForLoadState('networkidle');
+    const hits = await page.evaluate(() =>
+      (function () {
+        // The admin UI is one file, so its own <script> body lives in the DOM
+        // and would match everything; only rendered text counts.
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+          acceptNode(node) {
+            const tag = node.parentElement && node.parentElement.tagName;
+            return (tag === 'SCRIPT' || tag === 'STYLE')
+              ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+          },
+        });
+        // Named tags rather than any identifier: copy legitimately contains
+        // placeholders like "Authorization: Bearer <token>".
+        const TAG = /<\/?(span|div|a|button|code|td|tr|table|tbody|thead|th|svg|path|input|label|p|br|strong|em|ul|li|select|option)\b[^<>]*>/i;
+        const out = [];
+        while (walker.nextNode()) {
+          const text = walker.currentNode.nodeValue || '';
+          if (TAG.test(text)) out.push(text.trim().slice(0, 100));
+        }
+        return out;
+      })());
+    leaked.push(...hits.map((h) => `${label}: ${h}`));
+  }
+  testState.leakedMarkup = leaked;
+});
+
+Then('no tab showed raw markup as text', async ({ testState }) => {
+  expect(testState.leakedMarkup, 'markup rendered as visible text').toEqual([]);
 });
 
 // The dashboard is the only component polling on a 10s period, so tracking the
