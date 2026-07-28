@@ -40,6 +40,17 @@ Feature: Dashboard and statistics
     When I go to the "Statistics" tab
     Then every stat card marker matches its value colour
 
+  Scenario: The Throughput card shows the live rate, not the 24-hour mean
+    # The card is labelled Throughput and flashes on change, both of which
+    # promise a current reading. It derived q/s from total_today / 86400, so a
+    # traffic spike could never move it, while queries_1m — fetched on every
+    # summary refresh at the cost of its own DB round-trip — was discarded.
+    Given I am on the "Settings" tab
+    And the summary reports 120 queries in the last minute and 86400 today
+    When I go to the "Dashboard" tab
+    Then the Throughput card reads "2.00" q/s
+    And the Throughput card shows a 24h mean of "1.00"
+
   Scenario: No tab renders markup as escaped text
     # A fragment that should be Markup but reaches html`` as a plain string is
     # escaped and shows up as visible source — `<span class="timeago" …>` filling

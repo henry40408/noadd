@@ -188,3 +188,31 @@ Then('no hashchange listener was left behind', async ({ page }) => {
 Then('exactly one app shell is mounted', async ({ page }) => {
   await expect(page.locator('app-shell')).toHaveCount(1);
 });
+
+// --- Throughput card ---
+// Driving the real 60-second window from a browser test would mean generating
+// live DNS traffic and racing the logger's flush, so the two rates are injected
+// instead. They are deliberately chosen to differ: 120/60 = 2.00 q/s live
+// against 86400/86400 = 1.00 q/s for the day, so a card still reading the
+// daily mean shows 1.00 and fails rather than coincidentally matching.
+Given(
+  'the summary reports {int} queries in the last minute and {int} today',
+  async ({ page }, queries1m, today) => {
+    await page.route('**/api/stats/summary', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({
+        json: { ...body, queries_1m: queries1m, total_today: today },
+      });
+    });
+  },
+);
+
+// The slash is escaped because a bare `/` is alternation in a Cucumber expression.
+Then('the Throughput card reads {string} q\\/s', async ({ page }, value) => {
+  await expect(page.getByTestId('stat-throughput-value')).toHaveText(`${value}q/s`);
+});
+
+Then('the Throughput card shows a 24h mean of {string}', async ({ page }, value) => {
+  await expect(page.getByTestId('stat-throughput')).toContainText(`24h: ${value}`);
+});
