@@ -179,3 +179,85 @@ async fn stats_v2_health_returns_expected_fields() {
     );
     assert!(body.get("avg_new_rows_per_day").is_some());
 }
+
+// --- stats/v2 query parameters: each endpoint accepts exactly what it honours ---
+//
+// These endpoints shared one `range` + `tz_offset` struct, so the heatmap took a
+// `range` it could not apply (its window is a fixed 30 days) and the range-only
+// endpoints took a `tz_offset` they never read. Both were accepted with a 200,
+// which told the caller its parameter had been applied when it had not.
+
+async fn get_with_auth(app: axum::Router, uri: &str, token: &str) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .uri(uri)
+            .header("cookie", format!("session={token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .status()
+}
+
+#[tokio::test]
+async fn stats_v2_heatmap_rejects_range_it_cannot_honour() {
+    let (app, token) = setup().await;
+    assert_eq!(
+        get_with_auth(app, "/api/stats/v2/heatmap?range=7d", &token).await,
+        StatusCode::BAD_REQUEST,
+        "the heatmap window is a fixed 30 days, so accepting range would misreport what was applied"
+    );
+}
+
+#[tokio::test]
+async fn stats_v2_heatmap_still_accepts_tz_offset() {
+    let (app, token) = setup().await;
+    assert_eq!(
+        get_with_auth(app, "/api/stats/v2/heatmap?tz_offset=480", &token).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn stats_v2_range_only_endpoints_reject_tz_offset() {
+    // The mirror image of the heatmap case: these two select a window but do
+    // not align it to the viewer's calendar, so a tz_offset would be silently
+    // dropped.
+    for uri in [
+        "/api/stats/v2/breakdown?tz_offset=480",
+        "/api/stats/v2/highlights?tz_offset=480",
+    ] {
+        let (app, token) = setup().await;
+        assert_eq!(
+            get_with_auth(app, uri, &token).await,
+            StatusCode::BAD_REQUEST,
+            "{uri} should not accept a parameter it ignores"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stats_v2_range_only_endpoints_still_accept_range() {
+    for uri in [
+        "/api/stats/v2/breakdown?range=30d",
+        "/api/stats/v2/highlights?range=30d",
+    ] {
+        let (app, token) = setup().await;
+        assert_eq!(
+            get_with_auth(app, uri, &token).await,
+            StatusCode::OK,
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stats_v2_timeline_accepts_both_parameters() {
+    // The one endpoint that genuinely honours range and tz_offset together.
+    let (app, token) = setup().await;
+    assert_eq!(
+        get_with_auth(app, "/api/stats/v2/timeline?range=7d&tz_offset=480", &token).await,
+        StatusCode::OK
+    );
+}
