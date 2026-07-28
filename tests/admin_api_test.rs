@@ -186,11 +186,14 @@ async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
             .get("rebuilding")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let last_completed_at = body
-            .get("last_completed_at")
+        // started_at >= before proves *this* rebuild began, and !rebuilding
+        // that it finished — the pair the endpoint still reports since
+        // last_completed_at was dropped as unread by any consumer.
+        let started_at = body
+            .get("started_at")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
-        if !rebuilding && last_completed_at >= before {
+        if !rebuilding && started_at >= before {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -391,10 +394,9 @@ async fn rebuild_status_initial_is_idle() {
         body.get("started_at").and_then(serde_json::Value::as_i64),
         Some(0)
     );
-    assert_eq!(
-        body.get("last_completed_at")
-            .and_then(serde_json::Value::as_i64),
-        Some(0)
+    assert!(
+        body.get("last_completed_at").is_none(),
+        "last_completed_at was dropped: no consumer read it"
     );
     assert_eq!(
         body.get("last_duration_ms")
@@ -2711,4 +2713,20 @@ async fn mobileconfig_is_not_stored() {
         cache_control.contains("no-store"),
         "expected no-store, got: {cache_control}"
     );
+}
+
+#[tokio::test]
+async fn check_list_url_unknown_id_returns_404() {
+    // Covers the DB-lookup branch without reaching the network: with no URL in
+    // the body the handler resolves the list's own URL by id, and an id that
+    // matches no row must 404 rather than fall through to another list's URL.
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/999999/check")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

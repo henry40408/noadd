@@ -146,7 +146,6 @@ pub enum DeleteUserOutcome {
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub id: i64,
-    pub user_id: i64,
     pub username: String,
     pub created_at: i64,
     pub last_seen: i64,
@@ -236,11 +235,11 @@ pub struct HeatmapCell {
 #[derive(Debug, Clone, Serialize)]
 pub struct LatencySummary {
     pub sample_count: i64,
-    pub avg_ms: f64,
+    /// Percentiles only. A mean was dropped as superseded by p50, and a max as
+    /// an outlier the highlights grid never rendered; neither reached the UI.
     pub p50_ms: i64,
     pub p95_ms: i64,
     pub p99_ms: i64,
-    pub max_ms: i64,
 }
 
 /// Default rusqlite cache is 16 statements; the read connection alone has
@@ -785,6 +784,22 @@ impl Database {
             })
             .await?;
         Ok(id)
+    }
+
+    /// Fetch one list's URL by id, without materialising every column of every
+    /// row the way `get_filter_lists` does for callers that need a single field.
+    pub async fn filter_list_url(&self, id: i64) -> Result<Option<String>, DbError> {
+        let url = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached("SELECT url FROM filter_lists WHERE id = ?1")?;
+                let url = stmt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                Ok(url)
+            })
+            .await?;
+        Ok(url)
     }
 
     pub async fn get_filter_lists(&self) -> Result<Vec<FilterListRow>, DbError> {
@@ -1477,7 +1492,7 @@ impl Database {
             .reader()
             .call(|conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT s.id, s.user_id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token
+                    "SELECT s.id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token
                      FROM sessions s JOIN users u ON u.id = s.user_id
                      ORDER BY s.last_seen DESC",
                 )?;
@@ -1485,13 +1500,12 @@ impl Database {
                     .query_map([], |row| {
                         Ok(SessionRow {
                             id: row.get(0)?,
-                            user_id: row.get(1)?,
-                            username: row.get(2)?,
-                            created_at: row.get(3)?,
-                            last_seen: row.get(4)?,
-                            ip: row.get(5)?,
-                            user_agent: row.get(6)?,
-                            token: row.get(7)?,
+                            username: row.get(1)?,
+                            created_at: row.get(2)?,
+                            last_seen: row.get(3)?,
+                            ip: row.get(4)?,
+                            user_agent: row.get(5)?,
+                            token: row.get(6)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1628,42 +1642,20 @@ impl Database {
         Ok(result)
     }
 
-    /// `since` is in seconds (epoch). Internally converts to ms to match stored timestamps.
-    pub async fn count_queries_since(&self, since: i64) -> Result<(i64, i64), DbError> {
+    /// Count queries logged since `since` (epoch seconds; converted to ms
+    /// internally to match stored timestamps).
+    ///
+    /// Counts only. The blocked total was selected alongside it and bound to
+    /// `_` by the sole caller, so `SQLite` summed a column nothing read.
+    pub async fn count_queries_since(&self, since: i64) -> Result<i64, DbError> {
         let since_ms = since * 1000;
         let result = self
             .reader()
             .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT COUNT(*), COALESCE(SUM(blocked), 0) FROM query_logs WHERE timestamp >= ?1",
-                )?;
-                let (total, blocked) = stmt.query_row(params![since_ms], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                })?;
-                Ok((total, blocked))
-            })
-            .await?;
-        Ok(result)
-    }
-
-    /// Returns (`cache_hits`, `total_allowed`, `avg_response_ms`) since the given timestamp.
-    /// `since` is in seconds (epoch).
-    pub async fn cache_stats_since(&self, since: i64) -> Result<(i64, i64, f64), DbError> {
-        let since_ms = since * 1000;
-        let result = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT COALESCE(SUM(cached), 0), COUNT(*), COALESCE(AVG(response_ms), 0) FROM query_logs WHERE timestamp >= ?1 AND blocked = 0",
-                )?;
-                let row = stmt.query_row(params![since_ms], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, f64>(2)?,
-                    ))
-                })?;
-                Ok(row)
+                let mut stmt =
+                    conn.prepare_cached("SELECT COUNT(*) FROM query_logs WHERE timestamp >= ?1")?;
+                let total = stmt.query_row(params![since_ms], |row| row.get::<_, i64>(0))?;
+                Ok(total)
             })
             .await?;
         Ok(result)
@@ -2117,15 +2109,12 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     if total == 0 {
         return LatencySummary {
             sample_count: 0,
-            avg_ms: 0.0,
             p50_ms: 0,
             p95_ms: 0,
             p99_ms: 0,
-            max_ms: 0,
         };
     }
-    let weighted_sum: i64 = hist.iter().map(|(ms, c)| ms * c).sum();
-    let avg_ms = weighted_sum as f64 / total as f64;
+    // Still needed as the pick() fallback, even though it is no longer reported.
     let max_ms = hist.last().map_or(0, |(ms, _)| *ms);
 
     // Mirror SQL's `MAX(1, CAST(total * p AS INTEGER))` — CAST truncates toward
@@ -2144,11 +2133,9 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
 
     LatencySummary {
         sample_count: total,
-        avg_ms,
         p50_ms: pick(rank_for(0.50)),
         p95_ms: pick(rank_for(0.95)),
         p99_ms: pick(rank_for(0.99)),
-        max_ms,
     }
 }
 
