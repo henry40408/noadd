@@ -21,7 +21,12 @@ pub async fn supervise_listener<F>(
     F: Future<Output = std::io::Result<()>>,
 {
     if let Err(e) = listener.await {
-        tracing::error!(error = %e, "{name} DNS listener failed; shutting down");
+        tracing::error!(
+            event = "dns.listener_failed",
+            transport = %name,
+            error = %e,
+            "DNS listener failed; shutting down"
+        );
         failed.store(true, Ordering::Relaxed);
         let _ = shutdown.send(());
     }
@@ -54,10 +59,18 @@ async fn listen_for_signal() {
 
     tokio::select! {
         _ = sigterm.recv() => {
-            tracing::info!("received SIGTERM, initiating shutdown");
+            tracing::info!(
+                event = "shutdown.signal",
+                signal = "SIGTERM",
+                "received signal, initiating shutdown"
+            );
         }
         _ = sigint.recv() => {
-            tracing::info!("received SIGINT, initiating shutdown");
+            tracing::info!(
+                event = "shutdown.signal",
+                signal = "SIGINT",
+                "received signal, initiating shutdown"
+            );
         }
     }
 }
@@ -67,7 +80,11 @@ async fn listen_for_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("failed to listen for ctrl_c");
-    tracing::info!("received Ctrl+C, initiating shutdown");
+    tracing::info!(
+        event = "shutdown.signal",
+        signal = "ctrl_c",
+        "received signal, initiating shutdown"
+    );
 }
 
 #[cfg(test)]

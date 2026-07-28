@@ -149,6 +149,7 @@ pub const SESSION_LOG_SALT_KEY: &str = "session_log_salt";
 pub fn init_session_log_salt(salt: [u8; 16]) {
     if SESSION_LOG_SALT.set(salt).is_err() {
         tracing::warn!(
+            event = "audit.salt_reinit_ignored",
             "audit salt already initialised; session log ids will not correlate across restarts"
         );
     }

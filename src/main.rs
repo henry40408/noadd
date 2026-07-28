@@ -44,7 +44,11 @@ async fn main() -> anyhow::Result<()> {
     if !args.acme_domain.is_empty() && db.get_setting("public_url").await?.is_none() {
         let url = format!("https://{}", args.acme_domain[0]);
         db.set_setting("public_url", &url).await?;
-        tracing::info!(%url, "auto-set public_url from ACME domain");
+        tracing::info!(
+            event = "config.public_url_derived",
+            %url,
+            "auto-set public_url from ACME domain"
+        );
     }
 
     let filter = Arc::new(ArcSwap::from_pointee(FilterEngine::new(
@@ -70,7 +74,12 @@ async fn main() -> anyhow::Result<()> {
                     ..UpstreamConfig::default()
                 },
                 Err(e) => {
-                    tracing::warn!(error = %e, "invalid upstream_servers setting; using defaults");
+                    tracing::warn!(
+                        event = "config.invalid_setting",
+                        setting = "upstream_servers",
+                        error = %e,
+                        "invalid setting; using defaults"
+                    );
                     UpstreamConfig::default()
                 }
             }
@@ -83,12 +92,22 @@ async fn main() -> anyhow::Result<()> {
         && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
     {
         forwarder.set_strategy(strategy);
-        tracing::info!(%strategy_str, "loaded upstream strategy from DB");
+        tracing::info!(
+            event = "config.setting_loaded",
+            setting = "upstream_strategy",
+            value = %strategy_str,
+            "loaded setting from database"
+        );
     }
 
     if let Ok(Some(v)) = db.get_setting("dnssec_disabled").await {
         forwarder.set_dnssec_enabled(v.trim() != "true");
-        tracing::info!(dnssec_disabled = %v, "loaded DNSSEC transparency setting");
+        tracing::info!(
+            event = "config.setting_loaded",
+            setting = "dnssec_disabled",
+            value = %v,
+            "loaded setting from database"
+        );
     }
 
     let block_config = {
@@ -98,8 +117,10 @@ async fn main() -> anyhow::Result<()> {
         noadd::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref())
     };
     tracing::info!(
-        block_mode = block_config.mode.as_str(),
-        "loaded block-response mode"
+        event = "config.setting_loaded",
+        setting = "block_mode",
+        value = block_config.mode.as_str(),
+        "loaded setting from database"
     );
 
     let cache = DnsCache::new(10_000);
@@ -126,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         .with_block_config(block_config),
     );
     tracing::info!(
+        event = "dns.limits_configured",
         max_inflight = args.max_inflight_queries,
         rate_limit_qps = args.rate_limit_qps,
         rate_limit_burst = args.rate_limit_burst,
@@ -165,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
     })?);
     if !trusted_proxies.is_empty() {
         tracing::info!(
+            event = "config.trusted_proxies_configured",
             count = trusted_proxies.len(),
             "trusted proxy CIDRs configured — X-Forwarded-For / X-Real-IP will be honoured for matching peers"
         );
@@ -179,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
     if let Some(cfg) = &forward_auth {
         tracing::info!(
+            event = "config.forward_auth_enabled",
             header = %cfg.header(),
             cidrs = cfg.trusted_len(),
             "forward auth enabled — the header is honoured only for peers matching --forward-auth-trusted-proxies"
@@ -254,7 +278,11 @@ async fn main() -> anyhow::Result<()> {
                         "swept expired sessions"
                     ),
                     Ok(_) => {}
-                    Err(err) => tracing::warn!(%err, "session sweep failed; will retry next cycle"),
+                    Err(err) => tracing::warn!(
+                        event = "session.sweep_failed",
+                        error = %err,
+                        "session sweep failed; will retry next cycle"
+                    ),
                 }
             }
         }
@@ -267,7 +295,11 @@ async fn main() -> anyhow::Result<()> {
     // https:// is fine — DoH is https-only by definition.
     let app = if noadd::config::resolve_hsts(args.hsts, tls_enabled) {
         let value = noadd::headers::hsts_value(args.hsts_max_age);
-        tracing::info!(max_age = args.hsts_max_age, "HSTS enabled");
+        tracing::info!(
+            event = "server.hsts_enabled",
+            max_age = args.hsts_max_age,
+            "HSTS enabled"
+        );
         app.layer(axum::middleware::from_fn_with_state(
             value,
             noadd::headers::hsts,
@@ -289,7 +321,11 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = update_manager.update_all_lists_no_rebuild().await {
-                        tracing::warn!(error = %e, "failed to update filter lists; keeping previous lists");
+                        tracing::warn!(
+                        event = "filter.list_refresh_failed",
+                        error = %e,
+                        "failed to update filter lists; keeping previous lists"
+                    );
                     }
                     let mgr = update_manager.clone();
                     update_rebuild.clone().spawn_raw(move || async move {
@@ -320,13 +356,25 @@ async fn main() -> anyhow::Result<()> {
                     match prune_db.prune_logs_before(cutoff).await {
                         Ok(count) => {
                             if count > 0 {
-                                tracing::info!(count, "pruned old query logs");
+                                tracing::info!(
+                                    event = "db.logs_pruned",
+                                    count,
+                                    "pruned old query logs"
+                                );
                             }
                             if let Err(e) = prune_db.run_maintenance().await {
-                                tracing::warn!(error = %e, "database maintenance failed; will retry next cycle");
+                                tracing::warn!(
+                                    event = "db.maintenance_failed",
+                                    error = %e,
+                                    "database maintenance failed; will retry next cycle"
+                                );
                             }
                         }
-                        Err(e) => tracing::warn!(error = %e, "failed to prune logs; will retry next cycle"),
+                        Err(e) => tracing::warn!(
+                            event = "db.prune_failed",
+                            error = %e,
+                            "failed to prune logs; will retry next cycle"
+                        ),
                     }
                 }
                 _ = shutdown_rx.recv() => break,
@@ -347,7 +395,11 @@ async fn main() -> anyhow::Result<()> {
                 _ = interval.tick() => {
                     let removed = prune_limiter.prune(std::time::Duration::from_secs(600));
                     if removed > 0 {
-                        tracing::debug!(removed, "pruned inactive rate-limit buckets");
+                        tracing::debug!(
+                            event = "ratelimit.buckets_pruned",
+                            removed,
+                            "pruned inactive rate-limit buckets"
+                        );
                     }
                 }
                 _ = shutdown_rx.recv() => break,
@@ -368,7 +420,7 @@ async fn main() -> anyhow::Result<()> {
                         == noadd::upstream::strategy::UpstreamStrategy::LowestLatency
                     {
                         probe_forwarder.probe_all().await;
-                        tracing::debug!("upstream latency probe complete");
+                        tracing::debug!(event = "upstream.probe_completed", "upstream latency probe complete");
                     }
                 }
                 _ = shutdown_rx.recv() => break,
@@ -397,14 +449,24 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 match state.next().await {
-                    Some(Ok(ok)) => tracing::info!("ACME event: {:?}", ok),
-                    Some(Err(err)) => tracing::error!("ACME error: {:?}", err),
+                    Some(Ok(ok)) => {
+                        tracing::info!(event = "acme.event", detail = ?ok, "ACME event");
+                    }
+                    Some(Err(err)) => {
+                        tracing::error!(event = "acme.failed", error = ?err, "ACME error");
+                    }
                     None => break,
                 }
             }
         });
 
-        tracing::info!(%http_addr, "HTTPS server started with Let's Encrypt (DoH + Admin)");
+        tracing::info!(
+            event = "server.started",
+            scheme = "https",
+            tls = "acme",
+            %http_addr,
+            "HTTP server started (DoH + Admin)"
+        );
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
         tokio::spawn(async move {
@@ -423,7 +485,13 @@ async fn main() -> anyhow::Result<()> {
             args.tls_key.as_ref().unwrap(),
         )?;
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
-        tracing::info!(%http_addr, "HTTPS server started (DoH + Admin)");
+        tracing::info!(
+            event = "server.started",
+            scheme = "https",
+            tls = "static_cert",
+            %http_addr,
+            "HTTP server started (DoH + Admin)"
+        );
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
         tokio::spawn(async move {
@@ -437,7 +505,13 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // Plain HTTP
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
-        tracing::info!(%http_addr, "HTTP server started (DoH + Admin)");
+        tracing::info!(
+            event = "server.started",
+            scheme = "http",
+            tls = "none",
+            %http_addr,
+            "HTTP server started (DoH + Admin)"
+        );
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -448,13 +522,13 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    tracing::info!("shutting down...");
+    tracing::info!(event = "shutdown.started", "shutting down");
     udp_handle.abort();
     tcp_handle.abort();
     drop(handler); // drops log_tx
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), logger_handle).await;
     db.close().await; // checkpoint WAL and close connections so -wal/-shm are removed
-    tracing::info!("goodbye");
+    tracing::info!(event = "shutdown.complete", "goodbye");
 
     // If a DNS listener brought us down (rather than an OS signal), exit
     // non-zero so orchestrators and health checks see the failure instead of a

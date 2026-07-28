@@ -11,7 +11,12 @@ use super::handler::{DnsHandler, build_servfail};
 /// with connection reuse per RFC 7766.
 pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!("TCP DNS listener started on {addr}");
+    info!(
+        event = "dns.listener_started",
+        transport = "tcp",
+        %addr,
+        "DNS listener started"
+    );
     serve_tcp(listener, handler).await
 }
 
@@ -25,7 +30,12 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
         let (stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
             Err(e) => {
-                debug!("TCP accept error: {e}");
+                debug!(
+                    event = "dns.accept_failed",
+                    transport = "tcp",
+                    error = %e,
+                    "failed to accept connection"
+                );
                 continue;
             }
         };
@@ -45,7 +55,13 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                 // 2. Read the DNS message
                 let mut buf = vec![0u8; len];
                 if let Err(e) = reader.read_exact(&mut buf).await {
-                    debug!("TCP read error from {peer_addr}: {e}");
+                    debug!(
+                        event = "dns.recv_failed",
+                        transport = "tcp",
+                        client = %peer_addr,
+                        error = %e,
+                        "failed to read query body"
+                    );
                     break;
                 }
 
@@ -53,7 +69,13 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                 let response = match handler.handle(&buf, client_ip, None).await {
                     Ok(outcome) => outcome.bytes,
                     Err(e) => {
-                        debug!("DNS handler error for TCP query from {peer_addr}: {e}");
+                        debug!(
+                            event = "dns.handler_failed",
+                            transport = "tcp",
+                            client = %peer_addr,
+                            error = %e,
+                            "query handler failed; answering SERVFAIL"
+                        );
                         build_servfail(&buf)
                     }
                 };
@@ -61,15 +83,36 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                 // 4. Write 2-byte length prefix + response
                 let resp_len = response.len() as u16;
                 if let Err(e) = writer.write_u16(resp_len).await {
-                    debug!("TCP write length error for {peer_addr}: {e}");
+                    debug!(
+                        event = "dns.send_failed",
+                        transport = "tcp",
+                        stage = "length_prefix",
+                        client = %peer_addr,
+                        error = %e,
+                        "failed to send response"
+                    );
                     break;
                 }
                 if let Err(e) = writer.write_all(&response).await {
-                    debug!("TCP write response error for {peer_addr}: {e}");
+                    debug!(
+                        event = "dns.send_failed",
+                        transport = "tcp",
+                        stage = "body",
+                        client = %peer_addr,
+                        error = %e,
+                        "failed to send response"
+                    );
                     break;
                 }
                 if let Err(e) = writer.flush().await {
-                    debug!("TCP flush error for {peer_addr}: {e}");
+                    debug!(
+                        event = "dns.send_failed",
+                        transport = "tcp",
+                        stage = "flush",
+                        client = %peer_addr,
+                        error = %e,
+                        "failed to send response"
+                    );
                     break;
                 }
             }

@@ -327,7 +327,11 @@ impl DnsHandler {
                 authenticated_data: false,
             };
             if let Err(e) = self.log_tx.try_send(ctx) {
-                error!("query log event dropped, logger cannot keep up: {e}");
+                error!(
+                    event = "querylog.dropped",
+                    error = %e,
+                    "query log event dropped, logger cannot keep up"
+                );
             }
             // REFUSED is not cacheable downstream.
             return Ok(HandleOutcome {
@@ -413,12 +417,14 @@ impl DnsHandler {
                                             cache.insert(key, response, ttl, authenticated).await;
                                         } else {
                                             tracing::debug!(
+                                                event = "cache.stale_refresh_uncacheable",
                                                 "stale refresh got non-cacheable response"
                                             );
                                         }
                                     }
                                     Err(e) => {
                                         tracing::debug!(
+                                            event = "cache.stale_refresh_failed",
                                             error = %e,
                                             "stale refresh failed"
                                         );
@@ -544,7 +550,11 @@ impl DnsHandler {
         // nuisance, so it goes to the error stream where a timestamp and the
         // surrounding context come for free.
         if let Err(e) = self.log_tx.try_send(ctx) {
-            error!("query log event dropped, logger cannot keep up: {e}");
+            error!(
+                event = "querylog.dropped",
+                error = %e,
+                "query log event dropped, logger cannot keep up"
+            );
         }
 
         Ok(HandleOutcome {

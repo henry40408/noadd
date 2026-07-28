@@ -206,7 +206,12 @@ async fn handle_dns_query(
     match handler.handle(query_bytes, client_ip, doh_token).await {
         Ok(outcome) => dns_response(outcome.bytes, outcome.min_ttl as u64),
         Err(e) => {
-            tracing::warn!("DNS handler error: {e}");
+            tracing::warn!(
+                event = "dns.handler_failed",
+                transport = "doh",
+                error = %e,
+                "query handler failed; answering SERVFAIL"
+            );
             // RFC 8484 §4.2.1: return HTTP 200 with DNS SERVFAIL, not HTTP 500.
             // HTTP 500 causes iOS to penalize/disable the resolver entirely.
             let servfail = handler::build_servfail(query_bytes);

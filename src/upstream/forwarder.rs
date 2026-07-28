@@ -372,7 +372,12 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
         let spec = match UpstreamSpec::parse(server) {
             Ok(s) => s,
             Err(e) => {
-                warn!(server = %server, error = %e, "skipping unparseable upstream entry");
+                warn!(
+                    event = "upstream.spec_invalid",
+                    server = %server,
+                    error = %e,
+                    "skipping unparseable upstream entry"
+                );
                 continue;
             }
         };
@@ -391,7 +396,11 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
         let (idx, server, spec, addrs) = match joined {
             Ok(t) => t,
             Err(e) => {
-                warn!(error = %e, "upstream resolve task join failed");
+                warn!(
+                    event = "upstream.resolve_join_failed",
+                    error = %e,
+                    "upstream resolve task join failed"
+                );
                 continue;
             }
         };
@@ -400,12 +409,21 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
                 if let Some(a) = list.into_iter().next() {
                     a
                 } else {
-                    warn!(server = %server, "no addresses returned for upstream");
+                    warn!(
+                        event = "upstream.resolve_empty",
+                        server = %server,
+                        "no addresses returned for upstream"
+                    );
                     continue;
                 }
             }
             Err(e) => {
-                warn!(server = %server, error = %e, "failed to resolve upstream host");
+                warn!(
+                    event = "upstream.resolve_failed",
+                    server = %server,
+                    error = %e,
+                    "failed to resolve upstream host"
+                );
                 continue;
             }
         };
@@ -675,7 +693,12 @@ impl UpstreamForwarder {
                             return Ok((bytes, entry.label.clone(), upstream_authenticated));
                         }
                         Err(e) => {
-                            warn!(upstream = %entry.label, error = %e, "failed to re-encode upstream response");
+                            warn!(
+                                event = "upstream.reencode_failed",
+                                upstream = %entry.label,
+                                error = %e,
+                                "failed to re-encode upstream response"
+                            );
                         }
                     }
                 }
@@ -699,7 +722,12 @@ impl UpstreamForwarder {
                             return Ok((bytes, entry.label.clone(), false));
                         }
                     }
-                    warn!(upstream = %entry.label, error = %e, "upstream forward failed");
+                    warn!(
+                        event = "upstream.forward_failed",
+                        upstream = %entry.label,
+                        error = %e,
+                        "upstream forward failed"
+                    );
                 }
             }
         }
@@ -781,6 +809,7 @@ impl UpstreamForwarder {
                 // signal that the retry recovers from; only a failure on the
                 // final attempt actually marks the upstream down.
                 Err(e) => warn!(
+                    event = "upstream.probe_attempt_failed",
                     upstream = %entry.label,
                     attempt = attempt + 1,
                     attempts = PROBE_ATTEMPTS,
