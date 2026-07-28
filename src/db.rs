@@ -205,6 +205,10 @@ pub struct TopClient {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelinePoint {
+    /// Start of the bucket, in **Unix seconds** — the same unit as
+    /// [`TimelineMultiPoint::timestamp`] and the rest of the API's timestamps.
+    /// The underlying `query_logs.timestamp` column is milliseconds; the
+    /// conversion happens in [`Database::timeline_since`].
     pub timestamp: i64,
     pub total: i64,
     pub blocked: i64,
@@ -212,6 +216,10 @@ pub struct TimelinePoint {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineMultiPoint {
+    /// Start of the bucket, in **Unix seconds** — the same unit as
+    /// [`TimelinePoint::timestamp`]. The underlying `query_logs.timestamp`
+    /// column is milliseconds; the conversion happens in
+    /// [`Database::timeline_multi_since`].
     pub timestamp: i64,
     pub total: i64,
     pub blocked: i64,
@@ -2057,9 +2065,14 @@ impl Database {
         Ok(result)
     }
 
+    /// Bucket queries into a total/blocked timeline on UTC-epoch boundaries.
+    ///
+    /// Takes and returns Unix **seconds**, matching
+    /// [`Self::timeline_multi_since`]; milliseconds exist only inside the
+    /// query, because that is the unit the `query_logs.timestamp` column uses.
     pub async fn timeline_since(
         &self,
-        since: i64,
+        since: i64, // unix seconds
         bucket_secs: i64,
     ) -> Result<Vec<TimelinePoint>, DbError> {
         let rows = self
@@ -2076,7 +2089,7 @@ impl Database {
                 let rows = stmt
                     .query_map(params![bucket_secs, since], |row| {
                         Ok(TimelinePoint {
-                            timestamp: row.get(0)?,
+                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
                             total: row.get(1)?,
                             blocked: row.get(2)?,
                         })

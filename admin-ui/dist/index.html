@@ -1719,6 +1719,16 @@ function sharePctSpan(count, sum) {
   return pct ? html` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
 }
 
+// Accepts either Unix seconds or milliseconds and returns milliseconds.
+//
+// This is NOT a licence to leave new fields' units unspecified — it exists for
+// one remaining asymmetry: query-log rows carry `timestamp` straight from the
+// `query_logs` column, which is milliseconds, while every other timestamp the
+// API serves (timeline buckets, session created_at/last_seen, filter-list
+// last_updated, rebuild started_at) is seconds. The two timeline types used to
+// disagree with each other too, and this helper is exactly what hid it: a
+// consumer that skipped it was silently off by 1000x. They now agree on
+// seconds; keep it that way.
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
 }
