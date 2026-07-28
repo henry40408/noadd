@@ -421,3 +421,39 @@ async fn compute_summary_queries_1m_counts_only_the_last_60_seconds() {
         "the 24h window should still see every row, including those the 1m window excludes"
     );
 }
+
+#[tokio::test]
+async fn both_timeline_types_report_bucket_starts_in_the_same_unit() {
+    // The two sibling types are returned by adjacent endpoints, and
+    // TimelinePoint used to emit milliseconds while TimelineMultiPoint emitted
+    // seconds. Nothing broke at the time only because the admin UI funnelled
+    // both through a helper that accepts either magnitude; any consumer that
+    // did not would have been off by a factor of 1000, silently, landing dates
+    // in 1970 or the far future rather than erroring.
+    let db = test_db().await;
+    let entries = vec![
+        entry(600, "A", false, false, Some("NOERROR")),
+        entry(610, "A", true, false, Some("NXDOMAIN")),
+        entry(700, "AAAA", false, false, Some("NOERROR")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let single = db.timeline_since(0, 60).await.unwrap();
+    let multi = db.timeline_multi_since(0, 60, 0).await.unwrap();
+
+    assert_eq!(single.len(), 2);
+    assert_eq!(multi.len(), 2);
+
+    // Bucket starts are the literal second values, not milliseconds.
+    assert_eq!(single[0].timestamp, 600);
+    assert_eq!(single[1].timestamp, 660);
+
+    for (a, b) in single.iter().zip(multi.iter()) {
+        assert_eq!(
+            a.timestamp, b.timestamp,
+            "TimelinePoint and TimelineMultiPoint must express bucket starts in the same unit"
+        );
+        assert_eq!(a.total, b.total);
+        assert_eq!(a.blocked, b.blocked);
+    }
+}
