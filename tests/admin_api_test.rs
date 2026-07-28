@@ -2714,3 +2714,19 @@ async fn mobileconfig_is_not_stored() {
         "expected no-store, got: {cache_control}"
     );
 }
+
+#[tokio::test]
+async fn check_list_url_unknown_id_returns_404() {
+    // Covers the DB-lookup branch without reaching the network: with no URL in
+    // the body the handler resolves the list's own URL by id, and an id that
+    // matches no row must 404 rather than fall through to another list's URL.
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/lists/999999/check")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

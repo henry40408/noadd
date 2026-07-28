@@ -930,3 +930,34 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_filter_list_url_fetches_one_row_by_id() {
+    // Replaces a get_filter_lists() call that materialised every column of
+    // every row to read a single `url`, so the lookup being correct — and
+    // returning None rather than someone else's URL for an unknown id — is
+    // the whole point.
+    let db = test_db().await;
+    let first = db
+        .add_filter_list("EasyList", "https://easylist.example.com/list.txt", true)
+        .await
+        .unwrap();
+    let second = db
+        .add_filter_list("Other", "https://other.example.com/hosts.txt", true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.filter_list_url(first).await.unwrap().as_deref(),
+        Some("https://easylist.example.com/list.txt")
+    );
+    assert_eq!(
+        db.filter_list_url(second).await.unwrap().as_deref(),
+        Some("https://other.example.com/hosts.txt")
+    );
+    assert_eq!(
+        db.filter_list_url(first + second + 1).await.unwrap(),
+        None,
+        "an unknown id must not fall through to another row"
+    );
+}
