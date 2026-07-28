@@ -388,3 +388,36 @@ async fn cache_stats_multi_since_matches_single_window() {
     assert_eq!(d30.1, single_30d.1);
     assert!((d30.2 - single_30d.2).abs() < 1e-9);
 }
+
+#[tokio::test]
+async fn compute_summary_queries_1m_counts_only_the_last_60_seconds() {
+    use noadd::admin::stats::compute_summary;
+
+    // The dashboard's Throughput card divides this by 60 and presents it as the
+    // current rate, so the window boundary is user-visible: anything older than
+    // 60s leaking in would inflate the live reading with historical traffic.
+    let db = test_db().await;
+    let now: i64 = 40 * 86400;
+
+    db.insert_query_logs(&[
+        // Inside the 60s window.
+        entry(now - 5, "A", false, false, Some("NOERROR")),
+        entry(now - 59, "A", true, false, Some("NXDOMAIN")),
+        // Outside it, but still inside the 24h window.
+        entry(now - 61, "A", false, false, Some("NOERROR")),
+        entry(now - 3600, "A", false, false, Some("NOERROR")),
+    ])
+    .await
+    .unwrap();
+
+    let s = compute_summary(&db, now).await.unwrap();
+
+    assert_eq!(
+        s.queries_1m, 2,
+        "only the two rows inside the 60s window should count toward the live rate"
+    );
+    assert_eq!(
+        s.total_today, 4,
+        "the 24h window should still see every row, including those the 1m window excludes"
+    );
+}
