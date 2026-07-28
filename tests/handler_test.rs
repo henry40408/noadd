@@ -244,10 +244,13 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
 }
 
 #[tokio::test]
-async fn test_handler_counts_dropped_log_events() {
+async fn test_handler_serves_queries_while_log_channel_is_saturated() {
     // Tiny channel (capacity 1, no receiver consuming) saturates immediately,
-    // so try_send fails on every query past the first. Queries still succeed
-    // (logging is non-blocking), but the drop counter should increment.
+    // so try_send fails on every query past the first. That is the whole point
+    // of try_send over send: resolution must not stall behind SQLite, so a
+    // wedged logger costs log rows and nothing else. Each drop is reported by
+    // an error! line rather than a counter, so what is asserted here is the
+    // behaviour that matters — every query still gets a well-formed answer.
     let block_rules = vec![(
         ParsedRule {
             domain: "ads.example.com".to_string(),
@@ -266,15 +269,19 @@ async fn test_handler_counts_dropped_log_events() {
     let query = make_query_bytes("ads.example.com", RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    for _ in 0..20 {
-        let _ = handler.handle(&query, client_ip, None).await.unwrap();
+    for i in 0..20 {
+        let outcome = handler
+            .handle(&query, client_ip, None)
+            .await
+            .unwrap_or_else(|e| panic!("query {i} failed with a saturated logger: {e}"));
+        let response = Message::from_bytes(&outcome.bytes)
+            .unwrap_or_else(|e| panic!("query {i} returned unparseable bytes: {e}"));
+        assert_eq!(
+            response.metadata.response_code,
+            ResponseCode::NoError,
+            "query {i} should still be answered when the logger cannot keep up"
+        );
     }
-
-    assert!(
-        handler.log_drop_count() > 0,
-        "at least one log event should have been dropped (got {})",
-        handler.log_drop_count()
-    );
 }
 
 #[tokio::test]
