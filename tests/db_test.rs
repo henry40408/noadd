@@ -419,13 +419,10 @@ async fn test_count_queries_since() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let (total, blocked) = db.count_queries_since(1500).await.unwrap();
-    assert_eq!(total, 2);
-    assert_eq!(blocked, 1);
-
-    let (total, blocked) = db.count_queries_since(0).await.unwrap();
-    assert_eq!(total, 3);
-    assert_eq!(blocked, 1);
+    // Counts only — the blocked total this used to return was summed by SQLite
+    // and bound to `_` by the sole production caller.
+    assert_eq!(db.count_queries_since(1500).await.unwrap(), 2);
+    assert_eq!(db.count_queries_since(0).await.unwrap(), 3);
 }
 
 #[tokio::test]

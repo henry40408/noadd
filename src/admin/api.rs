@@ -1651,15 +1651,11 @@ async fn check_list_url(
     {
         u
     } else {
-        let lists = state
+        state
             .db
-            .get_filter_lists()
+            .filter_list_url(id)
             .await
-            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-        lists
-            .into_iter()
-            .find(|l| l.id == id)
-            .map(|l| l.url)
+            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?
     };
 
@@ -1741,7 +1737,6 @@ async fn trigger_list_update(
 struct RebuildStatusResponse {
     rebuilding: bool,
     started_at: i64,
-    last_completed_at: i64,
     last_duration_ms: u64,
 }
 
@@ -1753,9 +1748,6 @@ async fn get_rebuild_status(
     Ok(Json(RebuildStatusResponse {
         rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
         started_at: s.started_at.load(std::sync::atomic::Ordering::Relaxed),
-        last_completed_at: s
-            .last_completed_at
-            .load(std::sync::atomic::Ordering::Relaxed),
         last_duration_ms: s
             .last_duration_ms
             .load(std::sync::atomic::Ordering::Relaxed),

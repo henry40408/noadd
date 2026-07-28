@@ -17,7 +17,6 @@ pub struct RebuildCoordinator {
 pub struct RebuildState {
     pub rebuilding: AtomicBool,
     pub started_at: AtomicI64,
-    pub last_completed_at: AtomicI64,
     pub last_duration_ms: AtomicU64,
 }
 
@@ -52,9 +51,6 @@ impl RebuildCoordinator {
             self.state
                 .last_duration_ms
                 .store(duration_ms, Ordering::Relaxed);
-            self.state
-                .last_completed_at
-                .store(now_unix(), Ordering::Relaxed);
             self.state.rebuilding.store(false, Ordering::Relaxed);
             if let Err(e) = result {
                 tracing::warn!(

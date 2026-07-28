@@ -249,9 +249,6 @@ async fn latency_summary_computes_percentiles() {
 
     let summary = db.latency_summary_since(0).await.unwrap();
     assert_eq!(summary.sample_count, 100);
-    assert_eq!(summary.max_ms, 100);
-    // Avg of 1..=100 is 50.5
-    assert!((summary.avg_ms - 50.5).abs() < 0.001);
     // p50 -> rn <= 50 -> max response_ms = 50
     assert_eq!(summary.p50_ms, 50);
     assert_eq!(summary.p95_ms, 95);
@@ -266,7 +263,6 @@ async fn latency_summary_empty_db_is_zero() {
     assert_eq!(summary.p50_ms, 0);
     assert_eq!(summary.p95_ms, 0);
     assert_eq!(summary.p99_ms, 0);
-    assert_eq!(summary.max_ms, 0);
 }
 
 #[tokio::test]
@@ -343,9 +339,11 @@ async fn count_queries_multi_since_matches_single_window() {
         .await
         .unwrap();
 
-    assert_eq!(today, single_today);
-    assert_eq!(d7, single_7d);
-    assert_eq!(d30, single_30d);
+    // The single-window helper returns the total only, so the cross-check
+    // covers totals; the blocked halves are pinned directly below.
+    assert_eq!(today.0, single_today);
+    assert_eq!(d7.0, single_7d);
+    assert_eq!(d30.0, single_30d);
 
     // Sanity: today = (2, 1); 7d = (3, 1); 30d = (4, 2).
     assert_eq!(today, (2, 1));
@@ -354,7 +352,10 @@ async fn count_queries_multi_since_matches_single_window() {
 }
 
 #[tokio::test]
-async fn cache_stats_multi_since_matches_single_window() {
+async fn cache_stats_multi_since_computes_each_window() {
+    // Previously cross-checked against a single-window cache_stats_since, which
+    // production never called and which has been removed. The expectations are
+    // now stated directly so the multi-window query keeps its coverage.
     let db = test_db().await;
     let now: i64 = 40 * 86400;
     let one_day: i64 = 86400;
@@ -367,26 +368,23 @@ async fn cache_stats_multi_since_matches_single_window() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let single_today = db.cache_stats_since(now - one_day).await.unwrap();
-    let single_7d = db.cache_stats_since(now - 7 * one_day).await.unwrap();
-    let single_30d = db.cache_stats_since(now - 30 * one_day).await.unwrap();
-
     let (today, d7, d30) = db
         .cache_stats_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
         .await
         .unwrap();
 
-    assert_eq!(today.0, single_today.0);
-    assert_eq!(today.1, single_today.1);
-    assert!((today.2 - single_today.2).abs() < 1e-9);
+    // Blocked rows are excluded, so only the allowed ones count:
+    // today  -> 1 allowed, cached;              7d -> +1 allowed, uncached;
+    // 30d    -> the 20-day-old row is blocked, so identical to 7d.
+    // Every seeded row has response_ms = 5.
+    assert_eq!((today.0, today.1), (1, 1));
+    assert!((today.2 - 5.0).abs() < 1e-9);
 
-    assert_eq!(d7.0, single_7d.0);
-    assert_eq!(d7.1, single_7d.1);
-    assert!((d7.2 - single_7d.2).abs() < 1e-9);
+    assert_eq!((d7.0, d7.1), (1, 2));
+    assert!((d7.2 - 5.0).abs() < 1e-9);
 
-    assert_eq!(d30.0, single_30d.0);
-    assert_eq!(d30.1, single_30d.1);
-    assert!((d30.2 - single_30d.2).abs() < 1e-9);
+    assert_eq!((d30.0, d30.1), (1, 2));
+    assert!((d30.2 - 5.0).abs() < 1e-9);
 }
 
 #[tokio::test]

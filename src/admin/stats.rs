@@ -53,7 +53,7 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     let since_30d = now - 30 * one_day;
     let since_1m = now - 60;
 
-    let (queries_1m, _) = db.count_queries_since(since_1m).await?;
+    let queries_1m = db.count_queries_since(since_1m).await?;
     let ((total_today, blocked_today), (total_7d, blocked_7d), (total_30d, blocked_30d)) = db
         .count_queries_multi_since(since_today, since_7d, since_30d)
         .await?;
