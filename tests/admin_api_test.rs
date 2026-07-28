@@ -404,7 +404,12 @@ async fn rebuild_status_initial_is_idle() {
 }
 
 #[tokio::test]
-async fn test_health_endpoint_exposes_dropped_log_count() {
+async fn test_health_endpoint_reports_no_drop_counter() {
+    // Dropped query-log events are reported by an error-level log line, not
+    // by a counter on this endpoint: a cumulative per-process number carries
+    // neither a time nor a denominator, so it cannot tell an operator whether
+    // loss is happening now or mattered at all. Pinned so the field is not
+    // reintroduced as an apparently-free addition.
     let (app, _token) = setup().await;
 
     let response = app
@@ -422,11 +427,11 @@ async fn test_health_endpoint_exposes_dropped_log_count() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let drops = body
-        .get("dropped_log_count")
-        .and_then(serde_json::Value::as_u64)
-        .expect("dropped_log_count should be present and a u64");
-    assert_eq!(drops, 0, "fresh handler should have zero drops");
+    assert!(
+        body.get("dropped_log_count").is_none(),
+        "dropped_log_count should not be part of the health payload"
+    );
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("ok"));
 }
 
 #[tokio::test]

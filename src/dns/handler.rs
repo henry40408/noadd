@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -11,7 +10,7 @@ use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use thiserror::Error;
 use tokio::sync::{Semaphore, mpsc};
-use tracing::warn;
+use tracing::error;
 
 use crate::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use crate::dns::block::{BlockConfig, BlockMode};
@@ -156,10 +155,6 @@ pub struct DnsHandler {
     /// Prevents a single noisy client from exhausting the tokio runtime with
     /// unbounded spawned tasks. `None` = unlimited.
     concurrency_limit: Option<Arc<Semaphore>>,
-    /// Monotonic count of log events dropped because the async logger
-    /// channel was full. A non-zero value means the logger can't keep up
-    /// with query volume and some query logs were lost.
-    log_drop_count: Arc<AtomicU64>,
     /// Per-client-IP token bucket. `None` means no per-IP limiting.
     rate_limiter: Option<Arc<IpRateLimiter>>,
     /// When true, parse every successful response a third time to populate
@@ -206,7 +201,6 @@ impl DnsHandler {
             refreshing: Arc::new(DashMap::new()),
             inflight_fetches: Arc::new(InflightUpstream::new()),
             concurrency_limit,
-            log_drop_count: Arc::new(AtomicU64::new(0)),
             rate_limiter: None,
             log_query_results: false,
             block_config: Arc::new(ArcSwap::from_pointee(BlockConfig::default())),
@@ -242,12 +236,6 @@ impl DnsHandler {
     /// Load the current block-response configuration.
     pub fn block_config(&self) -> arc_swap::Guard<Arc<BlockConfig>> {
         self.block_config.load()
-    }
-
-    /// Cumulative number of log events dropped because the async logger
-    /// channel was full.
-    pub fn log_drop_count(&self) -> u64 {
-        self.log_drop_count.load(Ordering::Relaxed)
     }
 
     /// Handle a DNS query. Takes raw query bytes, client IP, and optional `DoH` token name.
@@ -339,8 +327,7 @@ impl DnsHandler {
                 authenticated_data: false,
             };
             if let Err(e) = self.log_tx.try_send(ctx) {
-                self.log_drop_count.fetch_add(1, Ordering::Relaxed);
-                warn!("failed to send log event: {e}");
+                error!("query log event dropped, logger cannot keep up: {e}");
             }
             // REFUSED is not cacheable downstream.
             return Ok(HandleOutcome {
@@ -551,9 +538,13 @@ impl DnsHandler {
             result,
             authenticated_data: authenticated,
         };
+        // The query is already answered — logging is deliberately non-blocking
+        // — but a dropped entry is gone for good, so every statistic derived
+        // from query_logs silently under-reports. That is a fault, not a
+        // nuisance, so it goes to the error stream where a timestamp and the
+        // surrounding context come for free.
         if let Err(e) = self.log_tx.try_send(ctx) {
-            self.log_drop_count.fetch_add(1, Ordering::Relaxed);
-            warn!("failed to send log event: {e}");
+            error!("query log event dropped, logger cannot keep up: {e}");
         }
 
         Ok(HandleOutcome {

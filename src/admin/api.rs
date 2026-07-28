@@ -1306,16 +1306,17 @@ pub struct HealthResponse {
     pub needs_setup: bool,
     /// Build version string (from `git describe`).
     pub version: &'static str,
-    /// Number of query-log events dropped because the async logger channel
-    /// was saturated. Non-zero means query logging is incomplete.
-    pub dropped_log_count: u64,
 }
 
 /// Report basic service health.
 ///
 /// Always unauthenticated so monitoring and the setup wizard can call it
-/// before any operator exists. Includes whether initial setup is still
-/// pending and how many query-log events the async logger has dropped.
+/// before any operator exists. Reports whether initial setup is still pending.
+///
+/// Dropped query-log events are deliberately not reported here. A cumulative
+/// per-process counter cannot say *when* the loss happened or how it compares
+/// to total volume, so it could not tell an operator anything actionable;
+/// each drop is logged at error level instead.
 #[utoipa::path(
     get, path = "/api/health", tag = "system",
     responses((status = 200, description = "Service health", body = HealthResponse))
@@ -1330,7 +1331,6 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok".to_string(),
         needs_setup,
         version: env!("GIT_VERSION"),
-        dropped_log_count: state.handler.log_drop_count(),
     })
 }
 
