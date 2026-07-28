@@ -44,7 +44,7 @@ impl ListManager {
     /// Rebuild the filter engine from all enabled lists + custom rules in DB.
     pub async fn rebuild_filter(&self) -> Result<(), ListError> {
         let start = std::time::Instant::now();
-        tracing::info!("rebuilding filter engine");
+        tracing::info!(event = "filter.rebuild_started", "rebuilding filter engine");
 
         let lists = self.db.get_filter_lists().await?;
 
@@ -144,6 +144,7 @@ impl ListManager {
         crate::reclaim_memory();
 
         tracing::info!(
+            event = "filter.rebuild_completed",
             block_count,
             allow_count,
             parse_ms,
@@ -209,7 +210,13 @@ impl ListManager {
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok((list_id, name, Ok(rule_count))) => {
-                    tracing::info!(list_id, name = %name, rule_count, "updated filter list");
+                    tracing::info!(
+                        event = "filter.list_updated",
+                        list_id,
+                        name = %name,
+                        rule_count,
+                        "updated filter list"
+                    );
                 }
                 Ok((_list_id, name, Err(e))) => {
                     failures.push(format!("{name} ({e})"));
@@ -221,6 +228,7 @@ impl ListManager {
         }
         if !failures.is_empty() {
             tracing::warn!(
+                event = "filter.list_update_failed",
                 failed = failures.len(),
                 lists = %failures.join(", "),
                 "some filter lists failed to update; keeping previous data for those"

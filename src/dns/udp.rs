@@ -13,14 +13,24 @@ const MAX_UDP_SIZE: usize = 4096;
 /// Run the UDP DNS listener, handling queries in spawned tasks.
 pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std::io::Result<()> {
     let socket = Arc::new(UdpSocket::bind(addr).await?);
-    info!("UDP DNS listener started on {addr}");
+    info!(
+        event = "dns.listener_started",
+        transport = "udp",
+        %addr,
+        "DNS listener started"
+    );
 
     loop {
         let mut buf = vec![0u8; MAX_UDP_SIZE];
         let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(result) => result,
             Err(e) => {
-                debug!("UDP recv_from error: {e}");
+                debug!(
+                    event = "dns.recv_failed",
+                    transport = "udp",
+                    error = %e,
+                    "failed to receive datagram"
+                );
                 continue;
             }
         };
@@ -37,12 +47,24 @@ pub async fn run_udp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
                 // limit, so only the UDP path does this.
                 Ok(outcome) => truncate_for_udp(&buf, outcome.bytes),
                 Err(e) => {
-                    debug!("DNS handler error for UDP query from {src}: {e}");
+                    debug!(
+                        event = "dns.handler_failed",
+                        transport = "udp",
+                        client = %src,
+                        error = %e,
+                        "query handler failed; answering SERVFAIL"
+                    );
                     build_servfail(&buf)
                 }
             };
             if let Err(e) = socket.send_to(&response, src).await {
-                debug!("UDP send_to error for {src}: {e}");
+                debug!(
+                    event = "dns.send_failed",
+                    transport = "udp",
+                    client = %src,
+                    error = %e,
+                    "failed to send response"
+                );
             }
         });
     }

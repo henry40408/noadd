@@ -68,3 +68,26 @@ All components run in one tokio runtime. Query path (`src/dns/handler.rs`): **fi
 - `src/main.rs` wires every component together and is the place to trace how things connect.
 
 `mimalloc` is the global allocator specifically so the large transient allocation from a filter rebuild is returned to the OS, keeping steady-state RSS low on small devices.
+
+## Diagnostic logging
+
+Separate from the per-query `query_logs` table — this is the `tracing` stream on stderr, configured in `src/config.rs` (`--log-format`, `RUST_LOG`, default `error,noadd=info`).
+
+**Every `info!`/`warn!`/`error!`/`debug!` call carries `event = "domain.action"` as its first field**, and every variable value is a field rather than being interpolated into the message. The message is a static human-readable string:
+
+```rust
+// yes
+debug!(event = "dns.send_failed", transport = "tcp", stage = "flush", client = %peer, error = %e, "failed to send response");
+
+// no — the values are trapped in the string, and the message is the only key
+debug!("TCP flush error for {peer}: {e}");
+```
+
+Why it matters: `--log-format json` emits each field as its own JSON key, so `event` is a stable identifier that survives message rewording, and fields are filterable without regex. `jq 'select(.fields.event == "upstream.forward_failed")'` works; grepping prose does not.
+
+Conventions:
+
+- **Prefer a field over a new event name.** The three TCP write failures share `dns.send_failed` and differ by `stage`; UDP and TCP share `dns.listener_started` and differ by `transport`. That keeps "all send failures" one query.
+- **Name events `domain.action`** in the past tense for things that happened (`filter.rebuild_completed`, `session.created`) — existing domains are `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, and the audit set (`auth`, `session`, `apikey`, `forward_auth`, `audit`).
+- **Errors go in an `error` field** (`error = %e`), never in the message.
+- Reuse an existing event name when the event is the same; a grep for `event = "` is the index.

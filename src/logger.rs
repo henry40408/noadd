@@ -81,7 +81,7 @@ impl QueryLogger {
                         if !buffer.is_empty() {
                             flush(&self.db, &mut buffer).await;
                         }
-                        info!("query logger shutting down");
+                        info!(event = "querylog.worker_stopped", "query logger shutting down");
                         return;
                     }
                 }
@@ -119,7 +119,12 @@ fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
 /// Flush all buffered entries to the database.
 async fn flush(db: &Database, buffer: &mut Vec<QueryLogEntry>) {
     if let Err(e) = db.insert_query_logs(buffer).await {
-        warn!("failed to flush query logs to database: {e}");
+        warn!(
+            event = "querylog.flush_failed",
+            entries = buffer.len(),
+            error = %e,
+            "failed to flush query logs to database"
+        );
     }
     buffer.clear();
 }

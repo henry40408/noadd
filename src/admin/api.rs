@@ -549,7 +549,11 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                         via_forward_auth: true,
                     }),
                     Err(err) => {
-                        tracing::error!(%err, "forward-auth operator lookup failed");
+                        tracing::error!(
+                            event = "forward_auth.lookup_failed",
+                            error = %err,
+                            "forward-auth operator lookup failed"
+                        );
                         // This exit bypasses the shared tail below, so the
                         // pending `auth.failed` warning must be emitted here
                         // too — otherwise a bad `noadd_…` key alongside a
@@ -1196,7 +1200,8 @@ async fn change_own_password(
             "revoked other sessions after password change"
         ),
         Err(err) => tracing::error!(
-            %err,
+            event = "session.revoke_failed",
+            error = %err,
             user_id,
             "password changed but revoking other sessions failed"
         ),
@@ -1898,7 +1903,11 @@ async fn get_registry_filters(
     match state.registry.list().await {
         Ok(data) => Ok(Json(data)),
         Err(e) => {
-            tracing::warn!(error = %e, "registry fetch failed");
+            tracing::warn!(
+                event = "registry.fetch_failed",
+                error = %e,
+                "registry fetch failed"
+            );
             Err(StatusCode::BAD_GATEWAY)
         }
     }

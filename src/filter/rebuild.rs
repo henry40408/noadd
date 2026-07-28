@@ -57,7 +57,11 @@ impl RebuildCoordinator {
                 .store(now_unix(), Ordering::Relaxed);
             self.state.rebuilding.store(false, Ordering::Relaxed);
             if let Err(e) = result {
-                tracing::warn!(error = %e, "rebuild task failed; keeping previous filter");
+                tracing::warn!(
+                    event = "filter.rebuild_failed",
+                    error = %e,
+                    "rebuild task failed; keeping previous filter"
+                );
             }
         })
     }
