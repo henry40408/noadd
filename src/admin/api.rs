@@ -2401,34 +2401,59 @@ async fn get_stats_top_upstreams(
 
 // --- Stats v2 ---
 
+// Each stats/v2 endpoint declares exactly the parameters it honours, and
+// `deny_unknown_fields` makes anything else a 400 rather than a silent no-op.
+// One shared struct used to cover them all, so `?range=` on the heatmap (a
+// fixed 30-day window) and `?tz_offset=` on the range-only endpoints were
+// accepted without complaint and quietly discarded — the API answering a
+// question it had not been asked and reporting no problem.
+
+/// Query for `/api/stats/v2/timeline`, the one endpoint that honours both.
 #[derive(Deserialize)]
-pub struct StatsRangeQuery {
+#[serde(deny_unknown_fields)]
+pub struct TimelineV2Query {
     pub range: Option<String>,
     /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), used
-    /// to align timeline buckets and heatmap cells to their local calendar.
-    /// Only those two endpoints read it; other handlers sharing this struct
-    /// ignore it. Clamped to ±14h; missing ⇒ 0 (UTC-aligned).
+    /// to align buckets to their local calendar. Clamped to ±14h; missing ⇒ 0
+    /// (UTC-aligned).
     pub tz_offset: Option<i64>,
 }
 
-fn parse_stats_range(q: &StatsRangeQuery) -> Result<stats::StatsRange, StatusCode> {
-    let raw = q.range.as_deref().unwrap_or("7d");
-    stats::StatsRange::parse(raw).ok_or(StatusCode::BAD_REQUEST)
+/// Query for `/api/stats/v2/heatmap`. No `range`: the heatmap is a fixed
+/// 30-day window by design (see [`stats::compute_heatmap`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeatmapQuery {
+    /// See [`TimelineV2Query::tz_offset`].
+    pub tz_offset: Option<i64>,
+}
+
+/// Query for the stats/v2 endpoints that select a window but do not align it
+/// to the viewer's calendar, so they take no `tz_offset`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangeQuery {
+    pub range: Option<String>,
+}
+
+/// Parse a `range` parameter, defaulting to 7 days when absent.
+fn parse_stats_range(raw: Option<&str>) -> Result<stats::StatsRange, StatusCode> {
+    stats::StatsRange::parse(raw.unwrap_or("7d")).ok_or(StatusCode::BAD_REQUEST)
 }
 
 /// Resolve the viewer's UTC offset to seconds, clamped to the real-world range
 /// (±14h) so a malformed value can't shift buckets to nonsense.
-fn resolve_tz_offset_secs(q: &StatsRangeQuery) -> i64 {
-    q.tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60) * 60
+fn resolve_tz_offset_secs(tz_offset: Option<i64>) -> i64 {
+    tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60) * 60
 }
 
 async fn get_stats_v2_timeline(
     State(state): State<AppState>,
     _auth: AuthedUser,
-    Query(query): Query<StatsRangeQuery>,
+    Query(query): Query<TimelineV2Query>,
 ) -> Result<Json<Vec<crate::db::TimelineMultiPoint>>, StatusCode> {
-    let range = parse_stats_range(&query)?;
-    let tz_offset = resolve_tz_offset_secs(&query);
+    let range = parse_stats_range(query.range.as_deref())?;
+    let tz_offset = resolve_tz_offset_secs(query.tz_offset);
     let now = crate::now_unix();
     let timeline = stats::compute_stats_timeline(&state.db, now, range, tz_offset)
         .await
@@ -2439,9 +2464,9 @@ async fn get_stats_v2_timeline(
 async fn get_stats_v2_heatmap(
     State(state): State<AppState>,
     _auth: AuthedUser,
-    Query(query): Query<StatsRangeQuery>,
+    Query(query): Query<HeatmapQuery>,
 ) -> Result<Json<Vec<crate::db::HeatmapCell>>, StatusCode> {
-    let tz_offset = resolve_tz_offset_secs(&query);
+    let tz_offset = resolve_tz_offset_secs(query.tz_offset);
     let now = crate::now_unix();
     let cells = stats::compute_heatmap(&state.db, now, tz_offset)
         .await
@@ -2452,9 +2477,9 @@ async fn get_stats_v2_heatmap(
 async fn get_stats_v2_breakdown(
     State(state): State<AppState>,
     _auth: AuthedUser,
-    Query(query): Query<StatsRangeQuery>,
+    Query(query): Query<RangeQuery>,
 ) -> Result<Json<stats::Breakdowns>, StatusCode> {
-    let range = parse_stats_range(&query)?;
+    let range = parse_stats_range(query.range.as_deref())?;
     let now = crate::now_unix();
     let b = stats::compute_breakdowns(&state.db, now, range)
         .await
@@ -2476,9 +2501,9 @@ async fn get_stats_v2_health(
 async fn get_stats_v2_highlights(
     State(state): State<AppState>,
     _auth: AuthedUser,
-    Query(query): Query<StatsRangeQuery>,
+    Query(query): Query<RangeQuery>,
 ) -> Result<Json<stats::StatsHighlights>, StatusCode> {
-    let range = parse_stats_range(&query)?;
+    let range = parse_stats_range(query.range.as_deref())?;
     let now = crate::now_unix();
     let h = stats::compute_highlights(&state.db, now, range)
         .await
@@ -2487,6 +2512,7 @@ async fn get_stats_v2_highlights(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RangedTopQuery {
     pub range: Option<String>,
     pub limit: Option<i64>,
@@ -2497,10 +2523,7 @@ async fn get_stats_v2_top_domains(
     _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopDomain>>, StatusCode> {
-    let range = parse_stats_range(&StatsRangeQuery {
-        range: query.range.clone(),
-        tz_offset: None,
-    })?;
+    let range = parse_stats_range(query.range.as_deref())?;
     let limit = query.limit.unwrap_or(15);
     let now = crate::now_unix();
     let rows = stats::compute_top_domains_ranged(&state.db, now, range, limit)
@@ -2514,10 +2537,7 @@ async fn get_stats_v2_top_clients(
     _auth: AuthedUser,
     Query(query): Query<RangedTopQuery>,
 ) -> Result<Json<Vec<crate::db::TopClient>>, StatusCode> {
-    let range = parse_stats_range(&StatsRangeQuery {
-        range: query.range.clone(),
-        tz_offset: None,
-    })?;
+    let range = parse_stats_range(query.range.as_deref())?;
     let limit = query.limit.unwrap_or(15);
     let now = crate::now_unix();
     let rows = stats::compute_top_clients_ranged(&state.db, now, range, limit)
