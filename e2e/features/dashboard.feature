@@ -40,6 +40,21 @@ Feature: Dashboard and statistics
     When I go to the "Statistics" tab
     Then every stat card marker matches its value colour
 
+  Scenario: A saturated query logger is surfaced rather than silently absorbed
+    # /api/health carries dropped_log_count, and the source calls a non-zero
+    # value out as "query logging is incomplete". The UI read only version and
+    # needs_setup from that response, so a saturated logger appeared nowhere:
+    # the dashboard counters, the Statistics page and the query log all
+    # under-reported at once, with nothing on screen to explain the gap.
+    Given the health endpoint reports 42 dropped log events
+    And the admin UI is reloaded
+    Then I see a warning that query logging is incomplete
+    And the warning reports 42 dropped log events
+
+  Scenario: A healthy query logger shows no warning
+    Given I am on the "Dashboard" tab
+    Then no warning about query logging is shown
+
   Scenario: No tab renders markup as escaped text
     # A fragment that should be Markup but reaches html`` as a plain string is
     # escaped and shows up as visible source — `<span class="timeago" …>` filling

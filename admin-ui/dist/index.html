@@ -1252,7 +1252,7 @@ stats-page #rate-trend-card { overflow: visible; }
 /* ============================================================
    Rebuild Status Strip — card-aligned status row with accent rail
    ============================================================ */
-rebuild-banner { display: block; }
+rebuild-banner, log-drop-banner { display: block; }
 .rebuild-banner { display: none; }
 .rebuild-banner.show {
   display: flex;
@@ -1274,6 +1274,10 @@ rebuild-banner { display: block; }
   border-left-color: var(--green);
   background: linear-gradient(90deg, var(--green-dim), var(--bg-panel) 55%);
 }
+.rebuild-banner.warn {
+  border-left-color: var(--orange);
+  background: linear-gradient(90deg, var(--orange-dim), var(--bg-panel) 55%);
+}
 .rebuild-banner .icon {
   display: inline-flex;
   align-items: center;
@@ -1284,6 +1288,8 @@ rebuild-banner { display: block; }
 }
 .rebuild-banner.active .icon { background: var(--accent-glow); color: var(--accent); }
 .rebuild-banner.done .icon { background: var(--green-dim); color: var(--green); }
+.rebuild-banner.warn .icon { background: var(--orange-dim); color: var(--orange); }
+.rebuild-banner .warn-sign { width: 15px; height: 15px; }
 .rebuild-banner .spin {
   width: 13px; height: 13px;
   border: 2px solid currentColor;
@@ -1857,6 +1863,7 @@ const icons = {
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
   external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
+  warning: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
 };
 
 // Marked once, here, rather than at each of the ~30 interpolation sites: these
@@ -2044,6 +2051,7 @@ class AppShell extends LiveElement {
         </header>
         <main class="main-content">
           <div id="notice-host"></div>
+          <log-drop-banner></log-drop-banner>
           <rebuild-banner></rebuild-banner>
           <next-step-banner></next-step-banner>
           <div id="page-content"></div>
@@ -2482,6 +2490,53 @@ class RebuildBanner extends LiveElement {
   }
 }
 customElements.define('rebuild-banner', RebuildBanner);
+
+// --- Dropped Query-Log Banner ---
+// /api/health reports how many query-log events the async logger threw away
+// because its mpsc channel was saturated. Every downstream number — the
+// dashboard counters, the Statistics page, the query log itself — silently
+// under-reports by that amount, so the discrepancy has to be visible or an
+// operator has no way to explain it.
+//
+// The counter is monotonic for the life of the process (never reset), so this
+// stays up once it trips; that is deliberate — the logs already in the DB stay
+// incomplete until noadd is restarted, so the warning remains true.
+//
+// Polls slower than the rebuild strip: this is a slow-burn condition, not
+// something with a live progress readout, and /api/health counts users on
+// every call.
+class LogDropBanner extends LiveElement {
+  connectedCallback() {
+    this.innerHTML = '';
+    this.interval(() => this.tick(), 10000);
+    this.tick();
+  }
+  async tick() {
+    let body;
+    try {
+      body = await api.get('/api/health');
+    } catch (e) {
+      return;
+    }
+    // A stale in-flight response must not repaint a torn-down banner.
+    if (!this.isConnected) return;
+    const dropped = Number(body.dropped_log_count) || 0;
+    if (dropped <= 0) {
+      this.innerHTML = '';
+      return;
+    }
+    const events = dropped === 1 ? 'event' : 'events';
+    this.innerHTML = html`
+      <div class="rebuild-banner show warn" role="status" aria-live="polite" data-testid="log-drop-banner">
+        <span class="icon"><span class="warn-sign">${icons.warning}</span></span>
+        <span class="text">
+          <span class="label">Query logging is incomplete — statistics under-report</span>
+          <span class="meta" data-testid="log-drop-banner-count">${formatFull(dropped)} log ${events} dropped because the logger fell behind</span>
+        </span>
+      </div>`;
+  }
+}
+customElements.define('log-drop-banner', LogDropBanner);
 
 // --- Next-Step Onboarding Banner ---
 // On a fresh install, tells the admin how to point a device's DNS at noadd
