@@ -2824,16 +2824,27 @@ document.addEventListener('pointerdown', (e) => {
 // onMove — chart's existing hover handler (positions cursor/tooltip from evt.clientX)
 // onLeave— chart's existing handler that clears cursor/tooltip
 function addChartTouch(svg, host, onMove, onLeave) {
-  const dismiss = () => { _chartTouchDismissers.delete(host); onLeave(); };
+  // Set while a touch/pen tooltip is up. After a tap, the browser synthesizes a
+  // compatibility mouse sequence, and its `pointerleave` (pointerType 'mouse',
+  // since the virtual cursor was never over the chart) would otherwise dismiss
+  // the tooltip within ~20ms of the finger lifting — the tooltip appeared and
+  // vanished, which on a phone reads as the tap not registering at all.
+  let touchHeld = false;
+  const dismiss = () => { _chartTouchDismissers.delete(host); touchHeld = false; onLeave(); };
   svg.addEventListener('pointerdown', (evt) => {
     if (evt.pointerType === 'mouse') return; // mouse keeps pure hover behavior
     try { svg.setPointerCapture(evt.pointerId); } catch (_) {}
+    touchHeld = true;
     _chartTouchDismissers.set(host, dismiss);
     onMove(evt);
   });
   svg.addEventListener('pointermove', onMove);
   // Mouse dismisses on leave; touch/pen keep the tooltip until a tap outside.
-  svg.addEventListener('pointerleave', (evt) => { if (evt.pointerType === 'mouse') onLeave(); });
+  // The `touchHeld` guard is what distinguishes a real cursor leaving the chart
+  // from the synthetic leave that follows a tap.
+  svg.addEventListener('pointerleave', (evt) => {
+    if (evt.pointerType === 'mouse' && !touchHeld) onLeave();
+  });
   svg.addEventListener('pointercancel', dismiss);
 }
 
