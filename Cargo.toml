@@ -16,7 +16,7 @@ argon2 = "0.5"
 axum = "0.8"
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "env"] }
 dashmap = "6"
