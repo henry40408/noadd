@@ -166,23 +166,17 @@ pub fn admin_router(state: AppState) -> Router {
         // Health + server info (no auth required for health)
         .route("/api/health", get(health))
         .route("/api/server-info", get(get_server_info))
-        // Settings
         .route("/api/settings", get(get_settings).put(put_settings))
-        // Lists
         .route("/api/lists", get(get_lists).post(add_list))
         .route("/api/lists/batch", post(batch_add_lists))
         .route("/api/lists/{id}", put(update_list).delete(delete_list))
         .route("/api/lists/{id}/check", post(check_list_url))
         .route("/api/lists/update", post(trigger_list_update))
-        // Rules
         .route("/api/rules", get(get_rules).post(add_rule))
         .route("/api/rules/{id}", delete(delete_rule))
-        // Filter check
         .route("/api/filter/check", post(filter_check))
         .route("/api/filter/rebuild-status", get(get_rebuild_status))
-        // Registry
         .route("/api/registry/filters", get(get_registry_filters))
-        // Upstream health
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
         // Operator management
@@ -193,16 +187,12 @@ pub fn admin_router(state: AppState) -> Router {
         )
         .route("/api/users/{id}", delete(delete_user_handler))
         .route("/api/users/me/password", post(change_own_password))
-        // Session management
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", delete(revoke_session_by_id))
-        // DoH tokens
         .route("/api/doh-tokens", get(get_doh_tokens).post(add_doh_token))
         .route("/api/doh-tokens/{id}", delete(delete_doh_token_endpoint))
-        // API keys
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api/api-keys/{id}", delete(delete_api_key))
-        // Stats
         .route("/api/stats/summary", get(get_stats_summary))
         .route("/api/stats/timeline", get(get_stats_timeline))
         .route("/api/stats/top-domains", get(get_stats_top_domains))
@@ -215,7 +205,6 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/stats/v2/highlights", get(get_stats_v2_highlights))
         .route("/api/stats/v2/top-domains", get(get_stats_v2_top_domains))
         .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
-        // Logs
         .route("/api/logs", get(get_logs).delete(delete_logs))
         .route("/api/logs/stream", get(stream_logs))
         // Apple mobileconfig (no auth — token in URL is the credential)
@@ -232,6 +221,7 @@ pub fn admin_router(state: AppState) -> Router {
             crate::admin::csrf::csrf_origin_guard,
         ))
         .layer(axum::middleware::from_fn(crate::headers::no_store))
+        .layer(axum::middleware::from_fn(crate::headers::security_headers))
 }
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");

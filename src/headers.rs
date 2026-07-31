@@ -37,6 +37,50 @@ pub async fn no_store(req: Request, next: Next) -> Response {
     resp
 }
 
+/// `Content-Security-Policy` carrying **only** `frame-ancestors`.
+///
+/// A full policy is deliberately out of scope: the admin UI is one HTML file
+/// of inline `<script>`/`<style>`, so any policy it could satisfy today would
+/// need `'unsafe-inline'` — which gives up most of what CSP is for — and the
+/// nonce alternative means rewriting the document per request, which is
+/// incompatible with serving it from `include_dir!` behind a content-hash
+/// `ETag`. `frame-ancestors` needs none of that and is the directive that
+/// actually closes a live hole here, so it ships on its own.
+const FRAME_ANCESTORS_NONE: HeaderValue = HeaderValue::from_static("frame-ancestors 'none'");
+
+/// `DENY` rather than `SAMEORIGIN`: nothing in the admin UI frames anything
+/// (there is not one `<iframe>` in the document), so the stricter value costs
+/// nothing and does not depend on that staying true by accident.
+const FRAME_DENY: HeaderValue = HeaderValue::from_static("DENY");
+
+/// `X-Content-Type-Options`. Every admin response already declares an
+/// accurate `Content-Type`, so this changes nothing today; it is here so that
+/// a future response that gets one wrong fails closed instead of letting a
+/// browser sniff an attacker-influenced body into something executable.
+const NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
+
+/// Stamp the browser-hardening headers on every admin response.
+///
+/// Both headers say the same thing on purpose: `frame-ancestors` is the
+/// modern directive and wins where both are understood, while
+/// `X-Frame-Options` still covers browsers that never implemented it. Neither
+/// is conditional on TLS the way HSTS is — an appliance reachable over plain
+/// HTTP on a LAN is exactly the one an attacker can frame from a page the
+/// victim is already browsing.
+///
+/// Unlike [`no_store`], these overwrite rather than defer to a value already
+/// on the response: no handler sets either header, so an existing value would
+/// mean something upstream is trying to make itself framable, which is never
+/// what this router wants.
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_SECURITY_POLICY, FRAME_ANCESTORS_NONE);
+    headers.insert(header::X_FRAME_OPTIONS, FRAME_DENY);
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, NOSNIFF);
+    resp
+}
+
 /// Stamp `Strict-Transport-Security` on every response. Registered only when
 /// [`crate::config::resolve_hsts`] says so, so the check is not repeated per
 /// request.
@@ -75,6 +119,54 @@ mod tests {
         let value = value.to_str().unwrap();
         assert!(!value.contains("includeSubDomains"));
         assert!(!value.contains("preload"));
+    }
+
+    #[tokio::test]
+    async fn security_headers_refuse_framing_and_sniffing() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn ok() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/", get(ok))
+            .layer(axum::middleware::from_fn(security_headers));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+            "DENY"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+        // Asserted exactly, not with `contains`: a policy that grew other
+        // directives would need the deliberate design work the constant's doc
+        // comment describes, and must not arrive here by accident.
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .unwrap(),
+            "frame-ancestors 'none'"
+        );
     }
 
     /// Positive counterpart to
