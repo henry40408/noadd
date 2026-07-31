@@ -2912,6 +2912,25 @@ async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
     assert!(!res.headers().contains_key("strict-transport-security"));
 }
 
+/// The mirror of the HSTS test above: clickjacking defence *does* belong on
+/// the admin router, since the admin UI is the only browser-rendered surface
+/// here, so a dropped `.layer(...)` must fail the suite. The unit test in
+/// `src/headers.rs` only proves the middleware works when attached.
+#[tokio::test]
+async fn frame_protection_headers_are_sent_by_the_admin_router() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/api/auth/me", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        res.headers().get("content-security-policy").unwrap(),
+        "frame-ancestors 'none'"
+    );
+}
+
 /// The mobileconfig download carries authenticated DNS-over-HTTPS config
 /// (the token in the URL is itself the credential), so it must not be stored.
 #[tokio::test]
