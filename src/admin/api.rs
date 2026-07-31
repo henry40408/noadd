@@ -830,13 +830,26 @@ async fn login(
         "login successful"
     );
 
-    let cookie = Cookie::build((
-        crate::admin::auth::session_cookie_name(state.cookie_secure),
+    Ok((
+        jar.add(build_session_cookie(token, state.cookie_secure)),
+        Json(LoginResponse { success: true }),
+    ))
+}
+
+/// The `Set-Cookie` carrying a freshly minted session token.
+///
+/// Shared by `login` and `change_own_password` rather than written out twice:
+/// the two must agree on every attribute, and a rotation that quietly dropped
+/// `HttpOnly` or `Secure` would downgrade the session it was issued to protect
+/// — the failure would be invisible until someone read the header by hand.
+fn build_session_cookie(token: String, cookie_secure: bool) -> Cookie<'static> {
+    Cookie::build((
+        crate::admin::auth::session_cookie_name(cookie_secure),
         token,
     ))
     .path("/")
     .http_only(true)
-    .secure(state.cookie_secure)
+    .secure(cookie_secure)
     // Lax rather than Strict: Lax already withholds the cookie from every
     // cross-site POST / PUT / DELETE, which covers every mutation this API
     // exposes, and no GET handler writes. The only thing Strict would
@@ -847,9 +860,7 @@ async fn login(
     .max_age(time::Duration::seconds(
         crate::admin::auth::SESSION_MAX_AGE_SECS,
     ))
-    .build();
-
-    Ok((jar.add(cookie), Json(LoginResponse { success: true })))
+    .build()
 }
 
 #[derive(Deserialize)]
@@ -1191,16 +1202,24 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 
-/// Change the caller's own password and invalidate that operator's *other*
-/// sessions (OWASP: invalidate other sessions on a privilege-level change).
+/// Change the caller's own password, invalidate that operator's *other*
+/// sessions, and rotate the caller's own session token (OWASP: renew the
+/// session ID after any privilege level change, and invalidate other sessions).
 ///
-/// This only invalidates; it does not renew. The caller keeps the same
-/// session token after the change — nothing here mints a fresh one, so the
-/// "renew the session ID" half of the cited OWASP guidance is a deliberate
-/// not-yet, not something already covered: it is the half that defends
-/// against a token that leaked through a channel not requiring ongoing
-/// browser access (a proxy log, a shared terminal history), which is
-/// unaffected by revoking every *other* session.
+/// The two halves defend against different things and neither substitutes for
+/// the other. Revoking the other sessions ejects an attacker who is holding a
+/// live cookie in a browser. Rotating this session's own token is what covers
+/// a token that leaked through a channel needing no ongoing browser access — a
+/// proxy log, a shared terminal's history, a screenshot — since such a leak is
+/// entirely unaffected by revoking *other* sessions.
+///
+/// The rotation is ordered deliberately: the replacement session is minted and
+/// stored *before* the old one is destroyed, so a failure anywhere in the
+/// sequence leaves the caller holding a session that still works rather than
+/// signed out with no replacement. The two destructions are also kept separate
+/// — `reason = "password_change"` counts the other devices, `reason =
+/// "rotated"` names this one — so an auditor summing the counts does not count
+/// the caller's own session twice.
 ///
 /// API keys are **not** touched by this endpoint. `revoke_user_sessions_except`
 /// only deletes rows from `sessions`; `POST /api/api-keys` is gated by
@@ -1223,19 +1242,19 @@ struct ChangePasswordRequest {
 /// `revoke_user_sessions_except(store, db, target_user_id, None)` so the
 /// reset account keeps no session at all.
 ///
-/// If revocation fails after the password write has already committed, the
-/// failure is logged via `tracing::error!` but the response still succeeds
-/// with 204: the password change is done and cannot be un-done, so returning
-/// 500 here would only mislead the caller into retrying. Worst case, other
-/// sessions survive until they expire naturally — the same as today's
-/// behavior before this fix.
+/// If revocation or rotation fails after the password write has already
+/// committed, the failure is logged via `tracing::error!` but the response
+/// still succeeds with 204: the password change is done and cannot be un-done,
+/// so returning 500 here would only mislead the caller into retrying. Worst
+/// case, other sessions survive until they expire naturally and the caller
+/// keeps their original token — strictly no worse than not having rotated.
 async fn change_own_password(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<(CookieJar, StatusCode), StatusCode> {
     let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
     if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
@@ -1299,7 +1318,102 @@ async fn change_own_password(
             "password changed but revoking other sessions failed"
         ),
     }
-    Ok(StatusCode::NO_CONTENT)
+
+    let jar = rotate_own_session(&state, &headers, jar, user_id, &token_hash, ip).await;
+    Ok((jar, StatusCode::NO_CONTENT))
+}
+
+/// Replace the caller's session with a freshly minted one and hand back the
+/// jar carrying its `Set-Cookie`. On any failure the original session is left
+/// untouched and the unchanged jar is returned — see `change_own_password`'s
+/// doc comment for why that is the right outcome rather than a 500.
+async fn rotate_own_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: CookieJar,
+    user_id: i64,
+    old_token_hash: &str,
+    ip: std::net::IpAddr,
+) -> CookieJar {
+    let now = crate::now_unix();
+    let token = generate_token();
+    let token_hash = crate::admin::auth::hash_session_token(&token);
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+
+    // Minted and persisted before anything is destroyed: if this fails, the
+    // caller simply keeps the session they arrived with.
+    let session_id = match state
+        .db
+        .insert_session(
+            &token_hash,
+            user_id,
+            now,
+            now,
+            Some(&ip.to_string()),
+            user_agent,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::error!(
+                event = "session.rotate_failed",
+                error = %err,
+                user_id,
+                "password changed but minting the replacement session failed"
+            );
+            return jar;
+        }
+    };
+    store_session(
+        &state.sessions,
+        &token_hash,
+        SessionInfo {
+            session_id,
+            user_id,
+            created_at: now,
+            last_seen: now,
+        },
+    );
+    tracing::info!(
+        event = "session.created",
+        reason = "password_change",
+        user_id,
+        session_id,
+        sid_hash = %session_log_id(&token_hash),
+        %ip,
+        user_agent = %log_safe(user_agent_log_value(headers), LOG_SAFE_MAX),
+        "rotated session after password change"
+    );
+
+    // Evict from memory first: that is what actually stops the old token
+    // authenticating. The row is deleted after, and a failure there is logged
+    // rather than ignored — an orphaned row would be restored as a live
+    // session by `load_sessions_from_db` on the next restart.
+    let revoked = crate::admin::auth::revoke_session(&state.sessions, old_token_hash);
+    if let Err(err) = state.db.delete_session_by_token_hash(old_token_hash).await {
+        tracing::error!(
+            event = "session.revoke_failed",
+            error = %err,
+            user_id,
+            "rotated session but deleting the superseded row failed"
+        );
+    }
+    if let Some(info) = revoked {
+        tracing::info!(
+            event = "session.destroyed",
+            reason = "rotated",
+            user_id,
+            session_id = info.session_id,
+            sid_hash = %session_log_id(old_token_hash),
+            %ip,
+            "superseded by the rotated session"
+        );
+    }
+
+    jar.add(build_session_cookie(token, state.cookie_secure))
 }
 
 #[derive(Serialize)]
