@@ -1,79 +1,72 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## What this is
 
-noadd is a single-binary, self-hosted DNS ad-blocker (plain DNS + DNS-over-HTTPS) written in Rust 2024 edition. The entire admin web UI is embedded into the binary at compile time, and all runtime state lives in one SQLite file. See `README.md` for user-facing usage and `ARCHITECTURE.md` for the detailed design — read `ARCHITECTURE.md` before touching the filter engine, query pipeline, or storage layer.
+noadd is a single-binary, self-hosted DNS ad-blocker (plain DNS + DNS-over-HTTPS) in Rust 2024. The admin web UI is embedded at compile time; all runtime state lives in one SQLite file. `README.md` covers usage. **Read `ARCHITECTURE.md` before touching the filter engine, query pipeline, or storage layer.**
 
 ## Commands
 
 ```bash
-# Build (also embeds admin-ui/dist and downloads filter lists via build.rs)
-cargo build                 # debug; embeds current admin UI
-cargo build --release
-
-# Tests — use nextest (CI does). Run a single test by substring:
-cargo nextest run
-cargo nextest run filter_engine          # one test file / name filter
+cargo build                              # debug; embeds admin-ui/dist, downloads lists via build.rs
+cargo nextest run                        # tests — nextest, not `cargo test` (CI uses nextest)
+cargo nextest run filter_engine          # by name substring
 cargo nextest run -E 'test(parse_hosts)' # nextest filter expression
-
-# Lint + format (CI gate; clippy warnings are denied)
-cargo fmt --check
+cargo fmt --check                        # CI gate
 cargo clippy --all-targets -- -D warnings
-cargo deny check            # supply-chain: advisories, licenses, bans, sources
+cargo deny check                         # advisories, licenses, bans, sources
 
-# Run locally on non-privileged ports (no root)
+# Local run on non-privileged ports
 RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Integration tests live in `tests/` (not `src/`); shared helpers are in `tests/common/`. Files ending `_bench.rs` are benchmark-style tests run by the normal test command.
+Integration tests live in `tests/`, not `src/`; shared helpers in `tests/common/`. Files ending `_bench.rs` are benchmark-style tests run by the normal test command.
 
 ### End-to-end (admin UI)
 
-Playwright-BDD tests in `e2e/`. Playwright boots the `noadd` binary itself on throwaway ports/DBs, so **build the binary first** so the latest UI is embedded:
+Playwright-BDD in `e2e/`. Playwright boots the `noadd` binary itself, so **`cargo build` first** or the UI under test is stale.
 
 ```bash
 cargo build
 cd e2e && npm ci && npx playwright install chromium
 npm test            # generates BDD step bindings, then runs the suite
-npm run screenshots # re-seeds fake traffic and re-captures docs/screenshots/
+npm run screenshots # re-seeds fake traffic, re-captures docs/screenshots/
 ```
 
-Gherkin features: `e2e/features/`; step definitions: `e2e/steps/`.
+Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenarios (password changes) and anything needing its own login rate-limit budget get a self-contained spec in `e2e/specs/` with dedicated ports — see `settings-autosave.spec.js`.
 
 ## Build-time behavior (`build.rs`)
 
-`build.rs` does work beyond compiling — be aware when builds behave unexpectedly:
-- Downloads the six built-in filter lists via `curl` into `OUT_DIR/lists/`. On network failure it writes an empty file and warns rather than failing the build.
-- Renders `admin-ui/dist/favicon.svg` into `apple-touch-icon.png` (180px) via `resvg`.
-- Stamps the binary with `GIT_VERSION` from `git describe` (overridable via the `GIT_VERSION` env var; a literal `dev` counts as unset). `.dockerignore` keeps `.git` out of the build context, so image builds must pass `--build-arg GIT_VERSION=...` — the Docker workflow resolves it with `git describe` on the runner. An arg-less `docker build` produces a working image labelled `dev`.
+- Downloads the six built-in filter lists via `curl` into `OUT_DIR/lists/`. On network failure it writes an empty file and warns rather than failing.
+- Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
+- Stamps `GIT_VERSION` from `git describe` (override via the env var; a literal `dev` counts as unset). `.dockerignore` excludes `.git`, so image builds must pass `--build-arg GIT_VERSION=...`; an arg-less `docker build` yields a working image labelled `dev`.
 
 ## Admin UI
 
-`admin-ui/dist/index.html` is a **single file of vanilla-JS web components — no framework, no build step.** It is embedded via `include_dir!` at `src/admin/api.rs` (`static ADMIN_UI`). Editing the UI = editing that one HTML file, then `cargo build` to re-embed. Embedded assets are served with content-hash `ETag` + `Cache-Control: no-cache` so browsers revalidate and get `304` when unchanged.
+`admin-ui/dist/index.html` is a **single file of vanilla-JS web components — no framework, no build step**, embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing that one file, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`.
 
-After any change that alters the admin UI's appearance, regenerate the affected screenshots in `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the updated PNGs alongside the change. Skip this only for non-visual edits (copy, logic, accessibility attributes) that do not change what a screenshot would capture.
+After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
 
 ## Architecture essentials
 
-All components run in one tokio runtime. Query path (`src/dns/handler.rs`): **filter → cache → upstream forward**, with logging fired async over an mpsc channel. Filter runs *before* cache so newly added block rules take effect immediately.
+Everything runs in one tokio runtime. Query path (`src/dns/handler.rs`): **filter → cache → upstream forward**, with logging fired async over an mpsc channel. Filter runs *before* cache so new block rules take effect immediately.
 
-- **Filter engine** (`src/filter/engine.rs`): FST for exact matches + a flat reverse-domain trie (labels stored reversed, e.g. `["com","example","ads"]`) serialized into two contiguous byte buffers (~19 bytes/rule). The live engine sits behind `ArcSwap`; updates build a fresh engine and atomically swap it in (lock-free reads, zero query interruption). Rebuild coordination is in `src/filter/rebuild.rs`.
-- **Storage** (`src/db.rs`): all SQLite schema, migrations, and CRUD in one module. Schema versioning uses `PRAGMA user_version`; each migration applies incrementally, new DBs get the latest schema directly. An hourly background task prunes old `query_logs` and runs maintenance (`PRAGMA optimize`, WAL checkpoint, conditional `VACUUM`).
-- **Async logging** (`src/logger.rs`): mpsc channel → a task batches and flushes to SQLite (every 500 entries or 1s) to keep the query path non-blocking.
-- **Upstream** (`src/upstream/`): forwarder + selection `strategy.rs` (Sequential / Round Robin / Lowest Latency via EMA), switchable at runtime.
-- **DoH** (`src/dns/doh.rs`): axum router; access can be gated by user-defined URL tokens (`/dns-query/my-token`).
-- **Admin** (`src/admin/`): `api.rs` (REST + static serving), `auth.rs` (Argon2 hashing, sessions, rate limiting), `stats.rs` (query statistics).
-- `src/main.rs` wires every component together and is the place to trace how things connect.
+- **Filter engine** (`src/filter/engine.rs`): FST for exact matches plus a flat reverse-domain trie, serialized into two contiguous byte buffers. The live engine sits behind `ArcSwap`; updates build a fresh engine and swap it in atomically. Coordination in `src/filter/rebuild.rs`.
+- **Storage** (`src/db.rs`): all schema, migrations, and CRUD in one module. Versioning via `PRAGMA user_version`, applied incrementally and forward-only. An hourly task prunes `query_logs` and runs maintenance.
+- **Async logging** (`src/logger.rs`): mpsc → a task batches to SQLite (500 entries or 1s) to keep the query path non-blocking.
+- **Upstream** (`src/upstream/`): forwarder plus `strategy.rs` (Sequential / Round Robin / Lowest Latency via EMA), switchable at runtime.
+- **DoH** (`src/dns/doh.rs`): axum router, optionally gated by user-defined URL tokens.
+- **Admin** (`src/admin/`): `api.rs` (REST + static serving), `auth.rs` (Argon2, sessions, rate limiting), `csrf.rs`, `stats.rs`.
+- `src/main.rs` wires it all together — the place to trace how things connect.
 
-`mimalloc` is the global allocator specifically so the large transient allocation from a filter rebuild is returned to the OS, keeping steady-state RSS low on small devices.
+`mimalloc` is the global allocator specifically so a filter rebuild's large transient allocation returns to the OS, keeping steady-state RSS low on small devices.
 
 ## Diagnostic logging
 
-Separate from the per-query `query_logs` table — this is the `tracing` stream on stderr, configured in `src/config.rs` (`--log-format`, `RUST_LOG`, default `error,noadd=info`).
+Separate from the per-query `query_logs` table: this is the `tracing` stream on stderr, configured in `src/config.rs` (`--log-format`, `RUST_LOG`, default `error,noadd=info`).
 
-**Every `info!`/`warn!`/`error!`/`debug!` call carries `event = "domain.action"` as its first field**, and every variable value is a field rather than being interpolated into the message. The message is a static human-readable string:
+**Every `info!`/`warn!`/`error!`/`debug!` carries `event = "domain.action"` as its first field**, every value is a field rather than interpolated, and the message is a static human-readable string:
 
 ```rust
 // yes
@@ -83,11 +76,9 @@ debug!(event = "dns.send_failed", transport = "tcp", stage = "flush", client = %
 debug!("TCP flush error for {peer}: {e}");
 ```
 
-Why it matters: `--log-format json` emits each field as its own JSON key, so `event` is a stable identifier that survives message rewording, and fields are filterable without regex. `jq 'select(.fields.event == "upstream.forward_failed")'` works; grepping prose does not.
-
-Conventions:
+`--log-format json` emits each field as its own key, so `event` survives message rewording and fields are filterable without regex: `jq 'select(.fields.event == "upstream.forward_failed")'` works; grepping prose does not.
 
 - **Prefer a field over a new event name.** The three TCP write failures share `dns.send_failed` and differ by `stage`; UDP and TCP share `dns.listener_started` and differ by `transport`. That keeps "all send failures" one query.
-- **Name events `domain.action`** in the past tense for things that happened (`filter.rebuild_completed`, `session.created`) — existing domains are `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, and the audit set (`auth`, `session`, `apikey`, `forward_auth`, `audit`).
+- **Name events `domain.action`**, past tense for things that happened (`filter.rebuild_completed`, `session.created`). Existing domains: `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, plus the audit set (`auth`, `session`, `apikey`, `forward_auth`, `audit`).
 - **Errors go in an `error` field** (`error = %e`), never in the message.
-- Reuse an existing event name when the event is the same; a grep for `event = "` is the index.
+- Reuse an existing event name when the event is the same; `rg 'event = "'` is the index.
