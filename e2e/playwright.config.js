@@ -131,5 +131,17 @@ export default defineConfig({
       testMatch: /settings-autosave\.spec\.js$/,
       use: { ...devices['Desktop Chrome'] },
     },
+    {
+      // Account-page regression: the session list must refresh in place after a
+      // password change. Plain Playwright spec that seeds and drives its own
+      // noadd instance (dedicated ports 14105/15105), like `settings`. It needs
+      // its own instance for two reasons: it changes the admin password, and it
+      // needs an unspent login rate-limit budget — the shared @auth instance
+      // uses up its five attempts per minute on the sign-in scenarios.
+      name: 'password-change',
+      testDir: 'specs',
+      testMatch: /password-change-session-list\.spec\.js$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 });
