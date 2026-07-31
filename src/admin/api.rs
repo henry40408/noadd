@@ -232,7 +232,7 @@ pub fn admin_router(state: AppState) -> Router {
             crate::admin::csrf::csrf_origin_guard,
         ))
         .layer(axum::middleware::from_fn(crate::headers::no_store))
-        .layer(axum::middleware::from_fn(crate::headers::frame_protection))
+        .layer(axum::middleware::from_fn(crate::headers::security_headers))
 }
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");

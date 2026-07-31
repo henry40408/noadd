@@ -2917,7 +2917,7 @@ async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
 /// here, so a dropped `.layer(...)` must fail the suite. The unit test in
 /// `src/headers.rs` only proves the middleware works when attached.
 #[tokio::test]
-async fn frame_protection_headers_are_sent_by_the_admin_router() {
+async fn security_headers_are_sent_by_the_admin_router() {
     let (app, token) = setup().await;
     let res = app
         .oneshot(authed("GET", "/api/auth/me", &token, None))
@@ -2928,6 +2928,10 @@ async fn frame_protection_headers_are_sent_by_the_admin_router() {
     assert_eq!(
         res.headers().get("content-security-policy").unwrap(),
         "frame-ancestors 'none'"
+    );
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
     );
 }
 

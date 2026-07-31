@@ -53,7 +53,13 @@ const FRAME_ANCESTORS_NONE: HeaderValue = HeaderValue::from_static("frame-ancest
 /// nothing and does not depend on that staying true by accident.
 const FRAME_DENY: HeaderValue = HeaderValue::from_static("DENY");
 
-/// Refuse clickjacking on every admin response.
+/// `X-Content-Type-Options`. Every admin response already declares an
+/// accurate `Content-Type`, so this changes nothing today; it is here so that
+/// a future response that gets one wrong fails closed instead of letting a
+/// browser sniff an attacker-influenced body into something executable.
+const NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
+
+/// Stamp the browser-hardening headers on every admin response.
 ///
 /// Both headers say the same thing on purpose: `frame-ancestors` is the
 /// modern directive and wins where both are understood, while
@@ -66,11 +72,12 @@ const FRAME_DENY: HeaderValue = HeaderValue::from_static("DENY");
 /// on the response: no handler sets either header, so an existing value would
 /// mean something upstream is trying to make itself framable, which is never
 /// what this router wants.
-pub async fn frame_protection(req: Request, next: Next) -> Response {
+pub async fn security_headers(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
     headers.insert(header::CONTENT_SECURITY_POLICY, FRAME_ANCESTORS_NONE);
     headers.insert(header::X_FRAME_OPTIONS, FRAME_DENY);
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, NOSNIFF);
     resp
 }
 
@@ -115,7 +122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frame_protection_refuses_framing_both_ways() {
+    async fn security_headers_refuse_framing_and_sniffing() {
         use axum::Router;
         use axum::body::Body;
         use axum::routing::get;
@@ -127,7 +134,7 @@ mod tests {
 
         let app = Router::new()
             .route("/", get(ok))
-            .layer(axum::middleware::from_fn(frame_protection));
+            .layer(axum::middleware::from_fn(security_headers));
 
         let response = app
             .oneshot(
@@ -142,6 +149,13 @@ mod tests {
         assert_eq!(
             response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
             "DENY"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
         );
         // Asserted exactly, not with `contains`: a policy that grew other
         // directives would need the deliberate design work the constant's doc
