@@ -7,7 +7,8 @@ use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+    RateLimiter, SessionInfo, generate_token, hash_password, hash_session_token, new_session_store,
+    store_session,
 };
 use noadd::cache::DnsCache;
 use noadd::db::Database;
@@ -49,12 +50,12 @@ async fn setup() -> (axum::Router, String) {
     let now = noadd::now_unix();
     let token = generate_token();
     let sid = db
-        .insert_session(&token, uid, now, now, None, None)
+        .insert_session(&hash_session_token(&token), uid, now, now, None, None)
         .await
         .unwrap();
     store_session(
         &sessions,
-        &token,
+        &hash_session_token(&token),
         SessionInfo {
             session_id: sid,
             user_id: uid,

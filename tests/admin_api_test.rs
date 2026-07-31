@@ -9,8 +9,8 @@ use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, new_session_store,
-    store_session,
+    RateLimiter, SessionInfo, SessionStore, generate_token, hash_password, hash_session_token,
+    new_session_store, store_session,
 };
 use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use noadd::db::{Database, QueryLogEntry};
@@ -113,12 +113,12 @@ async fn build_app_opts(
             .unwrap();
         let now = noadd::now_unix();
         let sid = db
-            .insert_session(&token, uid, now, now, None, None)
+            .insert_session(&hash_session_token(&token), uid, now, now, None, None)
             .await
             .unwrap();
         store_session(
             &sessions,
-            &token,
+            &hash_session_token(&token),
             SessionInfo {
                 session_id: sid,
                 user_id: uid,
@@ -598,6 +598,41 @@ async fn login_set_cookie(app: axum::Router) -> String {
         .to_string()
 }
 
+/// The stored identifier must not *be* the credential. A copy of the database
+/// — a backup, a stray WAL file, a discarded SD card — must not hand over a
+/// live session the way it did while `sessions.token` held plaintext.
+#[tokio::test]
+async fn login_persists_a_hash_never_the_cookie_value() {
+    let (app, _token, _cache, _events, db, sessions, _invalid_session_limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let set_cookie = login_set_cookie(app).await;
+    let cookie_value = set_cookie
+        .split_once("session=")
+        .expect("login must set the session cookie")
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let rows = db.list_sessions().await.unwrap();
+    assert!(
+        rows.iter()
+            .all(|r| r.token_hash != cookie_value && !r.token_hash.is_empty()),
+        "no row may hold the raw cookie value"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.token_hash == hash_session_token(&cookie_value)),
+        "the session must be persisted under the hash of the cookie value"
+    );
+    // The in-memory store is keyed the same way, which is what lets a row
+    // deleted by id be evicted from memory by the value the DELETE returned.
+    let live = sessions.lock();
+    assert!(!live.contains_key(&cookie_value));
+    assert!(live.contains_key(&hash_session_token(&cookie_value)));
+}
+
 #[tokio::test]
 async fn test_login_cookie_secure_when_enabled() {
     let (app, _token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
@@ -841,7 +876,7 @@ async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
 #[tokio::test]
 async fn logout_revokes_the_session_that_authenticated_the_request() {
     // Reproduces the bug: a browser can hold a stale `__Host-session`
-    // alongside a live `session` cookie (see `session_cookie_candidates`).
+    // alongside a live `session` cookie (see `session_cookie_hashes`).
     // `AuthedUser` correctly authenticates via the live one, but `logout`
     // used to act on whichever cookie was positionally first — clearing only
     // the stale name and reporting success while the live token, the one
@@ -922,12 +957,19 @@ async fn logout_revokes_every_live_session_named_by_a_cookie() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(&token_b, admin_id, now, now, None, None)
+        .insert_session(
+            &hash_session_token(&token_b),
+            admin_id,
+            now,
+            now,
+            None,
+            None,
+        )
         .await
         .unwrap();
     store_session(
         &sessions,
-        &token_b,
+        &hash_session_token(&token_b),
         SessionInfo {
             session_id: sid,
             user_id: admin_id,
@@ -2190,12 +2232,19 @@ async fn change_password_revokes_other_sessions_of_same_user() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(&token_b, admin_id, now, now, None, None)
+        .insert_session(
+            &hash_session_token(&token_b),
+            admin_id,
+            now,
+            now,
+            None,
+            None,
+        )
         .await
         .unwrap();
     store_session(
         &sessions,
-        &token_b,
+        &hash_session_token(&token_b),
         SessionInfo {
             session_id: sid,
             user_id: admin_id,
@@ -2249,12 +2298,12 @@ async fn change_password_keeps_other_operators_signed_in() {
     let token_c = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(&token_c, bob_id, now, now, None, None)
+        .insert_session(&hash_session_token(&token_c), bob_id, now, now, None, None)
         .await
         .unwrap();
     store_session(
         &sessions,
-        &token_c,
+        &hash_session_token(&token_c),
         SessionInfo {
             session_id: sid,
             user_id: bob_id,
@@ -2298,12 +2347,19 @@ async fn change_password_deletes_revoked_rows_from_db() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(&token_b, admin_id, now, now, None, None)
+        .insert_session(
+            &hash_session_token(&token_b),
+            admin_id,
+            now,
+            now,
+            None,
+            None,
+        )
         .await
         .unwrap();
     store_session(
         &sessions,
-        &token_b,
+        &hash_session_token(&token_b),
         SessionInfo {
             session_id: sid,
             user_id: admin_id,

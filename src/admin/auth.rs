@@ -70,7 +70,15 @@ pub struct SessionInfo {
     pub last_seen: i64,
 }
 
-/// Thread-safe session store. Maps token -> session metadata.
+/// Thread-safe session store. Maps **token hash** (see [`hash_session_token`])
+/// -> session metadata.
+///
+/// Keyed by the hash rather than the token so that the raw token exists in
+/// exactly two places — the `Set-Cookie` header on the way out and the
+/// `Cookie` header on the way back in — and nowhere in noadd's own state.
+/// The store and the `sessions` table therefore agree on one identifier, which
+/// is what lets a row deleted by id be evicted from memory by the value the
+/// DELETE returned.
 pub type SessionStore = Arc<Mutex<HashMap<String, SessionInfo>>>;
 
 /// Create a new, empty session store.
@@ -118,17 +126,39 @@ const API_KEY_PREFIX: &str = "noadd_";
 /// Random body length; 40 alphanumeric chars ≈ 238 bits of entropy.
 const API_KEY_BODY_LEN: usize = 40;
 
-/// BLAKE2b-512 hash of an API key, lower-hex encoded. Fast one-way hash — the
-/// token is high-entropy random, so no salt/Argon2 is needed, and the hex digest
-/// is directly indexable for lookup.
-pub fn hash_api_key(token: &str) -> String {
+/// BLAKE2b-512 of `secret`, lower-hex encoded. Fast one-way hash with no salt:
+/// every secret hashed here is high-entropy random, so there is no dictionary
+/// to defend against and nothing for Argon2 to buy, while the hex digest stays
+/// directly indexable for an equality lookup.
+fn blake2b_hex(secret: &str) -> String {
     use std::fmt::Write as _;
     let mut hasher = Blake2b512::new();
-    hasher.update(token.as_bytes());
+    hasher.update(secret.as_bytes());
     hasher.finalize().iter().fold(String::new(), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// Hash of an API key, as stored in `api_keys.token_hash`.
+pub fn hash_api_key(token: &str) -> String {
+    blake2b_hex(token)
+}
+
+/// Hash of a session token, as stored in `sessions.token_hash` and used as the
+/// [`SessionStore`] key.
+///
+/// Same construction as [`hash_api_key`], and for the same reason: a copy of
+/// the database — a backup, a stray WAL file, a snapshot on a disposed SD card
+/// — must not hand over live credentials. Before this, API keys were hashed
+/// while session tokens sat in the same file in plaintext, so the weaker of
+/// the two set the real bar.
+///
+/// This is *not* [`session_log_id`]: that one is salted and truncated for log
+/// correlation and cannot be looked up. This one must be deterministic and
+/// unsalted precisely so a presented cookie can find its row.
+pub fn hash_session_token(token: &str) -> String {
+    blake2b_hex(token)
 }
 
 /// Process-wide salt for [`session_log_id`]. Installed once at startup from the
@@ -192,9 +222,14 @@ fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
-/// Salted, truncated `BLAKE2b` digest of a session token: a stable,
+/// Salted, truncated `BLAKE2b` digest of a session's token hash: a stable,
 /// non-reversible identifier safe to write to logs, so session events can be
 /// correlated without ever disclosing the token. Never log the token itself.
+///
+/// Takes the hash rather than the raw token — that is the only identifier the
+/// logging call sites still hold (see [`hash_session_token`]) — and the salt
+/// is what keeps this distinct from the stored `token_hash`, so a log line can
+/// never be matched against a stolen database row.
 ///
 /// Deliberately not called for a successful session validation: that path
 /// runs on every request, so logging it there would drown the audit log
@@ -202,22 +237,22 @@ fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
 /// destruction are lifecycle events worth recording. A successful API key use
 /// is likewise not logged per-call; it is already tracked via
 /// `api_keys.last_used_at`.
-pub fn session_log_id(token: &str) -> String {
+pub fn session_log_id(token_hash: &str) -> String {
     let salt = SESSION_LOG_SALT.get_or_init(|| {
         let mut s = [0u8; 16];
         s.fill_with(rand::random);
         s
     });
-    session_log_id_with(salt, token)
+    session_log_id_with(salt, token_hash)
 }
 
 /// [`session_log_id`]'s digest under an explicit salt, split out so the
 /// salting property itself is directly testable — a test driving the
 /// process-wide `OnceLock` can only ever exercise one salt value per process.
-fn session_log_id_with(salt: &[u8; 16], token: &str) -> String {
+fn session_log_id_with(salt: &[u8; 16], token_hash: &str) -> String {
     let mut hasher = Blake2b512::new();
     hasher.update(salt);
-    hasher.update(token.as_bytes());
+    hasher.update(token_hash.as_bytes());
     use std::fmt::Write as _;
     // 16 hex chars (64 bits) is far more than enough to correlate the handful
     // of sessions one appliance ever has, and keeps log lines readable.
@@ -243,21 +278,22 @@ pub fn generate_api_key() -> (String, String, String) {
     (full, prefix, hash)
 }
 
-/// Record a session in the in-memory store.
-pub fn store_session(store: &SessionStore, token: &str, info: SessionInfo) {
-    store.lock().insert(token.to_string(), info);
+/// Record a session in the in-memory store, keyed by its token hash.
+pub fn store_session(store: &SessionStore, token_hash: &str, info: SessionInfo) {
+    store.lock().insert(token_hash.to_string(), info);
 }
 
-/// Validate a token. Returns the owning `user_id` and refreshes `last_seen`,
-/// or `None` if missing/expired (expired entries are dropped).
-pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
+/// Validate a presented session by its token hash. Returns the owning
+/// `user_id` and refreshes `last_seen`, or `None` if missing/expired (expired
+/// entries are dropped).
+pub fn validate_session(store: &SessionStore, token_hash: &str) -> Option<i64> {
     let now = now_secs();
     // Reason for eviction, resolved under the lock and logged after it is
     // dropped so no log formatting happens while the store is held.
     let mut expired: Option<(i64, &'static str)> = None;
     {
         let mut map = store.lock();
-        if let Some(info) = map.get_mut(token) {
+        if let Some(info) = map.get_mut(token_hash) {
             // Order matters: the idle check must read `last_seen` *before*
             // this request refreshes it, otherwise it can never fire. A clock
             // going backwards just makes these subtractions negative, which
@@ -276,7 +312,7 @@ pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
                 }
                 Some(r) => {
                     expired = Some((info.session_id, r));
-                    map.remove(token);
+                    map.remove(token_hash);
                 }
             }
         }
@@ -286,7 +322,7 @@ pub fn validate_session(store: &SessionStore, token: &str) -> Option<i64> {
             event = "session.destroyed",
             reason,
             session_id,
-            sid_hash = %session_log_id(token),
+            sid_hash = %session_log_id(token_hash),
             "session expired"
         );
     }
@@ -310,13 +346,13 @@ pub fn prune_expired(store: &SessionStore) -> usize {
 /// Revoke a single session token (logout this device only).
 ///
 /// Leaves every other session intact. Persistence to the database is the
-/// caller's responsibility (see `delete_session_by_token`). Returns the
-/// evicted session's info, or `None` if `token` did not name a live session —
-/// callers that log a `session.destroyed` event must gate on `Some` so an
-/// unvalidated/fabricated token (e.g. read from a client-supplied cookie)
-/// cannot inject a destruction event for a session that never existed.
-pub fn revoke_session(store: &SessionStore, token: &str) -> Option<SessionInfo> {
-    store.lock().remove(token)
+/// caller's responsibility (see `delete_session_by_token_hash`). Returns the
+/// evicted session's info, or `None` if `token_hash` did not name a live
+/// session — callers that log a `session.destroyed` event must gate on `Some`
+/// so an unvalidated/fabricated token (e.g. read from a client-supplied
+/// cookie) cannot inject a destruction event for a session that never existed.
+pub fn revoke_session(store: &SessionStore, token_hash: &str) -> Option<SessionInfo> {
+    store.lock().remove(token_hash)
 }
 
 /// Load persisted sessions from the `sessions` table into the store.
@@ -332,7 +368,7 @@ pub async fn load_sessions_from_db(
     let mut map = store.lock();
     for s in loaded {
         map.insert(
-            s.token,
+            s.token_hash,
             SessionInfo {
                 session_id: s.id,
                 user_id: s.user_id,
@@ -352,7 +388,7 @@ pub async fn flush_last_seen(
     let entries: Vec<(String, i64)> = store
         .lock()
         .iter()
-        .map(|(token, info)| (token.clone(), info.last_seen))
+        .map(|(token_hash, info)| (token_hash.clone(), info.last_seen))
         .collect();
     db.flush_sessions_last_seen(&entries).await
 }
@@ -376,27 +412,28 @@ pub async fn sweep_expired(
     Ok((evicted, deleted))
 }
 
-/// Revoke every session except `keep` (log out other devices, staying signed
-/// in on the current one). When `keep` is `None` — e.g. a forward-auth caller
-/// that holds no session cookie — every session is revoked, since none of them
-/// is the caller's own device. Returns the number of sessions revoked, for
-/// the caller's audit log.
+/// Revoke every session except the one whose token hash is `keep` (log out
+/// other devices, staying signed in on the current one). When `keep` is `None`
+/// — e.g. a forward-auth caller that holds no session cookie — every session is
+/// revoked, since none of them is the caller's own device. Returns the number
+/// of sessions revoked, for the caller's audit log.
 pub async fn revoke_other_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
     keep: Option<&str>,
 ) -> Result<usize, crate::db::DbError> {
-    if let Some(token) = keep {
-        store.lock().retain(|t, _| t == token);
-        db.delete_sessions_except(token).await
+    if let Some(keep_hash) = keep {
+        store.lock().retain(|hash, _| hash == keep_hash);
+        db.delete_sessions_except(keep_hash).await
     } else {
         store.lock().clear();
         db.delete_all_sessions().await
     }
 }
 
-/// Revoke every session owned by `user_id` except `keep` (the caller's own
-/// device). `keep = None` revokes all of that user's sessions. Unlike
+/// Revoke every session owned by `user_id` except the one whose token hash is
+/// `keep` (the caller's own device). `keep = None` revokes all of that user's
+/// sessions. Unlike
 /// [`revoke_other_sessions`], other operators are unaffected — which is the
 /// required semantics after a password change, where only the account whose
 /// credential changed may be logged out.
@@ -418,7 +455,7 @@ pub async fn revoke_user_sessions_except(
     db.delete_user_sessions_except(user_id, keep).await?;
     let mut map = store.lock();
     let before = map.len();
-    map.retain(|t, info| info.user_id != user_id || keep == Some(t.as_str()));
+    map.retain(|hash, info| info.user_id != user_id || keep == Some(hash.as_str()));
     Ok(before - map.len())
 }
 

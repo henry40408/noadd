@@ -9,7 +9,8 @@ use tower::ServiceExt;
 
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{
-    RateLimiter, SessionInfo, generate_token, hash_password, new_session_store, store_session,
+    RateLimiter, SessionInfo, generate_token, hash_password, hash_session_token, new_session_store,
+    store_session,
 };
 use noadd::admin::forward_auth::ForwardAuthConfig;
 use noadd::cache::DnsCache;
@@ -64,12 +65,12 @@ async fn build(
         let token = generate_token();
         let now = noadd::now_unix();
         let sid = db
-            .insert_session(&token, uid, now, now, None, None)
+            .insert_session(&hash_session_token(&token), uid, now, now, None, None)
             .await
             .unwrap();
         store_session(
             &sessions,
-            &token,
+            &hash_session_token(&token),
             SessionInfo {
                 session_id: sid,
                 user_id: uid,
@@ -440,7 +441,7 @@ async fn revoke_others_keeps_the_current_session() {
     let uid = db.get_user_auth("admin").await.unwrap().unwrap().id;
     let other = generate_token();
     let now = noadd::now_unix();
-    db.insert_session(&other, uid, now, now, None, None)
+    db.insert_session(&hash_session_token(&other), uid, now, now, None, None)
         .await
         .unwrap();
     assert_eq!(db.list_sessions().await.unwrap().len(), 2);
@@ -457,7 +458,8 @@ async fn revoke_others_keeps_the_current_session() {
     let remaining = db.list_sessions().await.unwrap();
     assert_eq!(remaining.len(), 1, "only the caller's session remains");
     assert_eq!(
-        remaining[0].token, token,
+        remaining[0].token_hash,
+        hash_session_token(&token),
         "the kept session is the caller's"
     );
 }
