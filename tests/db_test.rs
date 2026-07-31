@@ -605,7 +605,7 @@ async fn test_sessions_crud_and_cascade() {
     let list = db.list_sessions().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].username, "carol");
-    assert_eq!(list[0].token, "tok-1");
+    assert_eq!(list[0].token_hash, "tok-1");
     assert_eq!(list[0].ip.as_deref(), Some("1.2.3.4"));
 
     // delete_session_by_id returns the token for in-memory eviction
@@ -648,13 +648,13 @@ async fn test_load_sessions_drops_expired() {
     // exercises only the absolute-timeout branch.
     let loaded = db.load_sessions(100, 10_000, 1_100).await.unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].token, "fresh");
+    assert_eq!(loaded[0].token_hash, "fresh");
     assert!(
         db.list_sessions()
             .await
             .unwrap()
             .iter()
-            .all(|s| s.token == "fresh")
+            .all(|s| s.token_hash == "fresh")
     );
 }
 
@@ -682,13 +682,13 @@ async fn test_load_sessions_purges_idle_rows() {
         .await
         .unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].token, "active");
+    assert_eq!(loaded[0].token_hash, "active");
     assert!(
         db.list_sessions()
             .await
             .unwrap()
             .iter()
-            .all(|s| s.token == "active")
+            .all(|s| s.token_hash == "active")
     );
 }
 
@@ -759,7 +759,7 @@ async fn purge_expired_sessions_removes_absolute_and_idle_expired_rows() {
 
     let remaining = db.list_sessions().await.unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].token, "normal");
+    assert_eq!(remaining[0].token_hash, "normal");
 }
 
 #[tokio::test]

@@ -151,12 +151,17 @@ pub struct SessionRow {
     pub last_seen: i64,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
-    pub token: String,
+    /// `BLAKE2b` digest of the session token, never the token itself — see
+    /// `crate::admin::auth::hash_session_token`. Doubles as the in-memory
+    /// `SessionStore` key, so it is what identifies a session everywhere
+    /// except the cookie on the wire.
+    pub token_hash: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedSession {
-    pub token: String,
+    /// See [`SessionRow::token_hash`].
+    pub token_hash: String,
     pub id: i64,
     pub user_id: i64,
     pub created_at: i64,
@@ -525,7 +530,25 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 8;
+        if version < 9 {
+            // Session tokens are now stored as a BLAKE2b digest, the way API
+            // keys always have been, so a copy of the database — a backup, a
+            // stray WAL file — no longer hands over every live session.
+            //
+            // Existing rows hold raw tokens and are dropped rather than
+            // rehashed: SQLite has no BLAKE2b to do it in SQL, and doing it in
+            // Rust would rewrite the rows while leaving the plaintext behind
+            // in freelist pages and the WAL regardless, so the migration would
+            // claim a protection it had not actually delivered. Sessions are
+            // short-lived by construction; the cost is that every operator
+            // signs in once more after the upgrade.
+            conn.execute_batch(
+                "DELETE FROM sessions;
+                 ALTER TABLE sessions RENAME COLUMN token TO token_hash;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 9;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1381,25 +1404,27 @@ impl Database {
 
     // --- Sessions ---
 
+    /// Persist a session. `token_hash` is the digest, never the raw token —
+    /// see [`SessionRow::token_hash`].
     pub async fn insert_session(
         &self,
-        token: &str,
+        token_hash: &str,
         user_id: i64,
         created_at: i64,
         last_seen: i64,
         ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<i64, DbError> {
-        let token = token.to_string();
+        let token_hash = token_hash.to_string();
         let ip = ip.map(std::string::ToString::to_string);
         let user_agent = user_agent.map(std::string::ToString::to_string);
         let id = self
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO sessions (token, user_id, created_at, last_seen, ip, user_agent)
+                    "INSERT INTO sessions (token_hash, user_id, created_at, last_seen, ip, user_agent)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![token, user_id, created_at, last_seen, ip, user_agent],
+                    params![token_hash, user_id, created_at, last_seen, ip, user_agent],
                 )?;
                 Ok(conn.last_insert_rowid())
             })
@@ -1407,35 +1432,41 @@ impl Database {
         Ok(id)
     }
 
-    pub async fn delete_session_by_token(&self, token: &str) -> Result<(), DbError> {
-        let token = token.to_string();
+    pub async fn delete_session_by_token_hash(&self, token_hash: &str) -> Result<(), DbError> {
+        let token_hash = token_hash.to_string();
         self.conn
             .call(move |conn| {
-                conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+                conn.execute(
+                    "DELETE FROM sessions WHERE token_hash = ?1",
+                    params![token_hash],
+                )?;
                 Ok(())
             })
             .await?;
         Ok(())
     }
 
+    /// Delete the session with `id`, returning its `token_hash` so the caller
+    /// can evict the matching in-memory entry.
     pub async fn delete_session_by_id(&self, id: i64) -> Result<Option<String>, DbError> {
-        let token = self
+        let token_hash = self
             .conn
             .call(move |conn| {
                 // Single atomic statement: DELETE ... RETURNING removes the row and
-                // yields its token in one step, so there is no SELECT-then-DELETE
-                // window where a concurrent revoke of the same id could double-fire.
-                let tok: Option<String> = conn
+                // yields its token hash in one step, so there is no
+                // SELECT-then-DELETE window where a concurrent revoke of the same
+                // id could double-fire.
+                let hash: Option<String> = conn
                     .query_row(
-                        "DELETE FROM sessions WHERE id = ?1 RETURNING token",
+                        "DELETE FROM sessions WHERE id = ?1 RETURNING token_hash",
                         params![id],
                         |row| row.get(0),
                     )
                     .optional()?;
-                Ok(tok)
+                Ok(hash)
             })
             .await?;
-        Ok(token)
+        Ok(token_hash)
     }
 
     /// Delete every session. Returns the number of rows removed.
@@ -1447,36 +1478,40 @@ impl Database {
         Ok(n)
     }
 
-    /// Delete every session except the one holding `token` (log out other
-    /// devices while keeping the caller signed in). Returns the number of
-    /// rows removed.
-    pub async fn delete_sessions_except(&self, token: &str) -> Result<usize, DbError> {
-        let token = token.to_string();
+    /// Delete every session except the one identified by `keep_token_hash`
+    /// (log out other devices while keeping the caller signed in). Returns the
+    /// number of rows removed.
+    pub async fn delete_sessions_except(&self, keep_token_hash: &str) -> Result<usize, DbError> {
+        let keep_token_hash = keep_token_hash.to_string();
         let n = self
             .conn
             .call(move |conn| {
-                conn.execute("DELETE FROM sessions WHERE token != ?1", params![token])
+                conn.execute(
+                    "DELETE FROM sessions WHERE token_hash != ?1",
+                    params![keep_token_hash],
+                )
             })
             .await?;
         Ok(n)
     }
 
-    /// Delete every session belonging to `user_id` except the one holding
-    /// `keep_token`. Passing `None` revokes all of that user's sessions. Other
-    /// operators' sessions are never touched. Returns the number of rows deleted.
+    /// Delete every session belonging to `user_id` except the one identified by
+    /// `keep_token_hash`. Passing `None` revokes all of that user's sessions.
+    /// Other operators' sessions are never touched. Returns the number of rows
+    /// deleted.
     pub async fn delete_user_sessions_except(
         &self,
         user_id: i64,
-        keep_token: Option<&str>,
+        keep_token_hash: Option<&str>,
     ) -> Result<usize, DbError> {
-        let keep_token = keep_token.map(str::to_string);
+        let keep_token_hash = keep_token_hash.map(str::to_string);
         let deleted =
             self.conn
                 .call(move |conn| {
-                    let n = match &keep_token {
-                        Some(token) => conn.execute(
-                            "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
-                            params![user_id, token],
+                    let n = match &keep_token_hash {
+                        Some(hash) => conn.execute(
+                            "DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2",
+                            params![user_id, hash],
                         )?,
                         None => conn
                             .execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?,
@@ -1492,7 +1527,7 @@ impl Database {
             .reader()
             .call(|conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT s.id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token
+                    "SELECT s.id, u.username, s.created_at, s.last_seen, s.ip, s.user_agent, s.token_hash
                      FROM sessions s JOIN users u ON u.id = s.user_id
                      ORDER BY s.last_seen DESC",
                 )?;
@@ -1505,7 +1540,7 @@ impl Database {
                             last_seen: row.get(3)?,
                             ip: row.get(4)?,
                             user_agent: row.get(5)?,
-                            token: row.get(6)?,
+                            token_hash: row.get(6)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1565,12 +1600,13 @@ impl Database {
                     Self::PURGE_EXPIRED_SESSIONS_SQL,
                     params![absolute_cutoff, idle_cutoff],
                 )?;
-                let mut stmt =
-                    conn.prepare("SELECT token, id, user_id, created_at, last_seen FROM sessions")?;
+                let mut stmt = conn.prepare(
+                    "SELECT token_hash, id, user_id, created_at, last_seen FROM sessions",
+                )?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok(LoadedSession {
-                            token: row.get(0)?,
+                            token_hash: row.get(0)?,
                             id: row.get(1)?,
                             user_id: row.get(2)?,
                             created_at: row.get(3)?,
@@ -1584,6 +1620,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Flush `last_seen` for each `(token_hash, last_seen)` pair.
     pub async fn flush_sessions_last_seen(&self, entries: &[(String, i64)]) -> Result<(), DbError> {
         if entries.is_empty() {
             return Ok(());
@@ -1593,10 +1630,11 @@ impl Database {
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt =
-                        tx.prepare_cached("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")?;
-                    for (token, last_seen) in &entries {
-                        stmt.execute(params![last_seen, token])?;
+                    let mut stmt = tx.prepare_cached(
+                        "UPDATE sessions SET last_seen = ?1 WHERE token_hash = ?2",
+                    )?;
+                    for (token_hash, last_seen) in &entries {
+                        stmt.execute(params![last_seen, token_hash])?;
                     }
                 }
                 tx.commit()?;
@@ -2232,12 +2270,16 @@ mod tests {
         let path = dir.path().join("v7.db");
         let path_str = path.to_str().unwrap().to_string();
 
-        // Simulate a v7 database with a user and unrelated data.
+        // Simulate a v7 database with a user and unrelated data. `sessions` is
+        // part of the fixture because a real v7 database has one — it is created
+        // by the v6 step, which does not re-run for a database already stamped
+        // v7 — and the v9 step below rewrites that table.
         {
             let conn = rusqlite::Connection::open(&path_str).unwrap();
             conn.execute_batch(
                 "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
                  INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100);
+                 CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, ip TEXT, user_agent TEXT);
                  PRAGMA user_version = 7;",
             )
             .unwrap();
@@ -2255,6 +2297,46 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].name, "ci");
         assert_eq!(keys[0].prefix, "noadd_dead");
+    }
+
+    #[tokio::test]
+    async fn migration_v9_drops_plaintext_sessions_and_renames_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v8.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // A v8 database holding a live session under a plaintext token.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100);
+                 CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, ip TEXT, user_agent TEXT);
+                 INSERT INTO sessions (token, user_id, created_at, last_seen) VALUES ('plaintext-token', 1, 100, 100);
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        // The plaintext row is gone rather than carried forward: keeping it
+        // would leave a usable credential sitting in the file, which is the
+        // whole point of the migration.
+        assert!(db.list_sessions().await.unwrap().is_empty());
+
+        // And the renamed column is what the queries now use end to end.
+        let sid = db
+            .insert_session("a-hash", 1, 200, 200, None, None)
+            .await
+            .unwrap();
+        let rows = db.list_sessions().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].token_hash, "a-hash");
+        assert_eq!(
+            db.delete_session_by_id(sid).await.unwrap().as_deref(),
+            Some("a-hash")
+        );
     }
 
     #[tokio::test]

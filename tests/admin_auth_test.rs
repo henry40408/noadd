@@ -183,6 +183,11 @@ async fn sweep_expired_reports_both_counts() {
 
     // Persist matching rows in the DB so purge_expired_sessions (which reads
     // last_seen from disk) agrees with what the in-memory store holds.
+    //
+    // The literals stand in for token *hashes* — both the store key and
+    // `sessions.token_hash` are digests now (see `hash_session_token`), and
+    // nothing here goes through a cookie, so any consistent pair of strings
+    // exercises the same code path a real digest would.
     db.insert_session("active", uid, now - 1_000, now, None, None)
         .await
         .unwrap();
@@ -214,7 +219,7 @@ async fn sweep_expired_reports_both_counts() {
 
     let remaining = db.list_sessions().await.unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].token, "active");
+    assert_eq!(remaining[0].token_hash, "active");
 }
 
 #[test]
