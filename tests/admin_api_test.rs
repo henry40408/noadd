@@ -53,7 +53,7 @@ async fn build_app(
     DnsCache,
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
 ) {
-    let (router, token, cache, log_events, _db, _sessions) =
+    let (router, token, cache, log_events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts(registry_url, set_password, false).await;
     (router, token, cache, log_events)
 }
@@ -61,7 +61,8 @@ async fn build_app(
 /// `build_app` with control over `AppState::cookie_secure`, for the tests that
 /// assert the `Secure` attribute on the session cookie. Also hands back the
 /// `Database` and `SessionStore` backing the router, so tests can seed extra
-/// sessions directly into the same state the app queries.
+/// sessions directly into the same state the app queries, plus the
+/// `invalid_session_limiter` the router counts unknown session cookies into.
 async fn build_app_opts(
     registry_url: &str,
     set_password: bool,
@@ -73,6 +74,7 @@ async fn build_app_opts(
     tokio::sync::broadcast::Sender<Arc<QueryLogEntry>>,
     Database,
     SessionStore,
+    Arc<RateLimiter>,
 ) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
@@ -88,6 +90,10 @@ async fn build_app_opts(
     )));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let invalid_session_limiter = Arc::new(RateLimiter::new(
+        noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
+        noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
+    ));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (log_tx, _log_rx) = mpsc::channel(64);
     let handler = Arc::new(DnsHandler::new(
@@ -140,6 +146,7 @@ async fn build_app_opts(
         filter,
         cache: cache.clone(),
         rate_limiter,
+        invalid_session_limiter: invalid_session_limiter.clone(),
         forwarder,
         handler,
         log_events: log_events.clone(),
@@ -155,7 +162,15 @@ async fn build_app_opts(
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
     });
-    (router, token, cache, log_events, db, sessions)
+    (
+        router,
+        token,
+        cache,
+        log_events,
+        db,
+        sessions,
+        invalid_session_limiter,
+    )
 }
 
 #[tokio::test]
@@ -585,7 +600,7 @@ async fn login_set_cookie(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn test_login_cookie_secure_when_enabled() {
-    let (app, _token, _cache, _events, _db, _sessions) =
+    let (app, _token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let cookie = login_set_cookie(app).await;
     assert!(
@@ -607,7 +622,7 @@ async fn test_login_cookie_secure_when_enabled() {
 async fn test_login_cookie_not_secure_when_disabled() {
     // TLS terminates upstream (or not at all): a Secure cookie would be
     // dropped by the browser over plain HTTP and lock the operator out.
-    let (app, _token, _cache, _events, _db, _sessions) =
+    let (app, _token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let cookie = login_set_cookie(app).await;
     assert!(
@@ -624,7 +639,7 @@ async fn test_login_cookie_not_secure_when_disabled() {
 
 #[tokio::test]
 async fn host_prefixed_cookie_is_accepted_on_read() {
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let response = app
         .oneshot(
@@ -644,7 +659,7 @@ async fn legacy_cookie_name_still_accepted_when_secure() {
     // A restart that flips `cookie_secure` on (new TLS cert, added
     // `--cookie-secure`) must not invalidate sessions issued under the old,
     // unprefixed name.
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let response = app
         .oneshot(
@@ -661,7 +676,7 @@ async fn legacy_cookie_name_still_accepted_when_secure() {
 
 #[tokio::test]
 async fn logout_clears_the_host_prefixed_cookie() {
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
     let response = app
         .oneshot(
@@ -698,6 +713,76 @@ async fn logout_clears_the_host_prefixed_cookie() {
     );
 }
 
+/// OWASP session-ID brute-force detection: a client presenting cookies that
+/// name no live session must be counted per source IP, so a burst becomes
+/// visible in the audit log instead of being silently 401'd forever.
+///
+/// Asserted through the limiter the router counts into rather than through the
+/// log line, which is the only observable the router exposes: after
+/// `MAX_ATTEMPTS - 1` rejected requests, the test's own attempt must be the one
+/// that crosses the threshold — which it can only be if the router counted
+/// every preceding request.
+#[tokio::test]
+async fn unknown_session_cookies_are_counted_per_source_ip() {
+    let (app, _token, _cache, _events, _db, _sessions, limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    let attempts = noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS;
+    for i in 0..attempts - 1 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("session=not-a-real-token-{i}"))
+                    .header("x-forwarded-for", "203.0.113.7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        limiter.tracked_ips(),
+        1,
+        "the guessing client must be tracked under exactly one source IP"
+    );
+    assert!(
+        limiter.record_crossing("203.0.113.7".parse().unwrap()),
+        "the router must have counted the preceding {} rejections, making this one the threshold",
+        attempts - 1
+    );
+}
+
+/// The counter must fire only on a *presented* session cookie. An
+/// unauthenticated request that carries none (a first page load, an API client
+/// that forgot its bearer token) is not a guess and must leave no trace —
+/// otherwise ordinary 401s would drown the signal the burst warning exists for.
+#[tokio::test]
+async fn requests_without_a_session_cookie_are_not_counted() {
+    let (app, _token, _cache, _events, _db, _sessions, limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    for _ in 0..noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("x-forwarded-for", "203.0.113.7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        limiter.tracked_ips(),
+        0,
+        "a request with no session cookie must not be counted as a guess"
+    );
+}
+
 #[tokio::test]
 async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
     // Reproduces the lockout: an operator's browser holds a stale
@@ -705,7 +790,7 @@ async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
     // proxy) alongside a freshly-issued, valid `session` cookie. Auth must
     // fall through to the cookie that actually validates rather than getting
     // stuck on the positionally-preferred but dead `__Host-` one.
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
         .oneshot(
@@ -731,7 +816,7 @@ async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
 async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
     // Mirror case: a valid `__Host-session` alongside a stale unprefixed
     // `session` cookie must still authenticate via the valid one.
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
         .oneshot(
@@ -761,7 +846,7 @@ async fn logout_revokes_the_session_that_authenticated_the_request() {
     // used to act on whichever cookie was positionally first — clearing only
     // the stale name and reporting success while the live token, the one
     // that actually authenticated this very request, stayed valid.
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
         .clone()
@@ -822,7 +907,7 @@ async fn logout_revokes_every_live_session_named_by_a_cookie() {
     // leaving the other session live server-side, still listed in
     // `GET /api/sessions` and replayable by anyone holding its token, for up
     // to the idle/absolute window.
-    let (app, token_a, _cache, _events, db, sessions) =
+    let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let admin_id = db
         .list_users()
@@ -912,7 +997,7 @@ async fn revoke_others_keeps_the_authenticated_session() {
     // request authenticated with — was revoked along with everyone else's,
     // even though the endpoint is documented as "stay signed in on this
     // device".
-    let (app, token, _cache, _events, _db, _sessions) =
+    let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
         .clone()
@@ -1174,6 +1259,10 @@ async fn test_setup_initial_password() {
     )));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let invalid_session_limiter = Arc::new(RateLimiter::new(
+        noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
+        noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
+    ));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (log_tx, _log_rx) = mpsc::channel(64);
     let handler = Arc::new(DnsHandler::new(
@@ -1200,6 +1289,7 @@ async fn test_setup_initial_password() {
         filter: filter.clone(),
         cache: cache.clone(),
         rate_limiter: rate_limiter.clone(),
+        invalid_session_limiter: invalid_session_limiter.clone(),
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: tokio::sync::broadcast::channel(256).0,
@@ -1238,6 +1328,7 @@ async fn test_setup_initial_password() {
         filter,
         cache,
         rate_limiter,
+        invalid_session_limiter,
         forwarder,
         handler,
         log_events: tokio::sync::broadcast::channel(256).0,
@@ -2084,7 +2175,7 @@ async fn change_own_password_requires_correct_current() {
 
 #[tokio::test]
 async fn change_password_revokes_other_sessions_of_same_user() {
-    let (app, token_a, _cache, _events, db, sessions) =
+    let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let admin_id = db
         .list_users()
@@ -2146,7 +2237,7 @@ async fn change_password_revokes_other_sessions_of_same_user() {
 /// `revoke_other_sessions` (which would log out every operator).
 #[tokio::test]
 async fn change_password_keeps_other_operators_signed_in() {
-    let (app, token_a, _cache, _events, db, sessions) =
+    let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
 
     // A second, unrelated operator with their own session (token C).
@@ -2193,7 +2284,7 @@ async fn change_password_keeps_other_operators_signed_in() {
 
 #[tokio::test]
 async fn change_password_deletes_revoked_rows_from_db() {
-    let (app, token_a, _cache, _events, db, sessions) =
+    let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let admin_id = db
         .list_users()
@@ -2679,7 +2770,7 @@ async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
 /// (the token in the URL is itself the credential), so it must not be stored.
 #[tokio::test]
 async fn mobileconfig_is_not_stored() {
-    let (app, token, _cache, _log_events, db, _sessions) =
+    let (app, token, _cache, _log_events, db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
 
     db.set_setting("public_url", "https://dns.example.com")
