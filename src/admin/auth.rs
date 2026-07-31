@@ -541,7 +541,6 @@ impl RateLimiter {
         let map = self.attempts.lock();
         if let Some((count, started)) = map.get(&ip) {
             if started.elapsed().as_secs() >= self.window_secs {
-                // Window expired, allow
                 return true;
             }
             *count < self.max_attempts
@@ -555,7 +554,6 @@ impl RateLimiter {
         let mut map = self.attempts.lock();
         let entry = map.entry(ip).or_insert((0, Instant::now()));
         if entry.1.elapsed().as_secs() >= self.window_secs {
-            // Reset window
             *entry = (1, Instant::now());
         } else {
             entry.0 += 1;
@@ -616,7 +614,6 @@ mod tests {
         assert!(prefix.starts_with("noadd_"));
         assert_eq!(prefix.len(), "noadd_".len() + 4);
         assert!(full.starts_with(&prefix));
-        // hash is deterministic hex of the full token
         assert_eq!(hash, hash_api_key(&full));
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
