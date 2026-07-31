@@ -2148,6 +2148,21 @@ async fn login_with_wrong_username_is_unauthorized() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The session token a response's `Set-Cookie` hands back, if any. Used by the
+/// rotation tests, where the token a request authenticated with is no longer
+/// the token the next request must use.
+fn rotated_session_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let set_cookie = headers.get("set-cookie")?.to_str().ok()?;
+    Some(
+        set_cookie
+            .split_once("session=")?
+            .1
+            .split(';')
+            .next()?
+            .to_string(),
+    )
+}
+
 fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<Body> {
     let mut b = Request::builder()
         .method(method)
@@ -2273,12 +2288,86 @@ async fn change_password_revokes_other_sessions_of_same_user() {
         .unwrap();
     assert_eq!(res_b.status(), StatusCode::UNAUTHORIZED);
 
-    // Token A (the device that made the change) stays signed in.
+    // Token A (the device that made the change) stays signed in — but under
+    // the rotated token, not the one it arrived with.
+    let rotated = rotated_session_token(res.headers()).expect("rotation must set a cookie");
     let res_a = app
+        .clone()
         .oneshot(authed("GET", "/api/auth/me", &token_a, None))
         .await
         .unwrap();
-    assert_eq!(res_a.status(), StatusCode::OK);
+    assert_eq!(
+        res_a.status(),
+        StatusCode::UNAUTHORIZED,
+        "the superseded token must stop working"
+    );
+    let res_rotated = app
+        .oneshot(authed("GET", "/api/auth/me", &rotated, None))
+        .await
+        .unwrap();
+    assert_eq!(res_rotated.status(), StatusCode::OK);
+}
+
+/// OWASP: renew the session ID after a privilege level change. Revoking the
+/// *other* sessions is not enough on its own — it does nothing about a token
+/// that leaked through a channel needing no ongoing browser access (a proxy
+/// log, a shared terminal's history), which is exactly what rotation covers.
+#[tokio::test]
+async fn change_password_rotates_the_callers_own_token() {
+    let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token_a,
+            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .expect("rotation must emit a Set-Cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let rotated = rotated_session_token(res.headers()).unwrap();
+    assert_ne!(rotated, token_a, "the token must actually change");
+
+    // The replacement must carry the same protections as the one login
+    // issues; a rotation that silently dropped one would downgrade the very
+    // session it was issued to protect.
+    assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+    assert!(set_cookie.contains("SameSite=Lax"), "{set_cookie}");
+    assert!(set_cookie.contains("Path=/"), "{set_cookie}");
+
+    // Old token dead, new token live.
+    let old = app
+        .clone()
+        .oneshot(authed("GET", "/api/auth/me", &token_a, None))
+        .await
+        .unwrap();
+    assert_eq!(old.status(), StatusCode::UNAUTHORIZED);
+    let new = app
+        .oneshot(authed("GET", "/api/auth/me", &rotated, None))
+        .await
+        .unwrap();
+    assert_eq!(new.status(), StatusCode::OK);
+
+    // Exactly one session survives, stored as a hash and reachable from both
+    // views — the superseded row must not linger, or a restart would restore
+    // it as a live session.
+    let rows = db.list_sessions().await.unwrap();
+    assert_eq!(rows.len(), 1, "the superseded row must be deleted");
+    assert_eq!(rows[0].token_hash, hash_session_token(&rotated));
+    let live = sessions.lock();
+    assert_eq!(live.len(), 1);
+    assert!(live.contains_key(&hash_session_token(&rotated)));
 }
 
 /// Regression guard: `change_own_password` must revoke only the caller's own
@@ -2379,9 +2468,10 @@ async fn change_password_deletes_revoked_rows_from_db() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let rotated = rotated_session_token(res.headers()).expect("rotation must set a cookie");
 
     let res = app
-        .oneshot(authed("GET", "/api/sessions", &token_a, None))
+        .oneshot(authed("GET", "/api/sessions", &rotated, None))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);

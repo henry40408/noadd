@@ -2148,10 +2148,10 @@ class AccountPage extends HTMLElement {
         <p id="acct-whoami" class="card-desc">Loading…</p>
         <div class="card-title" style="margin-top:4px">Change Password</div>
         <div class="login-error" id="pw-error" style="display:none"></div>
-        <div class="input-row"><input type="password" id="pw-current" placeholder="current password" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" placeholder="new password (min 8)" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" placeholder="confirm new password" style="max-width:220px"></div>
-        <button class="btn btn-primary btn-sm" id="pw-save" style="margin-top:12px">Change Password</button>
+        <div class="input-row"><input type="password" id="pw-current" data-testid="password-current" placeholder="current password" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" data-testid="password-new" placeholder="new password (min 8)" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" data-testid="password-confirm" placeholder="confirm new password" style="max-width:220px"></div>
+        <button class="btn btn-primary btn-sm" id="pw-save" data-testid="password-save" style="margin-top:12px">Change Password</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Operators</div>
@@ -2278,7 +2278,7 @@ class AccountPage extends HTMLElement {
       body.innerHTML = '<tr><td class="text-red" colspan="6">Failed to load sessions</td></tr>';
       return;
     }
-    body.innerHTML = sessions.map(s => html`<tr>
+    body.innerHTML = sessions.map(s => html`<tr data-testid="session-row" data-id="${s.id}">
       <td class="mono text-primary">${s.username}${s.is_current ? raw(' <span class="badge badge-allowed">this device</span>') : ''}</td>
       <td class="mono">${s.ip || '—'}</td>
       <td>${s.user_agent || '—'}</td>
@@ -2310,6 +2310,11 @@ class AccountPage extends HTMLElement {
     if (nw !== cf) return showFormError(err, 'Passwords do not match');
     try {
       await api.post('/api/users/me/password', { current_password: cur, new_password: nw });
+      // The change rewrites this operator's sessions server-side — every other
+      // device is revoked and this one's token is rotated — so the table
+      // rendered above it is stale the moment this returns. Without this the
+      // page keeps showing revoked sessions until a manual reload.
+      this.loadSessions();
       this.querySelector('#pw-current').value = '';
       this.querySelector('#pw-new').value = '';
       this.querySelector('#pw-confirm').value = '';
