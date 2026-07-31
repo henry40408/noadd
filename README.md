@@ -183,9 +183,10 @@ once TLS is set up and expected to stay that way.
 
 ## Client IP behind a reverse proxy
 
-noadd rate-limits logins and DoH queries per client IP and records that IP in
-the query log, so it has to resolve the real client from behind whatever sits
-in front of it. `--trusted-proxies` takes a comma-separated CIDR list of the
+noadd rate-limits logins and DoH queries per client IP, counts unknown session
+cookies against it to spot session-ID guessing, and records that IP in the
+query log, so it has to resolve the real client from behind whatever sits in
+front of it. `--trusted-proxies` takes a comma-separated CIDR list of the
 proxies in the chain; loopback (127.0.0.0/8, `::1`) is always trusted so a
 same-host proxy needs no configuration.
 

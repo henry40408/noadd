@@ -45,6 +45,12 @@ pub struct AppState {
     pub filter: Arc<ArcSwap<FilterEngine>>,
     pub cache: DnsCache,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Counts unknown session tokens per source IP, so a client guessing
+    /// session IDs is reported (see [`note_invalid_session_cookie`]). A
+    /// separate instance from `rate_limiter` on purpose: sharing one would let
+    /// cookie guessing burn a legitimate operator's login budget from behind
+    /// the same NAT address.
+    pub invalid_session_limiter: Arc<RateLimiter>,
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
@@ -458,10 +464,62 @@ fn live_session_token(state: &AppState, jar: &CookieJar) -> Option<String> {
 /// that actually validates, rather than the positionally-first cookie
 /// present — see that function's doc comment for why a stale `__Host-`
 /// cookie must not be allowed to shadow a live `session` cookie.
-fn current_session(state: &AppState, jar: &CookieJar) -> Result<(i64, String), StatusCode> {
-    session_cookie_candidates(jar)
-        .find_map(|token| validate_session(&state.sessions, &token).map(|user_id| (user_id, token)))
-        .ok_or(StatusCode::UNAUTHORIZED)
+///
+/// `connect`/`headers` are only used to attribute a failed lookup to a source
+/// IP; see [`note_invalid_session_cookie`].
+fn current_session(
+    state: &AppState,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<(i64, String), StatusCode> {
+    let mut candidates = session_cookie_candidates(jar).peekable();
+    let presented_a_cookie = candidates.peek().is_some();
+    let found = candidates.find_map(|token| {
+        validate_session(&state.sessions, &token).map(|user_id| (user_id, token))
+    });
+    if found.is_none() && presented_a_cookie {
+        note_invalid_session_cookie(state, connect, headers);
+    }
+    found.ok_or(StatusCode::UNAUTHORIZED)
+}
+
+/// Count one presentation of a session cookie that names no live session, and
+/// warn once when a single source crosses
+/// [`INVALID_SESSION_MAX_ATTEMPTS`] within the window.
+///
+/// This is the detection half of OWASP's "session ID guessing and brute force
+/// detection": until now only `POST /api/auth/login` was counted, so guessing
+/// session cookies directly was neither limited nor visible anywhere.
+///
+/// Deliberately **detect-only** — no 429, no blocking. The same code path is
+/// walked by an entirely legitimate browser whose session expired while its
+/// tab stayed open: the admin SPA keeps polling with the stale cookie, so
+/// blocking on this counter would lock operators out of their own appliance
+/// on the strength of a benign event. The threshold exists for the same
+/// reason (see [`INVALID_SESSION_MAX_ATTEMPTS`]).
+///
+/// Reported as `auth.failed` with a `method` field rather than a new event
+/// name, matching how the password and API-key failures are already recorded,
+/// so "every authentication failure" stays a single query.
+fn note_invalid_session_cookie(
+    state: &AppState,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
+) {
+    let ip = client_ip(state, connect, headers);
+    if state.invalid_session_limiter.record_crossing(ip) {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "session_cookie",
+            reason = "unknown_token_burst",
+            %ip,
+            attempts = crate::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
+            window_secs = crate::admin::auth::INVALID_SESSION_WINDOW_SECS,
+            user_agent = %log_safe(user_agent_log_value(headers), LOG_SAFE_MAX),
+            "repeated session cookies naming no live session"
+        );
+    }
 }
 
 /// Extract a bearer token from the `Authorization` header, if present.
@@ -496,13 +554,27 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         // `session_cookie_candidates` for why a stale `__Host-` cookie must
         // not be allowed to shadow a live `session` cookie.
         let jar = CookieJar::from_headers(&parts.headers);
-        if let Some(user_id) = session_cookie_candidates(&jar)
-            .find_map(|token| validate_session(&state.sessions, &token))
+        let mut candidates = session_cookie_candidates(&jar).peekable();
+        let presented_a_cookie = candidates.peek().is_some();
+        if let Some(user_id) =
+            candidates.find_map(|token| validate_session(&state.sessions, &token))
         {
             return Ok(AuthedUser {
                 user_id,
                 via_forward_auth: false,
             });
+        }
+        // Counted here rather than deferred to the terminal rejection below
+        // (the way `failed_key_prefix` is): the signal is "an unknown session
+        // ID was presented", which is a fact about this request regardless of
+        // whether a bearer token or forward-auth header later authenticates
+        // it, and deferring would couple two unrelated detections.
+        if presented_a_cookie {
+            note_invalid_session_cookie(
+                state,
+                parts.extensions.get::<ConnectInfo<SocketAddr>>(),
+                &parts.headers,
+            );
         }
         // 2. Bearer API key (programmatic path).
         //
@@ -1143,7 +1215,7 @@ async fn change_own_password(
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (user_id, token) = current_session(&state, &jar)?;
+    let (user_id, token) = current_session(&state, connect.as_deref(), &headers, &jar)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
     if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(StatusCode::BAD_REQUEST);

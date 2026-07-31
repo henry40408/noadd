@@ -460,9 +460,24 @@ pub fn has_no_password(hash: &str) -> bool {
     hash == NO_PASSWORD_SENTINEL
 }
 
-/// Simple IP-based rate limiter for login attempts.
+/// How many unknown session tokens one client may present within
+/// [`INVALID_SESSION_WINDOW_SECS`] before the burst is reported. A browser
+/// whose session expired legitimately keeps presenting its stale cookie on
+/// every poll (the admin SPA polls every 2s), so a threshold well above one
+/// is what separates "somebody's tab went stale" from "somebody is guessing
+/// session IDs" — the single-occurrence event would be pure noise.
+pub const INVALID_SESSION_MAX_ATTEMPTS: u32 = 10;
+
+/// Sliding window for [`INVALID_SESSION_MAX_ATTEMPTS`].
+pub const INVALID_SESSION_WINDOW_SECS: u64 = 60;
+
+/// Simple IP-based sliding-window counter, used both to rate-limit login
+/// attempts and to detect bursts of unknown session tokens.
 ///
-/// Tracks the number of attempts per IP within a sliding window.
+/// Tracks the number of attempts per IP within a sliding window. Instances are
+/// per-signal: sharing one across signals would let an attacker guessing
+/// session cookies consume a legitimate operator's login budget from the same
+/// NAT address.
 pub struct RateLimiter {
     attempts: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     max_attempts: u32,
@@ -508,6 +523,47 @@ impl RateLimiter {
         } else {
             entry.0 += 1;
         }
+    }
+
+    /// Record an attempt and report whether it is the one that *reached*
+    /// `max_attempts` in the current window.
+    ///
+    /// Returns `true` on exactly one attempt per window, which is what makes
+    /// this usable to drive a log line: a caller that instead tested
+    /// `count >= max` would re-emit on every further attempt, and the burst
+    /// being reported is precisely the case where further attempts keep
+    /// arriving.
+    pub fn record_crossing(&self, ip: IpAddr) -> bool {
+        let mut map = self.attempts.lock();
+        let entry = map.entry(ip).or_insert((0, Instant::now()));
+        if entry.1.elapsed().as_secs() >= self.window_secs {
+            *entry = (1, Instant::now());
+        } else {
+            entry.0 += 1;
+        }
+        entry.0 == self.max_attempts
+    }
+
+    /// Drop entries whose window has already elapsed, returning how many were
+    /// removed. Without this the map retains one entry per source IP forever,
+    /// which a scanner cycling through addresses (trivial from a /64 of IPv6)
+    /// turns into unbounded memory growth.
+    ///
+    /// Unlike `IpRateLimiter::prune`, this takes no `max_age`: an entry whose
+    /// window has elapsed carries no information at all here — both `check`
+    /// and `record` already treat it as a fresh start — so there is nothing
+    /// for a caller to tune, and a too-short `max_age` could otherwise
+    /// discard a live window.
+    pub fn prune(&self) -> usize {
+        let mut map = self.attempts.lock();
+        let before = map.len();
+        map.retain(|_, (_, started)| started.elapsed().as_secs() < self.window_secs);
+        before - map.len()
+    }
+
+    /// Current number of tracked IPs. Exposed for observability / tests.
+    pub fn tracked_ips(&self) -> usize {
+        self.attempts.lock().len()
     }
 }
 
@@ -571,6 +627,40 @@ mod tests {
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             );
         }
+    }
+
+    #[test]
+    fn record_crossing_fires_exactly_once_per_window() {
+        let rl = RateLimiter::new(3, 60);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(!rl.record_crossing(ip));
+        assert!(!rl.record_crossing(ip));
+        assert!(rl.record_crossing(ip), "the 3rd attempt reaches the limit");
+        // The burst continues; the caller must not be told about it again, or
+        // one attacker would produce one log line per request.
+        assert!(!rl.record_crossing(ip));
+        assert!(!rl.record_crossing(ip));
+        // A different IP has its own window.
+        assert!(!rl.record_crossing("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn prune_drops_entries_whose_window_elapsed() {
+        // A zero-second window makes every entry look elapsed immediately.
+        let rl = RateLimiter::new(5, 0);
+        rl.record("10.0.0.1".parse().unwrap());
+        rl.record("10.0.0.2".parse().unwrap());
+        assert_eq!(rl.tracked_ips(), 2);
+        assert_eq!(rl.prune(), 2);
+        assert_eq!(rl.tracked_ips(), 0);
+    }
+
+    #[test]
+    fn prune_keeps_entries_whose_window_is_still_live() {
+        let rl = RateLimiter::new(5, 3600);
+        rl.record("10.0.0.1".parse().unwrap());
+        assert_eq!(rl.prune(), 0);
+        assert_eq!(rl.tracked_ips(), 1);
     }
 
     #[test]

@@ -53,6 +53,10 @@ async fn build_app() -> axum::Router {
         filter,
         cache,
         rate_limiter,
+        invalid_session_limiter: Arc::new(RateLimiter::new(
+            noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
+            noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
+        )),
         forwarder,
         handler,
         log_events,

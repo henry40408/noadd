@@ -224,6 +224,15 @@ async fn main() -> anyhow::Result<()> {
     let session_store_for_flush = session_store.clone();
     let db_for_flush = db.clone();
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let invalid_session_limiter = Arc::new(RateLimiter::new(
+        noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
+        noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
+    ));
+    // Both admin counters are keyed by source IP and so grow with the number
+    // of distinct clients seen; they are pruned alongside the DNS limiter
+    // below.
+    let login_limiter_for_prune = rate_limiter.clone();
+    let invalid_session_limiter_for_prune = invalid_session_limiter.clone();
     // noadd terminates TLS itself either from user-supplied certs or via ACME.
     // Both count: the listener below picks whichever is configured, so
     // `tls_enabled` must cover both or it misreports an ACME deployment.
@@ -241,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         filter: filter.clone(),
         cache: cache.clone(),
         rate_limiter,
+        invalid_session_limiter,
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: log_events.clone(),
@@ -384,7 +394,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Rate-limiter bucket pruning — IPs unseen for 10 min are evicted so
     // the map cannot grow without bound under clients that roam or scanners
-    // that cycle through source addresses.
+    // that cycle through source addresses. The two admin counters ride along
+    // on the same tick: they are keyed by source IP just the same, and without
+    // this the login limiter in particular retained one entry per address that
+    // ever attempted a login, for the lifetime of the process.
     let prune_limiter = ip_rate_limiter.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
@@ -393,13 +406,19 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let removed = prune_limiter.prune(std::time::Duration::from_secs(600));
-                    if removed > 0 {
-                        tracing::debug!(
-                            event = "ratelimit.buckets_pruned",
-                            removed,
-                            "pruned inactive rate-limit buckets"
-                        );
+                    for (scope, removed) in [
+                        ("dns", prune_limiter.prune(std::time::Duration::from_secs(600))),
+                        ("login", login_limiter_for_prune.prune()),
+                        ("invalid_session", invalid_session_limiter_for_prune.prune()),
+                    ] {
+                        if removed > 0 {
+                            tracing::debug!(
+                                event = "ratelimit.buckets_pruned",
+                                scope,
+                                removed,
+                                "pruned inactive rate-limit buckets"
+                            );
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => break,
