@@ -2437,6 +2437,35 @@ async fn change_own_password_enforces_the_length_band() {
     }
 }
 
+/// The username is validated on the same endpoint and with the same shape of
+/// rejection as the password, and had no coverage at all.
+#[tokio::test]
+async fn create_operator_rejects_an_invalid_username() {
+    for (label, username) in [
+        ("empty", String::new()),
+        ("whitespace only", "   ".to_string()),
+        ("past the 64-character limit", "u".repeat(65)),
+    ] {
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users",
+                &token,
+                Some(&format!(
+                    r#"{{"username":"{username}","password":"vault-quartz-nimbus-84"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "a {label} username must be rejected"
+        );
+    }
+}
+
 #[tokio::test]
 async fn create_operator_enforces_the_length_band() {
     for (label, password) in [

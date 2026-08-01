@@ -1007,7 +1007,10 @@ fn bad_request(message: String) -> (StatusCode, Json<ApiErrorResponse>) {
     )
 }
 
-fn setup_ise() -> (StatusCode, Json<ApiErrorResponse>) {
+/// An opaque `500`. Deliberately says nothing: the caller cannot act on the
+/// difference between a failed hash and a failed write, and naming it would
+/// only describe this server's internals to whoever provoked it.
+fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiErrorResponse {
@@ -1035,7 +1038,11 @@ async fn setup(
         ));
     }
 
-    let count = state.db.count_users().await.map_err(|_err| setup_ise())?;
+    let count = state
+        .db
+        .count_users()
+        .await
+        .map_err(|_err| internal_error())?;
     if count > 0 {
         return Err((
             StatusCode::CONFLICT,
@@ -1056,12 +1063,12 @@ async fn setup(
     if let Err(error) = validate_new_password(&body.password, &[username]) {
         return Err((StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error })));
     }
-    let hash = hash_password(&body.password).map_err(|_err| setup_ise())?;
+    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
     state
         .db
         .create_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_err| setup_ise())?;
+        .map_err(|_err| internal_error())?;
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -1251,14 +1258,7 @@ async fn create_user_handler(
     if let Err(error) = validate_new_password(&body.password, &[username]) {
         return Err(bad_request(error));
     }
-    let hash = hash_password(&body.password).map_err(|_err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse {
-                error: "internal error".to_string(),
-            }),
-        )
-    })?;
+    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
     match state
         .db
         .create_user(username, &hash, crate::now_unix())
@@ -1300,12 +1300,7 @@ async fn create_user_handler(
                 error: "username already exists".to_string(),
             }),
         )),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse {
-                error: "internal error".to_string(),
-            }),
-        )),
+        Err(_) => Err(internal_error()),
     }
 }
 
