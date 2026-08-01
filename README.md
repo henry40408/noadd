@@ -62,6 +62,8 @@ noadd intentionally keeps a narrow focus. The following are **not** supported, a
 - **Local DNSSEC validation** — noadd surfaces the upstream's AD verdict (see Features) but does not verify signatures itself or return SERVFAIL on bogus answers. Trust is hop-by-hop.
 - **Recursive resolution** — noadd is a forwarder, not a recursive resolver; it relies on configured upstreams rather than resolving from the root.
 - **Per-client / per-device policies** — filtering and rules are global; there is no AdGuard-style per-client filtering.
+- **Built-in MFA / passkeys** — the admin login is a password only. Put a proxy that does MFA in front and point noadd at it with `--forward-auth-header`; see [Multi-factor authentication](#multi-factor-authentication).
+- **A separate listen address for the admin UI** — one HTTP listener serves both DoH and the admin UI. Restricting one without the other is a routing rule on the reverse proxy that publishes noadd; see [Publishing DoH without publishing the admin UI](#publishing-doh-without-publishing-the-admin-ui).
 
 ## Quick Start
 
@@ -252,6 +254,65 @@ The HTTP listener must not be reachable except through the proxy: a client that
 can reach noadd (or the proxy) directly, bypassing Cloudflare, can send these
 headers itself.
 
+## Publishing DoH without publishing the admin UI
+
+One HTTP listener (`--http-addr`) serves both DoH and the admin UI. There is
+no separate admin port: splitting them is a routing rule on the reverse proxy
+you already need in order to publish anything, and duplicating that as a
+second listener would mean a second TLS identity, its own certificate, and its
+own cookie/HSTS rules to get wrong.
+
+The consequence is worth stating plainly: **publish noadd for DoH and you
+publish the login page with it**, unless the proxy says otherwise. The paths
+divide cleanly, so a proxy can route only DoH to the public world:
+
+| Path | Publish |
+| --- | --- |
+| `/dns-query`, `/dns-query/{token}` | yes — this is the service |
+| `/api/mobileconfig/{token}` | only if devices enrol over the internet |
+| everything else (`/`, `/api/*`) | no, or behind [forward auth](#reverse-proxy-authentication) |
+
+nginx — a prefix match, so it covers the `/dns-query/{token}` form too:
+
+```nginx
+location ^~ /dns-query { proxy_pass http://noadd:8080; }
+location / { return 404; }
+```
+
+Caddy:
+
+```caddyfile
+dns.example.com {
+    @doh path /dns-query /dns-query/*
+    handle @doh {
+        reverse_proxy noadd:8080
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+Either way the admin UI is still there on noadd's own `--http-addr`, reachable
+from whatever network that address is bound to — the proxy simply stops
+publishing it. Bind noadd to a LAN or VPN address rather than `0.0.0.0` if you
+want that enforced by the host as well.
+
+If you would rather publish the admin UI too, put it behind forward auth
+below rather than relying on the password alone.
+
+### What noadd does on its own
+
+Whatever the proxy does, the admin login is not bare. Passwords are 12–128
+characters and rejected if zxcvbn finds them guessable, hashed with Argon2id;
+login, password change and re-authentication share a five-attempts-per-minute
+throttle per source address; sessions carry both an idle and an absolute
+expiry and are stored hashed; and minting an API key or adding or removing an
+operator needs the password re-confirmed within five minutes, so a stolen
+session cookie cannot quietly be turned into permanent access.
+
+What it does **not** have is a second factor — see below.
+
 ## Reverse proxy authentication
 
 noadd can trust an operator identity set by a fronting proxy (Authelia,
@@ -282,6 +343,25 @@ Example nginx (Authelia-style):
 auth_request_set $user $upstream_http_remote_user;
 proxy_set_header Remote-User $user;
 ```
+
+### Multi-factor authentication
+
+noadd has no built-in MFA, and this is where you add it. Authelia, Authentik
+and Cloudflare Access all offer TOTP, WebAuthn and push in front of the
+`--forward-auth-header` integration above — and they give you one login across
+every self-hosted service instead of one more account to manage.
+
+Building it into noadd would be a worse version of that. WebAuthn needs a
+secure context, and noadd deliberately supports plain-HTTP internal
+deployments where the browser API simply does not exist — so passkeys would be
+unavailable to exactly the deployments least likely to have a proxy. A passkey
+is also bound to one origin, while a self-hosted box is commonly reached by IP,
+by `.local`, by a tailnet name and by a domain, sometimes all four.
+
+The gap a second factor closes that nothing above does is **password reuse**:
+throttling does not help when the attacker already has the right password from
+somebody else's breach. If the admin UI is reachable from the internet, put an
+MFA-capable proxy in front of it.
 
 ### Paths to exclude from the proxy's authentication
 

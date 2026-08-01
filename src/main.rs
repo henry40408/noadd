@@ -298,6 +298,22 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // One listener for both, deliberately — there is no `--admin-addr`.
+    //
+    // Publishing noadd for DoH therefore publishes the login page too, which
+    // sounds like an argument for a second listener until you cost it: an
+    // admin listener on an internal address cannot use the ACME certificate
+    // issued for the DoH domain, so it needs its own TLS identity, and
+    // `resolve_cookie_secure` / `resolve_hsts` would have to answer per
+    // listener instead of once. Getting that pair wrong locks an operator out
+    // of their own box (see the comments on both) — real risk, for a
+    // configuration a reverse proxy already expresses as a path rule.
+    //
+    // The judgement behind it: publishing a service straight to the internet
+    // with no reverse proxy in front is now rare, and anyone who does have one
+    // can already route `/dns-query*` publicly and keep the rest internal.
+    // README's "Publishing DoH without publishing the admin UI" is the
+    // supported answer. Revisit if that assumption stops holding.
     let app = doh_routes.merge(admin_routes);
 
     // HSTS covers the whole listener (admin UI *and* DoH): both are only
