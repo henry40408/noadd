@@ -925,13 +925,34 @@ const MAX_PASSWORD_LENGTH: usize = 128;
 /// `MAX_PASSWORD_LENGTH` would lock those operators out of their own appliance.
 const MAX_LOGIN_PASSWORD_LENGTH: usize = 1024;
 
-/// Check a to-be-set password against the length band, returning the message
-/// to show on rejection.
+/// Weakest zxcvbn score a new password may have. `Score::Three` is "safely
+/// unguessable: moderate protection from an offline slow-hash scenario"
+/// — 10^10 guesses.
+///
+/// Three rather than four because four asks for a genuinely long passphrase
+/// and this is the credential an operator types to bring a box up; a floor
+/// nobody can clear is a floor that gets removed. Three is also the level the
+/// throttling on `login` and `change_own_password` is sized for: those cap an
+/// online attacker at 5 attempts a minute, so 10^10 offline guesses is the
+/// scenario that actually matters here.
+const MIN_PASSWORD_SCORE: zxcvbn::Score = zxcvbn::Score::Three;
+
+/// Check a to-be-set password, returning the message to show on rejection.
 ///
 /// Shared by all three endpoints that set a password so they cannot drift
 /// apart: a floor enforced at setup but not at change would let an operator
 /// walk their own password straight back under it.
-fn validate_new_password(password: &str) -> Result<(), String> {
+///
+/// Length is checked first and separately from guessability. They fail for
+/// different reasons and an operator can act on the length one immediately,
+/// whereas zxcvbn's verdict on a 4-character password would just be noise on
+/// top of "it is too short".
+///
+/// `user_inputs` carries the account's own username. zxcvbn scores a password
+/// containing it far lower, which is the point: `noadd-admin-2026` looks
+/// respectable to a length check and to a breach blocklist, and is the first
+/// thing anyone guessing at this particular box would try.
+fn validate_new_password(password: &str, user_inputs: &[&str]) -> Result<(), String> {
     let len = password.chars().count();
     if len < MIN_PASSWORD_LENGTH {
         return Err(format!(
@@ -943,18 +964,56 @@ fn validate_new_password(password: &str) -> Result<(), String> {
             "password must be at most {MAX_PASSWORD_LENGTH} characters"
         ));
     }
-    Ok(())
+
+    let entropy = zxcvbn::zxcvbn(password, user_inputs);
+    if entropy.score() >= MIN_PASSWORD_SCORE {
+        return Ok(());
+    }
+    // zxcvbn's own diagnosis where it has one ("This is a top-100 password.",
+    // "Straight rows of keys are easy to guess."), because "too weak" alone
+    // tells an operator nothing about what to change. It is a fixed phrase
+    // from the crate's own enum, not anything derived from the password, so
+    // echoing it back reveals nothing a caller did not just type.
+    let reason = entropy
+        .feedback()
+        .and_then(zxcvbn::feedback::Feedback::warning)
+        .map_or_else(
+            || "it is too easy to guess".to_string(),
+            |warning| warning.to_string().trim_end_matches('.').to_lowercase(),
+        );
+    Err(format!(
+        "password rejected: {reason}. Use a longer passphrase of several unrelated words."
+    ))
 }
 
+/// A machine-readable reason on a 4xx, for the handful of endpoints where the
+/// status code alone leaves the caller unable to act.
+///
+/// Password rejection is the case that forces this: "400" tells an operator
+/// nothing, and the whole value of a guessability check is the sentence
+/// explaining what to change. Reserved for validation failures the caller
+/// supplied the input for — authentication failures stay bare, so no error
+/// body can become a user-enumeration oracle.
 #[derive(Serialize)]
-struct SetupErrorResponse {
+struct ApiErrorResponse {
     error: String,
 }
 
-fn setup_ise() -> (StatusCode, Json<SetupErrorResponse>) {
+/// A `400` carrying `message` as its reason.
+fn bad_request(message: String) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiErrorResponse { error: message }),
+    )
+}
+
+/// An opaque `500`. Deliberately says nothing: the caller cannot act on the
+/// difference between a failed hash and a failed write, and naming it would
+/// only describe this server's internals to whoever provoked it.
+fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(SetupErrorResponse {
+        Json(ApiErrorResponse {
             error: "internal error".to_string(),
         }),
     )
@@ -963,7 +1022,7 @@ fn setup_ise() -> (StatusCode, Json<SetupErrorResponse>) {
 async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
-) -> Result<Json<SetupResponse>, (StatusCode, Json<SetupErrorResponse>)> {
+) -> Result<Json<SetupResponse>, (StatusCode, Json<ApiErrorResponse>)> {
     // Forward auth makes the setup wizard inapplicable: identity comes from
     // the proxy, and the first proxied request provisions the operator — which
     // is why `health` reports `needs_setup: false`. Leaving this
@@ -973,17 +1032,21 @@ async fn setup(
     if state.forward_auth.is_some() {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(SetupErrorResponse {
+            Json(ApiErrorResponse {
                 error: "setup is disabled when forward auth is configured".to_string(),
             }),
         ));
     }
 
-    let count = state.db.count_users().await.map_err(|_err| setup_ise())?;
+    let count = state
+        .db
+        .count_users()
+        .await
+        .map_err(|_err| internal_error())?;
     if count > 0 {
         return Err((
             StatusCode::CONFLICT,
-            Json(SetupErrorResponse {
+            Json(ApiErrorResponse {
                 error: "already configured".to_string(),
             }),
         ));
@@ -992,20 +1055,20 @@ async fn setup(
     if username.is_empty() || username.chars().count() > 64 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(SetupErrorResponse {
+            Json(ApiErrorResponse {
                 error: "invalid username".to_string(),
             }),
         ));
     }
-    if let Err(error) = validate_new_password(&body.password) {
-        return Err((StatusCode::BAD_REQUEST, Json(SetupErrorResponse { error })));
+    if let Err(error) = validate_new_password(&body.password, &[username]) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error })));
     }
-    let hash = hash_password(&body.password).map_err(|_err| setup_ise())?;
+    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
     state
         .db
         .create_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_err| setup_ise())?;
+        .map_err(|_err| internal_error())?;
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -1175,29 +1238,69 @@ struct CreateUserRequest {
     password: String,
 }
 
+/// Provision another operator.
+///
+/// Every operator has full admin access, so this is the most privileged thing
+/// the API does: it hands out a second key to the whole appliance. That is why
+/// it is audited — see the `user.created` event below.
 async fn create_user_handler(
     State(state): State<AppState>,
-    _auth: AuthedUser,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(body): Json<CreateUserRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    let ip = client_ip(&state, connect.as_deref(), &headers);
     let username = body.username.trim();
     if username.is_empty() || username.chars().count() > 64 {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(bad_request("invalid username".to_string()));
     }
-    if validate_new_password(&body.password).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+    if let Err(error) = validate_new_password(&body.password, &[username]) {
+        return Err(bad_request(error));
     }
-    let hash = hash_password(&body.password).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
     match state
         .db
         .create_user(username, &hash, crate::now_unix())
         .await
     {
-        Ok(_) => Ok(StatusCode::CREATED),
+        Ok(id) => {
+            // The counterpart to `user.deleted`: between them, every change to
+            // who can administer this box is one query. `user_id` is the
+            // operator who did it and `target_user_id` the account created,
+            // matching the convention `delete_user_handler` already follows.
+            //
+            // The username is logged because an audit of "who was provisioned"
+            // is unreadable without it, and it is bounded first — it is
+            // caller-controlled text on a path that only a signed-in operator
+            // can reach, but the 64-character limit above is a validation
+            // rule, not a logging guarantee.
+            tracing::info!(
+                event = "user.created",
+                user_id = auth.user_id,
+                target_user_id = id,
+                target_username = %log_safe(username, LOG_SAFE_MAX),
+                %ip,
+                "operator created"
+            );
+            Ok(StatusCode::CREATED)
+        }
         // A UNIQUE violation means the username is taken (409); any other
         // database error is a genuine failure (500).
-        Err(e) if e.is_unique_violation() => Err(StatusCode::CONFLICT),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        //
+        // Naming the reason is fine here even though the cheat sheet asks
+        // registration to stay generic: that guidance is about *public*
+        // sign-up, where the response is an enumeration oracle. This endpoint
+        // is admin-only and the same caller can simply `GET /api/users`, so a
+        // generic message would withhold nothing and only make a taken
+        // username harder to diagnose.
+        Err(e) if e.is_unique_violation() => Err((
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse {
+                error: "username already exists".to_string(),
+            }),
+        )),
+        Err(_) => Err(internal_error()),
     }
 }
 
@@ -1245,6 +1348,17 @@ async fn delete_user_handler(
                 %ip,
                 revoked = tokens.len(),
                 "revoked sessions for deleted user"
+            );
+            // Separate from the session event above, which records what
+            // happened to the sessions rather than to the account. Pairing
+            // this with `user.created` makes every change to who can
+            // administer this box answerable from one event name.
+            tracing::info!(
+                event = "user.deleted",
+                user_id = auth.user_id,
+                target_user_id = id,
+                %ip,
+                "operator deleted"
             );
             Ok(StatusCode::NO_CONTENT)
         }
@@ -1309,8 +1423,9 @@ async fn change_own_password(
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
-) -> Result<(CookieJar, StatusCode), StatusCode> {
-    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
+) -> Result<(CookieJar, StatusCode), Response> {
+    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)
+        .map_err(IntoResponse::into_response)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
 
     // This endpoint verifies a password, so it is a password-guessing surface
@@ -1335,27 +1450,33 @@ async fn change_own_password(
             %ip,
             "password change rate limited"
         );
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        return Err(StatusCode::TOO_MANY_REQUESTS.into_response());
     }
     state.rate_limiter.record(ip);
 
-    if validate_new_password(&body.new_password).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+    // The account's own username feeds zxcvbn, so `admin` cannot set
+    // `admin-admin-admin`. A failure to read it is not fatal to the change —
+    // the length band and the dictionary checks still apply — so an empty
+    // slice is the right fallback rather than a 500.
+    let username = state.db.get_username(user_id).await.ok().flatten();
+    let user_inputs: Vec<&str> = username.as_deref().into_iter().collect();
+    if let Err(error) = validate_new_password(&body.new_password, &user_inputs) {
+        return Err(bad_request(error).into_response());
     }
     let hash = state
         .db
         .get_user_password_hash(user_id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
     // Unreachable today — this endpoint is cookie-only and a passwordless
     // account can never obtain a session — but guard anyway so the sentinel can
     // never reach `verify_password` and turn a 401 into a 500.
     if has_no_password(&hash) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into_response());
     }
     let ok = verify_password(&body.current_password, &hash)
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     if !ok {
         // This is the only password-verification path outside `login`, and
         // exactly the one an attacker holding a stolen session cookie uses to
@@ -1369,15 +1490,15 @@ async fn change_own_password(
             %ip,
             "current password rejected"
         );
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into_response());
     }
-    let new_hash =
-        hash_password(&body.new_password).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_hash = hash_password(&body.new_password)
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     state
         .db
         .update_user_password(user_id, &new_hash)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     match crate::admin::auth::revoke_user_sessions_except(
         &state.sessions,
         &state.db,

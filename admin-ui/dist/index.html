@@ -1603,7 +1603,20 @@ const api = {
       window.dispatchEvent(new CustomEvent('auth-required'));
       throw new Error('Unauthorized');
     }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      // Some 4xx responses carry `{"error": "..."}` explaining what the caller
+      // has to change — a rejected password is the case that matters, where
+      // the status code alone leaves the operator guessing. Surfaced as
+      // `.detail` so a caller can prefer it over its own fallback copy;
+      // responses without one are unchanged.
+      const err = new Error(`${res.status} ${res.statusText}`);
+      err.status = res.status;
+      try {
+        const parsed = await res.json();
+        if (parsed && typeof parsed.error === 'string') err.detail = parsed.error;
+      } catch (e) { /* no body, or not JSON — the status line stands alone */ }
+      throw err;
+    }
     const ct = res.headers.get('content-type') || '';
     if (ct.includes('application/json')) return res.json();
     return null;
@@ -1964,7 +1977,7 @@ class SetupPage extends HTMLElement {
             <input type="password" id="setup-pw2" name="confirm-password" autocomplete="new-password" data-testid="setup-password-confirm">
           </div>
           <button class="btn btn-primary boot-submit" id="setup-btn" data-testid="setup-submit">create account</button>
-          <div class="boot-hint">minimum ${MIN_PASSWORD_LENGTH} characters</div>
+          <div class="boot-hint">minimum ${MIN_PASSWORD_LENGTH} characters — a few unrelated words work best</div>
         </div>
       </div>`;
     const user = this.querySelector('#setup-user');
@@ -1988,7 +2001,7 @@ class SetupPage extends HTMLElement {
         try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
         this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
       } catch (e) {
-        showFormError(err, 'Setup failed. A password may already be set.');
+        showFormError(err, e.detail || 'Setup failed. A password may already be set.');
       }
     };
     btn.onclick = doSetup;
@@ -2343,7 +2356,7 @@ class AccountPage extends HTMLElement {
       btn.textContent = 'Changed!';
       setTimeout(() => { btn.textContent = 'Change Password'; }, 2000);
     } catch (e) {
-      showFormError(err, 'Current password is incorrect');
+      showFormError(err, e.detail || 'Current password is incorrect');
     }
   }
 
@@ -2364,7 +2377,7 @@ class AccountPage extends HTMLElement {
       this.querySelector('#op-pw2').value = '';
       this.loadOperators();
     } catch (e) {
-      showFormError(err, 'Could not add operator (username may already exist)');
+      showFormError(err, e.detail || 'Could not add operator (username may already exist)');
     }
   }
 

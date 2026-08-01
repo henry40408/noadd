@@ -49,6 +49,10 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 blake2 = "0.10"
 utoipa = "5"
 utoipa-scalar = { version = "0.3", features = ["axum"] }
+# Offline password-guessability estimation. `default-features = false` drops the
+# `builder` feature and with it `derive_builder`; noadd only calls `zxcvbn()`
+# and reads the score back.
+zxcvbn = { version = "3.1", default-features = false }
 
 [build-dependencies]
 resvg = { version = "0.47", default-features = false }
@@ -56,6 +60,10 @@ resvg = { version = "0.47", default-features = false }
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"
+# Already a runtime dependency; repeated here so integration tests can install
+# a capturing subscriber and assert on emitted audit events.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json"] }
 # Self-maintained lint set (originally seeded from Embark Studios' rust-ecosystem
 # list). The bulk of the old itemised pedantic lints are now covered by the
 # `pedantic` group; only the noisy/low-signal ones are opted back out, plus the

@@ -1913,6 +1913,72 @@ async fn test_apple_touch_icon_served_as_png() {
     );
 }
 
+/// A `tracing` sink that keeps everything written to it, so a test can assert
+/// on the audit events a handler emitted.
+///
+/// Under nextest each test is its own process, so installing a
+/// thread-local default subscriber cannot leak into another test.
+#[derive(Clone)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// The captured output, one JSON object per line.
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    /// Install as the default subscriber for as long as the returned guard
+    /// lives. JSON so a field can be matched as `"field":value` rather than
+    /// by groping through prose.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(self.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::set_default(subscriber)
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Source string for the maximum-length boundary tests. It has to be long
+/// enough to slice 128 characters out of *and* score well on zxcvbn, which
+/// rules out the obvious `"a".repeat(128)` — a run of one character is scored
+/// as a repeat and rejected for guessability, which would make the test pass
+/// or fail for a reason that has nothing to do with the length boundary.
+const STRONG_LONG_PASSPHRASE: &str = concat!(
+    "vermilion-thicket-marlin-quartz-nimbus-cobalt-drift-walnut-orbit-",
+    "vermilion-thicket-marlin-quartz-nimbus-cobalt-drift-walnut-orbit-",
+);
+
+/// Same idea for the characters-not-bytes test: 100 *distinct* CJK characters,
+/// because `"密".repeat(100)` is a repeat and would be rejected on
+/// guessability before the length check could be observed.
+const STRONG_CJK_PASSPHRASE: &str = concat!(
+    "山川河海風雲雷電花鳥魚蟲松竹梅蘭菊石泉澗谷嶺峰崖壁沙丘湖泊溪橋亭台樓閣舟車馬牛羊犬雞鴨鵝鶴鹿虎豹熊狼",
+    "狐兔鼠蛇龜蛙蟬蝶蜂蟻蚊蠅蛛天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏閏餘成歲律呂調陽雲騰致雨",
+);
+
 #[tokio::test]
 async fn setup_rejects_short_password_with_400() {
     let app = unconfigured_app().await;
@@ -1924,7 +1990,7 @@ async fn setup_rejects_short_password_with_400() {
         // arbitrarily short string, so a minimum accidentally applied as `<=`
         // or read off by one still fails this.
         .body(Body::from(
-            r#"{"username":"admin","password":"12345678901"}"#,
+            r#"{"username":"admin","password":"Yx7#qvLm2R!"}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -1951,7 +2017,7 @@ async fn setup_accepts_a_password_at_the_minimum_length_with_200() {
         // Exactly the 12-character minimum — the other side of the boundary
         // the test above guards.
         .body(Body::from(
-            r#"{"username":"admin","password":"123456789012"}"#,
+            r#"{"username":"admin","password":"Yx7#qvLm2Rk!"}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2001,7 +2067,7 @@ async fn setup_rejects_an_over_long_password_with_400() {
 #[tokio::test]
 async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
     let app = unconfigured_app().await;
-    let at_max = "a".repeat(128);
+    let at_max: String = STRONG_LONG_PASSPHRASE.chars().take(128).collect();
     let req = Request::builder()
         .method("POST")
         .uri("/api/auth/setup")
@@ -2022,7 +2088,7 @@ async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
 async fn password_length_is_counted_in_characters_not_bytes() {
     // 11 characters / 33 bytes — under the minimum however many bytes it is.
     let app = unconfigured_app().await;
-    let eleven_chars = "密".repeat(11);
+    let eleven_chars: String = STRONG_CJK_PASSPHRASE.chars().take(11).collect();
     let resp = app
         .oneshot(
             Request::builder()
@@ -2045,7 +2111,7 @@ async fn password_length_is_counted_in_characters_not_bytes() {
     // 100 characters / 300 bytes — comfortably inside a character-counted
     // maximum, well past a byte-counted one.
     let app = unconfigured_app().await;
-    let hundred_chars = "密".repeat(100);
+    let hundred_chars: String = STRONG_CJK_PASSPHRASE.chars().take(100).collect();
     let resp = app
         .oneshot(
             Request::builder()
@@ -2335,7 +2401,7 @@ async fn change_own_password_requires_correct_current() {
             "POST",
             "/api/users/me/password",
             &token,
-            Some(r#"{"current_password":"wrong","new_password":"brandnewpass"}"#),
+            Some(r#"{"current_password":"wrong","new_password":"vault-quartz-nimbus-84"}"#),
         ))
         .await
         .unwrap();
@@ -2348,7 +2414,7 @@ async fn change_own_password_requires_correct_current() {
 #[tokio::test]
 async fn change_own_password_enforces_the_length_band() {
     for (label, new_password) in [
-        ("under the minimum", "short1234".to_string()),
+        ("under the minimum", "Yx7#qvLm2R".to_string()),
         ("over the maximum", "a".repeat(129)),
     ] {
         let (app, token) = setup().await;
@@ -2371,10 +2437,39 @@ async fn change_own_password_enforces_the_length_band() {
     }
 }
 
+/// The username is validated on the same endpoint and with the same shape of
+/// rejection as the password, and had no coverage at all.
+#[tokio::test]
+async fn create_operator_rejects_an_invalid_username() {
+    for (label, username) in [
+        ("empty", String::new()),
+        ("whitespace only", "   ".to_string()),
+        ("past the 64-character limit", "u".repeat(65)),
+    ] {
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users",
+                &token,
+                Some(&format!(
+                    r#"{{"username":"{username}","password":"vault-quartz-nimbus-84"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "a {label} username must be rejected"
+        );
+    }
+}
+
 #[tokio::test]
 async fn create_operator_enforces_the_length_band() {
     for (label, password) in [
-        ("under the minimum", "short1234".to_string()),
+        ("under the minimum", "Yx7#qvLm2R".to_string()),
         ("over the maximum", "a".repeat(129)),
     ] {
         let (app, token) = setup().await;
@@ -2393,6 +2488,234 @@ async fn create_operator_enforces_the_length_band() {
             "an operator password {label} must be rejected"
         );
     }
+}
+
+/// Length alone is a weak policy: `password1234` and `noadd-noadd-noadd` both
+/// clear a 12-character floor. Every endpoint that sets a password must run
+/// the guessability check too, or an operator simply routes around the floor
+/// at whichever endpoint forgot.
+#[tokio::test]
+async fn every_set_password_endpoint_rejects_a_guessable_password() {
+    // Each is long enough to clear the length band and would have been
+    // accepted before: a top-N password padded out, a keyboard run, dictionary
+    // words, and one built from the account's own name.
+    for weak in [
+        "password1234",
+        "qwertyuiopasdfgh",
+        "letmeinletmein",
+        "admin-admin-admin-1",
+    ] {
+        let app = unconfigured_app().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/setup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"username":"admin","password":"{weak}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "setup must reject {weak:?}"
+        );
+
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users",
+                &token,
+                Some(&format!(r#"{{"username":"bob","password":"{weak}"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "operator creation must reject {weak:?}"
+        );
+
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users/me/password",
+                &token,
+                Some(&format!(
+                    r#"{{"current_password":"admin","new_password":"{weak}"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "password change must reject {weak:?}"
+        );
+    }
+}
+
+/// A rejection has to say what to change. Without a reason in the body the
+/// admin UI can only show "400", and an operator has no way to tell a
+/// too-short password from a too-guessable one.
+#[tokio::test]
+async fn a_rejected_password_explains_itself() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"admin","password":"password1234"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.contains("passphrase"),
+        "expected actionable guidance, got: {body}"
+    );
+    assert!(
+        !msg.to_lowercase().contains("at least") && !msg.to_lowercase().contains("at most"),
+        "a guessability rejection must not be reported as a length problem: {body}"
+    );
+
+    // The same endpoint's length rejection must remain distinguishable from it.
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"admin","password":"Yx7#qvLm2R"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("at least"),
+        "a short password must still be reported as too short: {body}"
+    );
+}
+
+/// A password containing the account's own username is the first thing anyone
+/// guessing at this particular box tries, and it sails past both a length
+/// floor and a breach blocklist. zxcvbn only catches it if the username is
+/// actually passed in as a user input.
+#[tokio::test]
+async fn the_username_is_fed_to_the_guessability_check() {
+    // `zephyrqualm-8412` is weak *only* relative to that username: zxcvbn
+    // scores it 2 when `zephyrqualm` is a user input and 4 when it is not.
+    // The second half of this test is what makes the first half mean
+    // something — without it, a password that is simply weak would pass just
+    // as well and prove nothing about the username reaching the checker.
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"zephyrqualm","password":"zephyrqualm-8412"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "a password built from the account's own username must be rejected"
+    );
+
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"unrelated","password":"zephyrqualm-8412"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "the very same password is fine under a username it does not contain"
+    );
+}
+
+/// Provisioning an operator hands out a second key to the whole appliance, so
+/// it has to leave a trace naming who did it and who was created. Deleting one
+/// is the same event in reverse; together they answer "who can administer this
+/// box, and when did that change" from one event name.
+#[tokio::test]
+async fn operator_lifecycle_is_audited() {
+    let logs = CapturedLogs::new();
+    let guard = logs.install();
+
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bob","password":"vault-quartz-nimbus-84"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    let res = app
+        .oneshot(authed("DELETE", "/api/users/2", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    drop(guard);
+    let text = logs.text();
+
+    for (event, what) in [
+        ("user.created", "provisioning an operator"),
+        ("user.deleted", "removing an operator"),
+    ] {
+        assert!(
+            text.contains(&format!(r#""event":"{event}""#)),
+            "{what} must emit {event}; captured logs were:\n{text}"
+        );
+    }
+    // The acting operator (admin, id 1) and the target (bob, id 2) must both
+    // be recorded — an event naming only one of them cannot answer either
+    // half of "who did what to whom".
+    assert!(
+        text.contains(r#""user_id":1"#) && text.contains(r#""target_user_id":2"#),
+        "both the acting and the target operator must be named:\n{text}"
+    );
+    assert!(
+        text.contains(r#""target_username":"bob""#),
+        "an audit of who was provisioned is unreadable without the name:\n{text}"
+    );
 }
 
 /// Changing a password verifies one, so it is a password-guessing surface and
@@ -2571,7 +2894,7 @@ async fn change_password_revokes_other_sessions_of_same_user() {
             "POST",
             "/api/users/me/password",
             &token_a,
-            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+            Some(r#"{"current_password":"admin","new_password":"vault-quartz-nimbus-84"}"#),
         ))
         .await
         .unwrap();
@@ -2620,7 +2943,7 @@ async fn change_password_rotates_the_callers_own_token() {
             "POST",
             "/api/users/me/password",
             &token_a,
-            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+            Some(r#"{"current_password":"admin","new_password":"vault-quartz-nimbus-84"}"#),
         ))
         .await
         .unwrap();
@@ -2704,7 +3027,7 @@ async fn change_password_keeps_other_operators_signed_in() {
             "POST",
             "/api/users/me/password",
             &token_a,
-            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+            Some(r#"{"current_password":"admin","new_password":"vault-quartz-nimbus-84"}"#),
         ))
         .await
         .unwrap();
@@ -2760,7 +3083,7 @@ async fn change_password_deletes_revoked_rows_from_db() {
             "POST",
             "/api/users/me/password",
             &token_a,
-            Some(r#"{"current_password":"admin","new_password":"brandnewpass"}"#),
+            Some(r#"{"current_password":"admin","new_password":"vault-quartz-nimbus-84"}"#),
         ))
         .await
         .unwrap();
