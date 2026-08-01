@@ -4,7 +4,10 @@
 # The builder is pinned to the native build platform; zig cross-compiles to the
 # target arch's musl triple, so no qemu emulation is needed — an arm64 image
 # builds at the host's native speed.
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS build
+# No Rust version here: rust-toolchain.toml is the single source of truth and
+# rustup installs it below. Do not "simplify" this to `rust:1.97` — the
+# un-suffixed tag resolves to trixie, which would be a silent Debian major bump.
+FROM --platform=$BUILDPLATFORM rust:bookworm AS build
 
 # aws-lc-sys (the rustls/aws-lc-rs crypto backend) compiles its C sources through
 # CMake; the SQLite (C) and mimalloc (C) deps are built by zig cc. curl fetches
@@ -29,6 +32,13 @@ RUN set -eux; \
     ln -s "/opt/zig-${zarch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
 
 WORKDIR /app
+
+# Install the pinned toolchain in a layer keyed on rust-toolchain.toml alone, so
+# editing source does not re-download the compiler. Any rustup proxy invocation
+# triggers the install.
+COPY rust-toolchain.toml .
+RUN cargo --version
+
 COPY . .
 
 # Map Docker's TARGETARCH onto the Rust musl triple and build. `rustup target
