@@ -306,10 +306,25 @@ below rather than relying on the password alone.
 Whatever the proxy does, the admin login is not bare. Passwords are 12–128
 characters and rejected if zxcvbn finds them guessable, hashed with Argon2id;
 login, password change and re-authentication share a five-attempts-per-minute
-throttle per source address; sessions carry both an idle and an absolute
-expiry and are stored hashed; and minting an API key or adding or removing an
-operator needs the password re-confirmed within five minutes, so a stolen
-session cookie cannot quietly be turned into permanent access.
+throttle per source address **and** a per-account backoff (see below);
+sessions carry both an idle and an absolute expiry and are stored hashed; and
+minting an API key or adding or removing an operator needs the password
+re-confirmed within five minutes, so a stolen session cookie cannot quietly be
+turned into permanent access.
+
+The per-account backoff is what a botnet runs into: a thousand source
+addresses get a thousand separate IP budgets but still share one account
+budget. The first three consecutive failures cost nothing — mistyping happens
+— after which each further failure locks that account for twice as long as the
+last, from one second up to a fifteen-minute ceiling, forgotten again after an
+hour of quiet or the moment the right password arrives.
+
+There is a ceiling rather than a permanent lock on purpose. noadd has no
+password-reset flow, so a lock with no way out would be a denial of service an
+attacker could trigger on demand against any username they can guess. DNS
+resolution is never affected either way — this gates the admin login only — and
+if you are locked out by a live attack and cannot wait, restarting noadd
+clears the state.
 
 What it does **not** have is a second factor — see below.
 
