@@ -3203,6 +3203,13 @@ struct MobileConfigProfile {
     payload_uuid: String,
     payload_version: u32,
     payload_description: String,
+    /// macOS 26.1 (Tahoe) and later refuse a `com.apple.dnsSettings.managed`
+    /// profile that does not declare a scope, failing with "The 'VPN Service'
+    /// payload could not be installed" — encrypted DNS and VPNs share the
+    /// `NetworkExtension` machinery, and without this key the profile is
+    /// evaluated as a user-scoped VPN service, which cannot be created.
+    /// A DNS resolver is a system-wide setting anyway, and iOS ignores the key.
+    payload_scope: String,
 }
 
 #[derive(Serialize)]
@@ -3274,6 +3281,7 @@ async fn get_mobileconfig(
         payload_version: 1,
         payload_description: "Configures DNS-over-HTTPS to use noadd ad-blocking DNS server."
             .into(),
+        payload_scope: "System".into(),
     };
 
     let mut xml = Vec::new();

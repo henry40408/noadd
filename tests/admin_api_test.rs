@@ -3970,6 +3970,55 @@ async fn mobileconfig_is_not_stored() {
     );
 }
 
+/// macOS 26.1 (Tahoe) rejects a DNS Settings profile that omits the top-level
+/// `PayloadScope`, reporting "The 'VPN Service' payload could not be
+/// installed". The key is what keeps the profile installable there.
+#[tokio::test]
+async fn mobileconfig_declares_system_payload_scope() {
+    let (app, token, _cache, _log_events, db, _sessions, _invalid_session_limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    db.set_setting("public_url", "https://dns.example.com")
+        .await
+        .unwrap();
+
+    let add_res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/doh-tokens",
+            &token,
+            Some(r#"{"token":"mobiletoken"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(add_res.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .uri("/api/mobileconfig/mobiletoken")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let xml = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        xml.contains("<key>PayloadScope</key>") && xml.contains("<string>System</string>"),
+        "profile must declare a System PayloadScope, got: {xml}"
+    );
+    assert!(
+        xml.contains("com.apple.dnsSettings.managed"),
+        "profile must carry the DNS Settings payload, got: {xml}"
+    );
+    assert!(
+        xml.contains("https://dns.example.com/dns-query/mobiletoken"),
+        "profile must point at the token's DoH URL, got: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn check_list_url_unknown_id_returns_404() {
     // Covers the DB-lookup branch without reaching the network: with no URL in
