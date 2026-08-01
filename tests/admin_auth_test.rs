@@ -2,8 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
     RateLimiter, SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, generate_token,
-    hash_password, new_session_store, prune_expired, revoke_session, session_log_id, store_session,
-    sweep_expired, validate_session, verify_password,
+    hash_password, new_session_store, prune_expired, revoke_session, session_log_id,
+    spend_verify_cost, store_session, sweep_expired, validate_session, verify_password,
 };
 use noadd::db::Database;
 use tempfile::tempdir;
@@ -43,6 +43,55 @@ fn test_password_hash_and_verify() {
 
     // Hash should be a valid PHC string
     assert!(hash.starts_with("$argon2"));
+}
+
+/// `spend_verify_cost` exists to make a login against an unknown username cost
+/// what a login against a known one costs, so the two cannot be told apart by
+/// response time. That property is a *duration*, so it is the duration this
+/// asserts — a test that only called the function would pass just as happily
+/// against an empty body.
+///
+/// The comparison is deliberately loose. Argon2's ~50 ms dwarfs the scheduling
+/// noise a shared CI runner adds, and the regression being guarded against is
+/// the function being emptied out or the call site dropped, which turns ~50 ms
+/// into microseconds — three orders of magnitude, not the factor of three this
+/// allows. Medians rather than means, so one descheduled sample cannot swing
+/// the verdict.
+#[test]
+fn spend_verify_cost_costs_what_a_real_verification_costs() {
+    use std::time::{Duration, Instant};
+
+    fn median_of<F: FnMut()>(samples: usize, mut f: F) -> Duration {
+        let mut times: Vec<Duration> = (0..samples)
+            .map(|_| {
+                let start = Instant::now();
+                f();
+                start.elapsed()
+            })
+            .collect();
+        times.sort_unstable();
+        times[times.len() / 2]
+    }
+
+    let hash = hash_password("a genuine stored password").unwrap();
+
+    // Warm up both paths first: the very first `spend_verify_cost` also pays
+    // to generate its process-wide dummy hash, and measuring that one-off
+    // would flatter the result rather than test it.
+    spend_verify_cost("warm up");
+    let _ = verify_password("warm up", &hash).unwrap();
+
+    let real = median_of(5, || {
+        assert!(!verify_password("the wrong password", &hash).unwrap());
+    });
+    let dummy = median_of(5, || spend_verify_cost("the wrong password"));
+
+    assert!(
+        dummy * 3 >= real,
+        "the padded path ({dummy:?}) must not be meaningfully cheaper than a \
+         real verification ({real:?}) — an unknown username would be \
+         distinguishable by response time"
+    );
 }
 
 #[test]

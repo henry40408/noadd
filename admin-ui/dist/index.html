@@ -1850,6 +1850,25 @@ function showFormError(el, msg) {
   el.style.display = 'block';
 }
 
+// Password length band, mirroring MIN_PASSWORD_LENGTH / MAX_PASSWORD_LENGTH in
+// src/admin/api.rs. Duplicated rather than fetched: this is only a courtesy
+// check so the operator sees the problem before a round trip — the server
+// enforces the real policy and stays authoritative if the two ever drift.
+const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 128;
+
+// The message for a password outside the band, or null when it fits. Counts
+// code points rather than UTF-16 units so an emoji or a CJK passphrase is
+// measured the same way `chars().count()` measures it server-side; `.length`
+// would count a single astral character twice and reject a password the
+// server would have accepted.
+function passwordLengthError(pw) {
+  const len = [...(pw || '')].length;
+  if (len < MIN_PASSWORD_LENGTH) return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  if (len > MAX_PASSWORD_LENGTH) return `Password must be at most ${MAX_PASSWORD_LENGTH} characters`;
+  return null;
+}
+
 // ============================================================
 // Icons (inline SVG)
 // ============================================================
@@ -1934,18 +1953,18 @@ class SetupPage extends HTMLElement {
           <div class="login-error" id="setup-error" data-testid="setup-error"></div>
           <div class="login-line">
             <label for="setup-user">username:</label>
-            <input type="text" id="setup-user" data-testid="setup-username" autofocus>
+            <input type="text" id="setup-user" name="username" autocomplete="username" data-testid="setup-username" autofocus>
           </div>
           <div class="login-line">
             <label for="setup-pw">password:</label>
-            <input type="password" id="setup-pw" data-testid="setup-password">
+            <input type="password" id="setup-pw" name="new-password" autocomplete="new-password" data-testid="setup-password">
           </div>
           <div class="login-line">
             <label for="setup-pw2">confirm:</label>
-            <input type="password" id="setup-pw2" data-testid="setup-password-confirm">
+            <input type="password" id="setup-pw2" name="confirm-password" autocomplete="new-password" data-testid="setup-password-confirm">
           </div>
           <button class="btn btn-primary boot-submit" id="setup-btn" data-testid="setup-submit">create account</button>
-          <div class="boot-hint">minimum 8 characters</div>
+          <div class="boot-hint">minimum ${MIN_PASSWORD_LENGTH} characters</div>
         </div>
       </div>`;
     const user = this.querySelector('#setup-user');
@@ -1957,7 +1976,8 @@ class SetupPage extends HTMLElement {
       err.style.display = 'none';
       const username = user.value.trim();
       if (!username) return showFormError(err, 'Username is required');
-      if (!pw.value || pw.value.length < 8) return showFormError(err, 'Password must be at least 8 characters');
+      const lenError = passwordLengthError(pw.value);
+      if (lenError) return showFormError(err, lenError);
       if (pw.value !== pw2.value) return showFormError(err, 'Passwords do not match');
       try {
         await api.post('/api/auth/setup', { username, password: pw.value });
@@ -2000,11 +2020,11 @@ class LoginPage extends HTMLElement {
           <div class="login-error" id="login-error" data-testid="login-error" role="alert"></div>
           <div class="login-line">
             <label for="li-user">username:</label>
-            <input type="text" id="li-user" data-testid="login-username" autofocus>
+            <input type="text" id="li-user" name="username" autocomplete="username" data-testid="login-username" autofocus>
           </div>
           <div class="login-line">
             <label for="pw">password:</label>
-            <input type="password" id="pw" data-testid="login-password">
+            <input type="password" id="pw" name="password" autocomplete="current-password" data-testid="login-password">
           </div>
           <button class="btn btn-primary boot-submit" id="login-btn" data-testid="login-submit">authenticate</button>
         </div>
@@ -2148,9 +2168,9 @@ class AccountPage extends HTMLElement {
         <p id="acct-whoami" class="card-desc">Loading…</p>
         <div class="card-title" style="margin-top:4px">Change Password</div>
         <div class="login-error" id="pw-error" style="display:none"></div>
-        <div class="input-row"><input type="password" id="pw-current" data-testid="password-current" placeholder="current password" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" data-testid="password-new" placeholder="new password (min 8)" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" data-testid="password-confirm" placeholder="confirm new password" style="max-width:220px"></div>
+        <div class="input-row"><input type="password" id="pw-current" name="current-password" autocomplete="current-password" data-testid="password-current" placeholder="current password" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" name="new-password" autocomplete="new-password" data-testid="password-new" placeholder="new password (min ${MIN_PASSWORD_LENGTH})" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" name="confirm-password" autocomplete="new-password" data-testid="password-confirm" placeholder="confirm new password" style="max-width:220px"></div>
         <button class="btn btn-primary btn-sm" id="pw-save" data-testid="password-save" style="margin-top:12px">Change Password</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.05s">
@@ -2162,9 +2182,9 @@ class AccountPage extends HTMLElement {
         </table></div>
         <div class="card-title" style="margin-top:16px">Add Operator</div>
         <div class="login-error" id="op-error" style="display:none"></div>
-        <div class="input-row"><input type="text" id="op-user" placeholder="username" style="max-width:200px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" placeholder="password (min 8)" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" placeholder="confirm password" style="max-width:220px"></div>
+        <div class="input-row"><input type="text" id="op-user" name="new-operator-username" autocomplete="off" placeholder="username" style="max-width:200px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" name="new-operator-password" autocomplete="new-password" placeholder="password (min ${MIN_PASSWORD_LENGTH})" style="max-width:220px"></div>
+        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" name="confirm-operator-password" autocomplete="new-password" placeholder="confirm password" style="max-width:220px"></div>
         <button class="btn btn-primary btn-sm" id="op-add" style="margin-top:12px">Add Operator</button>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
@@ -2306,7 +2326,8 @@ class AccountPage extends HTMLElement {
     const cur = this.querySelector('#pw-current').value;
     const nw = this.querySelector('#pw-new').value;
     const cf = this.querySelector('#pw-confirm').value;
-    if (nw.length < 8) return showFormError(err, 'New password must be at least 8 characters');
+    const lenError = passwordLengthError(nw);
+    if (lenError) return showFormError(err, lenError.replace(/^Password/, 'New password'));
     if (nw !== cf) return showFormError(err, 'Passwords do not match');
     try {
       await api.post('/api/users/me/password', { current_password: cur, new_password: nw });
@@ -2333,7 +2354,8 @@ class AccountPage extends HTMLElement {
     const pw = this.querySelector('#op-pw').value;
     const pw2 = this.querySelector('#op-pw2').value;
     if (!user) return showFormError(err, 'Username is required');
-    if (pw.length < 8) return showFormError(err, 'Password must be at least 8 characters');
+    const lenError = passwordLengthError(pw);
+    if (lenError) return showFormError(err, lenError);
     if (pw !== pw2) return showFormError(err, 'Passwords do not match');
     try {
       await api.post('/api/users', { username: user, password: pw });
