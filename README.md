@@ -75,7 +75,7 @@ sudo ./target/release/noadd
 ./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Open `http://127.0.0.1:8080` to create your operator account (username + password) and access the dashboard. Passwords must be 12–128 characters — noadd has no second factor yet, so length is the whole defence; any characters are allowed, so a passphrase is the easy way to clear the bar. Additional operators and active sessions are managed from the Account page.
+Open `http://127.0.0.1:8080` to create your operator account (username + password) and access the dashboard. Passwords must be 12–128 characters and are checked for guessability with [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs) — noadd has no second factor yet, so the password is the whole defence. Common passwords, keyboard runs, and anything built from your own username are refused with a message saying why. Any characters are allowed, so a few unrelated words is the easy way to clear the bar. The check runs entirely offline; no password or hash ever leaves the box. Additional operators and active sessions are managed from the Account page.
 
 ### Docker
 

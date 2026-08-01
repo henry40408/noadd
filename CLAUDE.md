@@ -79,6 +79,6 @@ debug!("TCP flush error for {peer}: {e}");
 `--log-format json` emits each field as its own key, so `event` survives message rewording and fields are filterable without regex: `jq 'select(.fields.event == "upstream.forward_failed")'` works; grepping prose does not.
 
 - **Prefer a field over a new event name.** The three TCP write failures share `dns.send_failed` and differ by `stage`; UDP and TCP share `dns.listener_started` and differ by `transport`. That keeps "all send failures" one query.
-- **Name events `domain.action`**, past tense for things that happened (`filter.rebuild_completed`, `session.created`). Existing domains: `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, plus the audit set (`auth`, `session`, `apikey`, `forward_auth`, `audit`).
+- **Name events `domain.action`**, past tense for things that happened (`filter.rebuild_completed`, `session.created`). Existing domains: `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, plus the audit set (`auth`, `session`, `user`, `apikey`, `forward_auth`, `audit`).
 - **Errors go in an `error` field** (`error = %e`), never in the message.
 - Reuse an existing event name when the event is the same; `rg 'event = "'` is the index.

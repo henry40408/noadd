@@ -501,7 +501,7 @@ async fn setup_is_refused_when_forward_auth_is_configured() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"hunter2hunter2"}"#,
+                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
@@ -530,7 +530,7 @@ async fn setup_still_works_without_forward_auth() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"hunter2hunter2"}"#,
+                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
