@@ -139,6 +139,8 @@ SQLite schema versioning uses `PRAGMA user_version`. Each migration checks the c
 
 DoH access can be restricted with user-defined tokens. Each token becomes a URL path: `/dns-query/my-token`. The access policy (`allow`/`deny`) controls whether unauthenticated `/dns-query` is permitted. Tokens are always valid regardless of policy.
 
+`GET /api/mobileconfig/{token}` renders that token's DoH URL as an Apple configuration profile (a `com.apple.dnsSettings.managed` payload) so an iOS or macOS device can adopt it as its system resolver. The profile declares `PayloadScope: System` at the top level: macOS 26.1 (Tahoe) onwards refuses a scope-less DNS Settings profile with "The 'VPN Service' payload could not be installed" — encrypted DNS is built on `NetworkExtension` just as VPNs are, and without the key the payload is evaluated as a user-scoped VPN service that cannot be created. Declaring it costs nothing elsewhere: a resolver is a system-wide setting either way, and iOS ignores the key.
+
 ### Admin UI
 
 A single `index.html` file using vanilla JS web components. No framework, no build step. Embedded in the binary at compile time via `include_dir`. Embedded assets are served with a content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate on each load and receive `304 Not Modified` when nothing changed — reloads avoid re-transferring the ~146 KB page, while a rebuilt binary (new content, new ETag) updates clients immediately. The dashboard polls the API every 10 seconds with a toggleable LIVE mode. Login is username + password; sessions are bound to a user and individually revocable.
