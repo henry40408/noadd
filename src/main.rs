@@ -224,6 +224,9 @@ async fn main() -> anyhow::Result<()> {
     let session_store_for_flush = session_store.clone();
     let db_for_flush = db.clone();
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    // Bounded by the number of operator accounts, so unlike the two IP-keyed
+    // limiters it needs no pruning tick.
+    let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(
         noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
         noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
@@ -251,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         cache: cache.clone(),
         rate_limiter,
         invalid_session_limiter,
+        lockout: lockout.clone(),
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: log_events.clone(),

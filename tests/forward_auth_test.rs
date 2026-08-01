@@ -104,6 +104,7 @@ async fn build(
             noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
             noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
         )),
+        lockout: Arc::new(noadd::admin::auth::AccountLockout::new()),
         forwarder,
         handler,
         log_events: tokio::sync::broadcast::channel(256).0,

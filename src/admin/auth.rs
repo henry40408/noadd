@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -603,6 +603,124 @@ pub const INVALID_SESSION_MAX_ATTEMPTS: u32 = 10;
 /// Sliding window for [`INVALID_SESSION_MAX_ATTEMPTS`].
 pub const INVALID_SESSION_WINDOW_SECS: u64 = 60;
 
+/// Consecutive password failures an account may accumulate before any delay
+/// applies. Three covers ordinary mistyping — a caps-lock slip and two
+/// retries — at no cost to the operator.
+pub const LOCKOUT_FREE_ATTEMPTS: u32 = 3;
+
+/// Ceiling on the exponential backoff, so a locked-out operator always gets
+/// back in within this long. See [`AccountLockout`] on why a ceiling exists at
+/// all rather than a permanent lock.
+pub const LOCKOUT_MAX_SECS: u64 = 900;
+
+/// Quiet period after which an account's failure count is forgotten. Without
+/// it, three typos in March and one in June would land an operator on June's
+/// attempt at a backoff earned three months earlier.
+pub const LOCKOUT_RESET_SECS: u64 = 3600;
+
+/// Per-account exponential backoff on password failures.
+///
+/// The IP limiter next door bounds one source address; this bounds one
+/// *account*, which is the control OWASP actually asks for — "the counter of
+/// failed logins should be associated with the account itself, rather than the
+/// source IP address, in order to prevent an attacker from making login
+/// attempts from a large number of different IP addresses". A botnet with a
+/// thousand addresses gets a thousand separate IP budgets and one account
+/// budget.
+///
+/// **Backoff, not lockout.** Past [`LOCKOUT_FREE_ATTEMPTS`] each further
+/// failure locks the account for twice as long as the last, capped at
+/// [`LOCKOUT_MAX_SECS`]. A hard lock would be a denial of service an attacker
+/// triggers on demand — they need only fail repeatedly against a username they
+/// can guess — and noadd has no password-reset flow to escape one with. The
+/// cap bounds that to fifteen minutes of admin-UI unavailability per sustained
+/// attack, while still turning a brute-force run into days. DNS resolution is
+/// unaffected either way: this gates the admin login, nothing on the query
+/// path. If an operator is locked out by a live attack and cannot wait,
+/// restarting the process clears the state — it is deliberately in-memory.
+///
+/// **Keyed by `user_id`, and only ever populated with one that resolved.**
+/// That is what keeps the map bounded by the number of operator accounts, so
+/// unlike the IP-keyed limiters there is nothing here for a caller to grow by
+/// cycling through inputs. It also means the lockout can never answer a
+/// question about whether an account exists — see the call site in `login`,
+/// which spends the same Argon2 cost and returns the same generic 401 for a
+/// locked account as for a wrong password.
+pub struct AccountLockout {
+    /// `user_id` -> (consecutive failures, when the last one happened).
+    failures: Mutex<HashMap<i64, (u32, Instant)>>,
+}
+
+impl Default for AccountLockout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccountLockout {
+    pub fn new() -> Self {
+        Self {
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// How long `failures` consecutive failures lock an account for, or `None`
+    /// while still inside the free allowance.
+    fn penalty(failures: u32) -> Option<Duration> {
+        let over = failures.checked_sub(LOCKOUT_FREE_ATTEMPTS)?;
+        if over == 0 {
+            return None;
+        }
+        // 1s, 2s, 4s, … saturating rather than wrapping: `over` is attacker-
+        // driven and 1u64 << 64 is undefined, not large.
+        let secs = 1u64
+            .checked_shl(over - 1)
+            .unwrap_or(LOCKOUT_MAX_SECS)
+            .min(LOCKOUT_MAX_SECS);
+        Some(Duration::from_secs(secs))
+    }
+
+    /// Whether this account is currently refusing password attempts.
+    pub fn is_locked(&self, user_id: i64) -> bool {
+        let map = self.failures.lock();
+        let Some(&(failures, last)) = map.get(&user_id) else {
+            return false;
+        };
+        if last.elapsed().as_secs() >= LOCKOUT_RESET_SECS {
+            return false;
+        }
+        Self::penalty(failures).is_some_and(|p| last.elapsed() < p)
+    }
+
+    /// Count one password failure. Returns the lock now in force, or `None` if
+    /// the account is still inside its free allowance.
+    pub fn record_failure(&self, user_id: i64) -> Option<Duration> {
+        let mut map = self.failures.lock();
+        let entry = map.entry(user_id).or_insert((0, Instant::now()));
+        // A long quiet spell forgets the history rather than resuming the
+        // backoff where it left off.
+        if entry.1.elapsed().as_secs() >= LOCKOUT_RESET_SECS {
+            *entry = (1, Instant::now());
+        } else {
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = Instant::now();
+        }
+        Self::penalty(entry.0)
+    }
+
+    /// Forget an account's failures. Called on a successful password check,
+    /// which is the only evidence that the attempts were the real operator
+    /// fumbling rather than someone guessing.
+    pub fn record_success(&self, user_id: i64) {
+        self.failures.lock().remove(&user_id);
+    }
+
+    /// Number of accounts currently carrying failures. Exposed for tests.
+    pub fn tracked_accounts(&self) -> usize {
+        self.failures.lock().len()
+    }
+}
+
 /// Simple IP-based sliding-window counter, used both to rate-limit login
 /// attempts and to detect bursts of unknown session tokens.
 ///
@@ -756,6 +874,85 @@ mod tests {
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             );
         }
+    }
+
+    #[test]
+    fn lockout_leaves_ordinary_mistyping_alone() {
+        let lockout = AccountLockout::new();
+        for i in 1..=LOCKOUT_FREE_ATTEMPTS {
+            assert!(
+                lockout.record_failure(1).is_none(),
+                "failure {i} is inside the free allowance and must not lock"
+            );
+            assert!(!lockout.is_locked(1));
+        }
+    }
+
+    #[test]
+    fn lockout_doubles_and_then_stops_doubling() {
+        // The shape of the backoff is the security property: linear growth
+        // would still let a patient attacker through, and unbounded growth
+        // would turn a lockout into a permanent denial of service.
+        let secs = |n: u32| AccountLockout::penalty(n).map(|d| d.as_secs());
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS), None);
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 1), Some(1));
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 2), Some(2));
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 3), Some(4));
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 10), Some(512));
+        // Capped from here on, however many failures pile up.
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 11), Some(LOCKOUT_MAX_SECS));
+        assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 40), Some(LOCKOUT_MAX_SECS));
+        // A shift count past the width of the type must saturate to the cap,
+        // not wrap round to a one-second lock. `over` is attacker-driven.
+        assert_eq!(secs(u32::MAX), Some(LOCKOUT_MAX_SECS));
+    }
+
+    #[test]
+    fn lockout_actually_locks_once_the_allowance_is_spent() {
+        let lockout = AccountLockout::new();
+        for _ in 0..LOCKOUT_FREE_ATTEMPTS {
+            lockout.record_failure(7);
+        }
+        assert!(!lockout.is_locked(7));
+        assert_eq!(
+            lockout.record_failure(7).map(|d| d.as_secs()),
+            Some(1),
+            "the first failure past the allowance locks for one second"
+        );
+        assert!(lockout.is_locked(7));
+    }
+
+    #[test]
+    fn lockout_is_per_account() {
+        // The whole point is that it is keyed by account, not by source: one
+        // account under attack must not lock any other operator out.
+        let lockout = AccountLockout::new();
+        for _ in 0..=LOCKOUT_FREE_ATTEMPTS {
+            lockout.record_failure(1);
+        }
+        assert!(lockout.is_locked(1));
+        assert!(!lockout.is_locked(2));
+    }
+
+    #[test]
+    fn a_correct_password_clears_the_history() {
+        let lockout = AccountLockout::new();
+        for _ in 0..=LOCKOUT_FREE_ATTEMPTS {
+            lockout.record_failure(1);
+        }
+        assert!(lockout.is_locked(1));
+        lockout.record_success(1);
+        assert!(!lockout.is_locked(1));
+        assert_eq!(lockout.tracked_accounts(), 0);
+        // And the backoff starts over rather than resuming where it stopped.
+        assert!(lockout.record_failure(1).is_none());
+    }
+
+    #[test]
+    fn an_untouched_account_is_never_locked() {
+        let lockout = AccountLockout::new();
+        assert!(!lockout.is_locked(42));
+        assert_eq!(lockout.tracked_accounts(), 0);
     }
 
     #[test]

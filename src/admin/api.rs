@@ -52,6 +52,11 @@ pub struct AppState {
     /// cookie guessing burn a legitimate operator's login budget from behind
     /// the same NAT address.
     pub invalid_session_limiter: Arc<RateLimiter>,
+    /// Per-account password-failure backoff, the account-keyed counterpart to
+    /// the IP-keyed `rate_limiter`. Both are needed: one bounds a single
+    /// source address, the other a single account across every address an
+    /// attacker can reach it from.
+    pub lockout: Arc<crate::admin::auth::AccountLockout>,
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
@@ -658,6 +663,25 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
     }
 }
 
+/// Count a password failure against `user_id`, and record the crossing into
+/// (or extension of) a lockout in the audit log.
+///
+/// The event carries no username: an operator reading the log has `user_id`,
+/// and anyone who has obtained the log has no business being handed the
+/// account names alongside evidence of which ones are under attack.
+fn note_account_failure(state: &AppState, user_id: i64, ip: std::net::IpAddr, endpoint: &str) {
+    if let Some(lock) = state.lockout.record_failure(user_id) {
+        tracing::warn!(
+            event = "auth.account_locked",
+            user_id,
+            %ip,
+            endpoint,
+            locked_secs = lock.as_secs(),
+            "account locked after repeated password failures"
+        );
+    }
+}
+
 /// Error body for the two ways a sensitive action can be refused for want of
 /// a recent password proof. `code` is what the admin UI keys off: a bare 403
 /// is indistinguishable from the CSRF guard's, and the two cases need
@@ -878,12 +902,27 @@ async fn login(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let valid = verify_password(&body.password, &auth.password_hash)
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !valid {
+    // Checked only once a username has resolved, which is what stops the
+    // lockout becoming the enumeration oracle the generic 401 exists to
+    // prevent: an unknown username is never counted, so it can never be
+    // locked, so the two cases cannot be told apart by whether a lock
+    // appears. The Argon2 cost is spent here too, for the same reason it is
+    // spent above — a locked account that answered faster than a wrong
+    // password would leak just as loudly.
+    if state.lockout.is_locked(auth.id) {
+        spend_verify_cost(&body.password);
         log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
+
+    let valid = verify_password(&body.password, &auth.password_hash)
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !valid {
+        note_account_failure(&state, auth.id, ip, "login");
+        log_failed();
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    state.lockout.record_success(auth.id);
 
     let now = crate::now_unix();
     // The one place a raw session token exists. It goes into the `Set-Cookie`
@@ -1226,9 +1265,14 @@ async fn reauth(
     if has_no_password(&hash) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    if state.lockout.is_locked(user_id) {
+        spend_verify_cost(&body.password);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let ok =
         verify_password(&body.password, &hash).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
+        note_account_failure(&state, user_id, ip, "reauth");
         tracing::warn!(
             event = "auth.failed",
             method = "password",
@@ -1239,6 +1283,7 @@ async fn reauth(
         );
         return Err(StatusCode::UNAUTHORIZED);
     }
+    state.lockout.record_success(user_id);
     if !crate::admin::auth::mark_reauthenticated(&state.sessions, &token_hash) {
         // The session was validated moments ago, so losing it here means it
         // expired or was revoked in between. Nothing was stamped, and the
@@ -1659,9 +1704,17 @@ async fn change_own_password(
     if has_no_password(&hash) {
         return Err(StatusCode::UNAUTHORIZED.into_response());
     }
+    // Same account budget as `login`. This endpoint verifies the same
+    // credential, so leaving it out would hand an attacker who already holds a
+    // session an unmetered place to grind it.
+    if state.lockout.is_locked(user_id) {
+        spend_verify_cost(&body.current_password);
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    }
     let ok = verify_password(&body.current_password, &hash)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     if !ok {
+        note_account_failure(&state, user_id, ip, "change_password");
         // This is the only password-verification path outside `login`, and
         // exactly the one an attacker holding a stolen session cookie uses to
         // try to take the account over permanently — a rejected attempt here
@@ -1676,6 +1729,7 @@ async fn change_own_password(
         );
         return Err(StatusCode::UNAUTHORIZED.into_response());
     }
+    state.lockout.record_success(user_id);
     let new_hash = hash_password(&body.new_password)
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     state

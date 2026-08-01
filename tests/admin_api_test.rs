@@ -90,6 +90,7 @@ async fn build_app_opts(
     )));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(
         noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
         noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
@@ -148,6 +149,7 @@ async fn build_app_opts(
         cache: cache.clone(),
         rate_limiter,
         invalid_session_limiter: invalid_session_limiter.clone(),
+        lockout: lockout.clone(),
         forwarder,
         handler,
         log_events: log_events.clone(),
@@ -1303,6 +1305,7 @@ async fn test_setup_initial_password() {
     )));
     let cache = DnsCache::new(100);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
+    let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(
         noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
         noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
@@ -1334,6 +1337,7 @@ async fn test_setup_initial_password() {
         cache: cache.clone(),
         rate_limiter: rate_limiter.clone(),
         invalid_session_limiter: invalid_session_limiter.clone(),
+        lockout: lockout.clone(),
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: tokio::sync::broadcast::channel(256).0,
@@ -1375,6 +1379,7 @@ async fn test_setup_initial_password() {
         cache,
         rate_limiter,
         invalid_session_limiter,
+        lockout: lockout.clone(),
         forwarder,
         handler,
         log_events: tokio::sync::broadcast::channel(256).0,
@@ -2353,6 +2358,192 @@ fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<B
     }
     b.body(body.map_or(Body::empty(), |s| Body::from(s.to_string())))
         .unwrap()
+}
+
+/// A login attempt that presents `ip` as its source address.
+///
+/// The tests below use a *different* address for every attempt, which is not a
+/// trick to dodge the IP limiter but the attack the account lockout exists to
+/// stop: OWASP's reason for keying the counter on the account is precisely
+/// "to prevent an attacker from making login attempts from a large number of
+/// different IP addresses". Each of these attempts is comfortably inside its
+/// own IP budget; only the account budget sees all of them.
+fn login_from(ip: &str, username: &str, password: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", ip)
+        .body(Body::from(format!(
+            r#"{{"username":"{username}","password":"{password}"}}"#
+        )))
+        .unwrap()
+}
+
+/// Spend an account's free allowance, one attempt per source address, leaving
+/// it locked. Returns the number of addresses used, so a caller can keep
+/// picking fresh ones.
+async fn lock_the_account(app: &axum::Router, username: &str) -> usize {
+    let attempts = noadd::admin::auth::LOCKOUT_FREE_ATTEMPTS + 1;
+    for i in 0..attempts {
+        let res = app
+            .clone()
+            .oneshot(login_from(
+                &format!("10.0.0.{i}"),
+                username,
+                "not-the-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {i} must fail on the password, not the IP limiter"
+        );
+    }
+    attempts as usize
+}
+
+/// The whole point: a thousand source addresses get a thousand IP budgets and
+/// one account budget. Once that is spent, even the *correct* password is
+/// refused.
+#[tokio::test]
+async fn a_distributed_guessing_run_locks_the_account() {
+    let (app, _token) = setup().await;
+    let used = lock_the_account(&app, "admin").await;
+
+    let res = app
+        .oneshot(login_from(&format!("10.0.0.{used}"), "admin", "admin"))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "the correct password must be refused while the account is locked"
+    );
+}
+
+/// A lockout that announced itself would re-open the user-enumeration hole
+/// the generic 401 exists to close: fail five times against a name and read
+/// off whether it exists. A locked account must be indistinguishable from one
+/// that was never there.
+#[tokio::test]
+async fn a_locked_account_is_indistinguishable_from_an_unknown_one() {
+    let (app, _token) = setup().await;
+    let used = lock_the_account(&app, "admin").await;
+
+    let locked = app
+        .clone()
+        .oneshot(login_from(
+            &format!("10.0.1.{used}"),
+            "admin",
+            "whatever-long",
+        ))
+        .await
+        .unwrap();
+    let unknown = app
+        .oneshot(login_from(
+            &format!("10.0.2.{used}"),
+            "nobody",
+            "whatever-long",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(locked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        locked.headers(),
+        unknown.headers(),
+        "a locked account must not be identifiable from the response headers"
+    );
+    let locked_body = axum::body::to_bytes(locked.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let unknown_body = axum::body::to_bytes(unknown.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(locked_body, unknown_body);
+}
+
+/// Getting it right is the only evidence the failures were the real operator
+/// fumbling, so it clears the history rather than leaving them one slip from a
+/// lockout for the next hour.
+#[tokio::test]
+async fn a_successful_login_clears_the_account_budget() {
+    let (app, _token) = setup().await;
+    let free = noadd::admin::auth::LOCKOUT_FREE_ATTEMPTS;
+
+    for i in 0..free {
+        let res = app
+            .clone()
+            .oneshot(login_from(&format!("10.1.0.{i}"), "admin", "wrong-one"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app
+        .clone()
+        .oneshot(login_from("10.1.0.200", "admin", "admin"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The allowance is whole again: the same number of failures as before
+    // still does not lock, which it would if the counter had merely carried on.
+    for i in 0..free {
+        let res = app
+            .clone()
+            .oneshot(login_from(&format!("10.1.1.{i}"), "admin", "wrong-one"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app
+        .oneshot(login_from("10.1.1.200", "admin", "admin"))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the counter must have restarted after the successful login"
+    );
+}
+
+/// The other two endpoints that verify this same password draw on the same
+/// account budget. Leaving either out would give an attacker who already holds
+/// a session an unmetered place to grind the credential.
+#[tokio::test]
+async fn the_lockout_covers_every_endpoint_that_checks_the_password() {
+    for (uri, body) in [
+        ("/api/auth/reauth", r#"{"password":"admin"}"#),
+        (
+            "/api/users/me/password",
+            r#"{"current_password":"admin","new_password":"vault-quartz-nimbus-84"}"#,
+        ),
+    ] {
+        let (app, token) = setup().await;
+        let used = lock_the_account(&app, "admin").await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("cookie", format!("session={token}"))
+                    .header("x-forwarded-for", format!("10.0.3.{used}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} must honour the account lockout even with the right password"
+        );
+    }
 }
 
 /// Age a live session's password proof past the re-authentication window,
