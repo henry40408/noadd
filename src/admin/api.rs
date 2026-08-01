@@ -162,6 +162,7 @@ pub fn admin_router(state: AppState) -> Router {
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
+        .route("/api/auth/reauth", post(reauth))
         .route("/api/auth/revoke-others", post(revoke_others))
         .route("/api/auth/logout", post(logout))
         // Health + server info (no auth required for health)
@@ -542,6 +543,15 @@ pub struct AuthedUser {
     /// True only when the request was authenticated by the forward-auth header
     /// (SSO), i.e. neither a session cookie nor an API key.
     pub via_forward_auth: bool,
+    /// The session's token hash when a browser cookie authenticated this
+    /// request, `None` for an API key or forward auth.
+    ///
+    /// It is what [`ReauthedUser`] needs to find the re-authentication stamp,
+    /// and carrying it here means that check does not have to re-walk the
+    /// cookie jar and risk disagreeing with the extractor about *which*
+    /// session authenticated — the two cookie names make that a real
+    /// possibility, not a theoretical one (see [`session_cookie_hashes`]).
+    pub session_token_hash: Option<String>,
 }
 
 impl axum::extract::FromRequestParts<AppState> for AuthedUser {
@@ -558,11 +568,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         let jar = CookieJar::from_headers(&parts.headers);
         let mut candidates = session_cookie_hashes(&jar).peekable();
         let presented_a_cookie = candidates.peek().is_some();
-        if let Some(user_id) = candidates.find_map(|hash| validate_session(&state.sessions, &hash))
+        if let Some((user_id, token_hash)) = candidates
+            .find_map(|hash| validate_session(&state.sessions, &hash).map(|uid| (uid, hash)))
         {
             return Ok(AuthedUser {
                 user_id,
                 via_forward_auth: false,
+                session_token_hash: Some(token_hash),
             });
         }
         // Counted here rather than deferred to the terminal rejection below
@@ -597,6 +609,7 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 return Ok(AuthedUser {
                     user_id,
                     via_forward_auth: false,
+                    session_token_hash: None,
                 });
             }
             // Not logged via `hash_api_key`'s output (that would still allow
@@ -620,6 +633,7 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                     Ok(user_id) => Ok(AuthedUser {
                         user_id,
                         via_forward_auth: true,
+                        session_token_hash: None,
                     }),
                     Err(err) => {
                         tracing::error!(
@@ -641,6 +655,78 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         }
         emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Error body for the two ways a sensitive action can be refused for want of
+/// a recent password proof. `code` is what the admin UI keys off: a bare 403
+/// is indistinguishable from the CSRF guard's, and the two cases need
+/// different handling — one is fixed by typing a password, the other cannot
+/// be fixed by this caller at all.
+#[derive(Serialize)]
+struct ReauthErrorResponse {
+    error: String,
+    code: &'static str,
+}
+
+/// An operator who has proved the account's password recently enough to
+/// perform a sensitive action — minting an API key, or adding or removing an
+/// operator. Anything that hands out durable access, in other words, which is
+/// exactly what an attacker holding a stolen cookie wants before the theft is
+/// noticed.
+///
+/// The three authentication methods are treated differently because they can
+/// prove different things:
+///
+/// - **Session cookie** — the case this exists for. Requires a password proof
+///   within [`REAUTH_WINDOW_SECS`]; login counts as one.
+/// - **Forward auth (SSO)** — exempt. The proxy authenticated *this very
+///   request*, which is a stronger claim than a stamp from minutes ago, and
+///   these accounts store [`NO_PASSWORD_SENTINEL`] so there is no password
+///   they could ever prove. Requiring one would lock SSO deployments out of
+///   their own operator management.
+/// - **API key** — refused outright. A key cannot present a password, and
+///   letting one mint another would mean a short-lived key could quietly issue
+///   itself a permanent successor. This matches the existing carve-out where
+///   session management and password change are already cookie-only.
+pub struct ReauthedUser(pub AuthedUser);
+
+impl axum::extract::FromRequestParts<AppState> for ReauthedUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = AuthedUser::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        if auth.via_forward_auth {
+            return Ok(Self(auth));
+        }
+        let Some(token_hash) = auth.session_token_hash.as_deref() else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ReauthErrorResponse {
+                    error:
+                        "this action requires a password and cannot be performed with an API key"
+                            .to_string(),
+                    code: "password_required",
+                }),
+            )
+                .into_response());
+        };
+        if crate::admin::auth::has_fresh_reauth(&state.sessions, token_hash) {
+            return Ok(Self(auth));
+        }
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(ReauthErrorResponse {
+                error: "confirm your password to continue".to_string(),
+                code: "reauth_required",
+            }),
+        )
+            .into_response())
     }
 }
 
@@ -825,6 +911,11 @@ async fn login(
             user_id: auth.id,
             created_at: now,
             last_seen: now,
+            // Typing the password *is* the proof, so a login satisfies
+            // `ReauthedUser` on its own. Without this an operator would be
+            // asked for the password twice in a row to do anything sensitive
+            // straight after signing in.
+            last_reauth_at: now,
         },
     );
     tracing::info!(
@@ -1072,6 +1163,99 @@ async fn setup(
     Ok(Json(SetupResponse { success: true }))
 }
 
+#[derive(Deserialize)]
+pub struct ReauthRequest {
+    pub password: String,
+}
+
+/// Prove the account's password again, refreshing this session's
+/// [`REAUTH_WINDOW_SECS`] window so it may perform a sensitive action.
+///
+/// Cookie-only, because the thing it updates is a session. A forward-auth or
+/// API-key caller reaching this endpoint has no session to stamp and gets the
+/// same 401 as any other request without one — `ReauthedUser` already answers
+/// for those two, and answering twice, differently, is how the two guards
+/// would end up disagreeing.
+///
+/// Verifying a password makes this a guessing surface, so it is throttled on
+/// the same budget as `login` and `change_own_password` — one IP, one
+/// credential, one budget.
+///
+/// Returns 204 rather than a body: the caller's next request carries the
+/// result, and there is nothing useful to say that the status does not.
+async fn reauth(
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(body): Json<ReauthRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+
+    if !state.rate_limiter.check(ip) {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "rate_limited",
+            user_id,
+            %ip,
+            "reauthentication rate limited"
+        );
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    state.rate_limiter.record(ip);
+
+    // Same cap as `login`, and for the same reason: bound the work an
+    // over-long input can make Argon2 do before it reaches the hasher.
+    if body.password.len() > MAX_LOGIN_PASSWORD_LENGTH {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let hash = state
+        .db
+        .get_user_password_hash(user_id)
+        .await
+        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    // A forward-auth-provisioned operator holds the sentinel rather than a
+    // hash. They cannot reach a sensitive endpoint through this path anyway —
+    // `ReauthedUser` exempts them on the strength of the proxy header — so the
+    // answer here is a plain 401, not the 500 that verifying the sentinel
+    // would produce.
+    if has_no_password(&hash) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let ok =
+        verify_password(&body.password, &hash).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "reauth",
+            user_id,
+            %ip,
+            "reauthentication rejected"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !crate::admin::auth::mark_reauthenticated(&state.sessions, &token_hash) {
+        // The session was validated moments ago, so losing it here means it
+        // expired or was revoked in between. Nothing was stamped, and the
+        // caller's next sensitive request will be rejected for want of a
+        // session rather than for want of a stamp.
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    tracing::info!(
+        event = "auth.reauthenticated",
+        user_id,
+        sid_hash = %session_log_id(&token_hash),
+        %ip,
+        "password confirmed for a sensitive action"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Log out every *other* session, keeping the caller's current one signed in.
 /// A forward-auth / API-key caller has no session cookie, so all sessions are
 /// revoked (none is their own device).
@@ -1245,7 +1429,7 @@ struct CreateUserRequest {
 /// it is audited — see the `user.created` event below.
 async fn create_user_handler(
     State(state): State<AppState>,
-    auth: AuthedUser,
+    ReauthedUser(auth): ReauthedUser,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(body): Json<CreateUserRequest>,
@@ -1306,7 +1490,7 @@ async fn create_user_handler(
 
 async fn delete_user_handler(
     State(state): State<AppState>,
-    auth: AuthedUser,
+    ReauthedUser(auth): ReauthedUser,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
@@ -1578,6 +1762,10 @@ async fn rotate_own_session(
             user_id,
             created_at: now,
             last_seen: now,
+            // The rotation happens immediately after the current password was
+            // verified, so the replacement session inherits that proof rather
+            // than starting stale.
+            last_reauth_at: now,
         },
     );
     tracing::info!(
@@ -2541,7 +2729,7 @@ async fn list_api_keys(
 )]
 async fn create_api_key(
     State(state): State<AppState>,
-    auth: AuthedUser,
+    ReauthedUser(auth): ReauthedUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
     let name = body.name.trim().to_string();

@@ -68,6 +68,18 @@ pub struct SessionInfo {
     pub user_id: i64,
     pub created_at: i64,
     pub last_seen: i64,
+    /// When this session last proved the account's password — at login, or at
+    /// a later `POST /api/auth/reauth`. Sensitive actions require this to be
+    /// within [`REAUTH_WINDOW_SECS`]; see [`has_fresh_reauth`].
+    ///
+    /// Deliberately **not** persisted to the `sessions` table. Restoring it
+    /// would mean writing on every re-authentication for a value whose whole
+    /// purpose is to go stale in minutes, and the failure mode of not
+    /// restoring it is the safe one: `load_sessions_from_db` falls back to
+    /// `created_at`, so a session restored after a restart is treated as
+    /// having last proved the password when it was created — true by
+    /// construction, since login is what created it.
+    pub last_reauth_at: i64,
 }
 
 /// Thread-safe session store. Maps **token hash** (see [`hash_session_token`])
@@ -343,6 +355,48 @@ pub fn prune_expired(store: &SessionStore) -> usize {
     before - map.len()
 }
 
+/// How recently a session must have proved the account's password before it
+/// may perform a sensitive action (mint an API key, add or remove an
+/// operator).
+///
+/// Five minutes is short on purpose. The threat this closes is an attacker
+/// holding a *stolen session cookie* — someone who walked past an unlocked
+/// screen, or picked the token out of a proxy log — and the window is exactly
+/// how long that cookie stays useful for the actions that would make the
+/// compromise permanent. It costs a legitimate operator one password entry per
+/// sitting, since logging in counts as a proof and most operators do these
+/// things right after signing in.
+pub const REAUTH_WINDOW_SECS: i64 = 300;
+
+/// Record that this session has just proved the account's password. Returns
+/// `false` if the token names no live session.
+pub fn mark_reauthenticated(store: &SessionStore, token_hash: &str) -> bool {
+    let now = now_secs();
+    let mut map = store.lock();
+    if let Some(info) = map.get_mut(token_hash) {
+        info.last_reauth_at = now;
+        return true;
+    }
+    false
+}
+
+/// Whether this session proved the password within [`REAUTH_WINDOW_SECS`].
+///
+/// A token naming no live session is not fresh — the caller is about to be
+/// rejected as unauthenticated anyway, and answering `true` here would be the
+/// wrong default for a function guarding sensitive actions.
+///
+/// A clock that jumps backwards makes the subtraction negative, which reads as
+/// "not yet stale" rather than misfiring — the same direction the session
+/// expiry checks take, so the two cannot disagree about what time it is.
+pub fn has_fresh_reauth(store: &SessionStore, token_hash: &str) -> bool {
+    let now = now_secs();
+    store
+        .lock()
+        .get(token_hash)
+        .is_some_and(|info| now - info.last_reauth_at < REAUTH_WINDOW_SECS)
+}
+
 /// Revoke a single session token (logout this device only).
 ///
 /// Leaves every other session intact. Persistence to the database is the
@@ -374,6 +428,10 @@ pub async fn load_sessions_from_db(
                 user_id: s.user_id,
                 created_at: s.created_at,
                 last_seen: s.last_seen,
+                // Not persisted — see the field's doc comment. `created_at` is
+                // the honest floor: login proved the password, and nothing
+                // since a restart has proved it again.
+                last_reauth_at: s.created_at,
             },
         );
     }

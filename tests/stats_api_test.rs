@@ -61,6 +61,7 @@ async fn setup() -> (axum::Router, String) {
             user_id: uid,
             created_at: now,
             last_seen: now,
+            last_reauth_at: now,
         },
     );
 
