@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -30,7 +30,8 @@ const MIN_TIMEOUT_MS: u64 = 5000;
 #[derive(Debug, Clone)]
 pub struct UpstreamConfig {
     /// Upstream server addresses. Each entry may be:
-    /// - `IP:port` — plain UDP (e.g. `1.1.1.1:53`, `[::1]:53`)
+    /// - `IP[:port]` — plain UDP, default port 53 (e.g. `1.1.1.1`,
+    ///   `1.1.1.1:53`, `::1`, `[::1]:53`)
     /// - `tls://host[:port]` — DNS-over-TLS, default port 853
     /// - `https://host[:port][/path]` — DNS-over-HTTPS, default port 443
     ///   and default path `/dns-query`
@@ -75,9 +76,9 @@ struct UpstreamSpec {
 
 impl UpstreamSpec {
     /// Parse an upstream entry string. Recognizes the `tls://` and
-    /// `https://` URL schemes; everything else is treated as plain
-    /// `IP:port` UDP and validated by `SocketAddr` to preserve the
-    /// existing v4/v6 behavior.
+    /// `https://` URL schemes; everything else is treated as plain UDP,
+    /// either `IP:port` or a bare IP literal that takes the standard
+    /// DNS port 53.
     fn parse(input: &str) -> Result<Self, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -102,33 +103,76 @@ impl UpstreamSpec {
                 port,
                 kind: UpstreamKind::Https { sni: host, path },
             })
-        } else {
-            let addr: SocketAddr = trimmed
-                .parse()
-                .map_err(|e| format!("invalid UDP upstream {trimmed:?}: {e}"))?;
+        } else if let Ok(addr) = trimmed.parse::<SocketAddr>() {
             Ok(Self {
                 host: addr.ip().to_string(),
                 port: addr.port(),
                 kind: UpstreamKind::Udp,
             })
+        } else if let Ok(ip) = trimmed.parse::<IpAddr>() {
+            // A bare IP takes the standard DNS port, matching the default
+            // ports `tls://` and `https://` already get. The two parses
+            // cannot both succeed — `SocketAddr` always requires a port and
+            // `IpAddr` always rejects one — so the fallback introduces no
+            // ambiguity. Note that testing for a `:` instead would misread
+            // every bare IPv6 literal as already carrying a port.
+            Ok(Self {
+                host: ip.to_string(),
+                port: 53,
+                kind: UpstreamKind::Udp,
+            })
+        } else {
+            Err(format!(
+                "invalid UDP upstream {trimmed:?}: expected an IP address, \
+                 optionally with a port (e.g. `1.1.1.1`, `1.1.1.1:53`, `[::1]:53`)"
+            ))
+        }
+    }
+
+    /// Render the spec back to its canonical entry string: every port and
+    /// path made explicit, IPv6 hosts bracketed.
+    ///
+    /// Storing this rather than what the operator typed is what keeps
+    /// `1.1.1.1` and `1.1.1.1:53` from becoming two independent upstreams —
+    /// each with its own health check and latency EMA — for one server.
+    fn canonical(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        let port = self.port;
+        match &self.kind {
+            UpstreamKind::Udp => format!("{host}:{port}"),
+            UpstreamKind::Tls { .. } => format!("tls://{host}:{port}"),
+            UpstreamKind::Https { path, .. } => format!("https://{host}:{port}{path}"),
         }
     }
 }
 
 /// Parse textarea / CSV upstream input into validated server strings.
 /// Splits on newlines and commas, trims, drops blanks, and validates each
-/// entry via [`UpstreamSpec::parse`]. Returns the cleaned strings in order,
-/// or an error naming the first offending entry. Empty input is an error —
-/// a resolver with zero upstreams is non-functional.
+/// entry via [`UpstreamSpec::parse`]. Returns each entry in its canonical
+/// form (see [`UpstreamSpec::canonical`]) in first-seen order with
+/// duplicates dropped, or an error naming the first offending entry.
+/// Empty input is an error — a resolver with zero upstreams is
+/// non-functional.
+///
+/// Canonicalizing here rather than preserving what was typed is what makes
+/// the deduplication meaningful: `1.1.1.1` and `1.1.1.1:53` name one server
+/// and must collapse to one upstream, or the forwarder health-checks it
+/// twice and the Lowest Latency strategy treats it as two candidates.
 pub fn parse_upstreams(input: &str) -> Result<Vec<String>, String> {
-    let mut servers = Vec::new();
+    let mut servers: Vec<String> = Vec::new();
     for raw in input.split(['\n', ',']) {
         let entry = raw.trim();
         if entry.is_empty() {
             continue;
         }
-        UpstreamSpec::parse(entry)?;
-        servers.push(entry.to_string());
+        let canonical = UpstreamSpec::parse(entry)?.canonical();
+        if !servers.contains(&canonical) {
+            servers.push(canonical);
+        }
     }
     if servers.is_empty() {
         return Err("at least one upstream server is required".to_string());
@@ -1240,9 +1284,70 @@ mod tests {
             vec![
                 "1.1.1.1:53".to_string(),
                 "tls://dns.mullvad.net:853".to_string(),
-                "https://dns.quad9.net/dns-query".to_string(),
+                "https://dns.quad9.net:443/dns-query".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_bare_ipv4_takes_port_53() {
+        let s = UpstreamSpec::parse("1.1.1.1").unwrap();
+        assert_eq!(s.host, "1.1.1.1");
+        assert_eq!(s.port, 53);
+        assert_eq!(s.kind, UpstreamKind::Udp);
+    }
+
+    /// A bare IPv6 literal is full of colons but carries no port, so the
+    /// fallback must be driven by an `IpAddr` parse rather than by looking
+    /// for a `:`.
+    #[test]
+    fn parse_bare_ipv6_takes_port_53() {
+        let s = UpstreamSpec::parse("2606:4700:4700::1111").unwrap();
+        assert_eq!(s.host, "2606:4700:4700::1111");
+        assert_eq!(s.port, 53);
+        assert_eq!(s.kind, UpstreamKind::Udp);
+        assert_eq!(s.canonical(), "[2606:4700:4700::1111]:53");
+    }
+
+    /// `inet_aton`-style shorthand and octal forms would make a bare IP
+    /// genuinely ambiguous; Rust's parser rejects them, so they stay errors.
+    #[test]
+    fn parse_bare_ip_rejects_inet_aton_shorthand() {
+        assert!(UpstreamSpec::parse("1.1").is_err());
+        assert!(UpstreamSpec::parse("010.1.1.1").is_err());
+        assert!(UpstreamSpec::parse("0x01010101").is_err());
+    }
+
+    /// Hostnames still need an explicit scheme — a bare name has no
+    /// transport to infer and is not covered by the port default.
+    #[test]
+    fn parse_bare_hostname_still_rejected() {
+        assert!(UpstreamSpec::parse("dns.example.com").is_err());
+        assert!(UpstreamSpec::parse("localhost:53").is_err());
+    }
+
+    #[test]
+    fn parse_upstreams_canonicalizes_every_scheme() {
+        let out =
+            parse_upstreams("1.1.1.1\n::1\ntls://dns.mullvad.net\nhttps://dns.quad9.net").unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "1.1.1.1:53".to_string(),
+                "[::1]:53".to_string(),
+                "tls://dns.mullvad.net:853".to_string(),
+                "https://dns.quad9.net:443/dns-query".to_string(),
+            ]
+        );
+    }
+
+    /// The whole point of canonicalizing before storing: these spellings
+    /// name one server and must not become two upstreams, each with its own
+    /// health check and latency EMA.
+    #[test]
+    fn parse_upstreams_dedupes_equivalent_spellings() {
+        let out = parse_upstreams("1.1.1.1, 1.1.1.1:53, [::1]:53, ::1").unwrap();
+        assert_eq!(out, vec!["1.1.1.1:53".to_string(), "[::1]:53".to_string()]);
     }
 
     #[test]
