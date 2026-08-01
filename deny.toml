@@ -15,6 +15,12 @@ ignore = [
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",
+    # TEMPORARY — remove on or after 2026-08-03. event-listener 5.4.1 lets a
+    # !Send tag cross threads via StackSlot. Fixed in 5.4.2, published
+    # 2026-07-27 11:31 UTC, which the 7-day dependency cooldown makes eligible
+    # on 2026-08-03. Reached only transitively (hickory-resolver/moka and
+    # rustls-acme/blocking); we never call Event::with_tag ourselves. See #206.
+    "RUSTSEC-2026-0221",
 ]
 
 [licenses]
