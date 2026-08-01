@@ -5,7 +5,11 @@ import { When, Then } from './fixtures.js';
 // --- Shared with @auth (setup-and-auth.feature) ---------------------------
 
 Then('I see a setup error about the password being too short', async ({ page }) => {
-  await expect(page.getByTestId('setup-error')).toContainText(/at least 8|too short/i);
+  // Minimum-agnostic on purpose: the figure lives in MIN_PASSWORD_LENGTH
+  // (src/admin/api.rs) and has already moved once. What this scenario is
+  // about is that the UI blocks a too-short password before any API call,
+  // not what the current floor happens to be.
+  await expect(page.getByTestId('setup-error')).toContainText(/at least \d+ characters|too short/i);
 });
 
 Then('I see a welcome message confirming the setup is complete', async ({ page }) => {

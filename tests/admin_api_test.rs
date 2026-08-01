@@ -1356,7 +1356,9 @@ async fn test_setup_initial_password() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"username":"admin","password":"newpass1"}"#))
+                .body(Body::from(
+                    r#"{"username":"admin","password":"newpassphrase1"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -1392,7 +1394,9 @@ async fn test_setup_initial_password() {
                 .method("POST")
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"username":"admin","password":"another12"}"#))
+                .body(Body::from(
+                    r#"{"username":"admin","password":"another-passphrase"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -1916,7 +1920,12 @@ async fn setup_rejects_short_password_with_400() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"username":"admin","password":"1234567"}"#)) // 7 chars
+        // One character under the 12-character minimum: the boundary, not an
+        // arbitrarily short string, so a minimum accidentally applied as `<=`
+        // or read off by one still fails this.
+        .body(Body::from(
+            r#"{"username":"admin","password":"12345678901"}"#,
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1927,19 +1936,23 @@ async fn setup_rejects_short_password_with_400() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        msg.to_lowercase().contains("at least") || msg.contains('8'),
+        msg.to_lowercase().contains("at least"),
         "expected a too-short error message mentioning the minimum, got: {body}"
     );
 }
 
 #[tokio::test]
-async fn setup_accepts_eight_char_password_with_200() {
+async fn setup_accepts_a_password_at_the_minimum_length_with_200() {
     let app = unconfigured_app().await;
     let req = Request::builder()
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"username":"admin","password":"12345678"}"#)) // 8 chars
+        // Exactly the 12-character minimum — the other side of the boundary
+        // the test above guards.
+        .body(Body::from(
+            r#"{"username":"admin","password":"123456789012"}"#,
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1951,6 +1964,105 @@ async fn setup_accepts_eight_char_password_with_200() {
     assert_eq!(
         body.get("success").and_then(serde_json::Value::as_bool),
         Some(true)
+    );
+}
+
+/// A password past the 128-character maximum must be rejected outright rather
+/// than truncated to fit: truncation would make every password sharing the
+/// first 128 characters open the same account.
+#[tokio::test]
+async fn setup_rejects_an_over_long_password_with_400() {
+    let app = unconfigured_app().await;
+    let too_long = "a".repeat(129);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"username":"admin","password":"{too_long}"}}"#
+        )))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("at most"),
+        "expected a too-long error message mentioning the maximum, got: {body}"
+    );
+}
+
+/// The maximum is a boundary, not a vibe: 128 characters exactly must still be
+/// accepted.
+#[tokio::test]
+async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
+    let app = unconfigured_app().await;
+    let at_max = "a".repeat(128);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"username":"admin","password":"{at_max}"}}"#
+        )))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The length band is counted in characters, not bytes. A 12-character CJK
+/// passphrase is 36 bytes; a byte-counting minimum would accept it for the
+/// wrong reason, and a byte-counting maximum would reject a perfectly ordinary
+/// 50-character one.
+#[tokio::test]
+async fn password_length_is_counted_in_characters_not_bytes() {
+    // 11 characters / 33 bytes — under the minimum however many bytes it is.
+    let app = unconfigured_app().await;
+    let eleven_chars = "密".repeat(11);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"username":"admin","password":"{eleven_chars}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "11 characters is under the minimum even though it is 33 bytes"
+    );
+
+    // 100 characters / 300 bytes — comfortably inside a character-counted
+    // maximum, well past a byte-counted one.
+    let app = unconfigured_app().await;
+    let hundred_chars = "密".repeat(100);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"username":"admin","password":"{hundred_chars}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "100 characters is inside the maximum even though it is 300 bytes"
     );
 }
 
@@ -2184,7 +2296,7 @@ async fn create_and_list_operators() {
             "POST",
             "/api/users",
             &token,
-            Some(r#"{"username":"bob","password":"longpass1"}"#),
+            Some(r#"{"username":"bob","password":"long-enough-pass"}"#),
         ))
         .await
         .unwrap();
@@ -2197,7 +2309,7 @@ async fn create_and_list_operators() {
             "POST",
             "/api/users",
             &token,
-            Some(r#"{"username":"bob","password":"longpass1"}"#),
+            Some(r#"{"username":"bob","password":"long-enough-pass"}"#),
         ))
         .await
         .unwrap();
@@ -2225,6 +2337,191 @@ async fn change_own_password_requires_correct_current() {
             &token,
             Some(r#"{"current_password":"wrong","new_password":"brandnewpass"}"#),
         ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The length band applies wherever a password is *set*, not just at setup.
+/// A minimum enforced only by the setup wizard would let an operator walk
+/// their own password straight back under it.
+#[tokio::test]
+async fn change_own_password_enforces_the_length_band() {
+    for (label, new_password) in [
+        ("under the minimum", "short1234".to_string()),
+        ("over the maximum", "a".repeat(129)),
+    ] {
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users/me/password",
+                &token,
+                Some(&format!(
+                    r#"{{"current_password":"admin","new_password":"{new_password}"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "a new password {label} must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_operator_enforces_the_length_band() {
+    for (label, password) in [
+        ("under the minimum", "short1234".to_string()),
+        ("over the maximum", "a".repeat(129)),
+    ] {
+        let (app, token) = setup().await;
+        let res = app
+            .oneshot(authed(
+                "POST",
+                "/api/users",
+                &token,
+                Some(&format!(r#"{{"username":"bob","password":"{password}"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "an operator password {label} must be rejected"
+        );
+    }
+}
+
+/// Changing a password verifies one, so it is a password-guessing surface and
+/// must be throttled like the login endpoint. Without this an attacker sitting
+/// at a signed-in terminal can grind the current-password field indefinitely
+/// and take the account over permanently.
+#[tokio::test]
+async fn change_own_password_is_rate_limited() {
+    let (app, token) = setup().await;
+    // The router is built with the same 5-attempts-per-60s limiter `main`
+    // uses, and every request here shares the fallback client IP.
+    let attempt = || {
+        app.clone().oneshot(authed(
+            "POST",
+            "/api/users/me/password",
+            &token,
+            Some(r#"{"current_password":"wrong","new_password":"a-long-enough-one"}"#),
+        ))
+    };
+    for i in 0..5 {
+        let res = attempt().await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {i} is inside the budget and must fail on the password, not the limiter"
+        );
+    }
+    let res = attempt().await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the 6th attempt within the window must be throttled"
+    );
+}
+
+/// The throttle counts against the same budget `login` uses, deliberately:
+/// both are the same credential being guessed from the same address. This
+/// pins that down so nobody "fixes" it into a separate limiter without
+/// meaning to.
+#[tokio::test]
+async fn change_own_password_shares_the_login_budget() {
+    let (app, token) = setup().await;
+    for _ in 0..5 {
+        let res = app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/api/users/me/password",
+                &token,
+                Some(r#"{"current_password":"wrong","new_password":"a-long-enough-one"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"username":"admin","password":"admin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// An unknown username and a known username with the wrong password must be
+/// indistinguishable in the response itself — the timing side of the same
+/// property is pinned in `tests/admin_auth_test.rs`.
+#[tokio::test]
+async fn unknown_user_and_wrong_password_return_identical_401s() {
+    let (app, _token) = setup().await;
+    let login = |payload: &'static str| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+    };
+
+    let unknown = login(r#"{"username":"nobody","password":"whatever-long"}"#)
+        .await
+        .unwrap();
+    let wrong = login(r#"{"username":"admin","password":"whatever-long"}"#)
+        .await
+        .unwrap();
+
+    assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unknown.headers(),
+        wrong.headers(),
+        "response headers must not reveal whether the account exists"
+    );
+
+    let unknown_body = axum::body::to_bytes(unknown.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let wrong_body = axum::body::to_bytes(wrong.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(unknown_body, wrong_body);
+}
+
+/// A password longer than any human types is refused before it ever reaches
+/// Argon2. The cap is far above `MAX_PASSWORD_LENGTH` on purpose so an
+/// operator whose password predates that limit is not locked out — this only
+/// bounds the work an unauthenticated caller can demand.
+#[tokio::test]
+async fn login_rejects_an_absurdly_long_password() {
+    let (app, _token) = setup().await;
+    let absurd = "a".repeat(2000);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"username":"admin","password":"{absurd}"}}"#
+                )))
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -2498,7 +2795,7 @@ async fn setup_creates_first_operator_when_empty() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"root","password":"hunter2pass"}"#,
+                    r#"{"username":"root","password":"hunter2passphrase"}"#,
                 ))
                 .unwrap(),
         )
@@ -2550,7 +2847,7 @@ async fn list_operators_excludes_password_hash() {
             "POST",
             "/api/users",
             &token,
-            Some(r#"{"username":"bob","password":"longpass1"}"#),
+            Some(r#"{"username":"bob","password":"long-enough-pass"}"#),
         ))
         .await
         .unwrap();
@@ -2672,7 +2969,9 @@ async fn delete_operator_succeeds_and_missing_returns_404() {
                 "POST",
                 "/api/users",
                 &token,
-                Some(&format!(r#"{{"username":"{u}","password":"longpass1"}}"#)),
+                Some(&format!(
+                    r#"{{"username":"{u}","password":"long-enough-pass"}}"#
+                )),
             ))
             .await
             .unwrap();

@@ -478,6 +478,43 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     }
 }
 
+/// Argon2 hash of a fixed, unusable string, generated once per process with
+/// the same parameters as every real hash. Verifying against it therefore
+/// costs exactly what verifying a real password costs, which is the entire
+/// point — see [`spend_verify_cost`].
+static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
+
+/// Spend the Argon2 work a real password verification would, and discard the
+/// answer.
+///
+/// Without this, `login` has the textbook "quick exit" shape OWASP warns
+/// about: an unknown username returns before any hashing happens, while a
+/// known one pays Argon2's ~50 ms first. Both answers are the same generic
+/// 401, but the *response time* is not, and that difference is a
+/// user-enumeration oracle — the one discrepancy factor a generic error
+/// message cannot close on its own.
+///
+/// The hash is generated lazily from a fixed string rather than hard-coded as
+/// a PHC literal so that it always tracks [`Argon2::default`]: a literal would
+/// silently stop matching the real cost the day those default parameters
+/// change, which is exactly when nobody would think to look. The first call
+/// additionally pays for generating it; that happens once per process and is
+/// not attributable to any particular username.
+///
+/// This equalises the dominant cost, not every instruction — the database
+/// lookup that precedes it still differs slightly between a hit and a miss.
+/// That residual sits orders of magnitude below the Argon2 term it now hides
+/// behind, and closing it entirely would require a constant-time database.
+pub fn spend_verify_cost(password: &str) {
+    let hash = DUMMY_PASSWORD_HASH.get_or_init(|| {
+        // A fixed input under default parameters; hashing it cannot fail.
+        hash_password("noadd::timing-equalisation::not-a-real-password")
+            .expect("hashing a fixed string with default Argon2 parameters cannot fail")
+    });
+    // The verdict is meaningless by construction — the work is the product.
+    let _ = verify_password(password, hash);
+}
+
 /// Stored in `users.password_hash` for operators provisioned from a trusted
 /// forward-auth header. `!` is not a valid PHC string, so it can never match a
 /// real Argon2 hash — the same convention `/etc/shadow` uses to mark an account

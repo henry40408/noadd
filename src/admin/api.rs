@@ -25,7 +25,8 @@ use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, has_no_password, hash_api_key,
-    hash_password, session_log_id, store_session, validate_session, verify_password,
+    hash_password, session_log_id, spend_verify_cost, store_session, validate_session,
+    verify_password,
 };
 use crate::admin::stats;
 use crate::cache::DnsCache;
@@ -754,6 +755,15 @@ async fn login(
         );
     };
 
+    // Bound the input handed to Argon2 before any hashing happens. The cap is
+    // far looser than `MAX_PASSWORD_LENGTH` on purpose — see that constant —
+    // and rejecting here leaks nothing, since the verdict does not depend on
+    // which username was presented.
+    if body.password.len() > MAX_LOGIN_PASSWORD_LENGTH {
+        log_failed();
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     // Generic 401 whether the username is unknown or the password is wrong.
     let Some(auth) = state
         .db
@@ -761,6 +771,9 @@ async fn login(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
+        // Same Argon2 cost a real account would have incurred, so the two
+        // paths cannot be told apart by response time. See `spend_verify_cost`.
+        spend_verify_cost(&body.password);
         log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -769,8 +782,12 @@ async fn login(
     // can never authenticate with a password — same generic 401 as any other
     // failed login. This must precede `verify_password`, which would otherwise
     // fail to parse the sentinel and surface it as a 500, leaking which accounts
-    // are forward-auth-provisioned.
+    // are forward-auth-provisioned. The sentinel is not a hash, so there is
+    // nothing to verify against and this path needs the same padding an
+    // unknown username gets — otherwise it returns early and becomes its own
+    // oracle for which accounts are proxy-provisioned.
     if has_no_password(&auth.password_hash) {
+        spend_verify_cost(&body.password);
         log_failed();
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -873,8 +890,61 @@ pub struct LogoutResponse {
     pub via_forward_auth: bool,
 }
 
-/// Minimum length for the admin password set via `POST /api/auth/setup`.
-const MIN_PASSWORD_LENGTH: usize = 8;
+/// Minimum length for a password *set* through the API — `POST
+/// /api/auth/setup`, `POST /api/users`, `POST /api/users/me/password`.
+///
+/// NIST SP 800-63B, via the OWASP Authentication Cheat Sheet, treats anything
+/// under 15 characters as weak *when a second factor is not available*, which
+/// is noadd's situation today. 12 is a deliberate compromise: a real
+/// improvement on the 8 it replaces, and still short enough that an operator
+/// bringing an appliance up on a phone keyboard does not route around it.
+/// Raise it to 15 once a second factor exists.
+///
+/// Enforced only when a password is set. `login` deliberately does not check
+/// it, so an operator whose password predates this constant keeps signing in
+/// and meets the new floor at their next change rather than being locked out.
+const MIN_PASSWORD_LENGTH: usize = 12;
+
+/// Maximum length for a password set through the API.
+///
+/// A maximum exists at all because Argon2 hashes whatever it is handed and the
+/// JSON body limit is measured in megabytes. 128 sits far above any real
+/// passphrase and far below anything that costs measurable work. Over-long
+/// passwords are rejected rather than truncated: silent truncation would make
+/// two different passwords open the same account.
+const MAX_PASSWORD_LENGTH: usize = 128;
+
+/// Upper bound on a password accepted at *login*, as opposed to
+/// [`MAX_PASSWORD_LENGTH`] when one is set.
+///
+/// Deliberately far looser, because the two bounds answer different questions.
+/// The set-time bound is a policy an operator can be asked to satisfy; this one
+/// only has to be low enough to bound the work an unauthenticated caller can
+/// make Argon2 do, while staying above any password an existing operator may
+/// already hold from before `MAX_PASSWORD_LENGTH` existed. Tightening this to
+/// `MAX_PASSWORD_LENGTH` would lock those operators out of their own appliance.
+const MAX_LOGIN_PASSWORD_LENGTH: usize = 1024;
+
+/// Check a to-be-set password against the length band, returning the message
+/// to show on rejection.
+///
+/// Shared by all three endpoints that set a password so they cannot drift
+/// apart: a floor enforced at setup but not at change would let an operator
+/// walk their own password straight back under it.
+fn validate_new_password(password: &str) -> Result<(), String> {
+    let len = password.chars().count();
+    if len < MIN_PASSWORD_LENGTH {
+        return Err(format!(
+            "password must be at least {MIN_PASSWORD_LENGTH} characters"
+        ));
+    }
+    if len > MAX_PASSWORD_LENGTH {
+        return Err(format!(
+            "password must be at most {MAX_PASSWORD_LENGTH} characters"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Serialize)]
 struct SetupErrorResponse {
@@ -927,13 +997,8 @@ async fn setup(
             }),
         ));
     }
-    if body.password.chars().count() < MIN_PASSWORD_LENGTH {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(SetupErrorResponse {
-                error: format!("password must be at least {MIN_PASSWORD_LENGTH} characters"),
-            }),
-        ));
+    if let Err(error) = validate_new_password(&body.password) {
+        return Err((StatusCode::BAD_REQUEST, Json(SetupErrorResponse { error })));
     }
     let hash = hash_password(&body.password).map_err(|_err| setup_ise())?;
     state
@@ -1119,7 +1184,7 @@ async fn create_user_handler(
     if username.is_empty() || username.chars().count() > 64 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if body.password.chars().count() < MIN_PASSWORD_LENGTH {
+    if validate_new_password(&body.password).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let hash = hash_password(&body.password).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1247,7 +1312,34 @@ async fn change_own_password(
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
     let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    if body.new_password.chars().count() < MIN_PASSWORD_LENGTH {
+
+    // This endpoint verifies a password, so it is a password-guessing surface
+    // and has to be throttled like one — the scenario being closed is the
+    // cheat sheet's own: someone walks up to a signed-in terminal and grinds
+    // the current-password field until the account is theirs permanently.
+    //
+    // It shares `rate_limiter` with `login` rather than getting its own
+    // instance. The usual objection to sharing a limiter — one signal
+    // consuming another's budget from a NAT address, which is why
+    // `invalid_session_limiter` is separate — does not apply here: both
+    // signals are the *same* credential being guessed from the same IP, so a
+    // shared budget is the behaviour you would build on purpose. The cost is
+    // that an operator who mistypes their current password five times waits a
+    // minute before signing in again from that address.
+    if !state.rate_limiter.check(ip) {
+        tracing::warn!(
+            event = "auth.failed",
+            method = "password",
+            reason = "rate_limited",
+            user_id,
+            %ip,
+            "password change rate limited"
+        );
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    state.rate_limiter.record(ip);
+
+    if validate_new_password(&body.new_password).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let hash = state
