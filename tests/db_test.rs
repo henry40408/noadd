@@ -883,6 +883,7 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
                     user_id: 1,
                     created_at,
                     last_seen,
+                    last_reauth_at: created_at,
                 },
             );
             let evicted = prune_expired(&store) == 1;

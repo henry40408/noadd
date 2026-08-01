@@ -124,6 +124,7 @@ async fn build_app_opts(
                 user_id: uid,
                 created_at: now,
                 last_seen: now,
+                last_reauth_at: now,
             },
         );
     }
@@ -975,6 +976,7 @@ async fn logout_revokes_every_live_session_named_by_a_cookie() {
             user_id: admin_id,
             created_at: now,
             last_seen: now,
+            last_reauth_at: now,
         },
     );
 
@@ -2353,6 +2355,183 @@ fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<B
         .unwrap()
 }
 
+/// Age a live session's password proof past the re-authentication window,
+/// leaving everything else about it untouched — the session stays valid, only
+/// the proof goes stale. Returns the number of sessions aged.
+fn expire_reauth(sessions: &SessionStore, token: &str) -> usize {
+    let hash = hash_session_token(token);
+    let mut map = sessions.lock();
+    let Some(info) = map.get_mut(&hash) else {
+        return 0;
+    };
+    info.last_reauth_at = noadd::now_unix() - noadd::admin::auth::REAUTH_WINDOW_SECS - 1;
+    1
+}
+
+/// The gap #208's own doc comment called out: an attacker holding a stolen
+/// session cookie could mint a long-lived API key, and that key kept working
+/// after the victim changed their password. Minting one now needs the
+/// password again.
+#[tokio::test]
+async fn sensitive_actions_need_a_recent_password_proof() {
+    // Each of these hands out durable access — a key that outlives the
+    // session, or an operator account that is a second key to the whole box.
+    let sensitive: &[(&str, &str, Option<&str>)] = &[
+        ("POST", "/api/api-keys", Some(r#"{"name":"ci"}"#)),
+        (
+            "POST",
+            "/api/users",
+            Some(r#"{"username":"bob","password":"vault-quartz-nimbus-84"}"#),
+        ),
+        ("DELETE", "/api/users/2", None),
+    ];
+
+    for (method, uri, body) in sensitive {
+        let (app, token, _cache, _events, _db, sessions, _isl) =
+            build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+        // Fresh out of login, the proof is current and the action goes
+        // through — an operator must not be asked twice in a row.
+        let res = app
+            .clone()
+            .oneshot(authed(method, uri, &token, *body))
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must be allowed straight after login"
+        );
+
+        assert_eq!(expire_reauth(&sessions, &token), 1);
+
+        let res = app
+            .oneshot(authed(method, uri, &token, *body))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must be refused once the proof is stale"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json.get("code").and_then(serde_json::Value::as_str),
+            Some("reauth_required"),
+            "the UI keys off this code — a bare 403 is indistinguishable from the CSRF guard's"
+        );
+    }
+}
+
+/// Re-authenticating restores the window, so the action that was just refused
+/// succeeds on retry. This is the whole loop the admin UI drives.
+#[tokio::test]
+async fn reauth_reopens_the_window() {
+    let (app, token, _cache, _events, _db, sessions, _isl) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    assert_eq!(expire_reauth(&sessions, &token), 1);
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/api-keys",
+            &token,
+            Some(r#"{"name":"ci"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/auth/reauth",
+            &token,
+            Some(r#"{"password":"admin"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/api-keys",
+            &token,
+            Some(r#"{"name":"ci"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+}
+
+/// A wrong password must not reopen the window, and must be audited — this is
+/// the same guessing surface as `login`.
+#[tokio::test]
+async fn reauth_rejects_the_wrong_password_and_leaves_the_window_shut() {
+    let (app, token, _cache, _events, _db, sessions, _isl) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    assert_eq!(expire_reauth(&sessions, &token), 1);
+
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "POST",
+            "/api/auth/reauth",
+            &token,
+            Some(r#"{"password":"not-the-password"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/api-keys",
+            &token,
+            Some(r#"{"name":"ci"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "a failed confirmation must not count as a proof"
+    );
+}
+
+/// Verifying a password makes this a guessing surface, so it shares the login
+/// budget for the same reason `change_own_password` does.
+#[tokio::test]
+async fn reauth_is_rate_limited() {
+    let (app, token) = setup().await;
+    let attempt = || {
+        app.clone().oneshot(authed(
+            "POST",
+            "/api/auth/reauth",
+            &token,
+            Some(r#"{"password":"wrong"}"#),
+        ))
+    };
+    for i in 0..5 {
+        assert_eq!(
+            attempt().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {i} is inside the budget"
+        );
+    }
+    assert_eq!(
+        attempt().await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
 #[tokio::test]
 async fn create_and_list_operators() {
     let (app, token) = setup().await;
@@ -2885,6 +3064,7 @@ async fn change_password_revokes_other_sessions_of_same_user() {
             user_id: admin_id,
             created_at: now,
             last_seen: now,
+            last_reauth_at: now,
         },
     );
 
@@ -3018,6 +3198,7 @@ async fn change_password_keeps_other_operators_signed_in() {
             user_id: bob_id,
             created_at: now,
             last_seen: now,
+            last_reauth_at: now,
         },
     );
 
@@ -3074,6 +3255,7 @@ async fn change_password_deletes_revoked_rows_from_db() {
             user_id: admin_id,
             created_at: now,
             last_seen: now,
+            last_reauth_at: now,
         },
     );
 

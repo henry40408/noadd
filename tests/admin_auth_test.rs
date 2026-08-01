@@ -22,6 +22,7 @@ fn info_at(user_id: i64, created_at: i64, last_seen: i64) -> SessionInfo {
         user_id,
         created_at,
         last_seen,
+        last_reauth_at: created_at,
     }
 }
 

@@ -143,5 +143,15 @@ export default defineConfig({
       testMatch: /password-change-session-list\.spec\.js$/,
       use: { ...devices['Desktop Chrome'] },
     },
+    {
+      // The client half of re-authentication: prompt, confirm, retry. Its own
+      // noadd instance (dedicated ports 14106/15106) because it mints API keys
+      // and because `/api/auth/reauth` draws on the same five-per-minute
+      // budget as login, which the shared @auth instance has already spent.
+      name: 'reauth',
+      testDir: 'specs',
+      testMatch: /reauth-prompt\.spec\.js$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 });

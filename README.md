@@ -331,6 +331,18 @@ it then). A key inherits its operator's permissions. Session-management
 (`/api/sessions`, `/api/auth/logout`) and password-change (`/api/users/me/password`)
 endpoints remain cookie-only by design, since they act on the browser session itself.
 
+Three endpoints additionally require you to have confirmed your password within
+the last five minutes: creating an API key (`POST /api/api-keys`) and adding or
+removing an operator (`POST`/`DELETE /api/users`). Signing in counts, so in
+practice the admin UI only asks again if you have been logged in a while — it
+prompts, confirms against `POST /api/auth/reauth`, and retries. This is what
+stops a stolen session cookie from being turned into permanent access before
+you notice it is gone. **API keys cannot perform these three actions at all**
+(`403`, `"code": "password_required"`): a key holds no password to confirm, and
+allowing it would let a short-lived key issue itself a permanent successor.
+Operators authenticated by a forward-auth proxy are exempt — the proxy
+authenticates every request, and those accounts have no password to confirm.
+
 ```bash
 curl -H "Authorization: Bearer noadd_XXXXXXXX…" \
      https://noadd.example.com/api/rules

@@ -15,8 +15,10 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 /// Build the admin router with a seeded operator (`user_id` 1) and return the
-/// router plus the backing Database. Mirrors `build_app` in `admin_api_test.rs`.
-async fn build_app() -> (axum::Router, Database) {
+/// router, the backing Database, and the session store. Mirrors `build_app` in
+/// `admin_api_test.rs`. The store is handed back so a test can seed a browser
+/// session, which is now the only way to reach `POST /api/api-keys`.
+async fn build_app() -> (axum::Router, Database, noadd::admin::auth::SessionStore) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
     let path = dir.keep().join("test.db");
@@ -57,7 +59,7 @@ async fn build_app() -> (axum::Router, Database) {
 
     let state = AppState {
         db: db.clone(),
-        sessions,
+        sessions: sessions.clone(),
         filter,
         cache,
         rate_limiter,
@@ -80,12 +82,32 @@ async fn build_app() -> (axum::Router, Database) {
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
     };
-    (admin_router(state), db)
+    (admin_router(state), db, sessions)
+}
+
+/// Seed a live browser session for operator 1 and return its raw token, for
+/// the endpoints that no longer accept an API key.
+fn seed_session(sessions: &noadd::admin::auth::SessionStore) -> String {
+    use noadd::admin::auth::{SessionInfo, generate_token, hash_session_token, store_session};
+    let token = generate_token();
+    let now = noadd::now_unix();
+    store_session(
+        sessions,
+        &hash_session_token(&token),
+        SessionInfo {
+            session_id: 1,
+            user_id: 1,
+            created_at: now,
+            last_seen: now,
+            last_reauth_at: now,
+        },
+    );
+    token
 }
 
 #[tokio::test]
 async fn bearer_api_key_authenticates_like_a_session() {
-    let (app, db) = build_app().await;
+    let (app, db, _sessions) = build_app().await;
 
     let (full, prefix, hash) = generate_api_key();
     db.insert_api_key(1, "test", &hash, &prefix, 0, None)
@@ -137,7 +159,7 @@ async fn bearer_api_key_authenticates_like_a_session() {
 #[tokio::test]
 async fn api_key_lifecycle_over_http() {
     use serde_json::json;
-    let (app, db) = build_app().await;
+    let (app, db, sessions) = build_app().await;
 
     // Authenticate management calls with a bootstrap key for user 1.
     let (boot, prefix, hash) = generate_api_key();
@@ -146,14 +168,17 @@ async fn api_key_lifecycle_over_http() {
         .unwrap();
     let auth = format!("Bearer {boot}");
 
-    // Create returns the full token exactly once.
+    // Create returns the full token exactly once. Minting a key is a
+    // sensitive action, so it goes through a freshly-authenticated browser
+    // session rather than the bootstrap key — see `key_cannot_mint_a_key`.
+    let session = seed_session(&sessions);
     let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/api-keys")
-                .header("authorization", &auth)
+                .header("cookie", format!("session={session}"))
                 .header("content-type", "application/json")
                 .body(Body::from(json!({"name": "ci"}).to_string()))
                 .unwrap(),
@@ -205,9 +230,49 @@ async fn api_key_lifecycle_over_http() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+/// An API key can read and revoke keys, but it cannot mint one. A key holds
+/// no password, so it can never satisfy the re-authentication requirement —
+/// and allowing it would let a short-lived key quietly issue itself a
+/// permanent successor.
+#[tokio::test]
+async fn an_api_key_cannot_mint_another_api_key() {
+    use serde_json::json;
+    let (app, db, _sessions) = build_app().await;
+    let (boot, prefix, hash) = generate_api_key();
+    db.insert_api_key(1, "boot", &hash, &prefix, 0, None)
+        .await
+        .unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/api-keys")
+                .header("authorization", format!("Bearer {boot}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name": "escalation"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // A distinct code from `reauth_required`: no password the caller could
+    // type would help here, so a client must not prompt for one.
+    assert_eq!(
+        body.get("code").and_then(serde_json::Value::as_str),
+        Some("password_required"),
+        "got: {body}"
+    );
+}
+
 #[tokio::test]
 async fn docs_endpoints_require_auth() {
-    let (app, db) = build_app().await;
+    let (app, db, _sessions) = build_app().await;
 
     let (full, prefix, hash) = generate_api_key();
     db.insert_api_key(1, "test", &hash, &prefix, 0, None)
