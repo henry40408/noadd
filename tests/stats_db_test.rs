@@ -132,6 +132,54 @@ async fn heatmap_shifts_cells_by_tz_offset() {
     assert_eq!(cells[0].hour, 19);
 }
 
+/// `hourly_heatmap_since` derives weekday and hour with integer arithmetic
+/// instead of `strftime`, which is far cheaper but easy to get subtly wrong —
+/// an off-by-one in the Thursday epoch anchor, or truncation where flooring
+/// was meant. Pin it against `SQLite`'s own `strftime` across a full week of
+/// hours and several UTC offsets, which is the thing the arithmetic replaced.
+#[tokio::test]
+async fn heatmap_matches_strftime_across_a_full_week() {
+    let db = test_db().await;
+
+    // 2024-01-01 00:00:00 UTC, a Monday. One entry every 5 hours for 8 days,
+    // so every weekday and a spread of hours are represented.
+    let start = 1_704_067_200;
+    let entries: Vec<_> = (0..40)
+        .map(|i| entry(start + i * 5 * 3600, "A", false, false, None))
+        .collect();
+    db.insert_query_logs(&entries).await.unwrap();
+
+    for offset_hours in [0_i64, 8, -5, 13, -11] {
+        let offset = offset_hours * 3600;
+        let cells = db.hourly_heatmap_since(0, offset).await.unwrap();
+
+        // Recompute the expected grid in Rust with *flooring* division, which
+        // is what strftime effectively does and what the SQL's truncating
+        // division only coincides with while the shifted timestamp stays
+        // non-negative.
+        let mut expected: std::collections::BTreeMap<(i64, i64), i64> =
+            std::collections::BTreeMap::new();
+        for i in 0..40 {
+            let local = start + i * 5 * 3600 + offset;
+            let weekday = (local.div_euclid(86400) + 4).rem_euclid(7);
+            let hour = local.rem_euclid(86400) / 3600;
+            *expected.entry((weekday, hour)).or_default() += 1;
+        }
+
+        let got: std::collections::BTreeMap<(i64, i64), i64> = cells
+            .iter()
+            .map(|c| ((c.weekday, c.hour), c.count))
+            .collect();
+        assert_eq!(got, expected, "offset {offset_hours}h");
+
+        // Every cell must land inside the grid the UI renders.
+        for c in &cells {
+            assert!((0..7).contains(&c.weekday), "weekday out of range: {c:?}");
+            assert!((0..24).contains(&c.hour), "hour out of range: {c:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn heatmap_empty_db() {
     let db = test_db().await;

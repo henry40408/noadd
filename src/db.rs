@@ -424,6 +424,7 @@ impl Database {
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics ON query_logs(timestamp, blocked, cached, response_ms, query_type);
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -601,7 +602,9 @@ impl Database {
             // row in the window. Ordering the columns group-first makes this a
             // covering index, so the scan reads the index alone. Measured on a
             // 447 k-row production database, the 7-day query went from 143 ms
-            // to 20 ms, for ~11% more on-disk size.
+            // to 20 ms; `dbstat` puts the index itself at ~18 MiB against a
+            // 103 MiB database, though that scales with how many distinct
+            // client_ip/doh_token pairs a deployment actually sees.
             //
             // Contrast idx_query_logs_domain_ts, which is why the equivalent
             // "Top Domains" query was already fast.
@@ -617,7 +620,31 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 10;
+        if version < 11 {
+            // The remaining Statistics aggregations — the timeline, the
+            // query-type breakdown, the latency histogram — all filter on
+            // timestamp and then read a few narrow columns. They were served
+            // by idx_query_logs_timestamp, which meant a row lookup per match
+            // into a table whose rows average ~84 bytes of strings (domain,
+            // client_ip, upstream, result) that none of them want. Carrying
+            // those narrow columns in the index makes all three covering.
+            //
+            // Measured on a 447 k-row database over a 7-day window: timeline
+            // 78 -> 60 ms, query_type 75 -> 62 ms, latency 60 -> 45 ms, for
+            // ~9 MiB of index against a 103 MiB database.
+            //
+            // `outcome_breakdown_since` deliberately stays uncovered: it tests
+            // `result` for emptiness, and both carrying that column and
+            // indexing the emptiness expression measured *slower* than the
+            // plain table lookup while costing ~10% more file size.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
+                 ON query_logs(timestamp, blocked, cached, response_ms, query_type);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 11;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1999,9 +2026,21 @@ impl Database {
         let result = self
             .reader()
             .call(move |conn| {
+                // Weekday and hour by integer arithmetic rather than
+                // `strftime`, which would format two strings per row — ~894 k
+                // calls for a 30-day window on a busy resolver, and the single
+                // most expensive thing the Statistics page did (155 ms, versus
+                // 61 ms for this form on a 447 k-row database).
+                //
+                // The `+ 4` is because Unix day 0 (1970-01-01) was a Thursday
+                // and `strftime('%w')` counts from Sunday = 0. Truncating
+                // division is only equal to flooring for non-negative inputs,
+                // which is what `timestamp / 1000 + ?2` always is here:
+                // timestamps come from the system clock and the offset is at
+                // most ±14 h.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT CAST(strftime('%w', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS wday, \
-                            CAST(strftime('%H', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS hr, \
+                    "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
+                            (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, \
                             COUNT(*) \
                      FROM query_logs \
                      WHERE timestamp >= ?1 \
@@ -2627,6 +2666,111 @@ mod tests {
         assert!(
             indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
             "(client_ip, doh_token, timestamp) index should exist: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_schema_has_metrics_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.sqlite3");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
+            "(timestamp, blocked, cached, response_ms, query_type) index should exist: {indexes:?}"
+        );
+    }
+
+    /// The metrics index only earns its disk if the planner treats it as
+    /// *covering* — a plain `SEARCH … USING INDEX` would still pay the row
+    /// lookup this index exists to avoid.
+    #[tokio::test]
+    async fn timeline_query_uses_the_metrics_index_as_covering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let logs: Vec<QueryLogEntry> = (0..500)
+            .map(|i| QueryLogEntry {
+                timestamp: 1_704_067_200_000 + i * 60_000,
+                domain: format!("d{}.example", i % 50),
+                query_type: if i % 3 == 0 { "AAAA" } else { "A" }.into(),
+                client_ip: format!("10.0.0.{}", i % 25),
+                blocked: i % 5 == 0,
+                cached: i % 4 == 0,
+                response_ms: i % 7,
+                upstream: None,
+                doh_token: None,
+                result: None,
+                authenticated_data: false,
+            })
+            .collect();
+        db.insert_query_logs(&logs).await.unwrap();
+
+        let plan = db
+            .conn
+            .call(|conn| {
+                conn.execute_batch("ANALYZE;")?;
+                let mut stmt = conn.prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT (timestamp / 3600000) * 3600000 AS b, COUNT(*), \
+                            COALESCE(SUM(blocked), 0), COALESCE(SUM(cached), 0) \
+                     FROM query_logs WHERE timestamp >= ?1 GROUP BY b",
+                )?;
+                let rows = stmt
+                    .query_map(params![0_i64], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            plan.contains("COVERING INDEX idx_query_logs_ts_metrics"),
+            "timeline query should be covered by the metrics index, got: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v11_adds_metrics_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v10.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // A v10 database: has the client index, lacks the metrics one.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    response_ms INTEGER NOT NULL DEFAULT 0,
+                    upstream TEXT,
+                    doh_token TEXT,
+                    result TEXT,
+                    authenticated_data INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
+                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                CREATE INDEX idx_query_logs_client_ts
+                    ON query_logs(client_ip, doh_token, timestamp);
+                PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
+            "metrics index should be created by migration: {indexes:?}"
         );
     }
 
