@@ -199,7 +199,34 @@ Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noa
 | `sessions` | Active admin sessions (token, user_id, ip, user agent, timestamps) |
 | `api_keys` | Programmatic API keys (BLAKE2b hash, owning user_id, `ON DELETE CASCADE`) |
 
-`query_logs` is indexed on `timestamp` and on the composite `(domain, timestamp)`. The composite index lets the dashboard's domain aggregations (top domains, unique domains) be served from a covering index with the time-window filter pushed in, instead of scanning the whole domain index.
+`query_logs` carries four indexes, all of them shaped by the statistics queries:
+
+| Index | Serves |
+| --- | --- |
+| `timestamp` | the time-window filter every stats query starts with |
+| `(domain, timestamp)` | top domains, unique domains |
+| `(client_ip, doh_token, timestamp)` | top clients |
+| `(timestamp, blocked, cached, response_ms, query_type)` | timeline, query-type breakdown, latency histogram |
+
+The first two composites put the grouped columns first and `timestamp` last, which is what makes them covering for a `GROUP BY … WHERE timestamp >= ?` shape — the aggregation reads the index alone instead of scanning the window and building a temp b-tree over it. Top clients went from 143 ms to 20 ms on a 447 k-row database that way.
+
+The last one inverts that order because its queries do not group by a column at all; they filter on `timestamp` and then read a few narrow values. Carrying those values in the index avoids a row lookup into a table whose rows average ~84 bytes of strings (`domain`, `client_ip`, `upstream`, `result`) that none of those queries want: timeline 78 → 60 ms, query-type 75 → 62 ms, latency 60 → 45 ms.
+
+Indexes are not free here. On that same 103 MiB database `dbstat` attributes 20 MiB to `(domain, timestamp)`, 18 MiB to `(client_ip, doh_token, timestamp)`, 9 MiB to the metrics index and 7 MiB to `timestamp` — the two composites added for statistics cost about a quarter of the file. Measuring an index by the file-size delta of `CREATE INDEX` understates it whenever the database is carrying a freelist, since the new pages come out of that first; `dbstat` reports the real figure.
+
+`outcome_breakdown_since` is deliberately left uncovered. It tests `result` for emptiness, and both carrying that column in an index and indexing the emptiness expression measured *slower* than the plain table lookup while costing ~10% more file size.
+
+Every index migration runs `ANALYZE`. A new index alone is not always enough — the planner keeps its old plan until `sqlite_stat1` is refreshed — and the hourly `PRAGMA optimize` lets those statistics drift a long way in the meantime.
+
+The hourly heatmap derives weekday and hour with integer arithmetic on the stored millisecond timestamp rather than `strftime`, which would format two strings per row — ~894 k calls for a 30-day window on a busy resolver, and 155 ms of the page's budget against 61 ms for the arithmetic. `heatmap_matches_strftime_across_a_full_week` pins the two forms together.
+
+### Read pool and SQLite global state
+
+Admin and stats reads run on a pool of four read-only connections (`READ_POOL_SIZE`), each owning a `tokio-rusqlite` worker thread, so the Statistics page's seven concurrent endpoints do not queue behind one another or behind the writer.
+
+The pool only actually scales because `Database::open` first turns off `SQLITE_CONFIG_MEMSTATUS`. That option is **on by default** and routes every `sqlite3_malloc`/`sqlite3_free` through process-global counters guarded by one static mutex. Since every stats query aggregates — and so allocates a temp b-tree — four readers working at once spent more time queueing on that mutex than reading: the page's fan-out measured *slower* than running the same queries sequentially. Disabling it took the fan-out from a 1.69 s median to 283 ms on a 447 k-row database. `tests/stats_contention_bench.rs` isolates the effect and `tests/stats_parallel_bench.rs` measures it end to end.
+
+This is unrelated to SQLite's threading mode. `SQLITE_CONFIG_MULTITHREAD` would not help: it only clears `bFullMutex`, the per-connection mutex, and `openDatabase` short-circuits on `SQLITE_OPEN_NOMUTEX` — which every connection here carries — before it ever reads that flag. Only `SQLITE_CONFIG_SINGLETHREAD` would drop the static mutex, and that is unusable with a threaded pool.
 
 ### Retention & Maintenance
 

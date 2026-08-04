@@ -252,6 +252,48 @@ pub struct LatencySummary {
 /// so anything below ~32 starts evicting on every admin poll.
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
 
+/// Turn off `SQLite`'s global memory accounting, once per process, before any
+/// connection exists.
+///
+/// `SQLITE_CONFIG_MEMSTATUS` defaults to on, and it makes every
+/// `sqlite3_malloc`/`sqlite3_free` update a set of process-global counters
+/// behind a single static mutex. The read pool's aggregation queries allocate
+/// hard — every `GROUP BY` in `src/admin/stats.rs` builds a temp b-tree — so
+/// with four readers running the Statistics page's fan-out concurrently, they
+/// spend more time queueing on that mutex than scanning. Measured against a
+/// 447 k-row production database, the page's seven endpoints under
+/// `tokio::join!` went from a 1.69 s median to 283 ms, and the pool stopped
+/// being *slower* than running the same queries one after another.
+/// `tests/stats_contention_bench.rs` isolates the effect.
+///
+/// Nothing here reads the counters back: the statistics this disables are
+/// `sqlite3_memory_used`, `sqlite3_status` and the `soft_heap_limit` machinery,
+/// none of which appear in this crate. Thread safety is untouched — that is
+/// governed by `bCoreMutex`/`bFullMutex`, which this does not alter.
+fn disable_sqlite_memstatus() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: `sqlite3_config` is variadic; `SQLITE_CONFIG_MEMSTATUS` takes
+        // a single `int`. Called from a `Once` before this process opens any
+        // connection, which is the documented requirement (it returns
+        // SQLITE_MISUSE once SQLite has initialized).
+        // FFI: no safe rusqlite wrapper exists for sqlite3_config
+        #[allow(unsafe_code)]
+        let rc =
+            unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0_i32) };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            // Not fatal: the database still works, it just keeps the slow
+            // global accounting. Worth knowing about, since it means something
+            // initialized SQLite before us.
+            tracing::warn!(
+                event = "db.memstatus_config_failed",
+                rc,
+                "could not disable SQLite global memory accounting"
+            );
+        }
+    });
+}
+
 /// Open a second connection to the same `SQLite` file in read-only mode.
 /// Used for admin SELECT queries so they run concurrently with the writer
 /// under WAL without blocking on a single worker thread.
@@ -278,6 +320,9 @@ async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
 
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
+        // Must precede the first connection in the process — see the function's
+        // own docs for why the read pool depends on it.
+        disable_sqlite_memstatus();
         let conn = Connection::open(path).await?;
         let placeholder_pool = Arc::new(ReadPool {
             conns: vec![conn.clone()],
@@ -378,6 +423,8 @@ impl Database {
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics ON query_logs(timestamp, blocked, cached, response_ms, query_type);
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -548,7 +595,56 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 9;
+        if version < 10 {
+            // "Top Clients" groups by (client_ip, doh_token) over a timestamp
+            // range, which had no index to serve it: the planner fell back to
+            // idx_query_logs_timestamp and then built a temp b-tree over every
+            // row in the window. Ordering the columns group-first makes this a
+            // covering index, so the scan reads the index alone. Measured on a
+            // 447 k-row production database, the 7-day query went from 143 ms
+            // to 20 ms; `dbstat` puts the index itself at ~18 MiB against a
+            // 103 MiB database, though that scales with how many distinct
+            // client_ip/doh_token pairs a deployment actually sees.
+            //
+            // Contrast idx_query_logs_domain_ts, which is why the equivalent
+            // "Top Domains" query was already fast.
+            //
+            // ANALYZE for the same reason the version-5 migration runs it, and
+            // because the hourly `PRAGMA optimize` had let sqlite_stat1 drift
+            // badly on real databases — one 447 k-row instance still described
+            // itself as holding 232 k.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts \
+                 ON query_logs(client_ip, doh_token, timestamp);
+                 ANALYZE;",
+            )?;
+        }
+
+        if version < 11 {
+            // The remaining Statistics aggregations — the timeline, the
+            // query-type breakdown, the latency histogram — all filter on
+            // timestamp and then read a few narrow columns. They were served
+            // by idx_query_logs_timestamp, which meant a row lookup per match
+            // into a table whose rows average ~84 bytes of strings (domain,
+            // client_ip, upstream, result) that none of them want. Carrying
+            // those narrow columns in the index makes all three covering.
+            //
+            // Measured on a 447 k-row database over a 7-day window: timeline
+            // 78 -> 60 ms, query_type 75 -> 62 ms, latency 60 -> 45 ms, for
+            // ~9 MiB of index against a 103 MiB database.
+            //
+            // `outcome_breakdown_since` deliberately stays uncovered: it tests
+            // `result` for emptiness, and both carrying that column and
+            // indexing the emptiness expression measured *slower* than the
+            // plain table lookup while costing ~10% more file size.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
+                 ON query_logs(timestamp, blocked, cached, response_ms, query_type);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 11;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1930,9 +2026,21 @@ impl Database {
         let result = self
             .reader()
             .call(move |conn| {
+                // Weekday and hour by integer arithmetic rather than
+                // `strftime`, which would format two strings per row — ~894 k
+                // calls for a 30-day window on a busy resolver, and the single
+                // most expensive thing the Statistics page did (155 ms, versus
+                // 61 ms for this form on a 447 k-row database).
+                //
+                // The `+ 4` is because Unix day 0 (1970-01-01) was a Thursday
+                // and `strftime('%w')` counts from Sunday = 0. Truncating
+                // division is only equal to flooring for non-negative inputs,
+                // which is what `timestamp / 1000 + ?2` always is here:
+                // timestamps come from the system clock and the offset is at
+                // most ±14 h.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT CAST(strftime('%w', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS wday, \
-                            CAST(strftime('%H', timestamp / 1000 + ?2, 'unixepoch') AS INTEGER) AS hr, \
+                    "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
+                            (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, \
                             COUNT(*) \
                      FROM query_logs \
                      WHERE timestamp >= ?1 \
@@ -2545,6 +2653,215 @@ mod tests {
         assert!(
             indexes.iter().any(|n| n == "idx_query_logs_domain_ts"),
             "composite index should be created by migration: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_schema_has_client_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.sqlite3");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
+            "(client_ip, doh_token, timestamp) index should exist: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_schema_has_metrics_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noadd.sqlite3");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
+            "(timestamp, blocked, cached, response_ms, query_type) index should exist: {indexes:?}"
+        );
+    }
+
+    /// The metrics index only earns its disk if the planner treats it as
+    /// *covering* — a plain `SEARCH … USING INDEX` would still pay the row
+    /// lookup this index exists to avoid.
+    #[tokio::test]
+    async fn timeline_query_uses_the_metrics_index_as_covering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let logs: Vec<QueryLogEntry> = (0..500)
+            .map(|i| QueryLogEntry {
+                timestamp: 1_704_067_200_000 + i * 60_000,
+                domain: format!("d{}.example", i % 50),
+                query_type: if i % 3 == 0 { "AAAA" } else { "A" }.into(),
+                client_ip: format!("10.0.0.{}", i % 25),
+                blocked: i % 5 == 0,
+                cached: i % 4 == 0,
+                response_ms: i % 7,
+                upstream: None,
+                doh_token: None,
+                result: None,
+                authenticated_data: false,
+            })
+            .collect();
+        db.insert_query_logs(&logs).await.unwrap();
+
+        let plan = db
+            .conn
+            .call(|conn| {
+                conn.execute_batch("ANALYZE;")?;
+                let mut stmt = conn.prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT (timestamp / 3600000) * 3600000 AS b, COUNT(*), \
+                            COALESCE(SUM(blocked), 0), COALESCE(SUM(cached), 0) \
+                     FROM query_logs WHERE timestamp >= ?1 GROUP BY b",
+                )?;
+                let rows = stmt
+                    .query_map(params![0_i64], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            plan.contains("COVERING INDEX idx_query_logs_ts_metrics"),
+            "timeline query should be covered by the metrics index, got: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v11_adds_metrics_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v10.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // A v10 database: has the client index, lacks the metrics one.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    response_ms INTEGER NOT NULL DEFAULT 0,
+                    upstream TEXT,
+                    doh_token TEXT,
+                    result TEXT,
+                    authenticated_data INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
+                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                CREATE INDEX idx_query_logs_client_ts
+                    ON query_logs(client_ip, doh_token, timestamp);
+                PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
+            "metrics index should be created by migration: {indexes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v10_adds_client_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v9.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // A v9 database: everything current except the client index.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    response_ms INTEGER NOT NULL DEFAULT 0,
+                    upstream TEXT,
+                    doh_token TEXT,
+                    result TEXT,
+                    authenticated_data INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
+                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                PRAGMA user_version = 9;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path_str).await.unwrap();
+
+        let indexes = query_log_index_names(&db).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
+            "client index should be created by migration: {indexes:?}"
+        );
+    }
+
+    /// The index only pays off if the planner actually picks it — the
+    /// version-5 migration's comment records that a new index alone was not
+    /// enough there. Assert the plan, not just the index's existence.
+    #[tokio::test]
+    async fn top_clients_query_uses_the_client_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.db");
+        let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+        let logs: Vec<QueryLogEntry> = (0..500)
+            .map(|i| QueryLogEntry {
+                timestamp: 1_000_000 + i,
+                domain: format!("d{}.example", i % 50),
+                query_type: "A".into(),
+                client_ip: format!("10.0.0.{}", i % 25),
+                blocked: false,
+                cached: false,
+                response_ms: i % 7,
+                upstream: None,
+                doh_token: None,
+                result: None,
+                authenticated_data: false,
+            })
+            .collect();
+        db.insert_query_logs(&logs).await.unwrap();
+
+        // The writer, not `reader()`: ANALYZE writes sqlite_stat1, and the read
+        // pool is opened SQLITE_OPEN_READ_ONLY.
+        let plan = db
+            .conn
+            .call(|conn| {
+                conn.execute_batch("ANALYZE;")?;
+                let mut stmt = conn.prepare(
+                    "EXPLAIN QUERY PLAN SELECT client_ip, doh_token, COUNT(*) c \
+                     FROM query_logs WHERE timestamp >= ?1 \
+                     GROUP BY client_ip, doh_token ORDER BY c DESC LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(params![0_i64, 10_i64], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            plan.contains("idx_query_logs_client_ts"),
+            "top-clients query should be served by the client index, got: {plan}"
         );
     }
 
