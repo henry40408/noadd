@@ -101,16 +101,16 @@ fn heavy_statements(now: i64, tz_offset_secs: i64) -> Vec<(&'static str, String)
     ]
 }
 
-fn open_reader(path: &str, mmap_size: i64) -> Connection {
+fn open_reader(path: &str, mmap_size: i64, cache_size: i64, temp_store: &str) -> Connection {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
     let conn = Connection::open_with_flags(path, flags).unwrap();
     conn.execute_batch(&format!(
         "PRAGMA busy_timeout = 5000; \
-         PRAGMA cache_size = -2000; \
+         PRAGMA cache_size = {cache_size}; \
          PRAGMA mmap_size = {mmap_size}; \
-         PRAGMA temp_store = MEMORY;"
+         PRAGMA temp_store = {temp_store};"
     ))
     .unwrap();
     conn
@@ -143,12 +143,54 @@ fn stats_contention_bench() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(268_435_456);
+    let cache_size: i64 = std::env::var("BENCH_CACHE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-2000);
+    let temp_store = std::env::var("BENCH_TEMP_STORE").unwrap_or_else(|_| "MEMORY".into());
+    assert!(
+        matches!(temp_store.as_str(), "MEMORY" | "FILE" | "DEFAULT"),
+        "BENCH_TEMP_STORE must be MEMORY, FILE or DEFAULT"
+    );
     let memstatus = env_usize("BENCH_MEMSTATUS", 1) != 0;
     let thread_counts: Vec<usize> = std::env::var("BENCH_THREADS")
         .unwrap_or_else(|_| "1,2,4,8".into())
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
+
+    // SQLITE_CONFIG_SINGLETHREAD=1, MULTITHREAD=2, SERIALIZED=3. 0 leaves the
+    // build default (SERIALIZED) in place.
+    //
+    // On paper this knob should do nothing here: MULTITHREAD only clears
+    // `bFullMutex`, the *per-connection* mutex, and `openDatabase`
+    // short-circuits on `SQLITE_OPEN_NOMUTEX` before it ever reads
+    // `bFullMutex` — a flag every noadd connection carries (readers set it
+    // explicitly, the writer inherits it from `OpenFlags::default()`).
+    // `bCoreMutex` stays 1 either way, so the static mutex guarding the
+    // MEMSTATUS counters is untouched.
+    //
+    // Measurement half-agrees. With MEMSTATUS *off* the two modes are within
+    // noise (2.27 vs 2.24 pass/s at four threads), as predicted. With
+    // MEMSTATUS on, one contaminated run had MULTITHREAD looking ~1.8x faster;
+    // that was never reproduced cleanly and the question is moot in
+    // production, since disabling MEMSTATUS beats either mode by far. Left
+    // here so the comparison can be redone rather than re-derived.
+    let thread_mode = env_usize("BENCH_THREADMODE", 0);
+    if thread_mode != 0 {
+        // SAFETY: variadic C call with the documented (no) argument for these
+        // ops, issued before SQLite is initialized and before any other thread
+        // exists in this test.
+        #[allow(unsafe_code, reason = "no safe rusqlite wrapper for sqlite3_config")]
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_config(i32::try_from(thread_mode).expect("mode fits in i32"))
+        };
+        assert_eq!(
+            rc,
+            rusqlite::ffi::SQLITE_OK,
+            "sqlite3_config(threading mode {thread_mode}) failed"
+        );
+    }
 
     if !memstatus {
         // SQLITE_CONFIG_MEMSTATUS = 9, expects an int argument. Must be called
@@ -177,7 +219,8 @@ fn stats_contention_bench() {
     };
     let stmts = Arc::new(heavy_statements(now, 8 * 3600));
     eprintln!(
-        "stats_contention_bench: db={db_path} stmts={} iters={iters} mmap={mmap} memstatus={}",
+        "stats_contention_bench: db={db_path} stmts={} iters={iters} mmap={mmap} \
+         cache={cache_size} temp_store={temp_store} memstatus={} threadmode={thread_mode}",
         stmts.len(),
         u8::from(memstatus),
     );
@@ -193,8 +236,9 @@ fn stats_contention_bench() {
             for _ in 0..threads {
                 let stmts = Arc::clone(&stmts);
                 let db_path = db_path.clone();
+                let temp_store = temp_store.clone();
                 s.spawn(move || {
-                    let conn = open_reader(&db_path, mmap);
+                    let conn = open_reader(&db_path, mmap, cache_size, &temp_store);
                     for (_, sql) in stmts.iter() {
                         drain(&conn, sql); // warm this connection
                     }
