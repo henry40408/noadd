@@ -98,11 +98,10 @@ body::after {
 
 ::selection { background: var(--green); color: var(--inverse-fg); }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 0; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+/* Scrollbars are deliberately left native: styling ::-webkit-scrollbar opts
+   Chrome/Safari out of overlay scrollbars, so every scrollable container would
+   own a permanently visible 8px bar instead of one that fades in while
+   scrolling. */
 
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
@@ -970,8 +969,6 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
 @media (prefers-color-scheme: light) {
   .card, .stat-card { box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
   .login-box { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-  ::-webkit-scrollbar-thumb { background: #c4c8d0; }
-  ::-webkit-scrollbar-thumb:hover { background: #a0a4ac; }
 }
 
 /* Responsive */
