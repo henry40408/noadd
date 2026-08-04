@@ -92,6 +92,23 @@ async fn stats_parallel_bench() {
         "BENCH_DB={db_path} not found — copy production DB to a scratch path before running"
     );
 
+    // `SQLITE_CONFIG_MEMSTATUS` (op 9) is on by default and makes every
+    // sqlite3_malloc/free update global counters under a shared mutex, which
+    // serializes the read pool — see `stats_mmap_bench` for the isolated
+    // measurement. Set BENCH_MEMSTATUS=0 to measure the pool without it.
+    if std::env::var("BENCH_MEMSTATUS").as_deref() == Ok("0") {
+        // SAFETY: variadic C call with the documented (int) argument for this
+        // op, issued before any connection exists and so before SQLite
+        // initializes.
+        #[allow(unsafe_code, reason = "no safe rusqlite wrapper for sqlite3_config")]
+        let rc = unsafe { rusqlite::ffi::sqlite3_config(9, 0_i32) };
+        assert_eq!(
+            rc,
+            rusqlite::ffi::SQLITE_OK,
+            "sqlite3_config(MEMSTATUS, 0) failed — called after SQLite was initialized?"
+        );
+    }
+
     let db = Database::open(&db_path).await.unwrap();
     let now = now_unix();
     // sanity: ensure stats compile + return non-empty heatmap
