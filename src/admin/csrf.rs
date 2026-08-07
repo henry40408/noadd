@@ -71,16 +71,29 @@ pub async fn csrf_origin_guard(req: Request, next: Next) -> Response {
 /// [`log_safe`] and is rendered with `%` — the same treatment
 /// `user_agent_log_value` already gets, and what stops an embedded newline
 /// forging a second log entry.
+///
+/// The values are bound before the macro rather than written inline as field
+/// expressions. `tracing` only evaluates a field expression once a subscriber
+/// has declared interest, which puts the work on a line no test can be shown
+/// to execute — the resulting code reads as covered while nothing proves the
+/// truncation ran. Binding first costs four string operations on a request
+/// that is already being refused, and this path is rare by construction (see
+/// the note on `csrf_origin_guard` about why it needs no threshold).
 fn log_rejection(req: &Request) {
     let headers = req.headers();
+    let method = req.method().as_str();
+    let path = log_safe(req.uri().path(), LOG_SAFE_MAX);
+    let sec_fetch_site = log_safe(header_log_value(headers, "sec-fetch-site"), LOG_SAFE_MAX);
+    let origin = log_safe(header_log_value(headers, header::ORIGIN), LOG_SAFE_MAX);
+    let host = log_safe(header_log_value(headers, header::HOST), LOG_SAFE_MAX);
     tracing::warn!(
         event = "csrf.rejected",
         reason = "cross_site",
-        method = %req.method(),
-        path = %log_safe(req.uri().path(), LOG_SAFE_MAX),
-        sec_fetch_site = %log_safe(header_log_value(headers, "sec-fetch-site"), LOG_SAFE_MAX),
-        origin = %log_safe(header_log_value(headers, header::ORIGIN), LOG_SAFE_MAX),
-        host = %log_safe(header_log_value(headers, header::HOST), LOG_SAFE_MAX),
+        method,
+        path,
+        sec_fetch_site,
+        origin,
+        host,
         "state-changing request rejected as cross-site"
     );
 }
