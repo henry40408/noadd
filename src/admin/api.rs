@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::header::AsHeaderName;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -359,12 +360,12 @@ fn client_ip(
 
 /// Bound on the client-controlled `User-Agent` / API-key-prefix text written
 /// to an audit log line, so a hostile client cannot inflate log volume.
-const LOG_SAFE_MAX: usize = 256;
+pub(crate) const LOG_SAFE_MAX: usize = 256;
 
 /// Truncate a client-controlled string to a bounded, UTF-8-safe prefix before
 /// it reaches a log line, cutting on a `char` boundary so multi-byte UTF-8 is
 /// never split mid-sequence.
-fn log_safe(value: &str, max: usize) -> &str {
+pub(crate) fn log_safe(value: &str, max: usize) -> &str {
     if value.len() <= max {
         return value;
     }
@@ -375,17 +376,25 @@ fn log_safe(value: &str, max: usize) -> &str {
     &value[..end]
 }
 
-/// The `User-Agent` value to log, distinguishing an absent header
-/// (`<none>`) from one present but not representable as ASCII
-/// (`<non-ascii>`). Collapsing both into a single `Option<&str>` — as
+/// The value of `name` to log, distinguishing an absent header (`<none>`)
+/// from one present but not representable as ASCII (`<non-ascii>`).
+/// Collapsing both into a single `Option<&str>` — as
 /// `headers.get(...).and_then(|v| v.to_str().ok())` does — loses that
-/// distinction, so a plain request that simply sent no `User-Agent` at all
-/// would otherwise be logged with the false claim that it sent a garbled one.
-fn user_agent_log_value(headers: &HeaderMap) -> &str {
-    match headers.get(axum::http::header::USER_AGENT) {
+/// distinction, so a request that simply sent no such header at all would
+/// otherwise be logged with the false claim that it sent a garbled one.
+///
+/// The returned value is still caller-controlled text: pass it through
+/// [`log_safe`] and render it with `%` at the call site.
+pub(crate) fn header_log_value(headers: &HeaderMap, name: impl AsHeaderName) -> &str {
+    match headers.get(name) {
         None => "<none>",
         Some(v) => v.to_str().unwrap_or("<non-ascii>"),
     }
+}
+
+/// The `User-Agent` value to log. See [`header_log_value`].
+fn user_agent_log_value(headers: &HeaderMap) -> &str {
+    header_log_value(headers, axum::http::header::USER_AGENT)
 }
 
 // --- Auth helper ---
@@ -3482,5 +3491,49 @@ mod openapi_tests {
                 );
             }
         }
+    }
+}
+
+/// The helpers that make a caller-controlled string safe to put in a log line.
+///
+/// Every production caller sits in a `tracing` field position, which is only
+/// evaluated once a subscriber has declared interest — so nothing else in the
+/// suite reaches these, and both sentinels went untested until this module.
+#[cfg(test)]
+mod log_value_tests {
+    use super::*;
+
+    /// A request that simply sent no such header must not be logged with the
+    /// false claim that it sent a garbled one — the whole reason
+    /// [`header_log_value`] exists rather than
+    /// `headers.get(..).and_then(|v| v.to_str().ok())`.
+    #[test]
+    fn header_log_value_separates_absent_from_unreadable() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(header_log_value(&headers, "x-probe"), "<none>");
+        assert_eq!(user_agent_log_value(&headers), "<none>");
+
+        headers.insert("x-probe", axum::http::HeaderValue::from_static("plain"));
+        assert_eq!(header_log_value(&headers, "x-probe"), "plain");
+
+        // Latin-1 bytes are a legal header value but not `to_str`-able, which
+        // is the case the second sentinel names.
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_bytes(b"caf\xe9").unwrap(),
+        );
+        assert_eq!(user_agent_log_value(&headers), "<non-ascii>");
+    }
+
+    /// `log_safe` cuts on a `char` boundary, so truncating multi-byte UTF-8
+    /// cannot split a sequence and emit invalid text into a log line.
+    #[test]
+    fn log_safe_truncates_on_a_char_boundary() {
+        assert_eq!(log_safe("short", LOG_SAFE_MAX), "short");
+        // Each of these is 3 bytes, so a limit of 4 lands mid-character.
+        let cjk = "山川河海";
+        let cut = log_safe(cjk, 4);
+        assert_eq!(cut, "山");
+        assert!(cjk.starts_with(cut));
     }
 }
