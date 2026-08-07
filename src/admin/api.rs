@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 use arc_swap::ArcSwap;
 use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::header::AsHeaderName;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -359,12 +360,12 @@ fn client_ip(
 
 /// Bound on the client-controlled `User-Agent` / API-key-prefix text written
 /// to an audit log line, so a hostile client cannot inflate log volume.
-const LOG_SAFE_MAX: usize = 256;
+pub(crate) const LOG_SAFE_MAX: usize = 256;
 
 /// Truncate a client-controlled string to a bounded, UTF-8-safe prefix before
 /// it reaches a log line, cutting on a `char` boundary so multi-byte UTF-8 is
 /// never split mid-sequence.
-fn log_safe(value: &str, max: usize) -> &str {
+pub(crate) fn log_safe(value: &str, max: usize) -> &str {
     if value.len() <= max {
         return value;
     }
@@ -375,17 +376,25 @@ fn log_safe(value: &str, max: usize) -> &str {
     &value[..end]
 }
 
-/// The `User-Agent` value to log, distinguishing an absent header
-/// (`<none>`) from one present but not representable as ASCII
-/// (`<non-ascii>`). Collapsing both into a single `Option<&str>` — as
+/// The value of `name` to log, distinguishing an absent header (`<none>`)
+/// from one present but not representable as ASCII (`<non-ascii>`).
+/// Collapsing both into a single `Option<&str>` — as
 /// `headers.get(...).and_then(|v| v.to_str().ok())` does — loses that
-/// distinction, so a plain request that simply sent no `User-Agent` at all
-/// would otherwise be logged with the false claim that it sent a garbled one.
-fn user_agent_log_value(headers: &HeaderMap) -> &str {
-    match headers.get(axum::http::header::USER_AGENT) {
+/// distinction, so a request that simply sent no such header at all would
+/// otherwise be logged with the false claim that it sent a garbled one.
+///
+/// The returned value is still caller-controlled text: pass it through
+/// [`log_safe`] and render it with `%` at the call site.
+pub(crate) fn header_log_value(headers: &HeaderMap, name: impl AsHeaderName) -> &str {
+    match headers.get(name) {
         None => "<none>",
         Some(v) => v.to_str().unwrap_or("<non-ascii>"),
     }
+}
+
+/// The `User-Agent` value to log. See [`header_log_value`].
+fn user_agent_log_value(headers: &HeaderMap) -> &str {
+    header_log_value(headers, axum::http::header::USER_AGENT)
 }
 
 // --- Auth helper ---

@@ -20,6 +20,11 @@
 //! while the forwarded `Host` carries no scheme, and the proxy commonly strips
 //! the port. Matching on host alone is what keeps the check working in that
 //! standard deployment without a configured public URL.
+//!
+//! Every rejection is recorded as a `csrf.rejected` warning carrying the three
+//! inputs the classification read. The 403 itself stays bodyless on purpose:
+//! the gap this guard had was that a refusal left no trace for the *operator*,
+//! not that it failed to explain itself to the caller.
 
 use axum::{
     extract::Request,
@@ -28,14 +33,56 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use crate::admin::api::{LOG_SAFE_MAX, header_log_value, log_safe};
+
 /// Reject a state-changing request that is provably cross-site. See the module
 /// docs for the classification. Safe methods (GET/HEAD/OPTIONS/TRACE) never
 /// change state and pass through untouched.
+///
+/// A rejection is recorded as `csrf.rejected`, reported with an `event` field
+/// rather than a distinct event name to match how `auth.failed` already
+/// records the password, API-key and session-cookie failures — "every request
+/// this appliance refused" stays a single query.
+///
+/// The event is a `warn!` with no threshold in front of it, unlike
+/// [`note_invalid_session_cookie`](crate::admin::api) — this guard cannot be
+/// driven in bulk. Neither the `DoH` router (merged as a sibling in `main`, so
+/// this layer never sees it) nor a non-browser client reaches the rejection
+/// at all: no `Sec-Fetch-Site` and no `Origin` classifies as not-cross-site
+/// and passes through. What is left is a real browser making a genuinely
+/// cross-site state-changing request — a CSRF attempt, or a reverse proxy
+/// rewriting `Host` — both of which an operator wants to see every time.
 pub async fn csrf_origin_guard(req: Request, next: Next) -> Response {
     if is_safe(req.method()) || !is_cross_site(&req) {
         return next.run(req).await;
     }
+    log_rejection(&req);
     StatusCode::FORBIDDEN.into_response()
+}
+
+/// Record the one `csrf.rejected` event.
+///
+/// All three classification inputs are logged together on purpose: telling a
+/// real cross-site POST apart from a proxy that rewrote `Host` needs the
+/// `Origin` *and* the `Host` *and* whether `Sec-Fetch-Site` decided it, and
+/// recording one of the three only moves the guesswork rather than ending it.
+///
+/// Every value here is chosen by the caller, so each goes through
+/// [`log_safe`] and is rendered with `%` — the same treatment
+/// `user_agent_log_value` already gets, and what stops an embedded newline
+/// forging a second log entry.
+fn log_rejection(req: &Request) {
+    let headers = req.headers();
+    tracing::warn!(
+        event = "csrf.rejected",
+        reason = "cross_site",
+        method = %req.method(),
+        path = %log_safe(req.uri().path(), LOG_SAFE_MAX),
+        sec_fetch_site = %log_safe(header_log_value(headers, "sec-fetch-site"), LOG_SAFE_MAX),
+        origin = %log_safe(header_log_value(headers, header::ORIGIN), LOG_SAFE_MAX),
+        host = %log_safe(header_log_value(headers, header::HOST), LOG_SAFE_MAX),
+        "state-changing request rejected as cross-site"
+    );
 }
 
 /// Whether `method` cannot change server state and so needs no CSRF check.
