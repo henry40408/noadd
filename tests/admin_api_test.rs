@@ -4205,3 +4205,193 @@ async fn a_server_rendered_page_is_never_stored() {
         .unwrap_or("");
     assert!(cc.contains("no-store"), "page cache-control was {cc:?}");
 }
+
+/// Every signed-in page path answers with the shell. Asserted as a set rather
+/// than one representative path: they are registered individually, so a route
+/// dropped from the table is exactly the kind of mistake a single-path test
+/// sails past.
+#[tokio::test]
+async fn every_page_path_is_served_to_an_authenticated_browser() {
+    let (app, token) = setup().await;
+    for path in ["/", "/stats", "/logs", "/filters", "/settings", "/account"] {
+        let res = app
+            .clone()
+            .oneshot(authed("GET", path, &token, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path} was not served");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            html.contains("id=\"app\"") && html.contains("/app.js"),
+            "{path} did not render the shell"
+        );
+    }
+}
+
+/// The sign-in form renders for a browser with no session.
+#[tokio::test]
+async fn the_sign_in_page_renders_for_an_anonymous_browser() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-testid=\"login-submit\""));
+    assert!(
+        html.contains("action=\"/login\""),
+        "the form must post back to /login"
+    );
+}
+
+/// An already-authenticated browser asking for the sign-in page is sent onward
+/// rather than shown a second form to fill in.
+#[tokio::test]
+async fn the_sign_in_page_sends_an_authenticated_browser_onward() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/login", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/")
+    );
+}
+
+/// The wizard renders while no operator exists.
+#[tokio::test]
+async fn the_wizard_renders_before_the_first_operator_exists() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-testid=\"setup-submit\""));
+}
+
+/// Once an operator exists the wizard is a dead end, so it redirects to sign-in
+/// instead of offering to create a second first account.
+#[tokio::test]
+async fn the_wizard_sends_an_already_configured_appliance_to_sign_in() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/login")
+    );
+}
+
+fn form_post(uri: &str, body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Completing the wizard creates the operator and signs them in on the spot —
+/// asking them to retype the password they just chose would be pure ceremony.
+/// `?welcome=1` is what drives the one-time strip the shell shows afterwards.
+#[tokio::test]
+async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/?welcome=1")
+    );
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "the new operator was not signed in"
+    );
+}
+
+/// The confirmation field exists only in the form, so it is checked in the page
+/// handler and nowhere else — `create_first_operator`, which the JSON endpoint
+/// shares, has no business knowing about it.
+#[tokio::test]
+async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=something-else",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("do not match"));
+    assert!(
+        html.contains("value=\"admin\""),
+        "the typed username was discarded"
+    );
+}
+
+/// A password the shared validator rejects comes back verbatim in the form. The
+/// operator has to be told *which* rule they missed; a generic failure would
+/// leave them guessing at a length they cannot see.
+#[tokio::test]
+async fn the_wizard_reports_why_a_password_was_rejected() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=short&confirm=short",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains("at least 12 characters"),
+        "the rejection reason did not reach the form"
+    );
+}
