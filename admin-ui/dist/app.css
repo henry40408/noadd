@@ -512,6 +512,9 @@ textarea { resize: vertical; line-height: 1.7; }
    below a control — never shares the control's flex row, so the control keeps
    a constant full width and the message toggling causes no reflow. */
 .field-msg { display: block; font-size: 0.8rem; line-height: 1.15em; min-height: 1.15em; margin: 6px 0; }
+/* Server-rendered validation messages carry a class, where the autosave path
+   sets the colour inline. Both land on the same element. */
+.field-msg.error { color: var(--red); }
 
 /* Label sitting above its form control (consistent placement for every field). */
 .field-label { display: block; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 6px; }

@@ -56,6 +56,19 @@ Page bodies are still **vanilla-JS web components — no framework, no build ste
 
 One-shot notices ride a **flash cookie** (`Flash` in `src/admin/pages.rs`), read and cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
 
+### Server-rendering a page body (the P3 pattern)
+
+Settings is the worked example; the remaining pages follow it.
+
+- The page template `{% extends "shell.html" %}` and fills `{% block page %}`. Its struct embeds `ShellData` as a `shell` field — `shell.html` reads `shell.*`.
+- **Wrap the body in the page's existing custom element** (`<settings-page>…</settings-page>`). It upgrades in place, so `app.js` enhances the rendered markup instead of replacing it. The bootstrap mounts a component only when the server left `#page-content` empty, which is how not-yet-converted pages keep working.
+- Validation lives in **one** function shared with the JSON endpoint (`apply_settings`), returning a field-tagged error so the form can put the message next to the offending input while the API keeps answering a bare 400.
+- A successful POST redirects with a flash; a rejected one re-renders **with the submitted values**, not the stored ones, at 400/401 — never 200.
+- When `app.js` enhances a form, it removes the no-JS submit row (`#settings-save-row`) rather than hiding it, and any submit button it takes over must `preventDefault()`.
+- **`load()` must not refill fields the server rendered.** Doing so overwrites what the operator typed in the window before the response lands — a real bug this pattern removed.
+
+⚠️ A `querySelector` that returns `null` in a `connectedCallback` throws and **silently kills every binding after it**. When moving markup to a template, check that every id `app.js` reaches for still exists.
+
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 
 After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).

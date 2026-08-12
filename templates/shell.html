@@ -11,10 +11,10 @@
 {% block content %}
       <div class="app-shell" data-testid="app-shell">
         <header class="topbar">
-          <div class="brand">noadd <span class="v">{{ version }}</span></div>
+          <div class="brand">noadd <span class="v">{{ shell.version }}</span></div>
           <nav class="nav-strip">
-            {%- for item in nav %}
-            <a class="nav-item{% if current_path == item.href %} active{% endif %}" href="{{ item.href }}" data-testid="{{ item.testid }}"><b>{{ item.key }}:</b>{{ item.label }}</a>
+            {%- for item in shell.nav %}
+            <a class="nav-item{% if shell.current_path == item.href %} active{% endif %}" href="{{ item.href }}" data-testid="{{ item.testid }}"><b>{{ item.key }}:</b>{{ item.label }}</a>
             {%- endfor %}
           </nav>
           <div class="topbar-meta">dns sinkhole</div>
@@ -23,7 +23,7 @@
           </form>
         </header>
         <main class="main-content">
-          {%- if welcome %}
+          {%- if shell.welcome %}
           <div class="rebuild-banner show done" data-testid="setup-welcome">
             <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div>
             <div class="text">
@@ -32,7 +32,7 @@
             </div>
           </div>
           {%- endif %}
-          {%- if proxy_logout_notice %}
+          {%- if shell.proxy_logout_notice %}
           <div class="rebuild-banner show" data-testid="proxy-logout-notice">
             <div class="text">
               <span class="label">This session is managed by your reverse proxy</span>
@@ -43,16 +43,16 @@
           <div id="notice-host"></div>
           <rebuild-banner></rebuild-banner>
           <next-step-banner></next-step-banner>
-          <div id="page-content"></div>
+          <div id="page-content">{% block page %}{% endblock %}</div>
         </main>
         <footer class="statusbar">
           <span class="live">ONLINE</span>
-          <span>noadd {{ version }}</span>
-          <span class="right">{{ host }}</span>
+          <span>noadd {{ shell.version }}</span>
+          <span class="right">{{ shell.host }}</span>
         </footer>
         <nav class="fnbar">
-          {%- for item in nav %}
-          <a class="nav-item{% if current_path == item.href %} active{% endif %}" href="{{ item.href }}"><span class="fk">{{ item.fkey }}</span><b>{{ item.short }}</b></a>
+          {%- for item in shell.nav %}
+          <a class="nav-item{% if shell.current_path == item.href %} active{% endif %}" href="{{ item.href }}"><span class="fk">{{ item.fkey }}</span><b>{{ item.short }}</b></a>
           {%- endfor %}
         </nav>
       </div>
