@@ -44,7 +44,7 @@ Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenario
 
 ## Admin UI
 
-`admin-ui/dist/index.html` is a **single file of vanilla-JS web components — no framework, no build step**, embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing that one file, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`.
+The admin UI is **vanilla-JS web components — no framework, no build step**, split across three files in `admin-ui/dist/`: `index.html` (the document shell — just the `<head>`, `<div id="app">`, and the two asset tags), `app.css`, and `app.js` (all components plus the bootstrap). The whole directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js` or `app.css`, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file.
 
 After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
 
