@@ -4430,6 +4430,107 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     assert!(html.contains("statusbar"));
 }
 
+/// The account page names who is signed in without the client asking.
+#[tokio::test]
+async fn the_account_page_renders_who_is_signed_in() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/account", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("Signed in as"));
+    assert!(html.contains("admin"));
+    assert!(html.contains(r#"action="/account/password""#));
+}
+
+/// The confirmation field is the form's own, so it is checked in the page
+/// handler and never reaches the shared password path.
+#[tokio::test]
+async fn a_mismatched_confirmation_never_reaches_the_password_change() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/account/password",
+            &token,
+            "current_password=admin&new_password=a-good-long-passphrase&confirm_password=different",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("do not match"));
+}
+
+/// A wrong current password is refused with 401 and says so — distinct from a
+/// rejected *new* password, which would send the operator fixing the wrong
+/// field.
+#[tokio::test]
+async fn a_wrong_current_password_is_reported_as_such() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/account/password",
+            &token,
+            "current_password=nope&new_password=a-good-long-passphrase\
+             &confirm_password=a-good-long-passphrase",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("Current password is incorrect"),
+        "the operator was not told which field was wrong"
+    );
+}
+
+/// A successful change redirects and issues a fresh session cookie — the shared
+/// path rotates it, and re-rendering would leave the form holding the password
+/// that was just replaced.
+#[tokio::test]
+async fn a_password_change_redirects_and_rotates_the_session() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/account/password",
+            &token,
+            "current_password=admin&new_password=a-good-long-passphrase\
+             &confirm_password=a-good-long-passphrase",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/account")
+    );
+    let cookies: Vec<&str> = res
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert!(
+        cookies.iter().any(|c| c.starts_with("session=")),
+        "the session was not rotated: {cookies:?}"
+    );
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.contains("noadd_flash=password_changed")),
+        "no confirmation was left for the page: {cookies:?}"
+    );
+}
+
 /// The settings page renders every scalar setting at its current value, so the
 /// form is usable without a round trip to fill it in.
 #[tokio::test]
