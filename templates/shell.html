@@ -1,14 +1,61 @@
 {#
   The signed-in application shell.
 
-  Its body is still rendered by `app.js` at this stage — P1 moved routing and
-  authentication to the server, not the page content. What the server settles
-  before the first byte is *which* page this is: an unauthenticated request
-  never reaches this template, so the client no longer has to ask the API who
-  it is and repaint once it finds out.
+  Everything here is settled by the server: which navigation item is active,
+  the version, the host in the status bar, and any one-shot notice. Only
+  `#page-content` is left for `app.js`, which mounts the page component for
+  this path into it.
 #}
 {% extends "base.html" %}
 
-{% block app_attrs %} data-version="{{ version }}"{% endblock %}
+{% block content %}
+      <div class="app-shell" data-testid="app-shell">
+        <header class="topbar">
+          <div class="brand">noadd <span class="v">{{ version }}</span></div>
+          <nav class="nav-strip">
+            {%- for item in nav %}
+            <a class="nav-item{% if current_path == item.href %} active{% endif %}" href="{{ item.href }}" data-testid="{{ item.testid }}"><b>{{ item.key }}:</b>{{ item.label }}</a>
+            {%- endfor %}
+          </nav>
+          <div class="topbar-meta">dns sinkhole</div>
+          <form method="post" action="/logout" class="topbar-logout">
+            <button type="submit" class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
+          </form>
+        </header>
+        <main class="main-content">
+          {%- if welcome %}
+          <div class="rebuild-banner show done" data-testid="setup-welcome">
+            <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="text">
+              <span class="label">Setup complete — welcome to noadd!</span>
+              <span class="meta">Your admin password is set and you're signed in.</span>
+            </div>
+          </div>
+          {%- endif %}
+          {%- if proxy_logout_notice %}
+          <div class="rebuild-banner show" data-testid="proxy-logout-notice">
+            <div class="text">
+              <span class="label">This session is managed by your reverse proxy</span>
+              <span class="meta">noadd cannot end it — log out at your proxy or SSO provider instead.</span>
+            </div>
+          </div>
+          {%- endif %}
+          <div id="notice-host"></div>
+          <rebuild-banner></rebuild-banner>
+          <next-step-banner></next-step-banner>
+          <div id="page-content"></div>
+        </main>
+        <footer class="statusbar">
+          <span class="live">ONLINE</span>
+          <span>noadd {{ version }}</span>
+          <span class="right">{{ host }}</span>
+        </footer>
+        <nav class="fnbar">
+          {%- for item in nav %}
+          <a class="nav-item{% if current_path == item.href %} active{% endif %}" href="{{ item.href }}"><span class="fk">{{ item.fkey }}</span><b>{{ item.short }}</b></a>
+          {%- endfor %}
+        </nav>
+      </div>
+{% endblock %}
 
 {% block scripts %}<script src="/app.js"></script>{% endblock %}

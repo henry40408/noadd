@@ -183,6 +183,10 @@ pub fn admin_router(state: AppState) -> Router {
             "/setup",
             get(crate::admin::pages::setup_page).post(crate::admin::pages::setup_submit),
         )
+        // POST, not GET: signing out changes state, and a `GET /logout` is
+        // something a link prefetcher would happily follow on the operator's
+        // behalf.
+        .route("/logout", post(crate::admin::pages::logout_submit))
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
@@ -340,24 +344,19 @@ async fn serve_apple_touch_icon(headers: HeaderMap) -> impl IntoResponse {
         .into_response()
 }
 
+/// Serve an embedded asset, or 404.
+///
+/// There is no SPA fallback any more. It existed so that a client-side route
+/// like `/settings` — a path the server knew nothing about — still received the
+/// shell for the router to act on. Every page path is a real route now, so a
+/// request that reaches here and matches no file is simply not a thing noadd
+/// serves, and answering it with HTML would hand the browser a document at an
+/// address that has no page.
 async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-
-    if let Some(file) = ADMIN_UI.get_file(path) {
-        static_response(file, &headers)
-    } else {
-        // Only fall back to index.html for extension-less paths (SPA
-        // client-side routes like /dashboard, /settings). Requests for
-        // missing assets (favicon.ico, robots.txt, *.map, etc.) must
-        // 404 so the browser doesn't try to parse HTML as the asset.
-        if std::path::Path::new(path).extension().is_some() {
-            return (StatusCode::NOT_FOUND, "not found").into_response();
-        }
-        match ADMIN_UI.get_file("index.html") {
-            Some(file) => static_response(file, &headers),
-            None => (StatusCode::NOT_FOUND, "not found").into_response(),
-        }
+    match ADMIN_UI.get_file(path) {
+        Some(file) => static_response(file, &headers),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
@@ -529,7 +528,7 @@ fn current_session(
 ///
 /// Deliberately **detect-only** — no 429, no blocking. The same code path is
 /// walked by an entirely legitimate browser whose session expired while its
-/// tab stayed open: the admin SPA keeps polling with the stale cookie, so
+/// tab stayed open: the page's components keep polling with the stale cookie, so
 /// blocking on this counter would lock operators out of their own appliance
 /// on the strength of a benign event. The threshold exists for the same
 /// reason (see [`INVALID_SESSION_MAX_ATTEMPTS`]).
@@ -1452,21 +1451,36 @@ async fn revoke_others(
 /// configured proxy/SSO logout URL so the SPA can complete the handoff — a
 /// forward-auth caller holds no session for us to revoke, so that redirect
 /// is the only way for them to actually end their session.
-async fn logout(
-    State(state): State<AppState>,
-    auth: AuthedUser,
-    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
-    headers: HeaderMap,
+/// Ask the browser to drop this origin's cookies, cached responses and storage.
+///
+/// `Set-Cookie` already expires our own cookie; this is the belt-and-braces
+/// version that also evicts cached API responses and any storage a future UI
+/// revision might add.
+///
+/// Deliberately *not* including `executionContexts`: that directive
+/// reloads/closes the browsing context. The JSON caller has to survive long
+/// enough to read `redirect_to` out of the very response carrying this header,
+/// and the form caller is mid-redirect — neither wants its context torn down
+/// underneath it.
+pub(crate) const CLEAR_SITE_DATA: (axum::http::HeaderName, &str) = (
+    axum::http::HeaderName::from_static("clear-site-data"),
+    r#""cache", "cookies", "storage""#,
+);
+
+/// Revoke every session this request's cookies name, clear the cookies, and
+/// report where a forward-auth operator has to go to finish signing out.
+///
+/// Shared by `POST /api/auth/logout` and the HTML `POST /logout` for the same
+/// reason [`start_password_session`] is shared — the revoke-both-cookies rule
+/// below is subtle enough that a second copy would get it wrong.
+pub(crate) async fn end_session(
+    state: &AppState,
+    auth: &AuthedUser,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
     jar: CookieJar,
-) -> Result<
-    (
-        CookieJar,
-        [(axum::http::HeaderName, &'static str); 1],
-        Json<LogoutResponse>,
-    ),
-    StatusCode,
-> {
-    let ip = client_ip(&state, connect.as_deref(), &headers);
+) -> (CookieJar, Option<String>) {
+    let ip = client_ip(state, connect, headers);
     // Revoke *every* token named by a cookie on this request, not just the
     // one that authenticated it. A browser can hold both accepted cookie
     // names at once, each naming a live session (log in over plain HTTP,
@@ -1505,24 +1519,31 @@ async fn logout(
     } else {
         None
     };
+    (jar, redirect_to)
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    auth: AuthedUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<
+    (
+        CookieJar,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<LogoutResponse>,
+    ),
+    StatusCode,
+> {
+    let via_forward_auth = auth.via_forward_auth;
+    let (jar, redirect_to) = end_session(&state, &auth, connect.as_deref(), &headers, jar).await;
     Ok((
         jar,
-        // Ask the browser to drop this origin's cookies, cached responses and
-        // storage. `Set-Cookie` above already expires our own cookie; this is
-        // the belt-and-braces version that also evicts cached API responses
-        // and any storage a future UI revision might add.
-        //
-        // Deliberately *not* including "executionContexts": that directive
-        // reloads/closes the browsing context, which would kill the SPA before
-        // it can read `redirect_to` from this very response and hand off to the
-        // forward-auth proxy's logout URL.
-        [(
-            axum::http::HeaderName::from_static("clear-site-data"),
-            r#""cache", "cookies", "storage""#,
-        )],
+        [CLEAR_SITE_DATA],
         Json(LogoutResponse {
             redirect_to,
-            via_forward_auth: auth.via_forward_auth,
+            via_forward_auth,
         }),
     ))
 }
