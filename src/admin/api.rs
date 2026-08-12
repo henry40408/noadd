@@ -177,7 +177,11 @@ pub fn admin_router(state: AppState) -> Router {
             "/settings",
             get(crate::admin::pages::settings_page).post(crate::admin::pages::settings_submit),
         )
-        .route("/account", get(crate::admin::pages::shell_page))
+        .route("/account", get(crate::admin::pages::account_page))
+        .route(
+            "/account/password",
+            post(crate::admin::pages::account_password_submit),
+        )
         .route(
             "/login",
             get(crate::admin::pages::login_page).post(crate::admin::pages::login_submit),
@@ -370,7 +374,7 @@ async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
 /// trusted only when the TCP peer is loopback or matches a configured CIDR
 /// in [`TrustedProxies`]; otherwise headers are client-controlled and would
 /// let a remote caller spoof source IPs to evade per-IP rate limits.
-fn client_ip(
+pub(crate) fn client_ip(
     state: &AppState,
     connect: Option<&ConnectInfo<SocketAddr>>,
     headers: &HeaderMap,
@@ -1730,6 +1734,21 @@ struct ChangePasswordRequest {
     current_password: String,
     new_password: String,
 }
+/// Why a password change was refused.
+///
+/// `Rejected` carries the reason because it is the only outcome the operator
+/// can act on — "at least 12 characters" or a zxcvbn verdict has to reach them
+/// verbatim, whether they are looking at JSON or at the account page's form.
+pub(crate) enum PasswordChangeError {
+    RateLimited,
+    Rejected(String),
+    /// The current password did not match. Deliberately distinct from
+    /// `Rejected`: one means "try a better new password", the other "you got
+    /// your existing one wrong", and telling an operator the wrong one of those
+    /// sends them fixing the field that was fine.
+    WrongPassword,
+    Internal,
+}
 
 /// Change the caller's own password, invalidate that operator's *other*
 /// sessions, and rotate the caller's own session token (OWASP: renew the
@@ -1777,17 +1796,26 @@ struct ChangePasswordRequest {
 /// so returning 500 here would only mislead the caller into retrying. Worst
 /// case, other sessions survive until they expire naturally and the caller
 /// keeps their original token — strictly no worse than not having rotated.
-async fn change_own_password(
-    State(state): State<AppState>,
-    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
-    headers: HeaderMap,
+///
+/// Change the signed-in operator's password, revoke their other sessions and
+/// rotate the one they are using.
+///
+/// Shared by `POST /api/users/me/password` and the account page's form. This is
+/// the only password-verification path outside sign-in, and the one an attacker
+/// holding a stolen session cookie uses to take an account over permanently —
+/// the rate limit, the account lockout and the `auth.failed` audit line are all
+/// load-bearing, and a second copy is a second chance to omit one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn change_password_for_session(
+    state: &AppState,
+    headers: &HeaderMap,
     jar: CookieJar,
-    Json(body): Json<ChangePasswordRequest>,
-) -> Result<(CookieJar, StatusCode), Response> {
-    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)
-        .map_err(IntoResponse::into_response)?;
-    let ip = client_ip(&state, connect.as_deref(), &headers);
-
+    user_id: i64,
+    token_hash: &str,
+    ip: std::net::IpAddr,
+    current_password: &str,
+    new_password: &str,
+) -> Result<CookieJar, PasswordChangeError> {
     // This endpoint verifies a password, so it is a password-guessing surface
     // and has to be throttled like one — the scenario being closed is the
     // cheat sheet's own: someone walks up to a signed-in terminal and grinds
@@ -1810,7 +1838,7 @@ async fn change_own_password(
             %ip,
             "password change rate limited"
         );
-        return Err(StatusCode::TOO_MANY_REQUESTS.into_response());
+        return Err(PasswordChangeError::RateLimited);
     }
     state.rate_limiter.record(ip);
 
@@ -1820,32 +1848,32 @@ async fn change_own_password(
     // slice is the right fallback rather than a 500.
     let username = state.db.get_username(user_id).await.ok().flatten();
     let user_inputs: Vec<&str> = username.as_deref().into_iter().collect();
-    if let Err(error) = validate_new_password(&body.new_password, &user_inputs) {
-        return Err(bad_request(error).into_response());
+    if let Err(error) = validate_new_password(new_password, &user_inputs) {
+        return Err(PasswordChangeError::Rejected(error));
     }
     let hash = state
         .db
         .get_user_password_hash(user_id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
-        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+        .map_err(|_err| PasswordChangeError::Internal)?
+        .ok_or(PasswordChangeError::Internal)?;
     // Unreachable today — this endpoint is cookie-only and a passwordless
     // account can never obtain a session — but guard anyway so the sentinel can
     // never reach `verify_password` and turn a 401 into a 500.
     if has_no_password(&hash) {
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+        return Err(PasswordChangeError::WrongPassword);
     }
     // Same account budget as `login`. This endpoint verifies the same
     // credential, so leaving it out would hand an attacker who already holds a
     // session an unmetered place to grind it.
     if state.lockout.is_locked(user_id) {
-        spend_verify_cost(&body.current_password);
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+        spend_verify_cost(current_password);
+        return Err(PasswordChangeError::WrongPassword);
     }
-    let ok = verify_password(&body.current_password, &hash)
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let ok =
+        verify_password(current_password, &hash).map_err(|_err| PasswordChangeError::Internal)?;
     if !ok {
-        note_account_failure(&state, user_id, ip, "change_password");
+        note_account_failure(state, user_id, ip, "change_password");
         // This is the only password-verification path outside `login`, and
         // exactly the one an attacker holding a stolen session cookie uses to
         // try to take the account over permanently — a rejected attempt here
@@ -1858,21 +1886,20 @@ async fn change_own_password(
             %ip,
             "current password rejected"
         );
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+        return Err(PasswordChangeError::WrongPassword);
     }
     state.lockout.record_success(user_id);
-    let new_hash = hash_password(&body.new_password)
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let new_hash = hash_password(new_password).map_err(|_err| PasswordChangeError::Internal)?;
     state
         .db
         .update_user_password(user_id, &new_hash)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+        .map_err(|_err| PasswordChangeError::Internal)?;
     match crate::admin::auth::revoke_user_sessions_except(
         &state.sessions,
         &state.db,
         user_id,
-        Some(&token_hash),
+        Some(token_hash),
     )
     .await
     {
@@ -1891,14 +1918,51 @@ async fn change_own_password(
         ),
     }
 
-    let jar = rotate_own_session(&state, &headers, jar, user_id, &token_hash, ip).await;
+    Ok(rotate_own_session(state, headers, jar, user_id, token_hash, ip).await)
+}
+
+/// `POST /api/users/me/password` — the JSON face of
+/// [`change_password_for_session`].
+///
+/// Resolves the caller's session, then maps the shared outcome onto status
+/// codes. The 401 covers both "current password wrong" and a missing account
+/// for the same reason sign-in does: neither is something the caller should be
+/// able to tell apart.
+async fn change_own_password(
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<(CookieJar, StatusCode), Response> {
+    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)
+        .map_err(IntoResponse::into_response)?;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+    let jar = change_password_for_session(
+        &state,
+        &headers,
+        jar,
+        user_id,
+        &token_hash,
+        ip,
+        &body.current_password,
+        &body.new_password,
+    )
+    .await
+    .map_err(|err| match err {
+        PasswordChangeError::RateLimited => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        PasswordChangeError::Rejected(message) => bad_request(message).into_response(),
+        PasswordChangeError::WrongPassword => StatusCode::UNAUTHORIZED.into_response(),
+        PasswordChangeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    })?;
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
 /// Replace the caller's session with a freshly minted one and hand back the
 /// jar carrying its `Set-Cookie`. On any failure the original session is left
-/// untouched and the unchanged jar is returned — see `change_own_password`'s
-/// doc comment for why that is the right outcome rather than a 500.
+/// untouched and the unchanged jar is returned — see
+/// [`change_password_for_session`]'s doc comment for why that is the right
+/// outcome rather than a 500.
 async fn rotate_own_session(
     state: &AppState,
     headers: &HeaderMap,

@@ -429,68 +429,10 @@ function showBanner(msg, type = 'info') {
 // --- Account Page ---
 class AccountPage extends HTMLElement {
   connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in"><h2>Account</h2><p>Operator accounts and active sessions</p></div>
-      <div class="card fade-in">
-        <div class="card-title">This Account</div>
-        <p id="acct-whoami" class="card-desc">Loading…</p>
-        <div class="card-title" style="margin-top:4px">Change Password</div>
-        <div class="login-error" id="pw-error" style="display:none"></div>
-        <div class="input-row"><input type="password" id="pw-current" name="current-password" autocomplete="current-password" data-testid="password-current" placeholder="current password" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-new" name="new-password" autocomplete="new-password" data-testid="password-new" placeholder="new password (min ${MIN_PASSWORD_LENGTH})" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="pw-confirm" name="confirm-password" autocomplete="new-password" data-testid="password-confirm" placeholder="confirm new password" style="max-width:220px"></div>
-        <button class="btn btn-primary btn-sm" id="pw-save" data-testid="password-save" style="margin-top:12px">Change Password</button>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="card-title">Operators</div>
-        <p class="card-desc">All operators have full admin access. The last operator cannot be deleted; deleting one revokes all their sessions.</p>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
-          <tbody id="ops-body"></tbody>
-        </table></div>
-        <div class="card-title" style="margin-top:16px">Add Operator</div>
-        <div class="login-error" id="op-error" style="display:none"></div>
-        <div class="input-row"><input type="text" id="op-user" name="new-operator-username" autocomplete="off" placeholder="username" style="max-width:200px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" name="new-operator-password" autocomplete="new-password" placeholder="password (min ${MIN_PASSWORD_LENGTH})" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" name="confirm-operator-password" autocomplete="new-password" placeholder="confirm password" style="max-width:220px"></div>
-        <button class="btn btn-primary btn-sm" id="op-add" style="margin-top:12px">Add Operator</button>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.1s">
-        <div class="card-title">Active Sessions</div>
-        <p class="card-desc">Tokens are never shown. Any operator can revoke any session. Sessions expire after 7 days, or 48 hours after a device last contacted the server.</p>
-        <div class="notice-banner info" id="sess-sso-note" role="status" style="display:none;margin-bottom:12px">
-          <span class="icon">${NOTICE_ICONS.info}</span>
-          <span class="msg">You're signed in via SSO, managed by your reverse proxy. Only password-login sessions are listed here; SSO access can't be revoked from noadd — sign out at your proxy instead.</span>
-        </div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Operator</th><th>IP</th><th>Browser</th><th>Signed in</th><th>Last seen</th><th></th></tr></thead>
-          <tbody id="sess-body"></tbody>
-        </table></div>
-        <button class="btn btn-danger" id="logout-others" data-testid="logout-other-sessions" style="margin-top:14px">Log Out Other Sessions</button>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.15s">
-        <div class="card-title">API Keys</div>
-        <p class="card-desc">
-          For programmatic access via <code style="color:var(--accent);font-size:0.8rem">Authorization: Bearer &lt;token&gt;</code>. <a class="text-accent" href="/api/docs" target="_blank" rel="noopener">Interactive API reference</a>
-        </p>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
-          <tbody id="api-keys-body"></tbody>
-        </table></div>
-        <div id="api-key-reveal" data-testid="api-key-reveal" style="display:none"></div>
-        <div class="card-title" style="margin-top:16px">Create API Key</div>
-        <div class="login-error" id="api-key-error" style="display:none"></div>
-        <div class="input-row">
-          <input type="text" id="api-key-name" data-testid="api-key-name" placeholder="name, e.g. home-assistant" style="max-width:220px">
-          <input type="date" id="api-key-expires" title="Expiry date (optional — leave blank for never)" style="max-width:160px">
-          <button class="btn btn-primary btn-sm" id="api-key-add" data-testid="api-key-create">${icons.plus} Create</button>
-        </div>
-      </div>`;
 
     this._me = null;
     this.load();
 
-    this.querySelector('#pw-save').onclick = () => this.changePassword();
     this.querySelector('#op-add').onclick = () => this.addOperator();
     this.querySelector('#logout-others').onclick = async () => {
       if (!confirm('Log out all other sessions? Your current session stays signed in.')) return;
@@ -507,14 +449,11 @@ class AccountPage extends HTMLElement {
   }
 
   async load() {
+    // Who is signed in, and the SSO note, are rendered by the server. What is
+    // still needed here is the id, which `loadOperators` compares against each
+    // row to mark which operator is you.
     try {
       this._me = await api.get('/api/auth/me');
-      const sso = this._me.via_sso
-        ? html` <span class="text-dim">· via SSO</span>` : '';
-      this.querySelector('#acct-whoami').innerHTML =
-        html`Signed in as <code style="color:var(--accent);font-size:0.85rem">${this._me.username}</code>${sso}`;
-      const note = this.querySelector('#sess-sso-note');
-      if (note) note.style.display = this._me.via_sso ? 'flex' : 'none';
     } catch (e) {}
     this.loadOperators();
     this.loadSessions();
@@ -586,33 +525,6 @@ class AccountPage extends HTMLElement {
         this.loadSessions();
       };
     });
-  }
-
-  async changePassword() {
-    const err = this.querySelector('#pw-error');
-    err.style.display = 'none';
-    const cur = this.querySelector('#pw-current').value;
-    const nw = this.querySelector('#pw-new').value;
-    const cf = this.querySelector('#pw-confirm').value;
-    const lenError = passwordLengthError(nw);
-    if (lenError) return showFormError(err, lenError.replace(/^Password/, 'New password'));
-    if (nw !== cf) return showFormError(err, 'Passwords do not match');
-    try {
-      await api.post('/api/users/me/password', { current_password: cur, new_password: nw });
-      // The change rewrites this operator's sessions server-side — every other
-      // device is revoked and this one's token is rotated — so the table
-      // rendered above it is stale the moment this returns. Without this the
-      // page keeps showing revoked sessions until a manual reload.
-      this.loadSessions();
-      this.querySelector('#pw-current').value = '';
-      this.querySelector('#pw-new').value = '';
-      this.querySelector('#pw-confirm').value = '';
-      const btn = this.querySelector('#pw-save');
-      btn.textContent = 'Changed!';
-      setTimeout(() => { btn.textContent = 'Change Password'; }, 2000);
-    } catch (e) {
-      showFormError(err, e.detail || 'Current password is incorrect');
-    }
   }
 
   async addOperator() {

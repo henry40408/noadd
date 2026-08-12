@@ -33,9 +33,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, SettingsError,
-    SetupError, apply_settings, create_first_operator, end_session, needs_setup,
-    start_password_session,
+    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, PasswordChangeError,
+    SettingsError, SetupError, apply_settings, change_password_for_session, create_first_operator,
+    end_session, needs_setup, start_password_session,
 };
 
 // --- Templates ---
@@ -154,6 +154,8 @@ pub struct ShellData {
     /// resolved here because this is where the flash is consumed, and consuming
     /// it in two places would mean one of them never sees it.
     settings_saved: bool,
+    /// Read by the account page, for the same reason as `settings_saved`.
+    password_changed: bool,
 }
 
 impl ShellData {
@@ -172,6 +174,7 @@ impl ShellData {
                 welcome: flash == Some(Flash::Welcome),
                 proxy_logout_notice: flash == Some(Flash::ProxyLogout),
                 settings_saved: flash == Some(Flash::SettingsSaved),
+                password_changed: flash == Some(Flash::PasswordChanged),
             },
             jar,
         )
@@ -200,6 +203,23 @@ pub struct SettingsTemplate {
     error_field: &'static str,
     error_message: String,
     saved: bool,
+}
+
+/// The account page.
+///
+/// Covers the shell, who is signed in, and the change-password form. The three
+/// actions needing a separate password proof — add operator, delete operator,
+/// create API key — and the tables' row actions still need JavaScript; they
+/// follow in their own change.
+#[derive(Template, WebTemplate)]
+#[template(path = "account.html")]
+pub struct AccountTemplate {
+    shell: ShellData,
+    username: String,
+    via_sso: bool,
+    min_password_length: usize,
+    error: Option<String>,
+    password_changed: bool,
 }
 
 /// The shell around a page whose body is still painted by `app.js`.
@@ -275,6 +295,8 @@ pub enum Flash {
     ProxyLogout,
     /// A settings save went through.
     SettingsSaved,
+    /// The operator changed their own password.
+    PasswordChanged,
 }
 
 impl Flash {
@@ -283,6 +305,7 @@ impl Flash {
             Self::Welcome => "welcome",
             Self::ProxyLogout => "proxy_logout",
             Self::SettingsSaved => "settings_saved",
+            Self::PasswordChanged => "password_changed",
         }
     }
 
@@ -291,6 +314,7 @@ impl Flash {
             "welcome" => Some(Self::Welcome),
             "proxy_logout" => Some(Self::ProxyLogout),
             "settings_saved" => Some(Self::SettingsSaved),
+            "password_changed" => Some(Self::PasswordChanged),
             // An unrecognised value is a stale cookie from an older build, or
             // something hand-written. Either way there is no notice to show.
             _ => None,
@@ -626,6 +650,147 @@ pub async fn setup_submit(
         // to `/login` is recoverable, where re-rendering the wizard would ask
         // them to create an account that is already there.
         Err(_) => Redirect::to("/login").into_response(),
+    }
+}
+
+// --- Account ---
+
+pub async fn account_page(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let changed = shell.password_changed;
+    let username = state
+        .db
+        .get_username(auth.user_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    (
+        jar,
+        AccountTemplate {
+            shell,
+            username,
+            via_sso: auth.via_forward_auth,
+            min_password_length: MIN_PASSWORD_LENGTH,
+            error: None,
+            password_changed: changed,
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct PasswordForm {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+/// `POST /account/password`.
+///
+/// The confirmation field is checked here and nowhere else — it exists only in
+/// the form, so `change_password_for_session`, which the JSON endpoint shares,
+/// has no business knowing about it.
+///
+/// A success redirects. It has to: the shared path rotates the session cookie,
+/// and re-rendering would leave the operator on a page whose form still holds
+/// the password they just replaced.
+pub async fn account_password_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<PasswordForm>,
+) -> Response {
+    let reject = |status: StatusCode, message: String, jar: CookieJar, username: String| {
+        let (shell, jar) = ShellData::build(&uri, &headers, jar);
+        (
+            status,
+            jar,
+            AccountTemplate {
+                shell,
+                username,
+                via_sso: auth.via_forward_auth,
+                min_password_length: MIN_PASSWORD_LENGTH,
+                error: Some(message),
+                password_changed: false,
+            },
+        )
+            .into_response()
+    };
+    let username = state
+        .db
+        .get_username(auth.user_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    if form.new_password != form.confirm_password {
+        return reject(
+            StatusCode::BAD_REQUEST,
+            "Passwords do not match".to_string(),
+            jar,
+            username,
+        );
+    }
+    // Cookie-only, like the JSON endpoint: an API-key or forward-auth caller
+    // holds no session to rotate, and `SsrUser` alone does not prove which
+    // session is being changed.
+    let Some(token_hash) = auth.session_token_hash.clone() else {
+        return reject(
+            StatusCode::UNAUTHORIZED,
+            "Changing a password needs a browser session".to_string(),
+            jar,
+            username,
+        );
+    };
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+
+    match change_password_for_session(
+        &state,
+        &headers,
+        jar,
+        auth.user_id,
+        &token_hash,
+        ip,
+        &form.current_password,
+        &form.new_password,
+    )
+    .await
+    {
+        Ok(jar) => (
+            set_flash(jar, Flash::PasswordChanged),
+            Redirect::to("/account"),
+        )
+            .into_response(),
+        Err(err) => {
+            let (status, message) = match err {
+                PasswordChangeError::RateLimited => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too many attempts — wait a minute, then retry".to_string(),
+                ),
+                PasswordChangeError::Rejected(message) => (StatusCode::BAD_REQUEST, message),
+                PasswordChangeError::WrongPassword => (
+                    StatusCode::UNAUTHORIZED,
+                    "Current password is incorrect".to_string(),
+                ),
+                PasswordChangeError::Internal => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not change the password — check the server log".to_string(),
+                ),
+            };
+            // The jar was consumed by the failed attempt; a fresh one is fine
+            // because nothing was set on it.
+            reject(status, message, CookieJar::new(), username)
+        }
     }
 }
 

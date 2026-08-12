@@ -65,7 +65,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => { await stopNoadd(server); });
 
-test('changing my password refreshes the session list in place', async ({ page }) => {
+test('changing my password revokes the others and rotates this one', async ({ page }) => {
   // A second session for the same operator, minted straight against the API.
   // Its cookie is discarded — all this needs is for the session to exist
   // server-side, so the account page has something to list besides this browser.
@@ -92,13 +92,13 @@ test('changing my password refreshes the session list in place', async ({ page }
   await page.getByTestId('password-new').fill(NEW_PASSWORD);
   await page.getByTestId('password-confirm').fill(NEW_PASSWORD);
   await page.getByTestId('password-save').click();
-  // The button only flips once the request resolves, so this doubles as the
-  // barrier before asserting on the table.
-  await expect(page.getByTestId('password-save')).toHaveText(/changed/i);
+  // The form posts and the server redirects back, so the confirmation it
+  // renders is the barrier: seeing it means the navigation finished and the
+  // table below was built from the post-change state.
+  await expect(page.getByTestId('password-changed')).toBeVisible();
 
   // The other device is gone and this device's row is a *different* session —
-  // its token was rotated, so it carries a new id. Both facts are only visible
-  // if the table re-rendered; before this fix they needed a manual reload.
+  // its token was rotated, so it carries a new id.
   await expect(rows).toHaveCount(1);
   const idAfter = await rows.getAttribute('data-id');
   expect(idAfter).toMatch(/^\d+$/);
