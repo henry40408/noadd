@@ -143,6 +143,10 @@ body::after {
   color: var(--text-dim);
   border-left: 1px solid var(--border);
 }
+/* Logging out is a form submission now, so the button sits inside a <form>.
+   The topbar stretches its children, and without this the form would be the
+   stretched item while the button kept its own height inside it. */
+.topbar-logout { display: flex; }
 #topbar-logout { border-left: 1px solid var(--border); border-right: none; }
 #topbar-logout:hover { color: var(--red); background: var(--red-dim); }
 

@@ -1858,9 +1858,12 @@ async fn test_existing_asset_served_with_correct_mime() {
 }
 
 #[tokio::test]
-async fn test_spa_route_still_serves_index_html() {
-    // Extension-less paths should still fall through to index.html so
-    // client-side routing (e.g. /dashboard, /settings) keeps working.
+async fn test_unknown_path_404s_rather_than_serving_a_shell() {
+    // The SPA fallback is gone: it existed so a client-side route the server
+    // knew nothing about still received the shell for the router to act on, and
+    // every page path is a real route now. `/dashboard` was never one of them —
+    // the dashboard is `/` — so it is exactly the stale link this must not
+    // answer with a document.
     let (app, _token) = setup().await;
 
     let response = app
@@ -1873,15 +1876,15 @@ async fn test_spa_route_still_serves_index_html() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let ctype = response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        ctype.starts_with("text/html"),
-        "expected text/html, got {ctype}"
+        !ctype.starts_with("text/html"),
+        "a 404 must not look like a page, got {ctype}"
     );
 }
 
@@ -4325,7 +4328,11 @@ fn form_post(uri: &str, body: &'static str) -> Request<Body> {
 
 /// Completing the wizard creates the operator and signs them in on the spot —
 /// asking them to retype the password they just chose would be pure ceremony.
-/// `?welcome=1` is what drives the one-time strip the shell shows afterwards.
+///
+/// The welcome strip rides a flash cookie rather than the redirect target. A
+/// `?welcome=1` would survive a refresh, a bookmark and a shared link, greeting
+/// the operator again each time; the flash is read and cleared by the response
+/// that renders it.
 #[tokio::test]
 async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     let app = unconfigured_app().await;
@@ -4339,11 +4346,21 @@ async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         res.headers().get("location").and_then(|v| v.to_str().ok()),
-        Some("/?welcome=1")
+        Some("/")
+    );
+    let cookies: Vec<&str> = res
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert!(
+        cookies.iter().any(|c| c.starts_with("session=")),
+        "the new operator was not signed in: {cookies:?}"
     );
     assert!(
-        res.headers().get("set-cookie").is_some(),
-        "the new operator was not signed in"
+        cookies.iter().any(|c| c.contains("noadd_flash=welcome")),
+        "no welcome notice was left for the shell: {cookies:?}"
     );
 }
 
@@ -4369,6 +4386,135 @@ async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
     assert!(
         html.contains("value=\"admin\""),
         "the typed username was discarded"
+    );
+}
+
+/// The shell is rendered by the server, active navigation item and all.
+///
+/// The active class is asserted on the path being served *and* its absence on
+/// another: a template that marked every item active, or none, would satisfy
+/// half of this and look fine in a screenshot.
+#[tokio::test]
+async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains(r#"class="nav-item active" href="/settings""#),
+        "the settings item was not marked active"
+    );
+    assert!(
+        !html.contains(r#"class="nav-item active" href="/logs""#),
+        "an item for another path was marked active"
+    );
+    // The shell, not a client-side stand-in for it.
+    assert!(html.contains(r#"action="/logout""#));
+    assert!(html.contains("statusbar"));
+}
+
+/// Signing out through the form revokes the session and sends the browser to
+/// the sign-in page. The revocation is the part that matters: clearing the
+/// cookie alone would leave a live session server-side that a copy of the
+/// cookie could still present.
+#[tokio::test]
+async fn the_logout_form_revokes_the_session_and_redirects() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed("POST", "/logout", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/login")
+    );
+
+    // The same cookie must no longer authenticate anything.
+    let after = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        StatusCode::SEE_OTHER,
+        "the revoked session still resolved"
+    );
+}
+
+/// A flash is shown once and then gone. It is cleared by the very response that
+/// renders it, so the second request must not repeat it — the failure this
+/// mechanism exists to prevent is a notice that reappears on every page.
+#[tokio::test]
+async fn a_flash_notice_is_shown_once_and_cleared() {
+    let app = unconfigured_app().await;
+    let created = app
+        .clone()
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery",
+        ))
+        .await
+        .unwrap();
+    // Carry every cookie the wizard set — the session and the flash both.
+    let cookie_header = created
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|c| c.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("cookie", &cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("setup-welcome"),
+        "the welcome notice was not rendered"
+    );
+
+    // Second request, same session cookie, flash cleared by the first response.
+    let session_only = cookie_header
+        .split("; ")
+        .find(|c| c.starts_with("session="))
+        .unwrap()
+        .to_string();
+    let second = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("cookie", session_only)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("setup-welcome"),
+        "the welcome notice came back on the next page"
     );
 }
 

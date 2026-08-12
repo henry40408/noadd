@@ -50,7 +50,11 @@ Sign-in and setup need **no CSRF token** — `src/admin/csrf.rs` is a header-bas
 
 Password sign-in lives in **one** place, `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, the constant Argon2 cost, the lockout and the audit events are all in there — do not grow a second path.
 
-The page bodies are still painted by **vanilla-JS web components — no framework, no build step**, in `admin-ui/dist/`: `index.html` (a static shell kept for the fallback route), `app.css`, and `app.js`. The whole directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js` or `app.css` (or a file under `templates/`), then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file; server-rendered pages get `no-store` from the same layer, which keys on whether a response already declares a policy.
+**The shell is server-rendered too** (`templates/shell.html`): topbar, both navigation bars, status bar, and any one-shot notice. `app.js` does not render it and must not re-derive what it already decided — the active nav item is a class the template set from the path it answered. Only `#page-content` is left for the client, where the page component for this path mounts. The nav table lives once, in `NAV` (`src/admin/pages.rs`), and drives both the desktop strip and the mobile F-key bar.
+
+Page bodies are still **vanilla-JS web components — no framework, no build step**, in `admin-ui/dist/`: `app.css` and `app.js`. There is no `index.html` and **no SPA fallback** — every page path is a real route, so an unmatched path 404s. The directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js`, `app.css`, or a file under `templates/`, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file; server-rendered pages get `no-store` from the same layer, which keys on whether a response already declares a policy.
+
+One-shot notices ride a **flash cookie** (`Flash` in `src/admin/pages.rs`), read and cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
 
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 

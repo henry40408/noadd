@@ -24,17 +24,17 @@ use askama_web::WebTemplate;
 use axum::{
     Form,
     extract::{ConnectInfo, Extension, FromRequestParts, Query, State},
-    http::{HeaderMap, StatusCode, request::Parts},
+    http::{HeaderMap, StatusCode, Uri, request::Parts},
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    AppState, AuthedUser, LoginError, MIN_PASSWORD_LENGTH, SetupError, create_first_operator,
-    needs_setup, start_password_session,
+    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, SetupError,
+    create_first_operator, end_session, needs_setup, start_password_session,
 };
 
 // --- Templates ---
@@ -63,15 +63,94 @@ pub struct SetupTemplate {
     min_password_length: usize,
 }
 
-/// The signed-in shell.
+/// One entry in the navigation, and with it one of the paths the shell links to.
 ///
-/// The body is still painted by `app.js` at this stage — see
-/// `templates/shell.html`. The version rides a `data-` attribute rather than an
-/// inline `<script>`, which is what keeps the document free of inline script.
+/// A single table drives the desktop strip and the mobile F-key bar both. They
+/// were separate blocks of markup before, which meant adding a page involved
+/// remembering to edit two places that nothing checked against each other.
+pub struct NavItem {
+    pub href: &'static str,
+    pub testid: &'static str,
+    /// The digit shown in the desktop strip (`1:` … `6:`).
+    pub key: &'static str,
+    /// The function key shown in the mobile bar (`F1` … `F6`).
+    pub fkey: &'static str,
+    pub label: &'static str,
+    /// The abbreviated label the narrow mobile bar uses.
+    pub short: &'static str,
+}
+
+const NAV: &[NavItem] = &[
+    NavItem {
+        href: "/",
+        testid: "nav-dashboard",
+        key: "1",
+        fkey: "F1",
+        label: "dashboard",
+        short: "dash",
+    },
+    NavItem {
+        href: "/stats",
+        testid: "nav-stats",
+        key: "2",
+        fkey: "F2",
+        label: "statistics",
+        short: "stats",
+    },
+    NavItem {
+        href: "/logs",
+        testid: "nav-logs",
+        key: "3",
+        fkey: "F3",
+        label: "query-log",
+        short: "logs",
+    },
+    NavItem {
+        href: "/filters",
+        testid: "nav-filters",
+        key: "4",
+        fkey: "F4",
+        label: "filters",
+        short: "filt",
+    },
+    NavItem {
+        href: "/settings",
+        testid: "nav-settings",
+        key: "5",
+        fkey: "F5",
+        label: "settings",
+        short: "conf",
+    },
+    NavItem {
+        href: "/account",
+        testid: "nav-account",
+        key: "6",
+        fkey: "F6",
+        label: "account",
+        short: "acct",
+    },
+];
+
+/// The signed-in shell: topbar, navigation, status bar and the container the
+/// page component mounts into.
+///
+/// Only `#page-content` is left for the client to fill. Everything around it —
+/// including which navigation item is active — is settled here, because the
+/// server already knows the path it is answering and the client would only be
+/// re-deriving it from the URL it was handed.
 #[derive(Template, WebTemplate)]
 #[template(path = "shell.html")]
 pub struct ShellTemplate {
     version: &'static str,
+    /// The `Host` this request arrived on, shown in the status bar. Attacker-
+    /// influenced (it is a request header), so it is only ever interpolated by
+    /// the template, which escapes it.
+    host: String,
+    /// The path being served, so the matching navigation item renders active.
+    current_path: String,
+    nav: &'static [NavItem],
+    welcome: bool,
+    proxy_logout_notice: bool,
 }
 
 // --- Extractors ---
@@ -119,6 +198,72 @@ impl FromRequestParts<AppState> for MaybeUser {
             AuthedUser::from_request_parts(parts, state).await.ok(),
         ))
     }
+}
+
+// --- Flash notices ---
+
+/// A one-shot notice left behind by a redirect.
+///
+/// A closed set rather than free text: the value round-trips through a cookie,
+/// and a cookie holding an arbitrary message is one encoding bug away from
+/// either breaking the header or carrying something the sender did not write.
+/// The wording lives in the template; only the identifier travels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Flash {
+    /// First-run setup just completed.
+    Welcome,
+    /// Logout on a forward-auth session, which noadd cannot end on its own.
+    ProxyLogout,
+}
+
+impl Flash {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Welcome => "welcome",
+            Self::ProxyLogout => "proxy_logout",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "welcome" => Some(Self::Welcome),
+            "proxy_logout" => Some(Self::ProxyLogout),
+            // An unrecognised value is a stale cookie from an older build, or
+            // something hand-written. Either way there is no notice to show.
+            _ => None,
+        }
+    }
+}
+
+/// The cookie a flash rides in.
+///
+/// A cookie rather than the query string: `?welcome=1` survives a refresh, a
+/// bookmark and a shared link, so the strip it drives comes back where it has
+/// no business coming back. It is deliberately session-scoped (no `Max-Age`) —
+/// a notice nobody saw before closing the tab is not one worth keeping.
+const FLASH_COOKIE: &str = "noadd_flash";
+
+fn set_flash(jar: CookieJar, flash: Flash) -> CookieJar {
+    jar.add(
+        Cookie::build((FLASH_COOKIE, flash.as_str()))
+            .path("/")
+            .http_only(true)
+            .same_site(SameSite::Lax)
+            .build(),
+    )
+}
+
+/// Read the pending notice and hand back a jar that clears it.
+///
+/// Read and clear are one step on purpose: a flash that is rendered but not
+/// cleared shows again on the next page, which is the failure this mechanism
+/// exists to avoid.
+fn take_flash(jar: CookieJar) -> (Option<Flash>, CookieJar) {
+    let Some(flash) = jar.get(FLASH_COOKIE).and_then(|c| Flash::parse(c.value())) else {
+        return (None, jar);
+    };
+    let jar = jar.remove(Cookie::build((FLASH_COOKIE, "")).path("/").build());
+    (Some(flash), jar)
 }
 
 // --- Redirect targets ---
@@ -186,12 +331,72 @@ pub struct NextQuery {
     next: Option<String>,
 }
 
-/// Every signed-in page. The body is still painted by `app.js`; what this
-/// settles is that the request is authenticated before any HTML is written.
-pub async fn shell_page(_user: SsrUser) -> ShellTemplate {
-    ShellTemplate {
-        version: env!("GIT_VERSION"),
+/// The `Host` this request arrived on.
+///
+/// Shown in the status bar, where it used to be read from `location.host`. It
+/// is a request header, so it is whatever the client sent — fine for a label,
+/// and the template escapes it — but never treat it as identity.
+fn request_host(headers: &HeaderMap) -> String {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Every signed-in page. The shell is rendered here; only `#page-content` is
+/// left for `app.js` to fill.
+pub async fn shell_page(
+    _user: SsrUser,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (flash, jar) = take_flash(jar);
+    (
+        jar,
+        ShellTemplate {
+            version: env!("GIT_VERSION"),
+            host: request_host(&headers),
+            current_path: uri.path().to_string(),
+            nav: NAV,
+            welcome: flash == Some(Flash::Welcome),
+            proxy_logout_notice: flash == Some(Flash::ProxyLogout),
+        },
+    )
+}
+
+/// `POST /logout`.
+///
+/// A form rather than a `fetch`, so signing out works with JavaScript off. It
+/// is a POST because it changes state — a `GET /logout` would be followed by
+/// any link prefetcher that happened across it.
+pub async fn logout_submit(
+    State(state): State<AppState>,
+    SsrUser(auth): SsrUser,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let via_forward_auth = auth.via_forward_auth;
+    let (jar, redirect_to) = end_session(&state, &auth, connect.as_deref(), &headers, jar).await;
+
+    if let Some(url) = redirect_to {
+        // The proxy owns this session; hand the browser to its logout URL.
+        return (jar, [CLEAR_SITE_DATA], Redirect::to(&url)).into_response();
     }
+    if via_forward_auth {
+        // Proxy-managed with nowhere to hand off to. Clearing our cookies
+        // achieves nothing — the next request carries the same proxy header —
+        // so say where the session actually has to be ended.
+        //
+        // No `Clear-Site-Data` here, deliberately: it would take the flash
+        // cookie with it and the operator would be redirected to a page that
+        // says nothing about why logging out did not work.
+        return (set_flash(jar, Flash::ProxyLogout), Redirect::to("/")).into_response();
+    }
+    // No `next`: the session just ended is not somewhere to return to.
+    (jar, [CLEAR_SITE_DATA], Redirect::to("/login")).into_response()
 }
 
 pub async fn login_page(
@@ -360,10 +565,10 @@ pub async fn setup_submit(
     )
     .await
     {
-        // `?welcome=1` drives the one-time strip the shell shows after setup.
-        // It rides the URL rather than `sessionStorage` so the server, which
-        // now knows setup just completed, is the one that says so.
-        Ok(jar) => (jar, Redirect::to("/?welcome=1")).into_response(),
+        // The welcome strip rides a flash cookie rather than the URL: a
+        // `?welcome=1` would survive a refresh, a bookmark and a shared link,
+        // and greet the operator again each time.
+        Ok(jar) => (set_flash(jar, Flash::Welcome), Redirect::to("/")).into_response(),
         // The account exists; only the automatic sign-in failed. Sending them
         // to `/login` is recoverable, where re-rendering the wizard would ask
         // them to create an account that is already there.

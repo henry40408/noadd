@@ -18,12 +18,6 @@ if (LEGACY_HASH_ROUTES[location.hash]) {
   location.replace(LEGACY_HASH_ROUTES[location.hash]);
 }
 
-// The build version, handed over as a data attribute on #app rather than an
-// inline <script>. It used to arrive from `/api/health`, which the client no
-// longer needs to call for anything else; a data attribute keeps the document
-// free of inline script, which is what leaves `script-src 'self'` reachable.
-const NOADD_VERSION = document.getElementById('app').dataset.version || '';
-
 // ============================================================
 // API Client
 // ============================================================
@@ -432,105 +426,6 @@ function showBanner(msg, type = 'info') {
 // ============================================================
 
 // --- App Shell ---
-class AppShell extends LiveElement {
-  connectedCallback() {
-    this.innerHTML = html`
-      <div class="app-shell" data-testid="app-shell">
-        <header class="topbar">
-          <div class="brand">noadd <span class="v">${NOADD_VERSION}</span></div>
-          <nav class="nav-strip">
-            <a class="nav-item" href="/" data-testid="nav-dashboard"><b>1:</b>dashboard</a>
-            <a class="nav-item" href="/stats" data-testid="nav-stats"><b>2:</b>statistics</a>
-            <a class="nav-item" href="/logs" data-testid="nav-logs"><b>3:</b>query-log</a>
-            <a class="nav-item" href="/filters" data-testid="nav-filters"><b>4:</b>filters</a>
-            <a class="nav-item" href="/settings" data-testid="nav-settings"><b>5:</b>settings</a>
-            <a class="nav-item" href="/account" data-testid="nav-account"><b>6:</b>account</a>
-          </nav>
-          <div class="topbar-meta">dns sinkhole</div>
-          <button class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
-        </header>
-        <main class="main-content">
-          <div id="notice-host"></div>
-          <rebuild-banner></rebuild-banner>
-          <next-step-banner></next-step-banner>
-          <div id="page-content"></div>
-        </main>
-        <footer class="statusbar">
-          <span class="live">ONLINE</span>
-          <span>noadd ${NOADD_VERSION}</span>
-          <span class="right">${location.host}</span>
-        </footer>
-        <nav class="fnbar">
-          <a class="nav-item" href="/"><span class="fk">F1</span><b>dash</b></a>
-          <a class="nav-item" href="/stats"><span class="fk">F2</span><b>stats</b></a>
-          <a class="nav-item" href="/logs"><span class="fk">F3</span><b>logs</b></a>
-          <a class="nav-item" href="/filters"><span class="fk">F4</span><b>filt</b></a>
-          <a class="nav-item" href="/settings"><span class="fk">F5</span><b>conf</b></a>
-          <a class="nav-item" href="/account"><span class="fk">F6</span><b>acct</b></a>
-        </nav>
-      </div>`;
-
-    // Navigation is ordinary links now, so there is nothing to bind and nothing
-    // to keep in sync afterwards: each page is its own document, and the active
-    // item is whichever link points at the path the server just served. The
-    // `hashchange` listener this replaces had to be registered for teardown
-    // because the shell was rebuilt on every login; the shell is built once per
-    // document now, and holds no window-level listener to strand.
-    this.querySelectorAll('.nav-item[href]').forEach(link => {
-      link.classList.toggle('active', link.getAttribute('href') === location.pathname);
-    });
-
-    this.querySelector('#topbar-logout').onclick = async () => {
-      let resp = null;
-      try {
-        resp = await api.post('/api/auth/logout');
-      } catch (e) { /* clear client state regardless of response */ }
-      if (resp && resp.redirect_to) {
-        window.location.href = resp.redirect_to;
-        return;
-      }
-      if (resp && resp.via_forward_auth) {
-        showBanner('You are signed in via your reverse proxy. To end your session, log out at your proxy or SSO provider.', 'info');
-        return;
-      }
-      // No `next`: the session that was just ended is not somewhere to return
-      // to, and carrying the path would send the operator straight back into
-      // the page they logged out of.
-      window.location.assign('/login');
-    };
-
-    // One-time post-setup welcome strip. `?welcome=1` rides the redirect out of
-    // setup, so the server — which is what actually knows setup just finished —
-    // is the one that says so; the `sessionStorage` flag this replaces was the
-    // client trying to remember it across a reload it no longer performs. The
-    // marker is stripped from the URL straight away so a refresh, a bookmark or
-    // a shared link never shows it a second time.
-    const params = new URLSearchParams(location.search);
-    if (params.get('welcome') === '1') {
-      params.delete('welcome');
-      const rest = params.toString();
-      history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : ''));
-      const main = this.querySelector('.main-content');
-      const welcome = document.createElement('div');
-      welcome.className = 'rebuild-banner show done';
-      welcome.setAttribute('data-testid', 'setup-welcome');
-      welcome.innerHTML = `
-        <div class="icon">${icons.check || ''}</div>
-        <div class="text">
-          <span class="label">Setup complete — welcome to noadd!</span>
-          <span class="meta">Your admin password is set and you're signed in.</span>
-        </div>
-        <button class="btn" data-testid="setup-welcome-dismiss"
-                style="margin-left:auto" aria-label="Dismiss">Dismiss</button>`;
-      welcome.querySelector('[data-testid="setup-welcome-dismiss"]').onclick = () => welcome.remove();
-      main.insertBefore(welcome, main.firstChild);
-    }
-  }
-
-  get pageContent() { return this.querySelector('#page-content'); }
-}
-customElements.define('app-shell', AppShell);
-
 // --- Account Page ---
 class AccountPage extends HTMLElement {
   connectedCallback() {
@@ -2996,14 +2891,34 @@ const PAGES = {
   '/account': 'account-page',
 };
 
-const app = document.getElementById('app');
-const shell = document.createElement('app-shell');
-app.replaceChildren(shell);
-// An unrecognised path falls back to the dashboard rather than rendering
-// nothing. The server only routes the six paths above here, so this is reached
-// only via the static fallback — a stale link, most likely.
-shell.pageContent.appendChild(
+// The shell is in the document already — the server rendered it, topbar and
+// navigation and status bar and all — so there is no shell component here to
+// wrap it in. Nothing below re-derives what the template settled: the active
+// navigation item is a class it set from the path it was answering, and working
+// that out again from `location.pathname` would be a second source for one
+// fact.
+//
+// An unrecognised path mounts the dashboard rather than nothing. Only the six
+// paths above route to this shell, so arriving with anything else means a stale
+// link that somehow reached it.
+document.getElementById('page-content').appendChild(
   document.createElement(PAGES[location.pathname] || 'dashboard-page'));
+
+// Dismiss is attached only where there is JavaScript to make it work, rather
+// than shipped in the markup as a button that does nothing without it. The
+// strip is one-shot either way: the flash cookie behind it was cleared by the
+// very response that rendered it, so a navigation is enough to be rid of it.
+const welcome = document.querySelector('[data-testid="setup-welcome"]');
+if (welcome) {
+  const dismiss = document.createElement('button');
+  dismiss.className = 'btn';
+  dismiss.dataset.testid = 'setup-welcome-dismiss';
+  dismiss.style.marginLeft = 'auto';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = 'Dismiss';
+  dismiss.onclick = () => welcome.remove();
+  welcome.appendChild(dismiss);
+}
 
 // A 401 from any later API call means the session ended underneath us — it
 // expired, or another device revoked it. Navigate rather than swap in a login

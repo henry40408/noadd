@@ -15,7 +15,7 @@ const NO_STORE: HeaderValue =
 /// every admin response that does not already declare a caching policy.
 ///
 /// Keying on "already has `Cache-Control`" rather than on the request path is
-/// deliberate: the embedded SPA assets set their own `no-cache` + `ETag`
+/// deliberate: the embedded assets set their own `no-cache` + `ETag`
 /// (see `static_response`) and must keep it — `no-store` there would defeat
 /// the revalidation/304 design for no benefit, since the shell carries no user
 /// data. Almost everything else — every `/api/*` JSON body, the mobileconfig
