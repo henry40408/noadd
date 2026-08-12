@@ -99,9 +99,9 @@ test.describe('Statistics charts respond to touch', () => {
     await page.getByTestId('login-password').fill(ADMIN_PASSWORD);
     await page.getByTestId('login-submit').click();
     await expect(page.getByTestId('app-shell')).toBeVisible();
-    // Navigate by hash: the desktop sidebar nav is hidden at mobile widths
-    // (replaced by an F-key bar), so click the route via the router instead.
-    await page.evaluate(() => { location.hash = '#stats'; });
+    // Navigate by URL: the desktop nav strip is hidden at mobile widths
+    // (replaced by an F-key bar), so there is nothing to click here.
+    await page.goto('/stats');
     // Wait for all three interactive charts to render real data.
     await page.locator('#timeline-chart .tl-svg').waitFor();
     await page.locator('#rate-trend-chart .rate-svg').waitFor();

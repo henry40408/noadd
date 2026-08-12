@@ -44,7 +44,15 @@ Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenario
 
 ## Admin UI
 
-The admin UI is **vanilla-JS web components — no framework, no build step**, split across three files in `admin-ui/dist/`: `index.html` (the document shell — just the `<head>`, `<div id="app">`, and the two asset tags), `app.css`, and `app.js` (all components plus the bootstrap). The whole directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js` or `app.css`, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file.
+**Routing and authentication are server-side.** `src/admin/pages.rs` renders the browser-facing HTML from `templates/` (askama, compile-time). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/settings`, `/account` — resolves the session *before* writing any HTML, redirecting to `/login?next=…` or `/setup` when there is none. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is ordinary links with full page loads; there is no client-side router.
+
+Sign-in and setup need **no CSRF token** — `src/admin/csrf.rs` is a header-based origin guard covering every unsafe method on the router, so a cross-origin form post is refused before it reaches a handler.
+
+Password sign-in lives in **one** place, `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, the constant Argon2 cost, the lockout and the audit events are all in there — do not grow a second path.
+
+The page bodies are still painted by **vanilla-JS web components — no framework, no build step**, in `admin-ui/dist/`: `index.html` (a static shell kept for the fallback route), `app.css`, and `app.js`. The whole directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js` or `app.css` (or a file under `templates/`), then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file; server-rendered pages get `no-store` from the same layer, which keys on whether a response already declares a policy.
+
+`/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 
 After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
 

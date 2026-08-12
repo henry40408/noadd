@@ -58,39 +58,3 @@ Feature: Dashboard and statistics
     # that, so sweep every tab for text nodes that look like tags.
     When I visit every tab
     Then no tab showed raw markup as text
-
-  Scenario: Leaving the dashboard before it finishes loading strands no poll timer
-    # The dashboard's connectedCallback is async: it awaits server-info and a
-    # first stats fetch before starting its 10s poll timer. Navigating away in
-    # that window runs disconnectedCallback first — while there is still no
-    # timer to stop — and the callback then resumes and starts one against a
-    # page nobody will tear down again. The stranded timer keeps polling five
-    # stats endpoints every 10s for the lifetime of the tab.
-    Given I am on the "Settings" tab
-    And I am counting dashboard poll timers
-    And the server-info request is delayed
-    When I go to the "Dashboard" tab
-    And I go to the "Query Log" tab
-    And the delayed request has arrived
-    Then no dashboard poll timer is left running
-
-  Scenario: Rebuilding the app shell leaves no stale navigation handler
-    # showApp() replaces the whole app-shell, which is what happens after every
-    # sign-in. Without a disconnectedCallback the outgoing shell never
-    # unregisters its hashchange listener, so each rebuild strands one more —
-    # each holding the whole discarded shell subtree alive through its closure.
-    # Nothing breaks visibly (the stale handler just updates its own detached
-    # nodes), so the leak has to be measured at the registration level.
-    #
-    # The rebuild goes through the same 'login-success' event the login page
-    # dispatches, driving the production path without spending two more logins
-    # against the 5-per-minute login rate limiter.
-    Given I am on the "Dashboard" tab
-    And I am counting hashchange listener registrations
-    And I am recording uncaught page errors
-    When the app shell is rebuilt as it is after a fresh sign-in
-    And I go to the "Query Log" tab
-    And I go to the "Settings" tab
-    Then no hashchange listener was left behind
-    And exactly one app shell is mounted
-    And no uncaught page errors were recorded

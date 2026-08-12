@@ -1,0 +1,14 @@
+{#
+  The signed-in application shell.
+
+  Its body is still rendered by `app.js` at this stage — P1 moved routing and
+  authentication to the server, not the page content. What the server settles
+  before the first byte is *which* page this is: an unauthenticated request
+  never reaches this template, so the client no longer has to ask the API who
+  it is and repaint once it finds out.
+#}
+{% extends "base.html" %}
+
+{% block app_attrs %} data-version="{{ version }}"{% endblock %}
+
+{% block scripts %}<script src="/app.js"></script>{% endblock %}

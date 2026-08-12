@@ -39,13 +39,21 @@ pub async fn no_store(req: Request, next: Next) -> Response {
 
 /// `Content-Security-Policy` carrying **only** `frame-ancestors`.
 ///
-/// A full policy is deliberately out of scope: the admin UI is one HTML file
-/// of inline `<script>`/`<style>`, so any policy it could satisfy today would
-/// need `'unsafe-inline'` — which gives up most of what CSP is for — and the
-/// nonce alternative means rewriting the document per request, which is
-/// incompatible with serving it from `include_dir!` behind a content-hash
-/// `ETag`. `frame-ancestors` needs none of that and is the directive that
-/// actually closes a live hole here, so it ships on its own.
+/// A full policy is still out of scope, though both halves of the original
+/// reason have since moved. Splitting the document into `app.css`/`app.js`
+/// removed every inline `<script>` — and the components bind events as DOM
+/// properties, never as `on*` attributes — so `script-src 'self'` would now
+/// hold without `'unsafe-inline'`. Serving pages from a template rather than
+/// straight out of `include_dir!` also makes a per-request nonce possible,
+/// which the content-hash `ETag` used to rule out.
+///
+/// What has not moved is `style-src`: roughly 150 `style="…"` attributes remain
+/// in the markup the components render, and covering them still means
+/// `'unsafe-inline'`, which gives up most of what CSP is for. Tightening
+/// `script-src` is therefore an open option rather than a blocked one, left to
+/// its own change so it can be reasoned about — and reverted — on its own.
+/// `frame-ancestors` needs none of that and is the directive that actually
+/// closes a live hole here, so it continues to ship on its own.
 const FRAME_ANCESTORS_NONE: HeaderValue = HeaderValue::from_static("frame-ancestors 'none'");
 
 /// `DENY` rather than `SAMEORIGIN`: nothing in the admin UI frames anything

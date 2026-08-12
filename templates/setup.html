@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+      <div class="login-container">
+        <div class="login-box boot fade-in">
+          {% include "_boot_logo.html" %}
+          <div class="boot-log">
+            noadd dns sinkhole · first boot<br>
+            admin account ............ <span class="warn">none</span><br>
+            create operator credentials to continue_
+          </div>
+          <div class="login-error" id="setup-error" data-testid="setup-error" role="alert"{% if error.is_some() %} style="display:block"{% endif %}>{% if let Some(message) = error %}{{ message }}{% endif %}</div>
+          <form method="post" action="/setup">
+            <div class="login-line">
+              <label for="setup-user">username:</label>
+              <input type="text" id="setup-user" name="username" autocomplete="username" data-testid="setup-username" value="{{ username }}" autofocus>
+            </div>
+            <div class="login-line">
+              <label for="setup-pw">password:</label>
+              <input type="password" id="setup-pw" name="password" autocomplete="new-password" data-testid="setup-password">
+            </div>
+            <div class="login-line">
+              <label for="setup-pw2">confirm:</label>
+              <input type="password" id="setup-pw2" name="confirm" autocomplete="new-password" data-testid="setup-password-confirm">
+            </div>
+            <button type="submit" class="btn btn-primary boot-submit" id="setup-btn" data-testid="setup-submit">create account</button>
+            <div class="boot-hint">minimum {{ min_password_length }} characters — a few unrelated words work best</div>
+          </form>
+        </div>
+      </div>
+{% endblock %}

@@ -13,6 +13,11 @@ opt-level = "s"
 anyhow = "1"
 arc-swap = "1"
 argon2 = "0.5"
+# Compile-time templates for the server-rendered admin pages. `askama_web`
+# supplies the axum `IntoResponse` bridge; its `axum-0.8` feature must track the
+# axum version below.
+askama = "0.16"
+askama_web = { version = "0.16", default-features = false, features = ["derive", "axum-0.8"] }
 axum = "0.8"
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }

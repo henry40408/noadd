@@ -2163,12 +2163,21 @@ async fn setup_already_configured_returns_409() {
     );
 }
 
+/// Asks for `/app.css` rather than `/`: page routes resolve a session before
+/// they answer now, so `/` redirects an unauthenticated request instead of
+/// serving an embedded file. The revalidation contract being pinned here
+/// belongs to the embedded assets, which `/app.css` is one of.
 #[tokio::test]
 async fn test_index_served_with_etag_and_no_cache() {
     let (app, _token) = setup().await;
 
     let response = app
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/app.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -2196,7 +2205,12 @@ async fn test_index_conditional_request_returns_304() {
 
     let first = app
         .clone()
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/app.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let etag = first
@@ -2209,7 +2223,7 @@ async fn test_index_conditional_request_returns_304() {
     let second = app
         .oneshot(
             Request::builder()
-                .uri("/")
+                .uri("/app.css")
                 .header("if-none-match", &etag)
                 .body(Body::empty())
                 .unwrap(),
@@ -3875,12 +3889,20 @@ async fn unauthenticated_rejections_are_not_stored() {
 }
 
 /// Regression guard: the `no_store` layer keys on "response already declares
-/// a `Cache-Control`" and must not clobber the embedded SPA shell's existing
+/// a `Cache-Control`" and must not clobber the embedded assets' existing
 /// `no-cache` + `ETag` revalidation headers.
+///
+/// `/app.css` rather than `/` — see `test_index_served_with_etag_and_no_cache`.
+/// The distinction matters more now than it reads: a server-rendered page gets
+/// `no-store` from that same layer, which is what keeps operator data out of
+/// the browser cache, and only the static assets are meant to escape it.
 #[tokio::test]
 async fn static_assets_keep_no_cache_and_etag() {
     let (app, _token) = setup().await;
-    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/app.css")
+        .body(Body::empty())
+        .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
@@ -4033,4 +4055,343 @@ async fn check_list_url_unknown_id_returns_404() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Server-rendered pages ---
+
+/// A browser asking for a page it has no session for is redirected to the
+/// sign-in form, carrying where it was trying to go. The API answers the same
+/// situation with a 401; the two are halves of one guard, and they share the
+/// extractor underneath precisely so they cannot disagree about who is signed
+/// in.
+#[tokio::test]
+async fn a_page_request_without_a_session_is_redirected_to_sign_in() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/login?next=/settings")
+    );
+}
+
+/// Before any operator exists every page routes to the wizard, not to a sign-in
+/// form nobody could satisfy.
+#[tokio::test]
+async fn a_page_request_before_setup_is_redirected_to_the_wizard() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/setup")
+    );
+}
+
+/// An off-origin `next` is dropped rather than honoured.
+///
+/// The sign-in page is exactly what a phishing link points at, and a redirect
+/// it performs *after* authentication wears noadd's own URL as the bait. All
+/// three spellings are covered because a browser honours all three: the
+/// absolute URL, the protocol-relative form, and the backslash variant that
+/// several browsers normalise into it.
+#[tokio::test]
+async fn sign_in_refuses_to_carry_an_off_origin_destination() {
+    let (app, _token) = setup().await;
+    for target in ["https://evil.example", "//evil.example", "/\\evil.example"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/login?next={target}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{target}: expected the form");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            !html.contains("evil.example"),
+            "{target} survived into the rendered form"
+        );
+    }
+}
+
+/// A form sign-in mints the session and sends the browser where it was headed,
+/// rather than answering with a body the way the JSON endpoint does.
+#[tokio::test]
+async fn a_form_sign_in_mints_a_session_and_redirects() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=admin&password=admin&next=/settings"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/settings")
+    );
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "no session cookie was issued"
+    );
+}
+
+/// A refused sign-in re-renders the form so the typed username survives, but
+/// still answers 401. A form that returns 200 on a rejected credential is lying
+/// to everything except the eye.
+#[tokio::test]
+async fn a_refused_form_sign_in_answers_401_and_keeps_the_username() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=admin&password=wrong-password"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-testid=\"login-error\""));
+    assert!(
+        html.contains("value=\"admin\""),
+        "the typed username was discarded"
+    );
+}
+
+/// A server-rendered page must never reach the browser's disk cache: an
+/// operator's dashboard is not a cacheable representation, and the appliance is
+/// commonly reached from a shared machine. The `no_store` layer gives it that
+/// by keying on responses that declare no policy of their own — this pins that
+/// a page is one of them, where the static assets deliberately are not.
+#[tokio::test]
+async fn a_server_rendered_page_is_never_stored() {
+    let (app, token) = setup().await;
+    let res = app.oneshot(authed("GET", "/", &token, None)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cc = res
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(cc.contains("no-store"), "page cache-control was {cc:?}");
+}
+
+/// Every signed-in page path answers with the shell. Asserted as a set rather
+/// than one representative path: they are registered individually, so a route
+/// dropped from the table is exactly the kind of mistake a single-path test
+/// sails past.
+#[tokio::test]
+async fn every_page_path_is_served_to_an_authenticated_browser() {
+    let (app, token) = setup().await;
+    for path in ["/", "/stats", "/logs", "/filters", "/settings", "/account"] {
+        let res = app
+            .clone()
+            .oneshot(authed("GET", path, &token, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path} was not served");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            html.contains("id=\"app\"") && html.contains("/app.js"),
+            "{path} did not render the shell"
+        );
+    }
+}
+
+/// The sign-in form renders for a browser with no session.
+#[tokio::test]
+async fn the_sign_in_page_renders_for_an_anonymous_browser() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-testid=\"login-submit\""));
+    assert!(
+        html.contains("action=\"/login\""),
+        "the form must post back to /login"
+    );
+}
+
+/// An already-authenticated browser asking for the sign-in page is sent onward
+/// rather than shown a second form to fill in.
+#[tokio::test]
+async fn the_sign_in_page_sends_an_authenticated_browser_onward() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/login", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/")
+    );
+}
+
+/// The wizard renders while no operator exists.
+#[tokio::test]
+async fn the_wizard_renders_before_the_first_operator_exists() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-testid=\"setup-submit\""));
+}
+
+/// Once an operator exists the wizard is a dead end, so it redirects to sign-in
+/// instead of offering to create a second first account.
+#[tokio::test]
+async fn the_wizard_sends_an_already_configured_appliance_to_sign_in() {
+    let (app, _token) = setup().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/login")
+    );
+}
+
+fn form_post(uri: &str, body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Completing the wizard creates the operator and signs them in on the spot —
+/// asking them to retype the password they just chose would be pure ceremony.
+/// `?welcome=1` is what drives the one-time strip the shell shows afterwards.
+#[tokio::test]
+async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/?welcome=1")
+    );
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "the new operator was not signed in"
+    );
+}
+
+/// The confirmation field exists only in the form, so it is checked in the page
+/// handler and nowhere else — `create_first_operator`, which the JSON endpoint
+/// shares, has no business knowing about it.
+#[tokio::test]
+async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=something-else",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("do not match"));
+    assert!(
+        html.contains("value=\"admin\""),
+        "the typed username was discarded"
+    );
+}
+
+/// A password the shared validator rejects comes back verbatim in the form. The
+/// operator has to be told *which* rule they missed; a generic failure would
+/// leave them guessing at a length they cannot see.
+#[tokio::test]
+async fn the_wizard_reports_why_a_password_was_rejected() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=short&confirm=short",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains("at least 12 characters"),
+        "the rejection reason did not reach the form"
+    );
 }

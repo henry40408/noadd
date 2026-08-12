@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block content %}
+      <div class="login-container">
+        <div class="login-box boot fade-in">
+          {% include "_boot_logo.html" %}
+          <div class="boot-log">
+            noadd dns sinkhole{% if !version.is_empty() %} · {{ version }}{% endif %}<br>
+            admin console ............ <span class="ok">ok</span><br>
+            session .................. <span class="ok">awaiting operator</span><br>
+          </div>
+          <div class="login-error" id="login-error" data-testid="login-error" role="alert"{% if error.is_some() %} style="display:block"{% endif %}>{% if let Some(message) = error %}{{ message }}{% endif %}</div>
+          <form method="post" action="/login">
+            {% if let Some(target) = next %}<input type="hidden" name="next" value="{{ target }}">{% endif %}
+            <div class="login-line">
+              <label for="li-user">username:</label>
+              <input type="text" id="li-user" name="username" autocomplete="username" data-testid="login-username" value="{{ username }}" autofocus>
+            </div>
+            <div class="login-line">
+              <label for="pw">password:</label>
+              <input type="password" id="pw" name="password" autocomplete="current-password" data-testid="login-password">
+            </div>
+            <button type="submit" class="btn btn-primary boot-submit" id="login-btn" data-testid="login-submit">authenticate</button>
+          </form>
+        </div>
+      </div>
+{% endblock %}

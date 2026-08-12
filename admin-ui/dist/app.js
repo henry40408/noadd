@@ -1,4 +1,30 @@
 // ============================================================
+// Legacy hash routes
+// ============================================================
+// Routing moved to the server, so `#settings` became `/settings`. A bookmark or
+// a link from before that still carries the hash, and left alone it would land
+// on the dashboard with no sign anything was missed. Rewritten here, before
+// anything renders, so the redirect is invisible rather than a visible flash of
+// the wrong page.
+const LEGACY_HASH_ROUTES = {
+  '#dashboard': '/',
+  '#stats': '/stats',
+  '#logs': '/logs',
+  '#filters': '/filters',
+  '#settings': '/settings',
+  '#account': '/account',
+};
+if (LEGACY_HASH_ROUTES[location.hash]) {
+  location.replace(LEGACY_HASH_ROUTES[location.hash]);
+}
+
+// The build version, handed over as a data attribute on #app rather than an
+// inline <script>. It used to arrive from `/api/health`, which the client no
+// longer needs to call for anything else; a data attribute keeps the document
+// free of inline script, which is what leaves `script-src 'self'` reachable.
+const NOADD_VERSION = document.getElementById('app').dataset.version || '';
+
+// ============================================================
 // API Client
 // ============================================================
 // Endpoints where a 401 means "that credential was wrong", not "your session
@@ -99,27 +125,6 @@ class LiveElement extends HTMLElement {
       try { cleanups[i](); } catch (e) { /* nothing useful to do here */ }
     }
   }
-}
-
-// ============================================================
-// Router
-// ============================================================
-class AppRouter {
-  constructor() {
-    this.routes = new Map();
-    this.current = null;
-    window.addEventListener('hashchange', () => this.navigate());
-  }
-  on(hash, cb) { this.routes.set(hash, cb); return this; }
-  navigate() {
-    const hash = location.hash || '#dashboard';
-    const cb = this.routes.get(hash) || this.routes.get('#dashboard');
-    if (cb) {
-      this.current = hash;
-      cb();
-    }
-  }
-  start() { this.navigate(); }
 }
 
 // ============================================================
@@ -426,142 +431,20 @@ function showBanner(msg, type = 'info') {
 // Web Components
 // ============================================================
 
-// --- Setup Page (first-time password creation) ---
-class SetupPage extends HTMLElement {
-  connectedCallback() {
-    this.innerHTML = `
-      <div class="login-container">
-        <div class="login-box boot fade-in">
-          <pre class="boot-logo" aria-hidden="true">
-███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗
-████╗  ██║██╔═══██╗██╔══██╗██╔══██╗██╔══██╗
-██╔██╗ ██║██║   ██║███████║██║  ██║██║  ██║
-██║╚██╗██║██║   ██║██╔══██║██║  ██║██║  ██║
-██║ ╚████║╚██████╔╝██║  ██║██████╔╝██████╔╝
-╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═════╝</pre>
-          <div class="boot-log">
-            noadd dns sinkhole · first boot<br>
-            admin account ............ <span class="warn">none</span><br>
-            create operator credentials to continue_
-          </div>
-          <div class="login-error" id="setup-error" data-testid="setup-error"></div>
-          <div class="login-line">
-            <label for="setup-user">username:</label>
-            <input type="text" id="setup-user" name="username" autocomplete="username" data-testid="setup-username" autofocus>
-          </div>
-          <div class="login-line">
-            <label for="setup-pw">password:</label>
-            <input type="password" id="setup-pw" name="new-password" autocomplete="new-password" data-testid="setup-password">
-          </div>
-          <div class="login-line">
-            <label for="setup-pw2">confirm:</label>
-            <input type="password" id="setup-pw2" name="confirm-password" autocomplete="new-password" data-testid="setup-password-confirm">
-          </div>
-          <button class="btn btn-primary boot-submit" id="setup-btn" data-testid="setup-submit">create account</button>
-          <div class="boot-hint">minimum ${MIN_PASSWORD_LENGTH} characters — a few unrelated words work best</div>
-        </div>
-      </div>`;
-    const user = this.querySelector('#setup-user');
-    const pw = this.querySelector('#setup-pw');
-    const pw2 = this.querySelector('#setup-pw2');
-    const btn = this.querySelector('#setup-btn');
-    const err = this.querySelector('#setup-error');
-    const doSetup = async () => {
-      err.style.display = 'none';
-      const username = user.value.trim();
-      if (!username) return showFormError(err, 'Username is required');
-      const lenError = passwordLengthError(pw.value);
-      if (lenError) return showFormError(err, lenError);
-      if (pw.value !== pw2.value) return showFormError(err, 'Passwords do not match');
-      try {
-        await api.post('/api/auth/setup', { username, password: pw.value });
-        // Auto-login after setup
-        await api.post('/api/auth/login', { username, password: pw.value });
-        // Mark this session as just-set-up so the dashboard shows a one-time
-        // welcome message. Set before dispatching so AppShell sees it on render.
-        try { sessionStorage.setItem('noadd_just_setup', '1'); } catch (e) {}
-        this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
-      } catch (e) {
-        showFormError(err, e.detail || 'Setup failed. A password may already be set.');
-      }
-    };
-    btn.onclick = doSetup;
-    user.onkeydown = (e) => { if (e.key === 'Enter') pw.focus(); };
-    pw.onkeydown = (e) => { if (e.key === 'Enter') pw2.focus(); };
-    pw2.onkeydown = (e) => { if (e.key === 'Enter') doSetup(); };
-  }
-}
-customElements.define('setup-page', SetupPage);
-
-// --- Login Page ---
-class LoginPage extends HTMLElement {
-  connectedCallback() {
-    this.innerHTML = `
-      <div class="login-container">
-        <div class="login-box boot fade-in">
-          <pre class="boot-logo" aria-hidden="true">
-███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗
-████╗  ██║██╔═══██╗██╔══██╗██╔══██╗██╔══██╗
-██╔██╗ ██║██║   ██║███████║██║  ██║██║  ██║
-██║╚██╗██║██║   ██║██╔══██║██║  ██║██║  ██║
-██║ ╚████║╚██████╔╝██║  ██║██████╔╝██████╔╝
-╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═════╝</pre>
-          <div class="boot-log">
-            noadd dns sinkhole${window.__noadd_version ? ' · ' + window.__noadd_version : ''}<br>
-            admin console ............ <span class="ok">ok</span><br>
-            session .................. <span class="ok">awaiting operator</span><br>
-          </div>
-          <div class="login-error" id="login-error" data-testid="login-error" role="alert"></div>
-          <div class="login-line">
-            <label for="li-user">username:</label>
-            <input type="text" id="li-user" name="username" autocomplete="username" data-testid="login-username" autofocus>
-          </div>
-          <div class="login-line">
-            <label for="pw">password:</label>
-            <input type="password" id="pw" name="password" autocomplete="current-password" data-testid="login-password">
-          </div>
-          <button class="btn btn-primary boot-submit" id="login-btn" data-testid="login-submit">authenticate</button>
-        </div>
-      </div>`;
-    const userEl = this.querySelector('#li-user');
-    const pw = this.querySelector('#pw');
-    const btn = this.querySelector('#login-btn');
-    const err = this.querySelector('#login-error');
-    const doLogin = async () => {
-      try {
-        err.style.display = 'none';
-        await api.post('/api/auth/login', { username: userEl.value.trim(), password: pw.value });
-        this.dispatchEvent(new CustomEvent('login-success', { bubbles: true }));
-      } catch (e) {
-        const limited = /^429\b/.test((e && e.message) || '');
-        showFormError(err, limited
-          ? 'ERR: too many attempts — wait a minute, then retry'
-          : 'ERR: incorrect password — access denied');
-        pw.focus();
-        pw.select();
-      }
-    };
-    btn.onclick = doLogin;
-    userEl.onkeydown = (e) => { if (e.key === 'Enter') pw.focus(); };
-    pw.onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
-  }
-}
-customElements.define('login-page', LoginPage);
-
 // --- App Shell ---
 class AppShell extends LiveElement {
   connectedCallback() {
     this.innerHTML = html`
       <div class="app-shell" data-testid="app-shell">
         <header class="topbar">
-          <div class="brand">noadd <span class="v">${window.__noadd_version || ''}</span></div>
+          <div class="brand">noadd <span class="v">${NOADD_VERSION}</span></div>
           <nav class="nav-strip">
-            <button class="nav-item" data-route="#dashboard" data-testid="nav-dashboard"><b>1:</b>dashboard</button>
-            <button class="nav-item" data-route="#stats" data-testid="nav-stats"><b>2:</b>statistics</button>
-            <button class="nav-item" data-route="#logs" data-testid="nav-logs"><b>3:</b>query-log</button>
-            <button class="nav-item" data-route="#filters" data-testid="nav-filters"><b>4:</b>filters</button>
-            <button class="nav-item" data-route="#settings" data-testid="nav-settings"><b>5:</b>settings</button>
-            <button class="nav-item" data-route="#account" data-testid="nav-account"><b>6:</b>account</button>
+            <a class="nav-item" href="/" data-testid="nav-dashboard"><b>1:</b>dashboard</a>
+            <a class="nav-item" href="/stats" data-testid="nav-stats"><b>2:</b>statistics</a>
+            <a class="nav-item" href="/logs" data-testid="nav-logs"><b>3:</b>query-log</a>
+            <a class="nav-item" href="/filters" data-testid="nav-filters"><b>4:</b>filters</a>
+            <a class="nav-item" href="/settings" data-testid="nav-settings"><b>5:</b>settings</a>
+            <a class="nav-item" href="/account" data-testid="nav-account"><b>6:</b>account</a>
           </nav>
           <div class="topbar-meta">dns sinkhole</div>
           <button class="nav-item" id="topbar-logout" data-testid="topbar-logout" title="Log out of this session">[ logout ]</button>
@@ -574,21 +457,27 @@ class AppShell extends LiveElement {
         </main>
         <footer class="statusbar">
           <span class="live">ONLINE</span>
-          <span>noadd ${window.__noadd_version || ''}</span>
+          <span>noadd ${NOADD_VERSION}</span>
           <span class="right">${location.host}</span>
         </footer>
         <nav class="fnbar">
-          <button class="nav-item" data-route="#dashboard"><span class="fk">F1</span><b>dash</b></button>
-          <button class="nav-item" data-route="#stats"><span class="fk">F2</span><b>stats</b></button>
-          <button class="nav-item" data-route="#logs"><span class="fk">F3</span><b>logs</b></button>
-          <button class="nav-item" data-route="#filters"><span class="fk">F4</span><b>filt</b></button>
-          <button class="nav-item" data-route="#settings"><span class="fk">F5</span><b>conf</b></button>
-          <button class="nav-item" data-route="#account"><span class="fk">F6</span><b>acct</b></button>
+          <a class="nav-item" href="/"><span class="fk">F1</span><b>dash</b></a>
+          <a class="nav-item" href="/stats"><span class="fk">F2</span><b>stats</b></a>
+          <a class="nav-item" href="/logs"><span class="fk">F3</span><b>logs</b></a>
+          <a class="nav-item" href="/filters"><span class="fk">F4</span><b>filt</b></a>
+          <a class="nav-item" href="/settings"><span class="fk">F5</span><b>conf</b></a>
+          <a class="nav-item" href="/account"><span class="fk">F6</span><b>acct</b></a>
         </nav>
       </div>`;
 
-    this.querySelectorAll('.nav-item[data-route]').forEach(btn => {
-      btn.onclick = () => { location.hash = btn.dataset.route; };
+    // Navigation is ordinary links now, so there is nothing to bind and nothing
+    // to keep in sync afterwards: each page is its own document, and the active
+    // item is whichever link points at the path the server just served. The
+    // `hashchange` listener this replaces had to be registered for teardown
+    // because the shell was rebuilt on every login; the shell is built once per
+    // document now, and holds no window-level listener to strand.
+    this.querySelectorAll('.nav-item[href]').forEach(link => {
+      link.classList.toggle('active', link.getAttribute('href') === location.pathname);
     });
 
     this.querySelector('#topbar-logout').onclick = async () => {
@@ -604,33 +493,23 @@ class AppShell extends LiveElement {
         showBanner('You are signed in via your reverse proxy. To end your session, log out at your proxy or SSO provider.', 'info');
         return;
       }
-      window.dispatchEvent(new CustomEvent('auth-required'));
+      // No `next`: the session that was just ended is not somewhere to return
+      // to, and carrying the path would send the operator straight back into
+      // the page they logged out of.
+      window.location.assign('/login');
     };
 
-    // showApp() builds a fresh app-shell on every login, so this listener must
-    // go when the shell does — otherwise each rebuild strands one more, holding
-    // its whole discarded subtree alive. It breaks nothing visibly (the stale
-    // handler just updates nodes nobody can see), which is why it needs the
-    // registry rather than a spot check.
-    const updateActive = this.listen(window, 'hashchange', () => {
-      const hash = location.hash || '#dashboard';
-      this.querySelectorAll('.nav-item[data-route]').forEach(b => {
-        b.classList.toggle('active', b.dataset.route === hash);
-      });
-      // Clear page-scoped banners when navigating to another page.
-      this.querySelector('#notice-host').replaceChildren();
-    });
-    updateActive();
-
-    // One-time post-setup welcome strip. Shown once for the session that just
-    // completed first-run setup (flag set in SetupPage.doSetup), then cleared
-    // so it never reappears on later logins.
-    let justSetUp = false;
-    try {
-      justSetUp = sessionStorage.getItem('noadd_just_setup') === '1';
-      if (justSetUp) sessionStorage.removeItem('noadd_just_setup');
-    } catch (e) {}
-    if (justSetUp) {
+    // One-time post-setup welcome strip. `?welcome=1` rides the redirect out of
+    // setup, so the server — which is what actually knows setup just finished —
+    // is the one that says so; the `sessionStorage` flag this replaces was the
+    // client trying to remember it across a reload it no longer performs. The
+    // marker is stripped from the URL straight away so a refresh, a bookmark or
+    // a shared link never shows it a second time.
+    const params = new URLSearchParams(location.search);
+    if (params.get('welcome') === '1') {
+      params.delete('welcome');
+      const rest = params.toString();
+      history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : ''));
       const main = this.querySelector('.main-content');
       const welcome = document.createElement('div');
       welcome.className = 'rebuild-banner show done';
@@ -3103,63 +2982,34 @@ customElements.define('settings-page', SettingsPage);
 // ============================================================
 // App Bootstrap
 // ============================================================
+// Reaching this file at all means the server already resolved the session and
+// decided this is a page for a signed-in operator — an unauthenticated request
+// was redirected before any HTML was written. Two round trips (`/api/health`,
+// then `/api/settings`) and the repaint they forced are gone with that; what is
+// left for the client is picking the page component out of the path.
+const PAGES = {
+  '/': 'dashboard-page',
+  '/stats': 'stats-page',
+  '/logs': 'logs-page',
+  '/filters': 'filters-page',
+  '/settings': 'settings-page',
+  '/account': 'account-page',
+};
+
 const app = document.getElementById('app');
-let shell = null;
-const router = new AppRouter();
+const shell = document.createElement('app-shell');
+app.replaceChildren(shell);
+// An unrecognised path falls back to the dashboard rather than rendering
+// nothing. The server only routes the six paths above here, so this is reached
+// only via the static fallback — a stale link, most likely.
+shell.pageContent.appendChild(
+  document.createElement(PAGES[location.pathname] || 'dashboard-page'));
 
-function showSetup() {
-  app.innerHTML = '';
-  const setup = document.createElement('setup-page');
-  app.appendChild(setup);
-}
-
-function showLogin() {
-  app.innerHTML = '';
-  const login = document.createElement('login-page');
-  app.appendChild(login);
-}
-
-function showApp() {
-  app.innerHTML = '';
-  shell = document.createElement('app-shell');
-  app.appendChild(shell);
-  router.start();
-}
-
-function setPage(tag) {
-  if (!shell) return;
-  const container = shell.pageContent;
-  container.innerHTML = '';
-  const page = document.createElement(tag);
-  container.appendChild(page);
-}
-
-router
-  .on('#dashboard', () => setPage('dashboard-page'))
-  .on('#stats', () => setPage('stats-page'))
-  .on('#logs', () => setPage('logs-page'))
-  .on('#filters', () => setPage('filters-page'))
-  .on('#settings', () => setPage('settings-page'))
-  .on('#account', () => setPage('account-page'));
-
-window.addEventListener('auth-required', showLogin);
-window.addEventListener('login-success', showApp);
-
-// Bootstrap: check health for setup status, then check auth
-async function bootstrap() {
-  try {
-    const health = await api.get('/api/health');
-    window.__noadd_version = health.version || '';
-    if (health.needs_setup) {
-      showSetup();
-      return;
-    }
-    // Password is set — check if already authenticated
-    await api.get('/api/settings');
-    showApp();
-  } catch (e) {
-    showLogin();
-  }
-}
-
-bootstrap();
+// A 401 from any later API call means the session ended underneath us — it
+// expired, or another device revoked it. Navigate rather than swap in a login
+// component: the sign-in form is a server-rendered page now, and `next` is what
+// brings the operator back to the page they were on.
+window.addEventListener('auth-required', () => {
+  const here = location.pathname + location.search;
+  window.location.assign(here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`);
+});
