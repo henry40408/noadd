@@ -165,6 +165,24 @@ async fn scalar_docs(_auth: AuthedUser) -> axum::response::Html<String> {
 
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
+        // Server-rendered pages (see `crate::admin::pages`). Each signed-in
+        // route resolves the session before any HTML is written, so an
+        // unauthenticated browser is redirected rather than served a shell that
+        // has to discover the same thing for itself.
+        .route("/", get(crate::admin::pages::shell_page))
+        .route("/stats", get(crate::admin::pages::shell_page))
+        .route("/logs", get(crate::admin::pages::shell_page))
+        .route("/filters", get(crate::admin::pages::shell_page))
+        .route("/settings", get(crate::admin::pages::shell_page))
+        .route("/account", get(crate::admin::pages::shell_page))
+        .route(
+            "/login",
+            get(crate::admin::pages::login_page).post(crate::admin::pages::login_submit),
+        )
+        .route(
+            "/setup",
+            get(crate::admin::pages::setup_page).post(crate::admin::pages::setup_submit),
+        )
         // Auth (no auth required)
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
@@ -836,14 +854,38 @@ pub struct LoginResponse {
     pub success: bool,
 }
 
-async fn login(
-    State(state): State<AppState>,
-    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
-    headers: HeaderMap,
+/// Why a password sign-in was refused.
+///
+/// The API and the HTML form answer the same three outcomes in their own idiom
+/// — a status code for `POST /api/auth/login`, a re-rendered form for `POST
+/// /login` — so the decision is made once, here, and each caller phrases it.
+pub(crate) enum LoginError {
+    RateLimited,
+    /// Unknown username, wrong password, a forward-auth account, or a locked
+    /// one. Deliberately a single variant: a caller must not be able to tell
+    /// these apart, which is why the API answers all four with the same 401.
+    Invalid,
+    Internal,
+}
+
+/// Verify a username and password and, on success, mint a session — returning
+/// the jar carrying its `Set-Cookie`.
+///
+/// This is the whole of noadd's password sign-in: the rate limit, the constant
+/// Argon2 cost that keeps an unknown username indistinguishable from a wrong
+/// password, the per-account lockout, and the audit events. Both the JSON
+/// endpoint and the HTML form go through here rather than each implementing it.
+/// A second copy is how one of the two paths ends up missing the timing padding
+/// or the lockout check, and that gap stays invisible until someone attacks it.
+pub(crate) async fn start_password_session(
+    state: &AppState,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    headers: &HeaderMap,
     jar: CookieJar,
-    Json(body): Json<LoginRequest>,
-) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
-    let ip = client_ip(&state, connect.as_deref(), &headers);
+    username: &str,
+    password: &str,
+) -> Result<CookieJar, LoginError> {
+    let ip = client_ip(state, connect, headers);
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
@@ -855,7 +897,7 @@ async fn login(
             %ip,
             "login rate limited"
         );
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        return Err(LoginError::RateLimited);
     }
     state.rate_limiter.record(ip);
 
@@ -869,7 +911,7 @@ async fn login(
             event = "auth.failed",
             method = "password",
             %ip,
-            user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
+            user_agent = %log_safe(user_agent_log_value(headers), LOG_SAFE_MAX),
             "login failed"
         );
     };
@@ -878,23 +920,23 @@ async fn login(
     // far looser than `MAX_PASSWORD_LENGTH` on purpose — see that constant —
     // and rejecting here leaks nothing, since the verdict does not depend on
     // which username was presented.
-    if body.password.len() > MAX_LOGIN_PASSWORD_LENGTH {
+    if password.len() > MAX_LOGIN_PASSWORD_LENGTH {
         log_failed();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(LoginError::Invalid);
     }
 
-    // Generic 401 whether the username is unknown or the password is wrong.
+    // Generic failure whether the username is unknown or the password is wrong.
     let Some(auth) = state
         .db
-        .get_user_auth(body.username.trim())
+        .get_user_auth(username.trim())
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| LoginError::Internal)?
     else {
         // Same Argon2 cost a real account would have incurred, so the two
         // paths cannot be told apart by response time. See `spend_verify_cost`.
-        spend_verify_cost(&body.password);
+        spend_verify_cost(password);
         log_failed();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(LoginError::Invalid);
     };
 
     // Forward-auth-provisioned accounts store a sentinel in place of a hash and
@@ -906,9 +948,9 @@ async fn login(
     // unknown username gets — otherwise it returns early and becomes its own
     // oracle for which accounts are proxy-provisioned.
     if has_no_password(&auth.password_hash) {
-        spend_verify_cost(&body.password);
+        spend_verify_cost(password);
         log_failed();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(LoginError::Invalid);
     }
 
     // Checked only once a username has resolved, which is what stops the
@@ -919,17 +961,17 @@ async fn login(
     // spent above — a locked account that answered faster than a wrong
     // password would leak just as loudly.
     if state.lockout.is_locked(auth.id) {
-        spend_verify_cost(&body.password);
+        spend_verify_cost(password);
         log_failed();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(LoginError::Invalid);
     }
 
-    let valid = verify_password(&body.password, &auth.password_hash)
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let valid =
+        verify_password(password, &auth.password_hash).map_err(|_err| LoginError::Internal)?;
     if !valid {
-        note_account_failure(&state, auth.id, ip, "login");
+        note_account_failure(state, auth.id, ip, "login");
         log_failed();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(LoginError::Invalid);
     }
     state.lockout.record_success(auth.id);
 
@@ -950,7 +992,7 @@ async fn login(
             user_agent,
         )
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| LoginError::Internal)?;
     store_session(
         &state.sessions,
         &token_hash,
@@ -972,14 +1014,40 @@ async fn login(
         session_id,
         sid_hash = %session_log_id(&token_hash),
         %ip,
-        user_agent = %log_safe(user_agent_log_value(&headers), LOG_SAFE_MAX),
+        user_agent = %log_safe(user_agent_log_value(headers), LOG_SAFE_MAX),
         "login successful"
     );
 
-    Ok((
-        jar.add(build_session_cookie(token, state.cookie_secure)),
-        Json(LoginResponse { success: true }),
-    ))
+    Ok(jar.add(build_session_cookie(token, state.cookie_secure)))
+}
+
+/// `POST /api/auth/login` — the JSON face of [`start_password_session`].
+///
+/// Every outcome it can report is decided there; this only chooses the status
+/// code. The 401 covers an unknown username, a wrong password, a forward-auth
+/// account and a locked one alike, so none of them can be told apart.
+async fn login(
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(body): Json<LoginRequest>,
+) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
+    let jar = start_password_session(
+        &state,
+        connect.as_deref(),
+        &headers,
+        jar,
+        &body.username,
+        &body.password,
+    )
+    .await
+    .map_err(|err| match err {
+        LoginError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        LoginError::Invalid => StatusCode::UNAUTHORIZED,
+        LoginError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
+    Ok((jar, Json(LoginResponse { success: true })))
 }
 
 /// The `Set-Cookie` carrying a freshly minted session token.
@@ -1042,7 +1110,7 @@ pub struct LogoutResponse {
 /// Enforced only when a password is set. `login` deliberately does not check
 /// it, so an operator whose password predates this constant keeps signing in
 /// and meets the new floor at their next change rather than being locked out.
-const MIN_PASSWORD_LENGTH: usize = 12;
+pub(crate) const MIN_PASSWORD_LENGTH: usize = 12;
 
 /// Maximum length for a password set through the API.
 ///
@@ -1158,56 +1226,86 @@ fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     )
 }
 
-async fn setup(
-    State(state): State<AppState>,
-    Json(body): Json<SetupRequest>,
-) -> Result<Json<SetupResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+/// Why first-run setup was refused.
+///
+/// [`SetupError::Invalid`] carries the message because it is the only variant
+/// the operator can act on — "password must be at least 12 characters" has to
+/// reach them verbatim, whether they are looking at JSON or at the form.
+pub(crate) enum SetupError {
+    /// Forward auth is configured, so the wizard does not apply.
+    Disabled,
+    AlreadyConfigured,
+    Invalid(String),
+    Internal,
+}
+
+/// Create the first operator account.
+///
+/// Shared by `POST /api/auth/setup` and the HTML `POST /setup` for the same
+/// reason [`start_password_session`] is shared: the forward-auth guard and the
+/// already-configured check are what stop a second account being claimed, and a
+/// copy of them is a copy that can drift out of step.
+pub(crate) async fn create_first_operator(
+    state: &AppState,
+    username: &str,
+    password: &str,
+) -> Result<(), SetupError> {
     // Forward auth makes the setup wizard inapplicable: identity comes from
     // the proxy, and the first proxied request provisions the operator — which
     // is why `health` reports `needs_setup: false`. Leaving this
-    // unauthenticated endpoint live would let anyone who can reach the listener
+    // unauthenticated path live would let anyone who can reach the listener
     // directly, bypassing the proxy, claim the first operator account during
     // the window before that first proxied request arrives.
     if state.forward_auth.is_some() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiErrorResponse {
-                error: "setup is disabled when forward auth is configured".to_string(),
-            }),
-        ));
+        return Err(SetupError::Disabled);
     }
 
     let count = state
         .db
         .count_users()
         .await
-        .map_err(|_err| internal_error())?;
+        .map_err(|_err| SetupError::Internal)?;
     if count > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiErrorResponse {
-                error: "already configured".to_string(),
-            }),
-        ));
+        return Err(SetupError::AlreadyConfigured);
     }
-    let username = body.username.trim();
+    let username = username.trim();
     if username.is_empty() || username.chars().count() > 64 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiErrorResponse {
-                error: "invalid username".to_string(),
-            }),
-        ));
+        return Err(SetupError::Invalid("invalid username".to_string()));
     }
-    if let Err(error) = validate_new_password(&body.password, &[username]) {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error })));
-    }
-    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
+    validate_new_password(password, &[username]).map_err(SetupError::Invalid)?;
+    let hash = hash_password(password).map_err(|_err| SetupError::Internal)?;
     state
         .db
         .create_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_err| internal_error())?;
+        .map_err(|_err| SetupError::Internal)?;
+    Ok(())
+}
+
+async fn setup(
+    State(state): State<AppState>,
+    Json(body): Json<SetupRequest>,
+) -> Result<Json<SetupResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    create_first_operator(&state, &body.username, &body.password)
+        .await
+        .map_err(|err| match err {
+            SetupError::Disabled => (
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorResponse {
+                    error: "setup is disabled when forward auth is configured".to_string(),
+                }),
+            ),
+            SetupError::AlreadyConfigured => (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse {
+                    error: "already configured".to_string(),
+                }),
+            ),
+            SetupError::Invalid(error) => {
+                (StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error }))
+            }
+            SetupError::Internal => internal_error(),
+        })?;
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -1974,6 +2072,17 @@ pub struct HealthResponse {
     pub version: &'static str,
 }
 
+/// Whether this appliance still has no operator and must show the setup wizard.
+///
+/// With forward auth on, identity comes from the proxy and the wizard would be
+/// a dead end — the first proxied request provisions the operator — so it
+/// reports `false` however empty the user table is. Shared with the page
+/// handlers, which route an unauthenticated browser to `/setup` or `/login`
+/// depending on this same answer.
+pub(crate) async fn needs_setup(state: &AppState) -> bool {
+    state.forward_auth.is_none() && state.db.count_users().await.is_ok_and(|n| n == 0)
+}
+
 /// Report basic service health.
 ///
 /// Always unauthenticated so monitoring and the setup wizard can call it
@@ -1988,14 +2097,9 @@ pub struct HealthResponse {
     responses((status = 200, description = "Service health", body = HealthResponse))
 )]
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    // With forward auth on, identity comes from the proxy and the setup
-    // wizard would be a dead end — the first proxied request provisions the
-    // operator.
-    let needs_setup =
-        state.forward_auth.is_none() && state.db.count_users().await.is_ok_and(|n| n == 0);
     Json(HealthResponse {
         status: "ok".to_string(),
-        needs_setup,
+        needs_setup: needs_setup(&state).await,
         version: env!("GIT_VERSION"),
     })
 }

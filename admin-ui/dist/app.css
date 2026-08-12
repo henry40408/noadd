@@ -126,6 +126,11 @@ body::after {
   padding: 8px 14px;
   border-right: 1px solid var(--border);
   transition: color var(--transition), background var(--transition);
+  /* The navigation items are <a> elements now that routing is server-side —
+     these two are the only places a link does not already inherit what the
+     <button> they replaced was given for free. */
+  text-decoration: none;
+  text-align: center;
 }
 .nav-item b { color: var(--text-primary); font-weight: 600; margin-right: 2px; }
 .nav-item:hover { color: var(--text-primary); }

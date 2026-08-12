@@ -67,7 +67,7 @@ async function gotoSettings(page) {
   await page.getByTestId('login-password').fill(ADMIN_PASSWORD);
   await page.getByTestId('login-submit').click();
   await expect(page.getByTestId('app-shell')).toBeVisible();
-  await page.evaluate(() => { location.hash = '#settings'; });
+  await page.goto('/settings');
   await page.locator('#s-block-mode').waitFor();
 }
 
