@@ -33,8 +33,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, SetupError,
-    create_first_operator, end_session, needs_setup, start_password_session,
+    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, SettingsError,
+    SetupError, apply_settings, create_first_operator, end_session, needs_setup,
+    start_password_session,
 };
 
 // --- Templates ---
@@ -131,16 +132,13 @@ const NAV: &[NavItem] = &[
     },
 ];
 
-/// The signed-in shell: topbar, navigation, status bar and the container the
-/// page component mounts into.
+/// Everything the shell needs, independent of which page is inside it.
 ///
-/// Only `#page-content` is left for the client to fill. Everything around it —
-/// including which navigation item is active — is settled here, because the
-/// server already knows the path it is answering and the client would only be
-/// re-deriving it from the URL it was handed.
-#[derive(Template, WebTemplate)]
-#[template(path = "shell.html")]
-pub struct ShellTemplate {
+/// Carried as a field on each page's template rather than duplicated across
+/// them: `shell.html` reads `shell.*`, so a page template only has to declare
+/// its own data. Every page that grows a server-rendered body gets this for
+/// free by embedding it.
+pub struct ShellData {
     version: &'static str,
     /// The `Host` this request arrived on, shown in the status bar. Attacker-
     /// influenced (it is a request header), so it is only ever interpolated by
@@ -151,6 +149,67 @@ pub struct ShellTemplate {
     nav: &'static [NavItem],
     welcome: bool,
     proxy_logout_notice: bool,
+    /// Read by the settings page rather than `shell.html` — the confirmation
+    /// belongs next to the save button, not in the shell's notice area. It is
+    /// resolved here because this is where the flash is consumed, and consuming
+    /// it in two places would mean one of them never sees it.
+    settings_saved: bool,
+}
+
+impl ShellData {
+    /// Build the shell's data for this request, consuming the pending flash.
+    ///
+    /// Returns the jar that clears it alongside, because reading a flash
+    /// without clearing it is the bug this mechanism exists to prevent.
+    fn build(uri: &Uri, headers: &HeaderMap, jar: CookieJar) -> (Self, CookieJar) {
+        let (flash, jar) = take_flash(jar);
+        (
+            Self {
+                version: env!("GIT_VERSION"),
+                host: request_host(headers),
+                current_path: uri.path().to_string(),
+                nav: NAV,
+                welcome: flash == Some(Flash::Welcome),
+                proxy_logout_notice: flash == Some(Flash::ProxyLogout),
+                settings_saved: flash == Some(Flash::SettingsSaved),
+            },
+            jar,
+        )
+    }
+}
+
+/// The settings page.
+///
+/// `error_field` names the one field a rejected save objected to, and is
+/// compared by name in the template so the message lands next to the input it
+/// is about — a page with eight fields and one message at the top makes the
+/// operator hunt for which. Empty when there is nothing to report.
+#[derive(Template, WebTemplate)]
+#[template(path = "settings.html")]
+pub struct SettingsTemplate {
+    shell: ShellData,
+    upstream_servers: String,
+    upstream_strategy: String,
+    dnssec_on: bool,
+    block_mode: String,
+    block_custom_ipv4: String,
+    block_custom_ipv6: String,
+    log_retention_days: String,
+    public_url: String,
+    doh_access_policy: String,
+    error_field: &'static str,
+    error_message: String,
+    saved: bool,
+}
+
+/// The shell around a page whose body is still painted by `app.js`.
+///
+/// Every page still using this is one P3 has not reached yet; a page with a
+/// server-rendered body has its own template that embeds [`ShellData`] instead.
+#[derive(Template, WebTemplate)]
+#[template(path = "shell.html")]
+pub struct ShellTemplate {
+    shell: ShellData,
 }
 
 // --- Extractors ---
@@ -214,6 +273,8 @@ pub enum Flash {
     Welcome,
     /// Logout on a forward-auth session, which noadd cannot end on its own.
     ProxyLogout,
+    /// A settings save went through.
+    SettingsSaved,
 }
 
 impl Flash {
@@ -221,6 +282,7 @@ impl Flash {
         match self {
             Self::Welcome => "welcome",
             Self::ProxyLogout => "proxy_logout",
+            Self::SettingsSaved => "settings_saved",
         }
     }
 
@@ -228,6 +290,7 @@ impl Flash {
         match raw {
             "welcome" => Some(Self::Welcome),
             "proxy_logout" => Some(Self::ProxyLogout),
+            "settings_saved" => Some(Self::SettingsSaved),
             // An unrecognised value is a stale cookie from an older build, or
             // something hand-written. Either way there is no notice to show.
             _ => None,
@@ -352,18 +415,8 @@ pub async fn shell_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (flash, jar) = take_flash(jar);
-    (
-        jar,
-        ShellTemplate {
-            version: env!("GIT_VERSION"),
-            host: request_host(&headers),
-            current_path: uri.path().to_string(),
-            nav: NAV,
-            welcome: flash == Some(Flash::Welcome),
-            proxy_logout_notice: flash == Some(Flash::ProxyLogout),
-        },
-    )
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    (jar, ShellTemplate { shell })
 }
 
 /// `POST /logout`.
@@ -573,6 +626,175 @@ pub async fn setup_submit(
         // to `/login` is recoverable, where re-rendering the wizard would ask
         // them to create an account that is already there.
         Err(_) => Redirect::to("/login").into_response(),
+    }
+}
+
+// --- Settings ---
+
+/// The settings the page renders. Absent keys come back as empty strings, which
+/// is what an unset setting means to every input on the page.
+async fn current_settings(state: &AppState) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for key in [
+        "upstream_servers",
+        "upstream_strategy",
+        "log_retention_days",
+        "doh_access_policy",
+        "public_url",
+        "dnssec_disabled",
+        "block_mode",
+        "block_custom_ipv4",
+        "block_custom_ipv6",
+    ] {
+        if let Ok(Some(value)) = state.db.get_setting(key).await {
+            out.insert(key.to_string(), value);
+        }
+    }
+    out
+}
+
+/// Build the page from a set of values, whatever their source.
+///
+/// Called with the persisted settings on a GET and with the *submitted* ones on
+/// a rejected save, which is what lets the operator correct the one field that
+/// was wrong instead of retyping the seven that were fine.
+fn settings_template(
+    shell: ShellData,
+    values: &std::collections::HashMap<String, String>,
+    error_field: &'static str,
+    error_message: String,
+    saved: bool,
+) -> SettingsTemplate {
+    let get = |key: &str| values.get(key).cloned().unwrap_or_default();
+    SettingsTemplate {
+        shell,
+        upstream_servers: get("upstream_servers"),
+        // The defaults mirror what the DNS layer falls back to for an unset
+        // value, so the page never shows a blank select for a setting that is
+        // in fact in effect.
+        upstream_strategy: match get("upstream_strategy").as_str() {
+            "" => "sequential".to_string(),
+            other => other.to_string(),
+        },
+        dnssec_on: get("dnssec_disabled").trim() != "true",
+        block_mode: match get("block_mode").as_str() {
+            "" => "null_ip".to_string(),
+            other => other.to_string(),
+        },
+        block_custom_ipv4: get("block_custom_ipv4"),
+        block_custom_ipv6: get("block_custom_ipv6"),
+        log_retention_days: get("log_retention_days"),
+        public_url: get("public_url"),
+        doh_access_policy: match get("doh_access_policy").as_str() {
+            "" => "allow".to_string(),
+            other => other.to_string(),
+        },
+        error_field,
+        error_message,
+        saved,
+    }
+}
+
+pub async fn settings_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let saved = shell.settings_saved;
+    let values = current_settings(&state).await;
+    (
+        jar,
+        settings_template(shell, &values, "", String::new(), saved),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct SettingsForm {
+    upstream_servers: String,
+    upstream_strategy: String,
+    /// `on` / `off`, the inverse of the stored `dnssec_disabled`. The form says
+    /// what the operator sees; the storage key predates it.
+    dnssec: String,
+    block_mode: String,
+    block_custom_ipv4: String,
+    block_custom_ipv6: String,
+    log_retention_days: String,
+    public_url: String,
+    doh_access_policy: String,
+}
+
+impl SettingsForm {
+    fn into_map(self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        map.insert("upstream_servers".to_string(), self.upstream_servers);
+        map.insert("upstream_strategy".to_string(), self.upstream_strategy);
+        map.insert(
+            "dnssec_disabled".to_string(),
+            if self.dnssec == "off" {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        );
+        map.insert("block_mode".to_string(), self.block_mode);
+        map.insert("block_custom_ipv4".to_string(), self.block_custom_ipv4);
+        map.insert("block_custom_ipv6".to_string(), self.block_custom_ipv6);
+        map.insert("log_retention_days".to_string(), self.log_retention_days);
+        map.insert("public_url".to_string(), self.public_url);
+        map.insert("doh_access_policy".to_string(), self.doh_access_policy);
+        map
+    }
+}
+
+/// `POST /settings`.
+///
+/// One submit for every scalar setting, rather than one endpoint per field.
+/// Without JavaScript that is what makes the page usable; with it, `app.js`
+/// removes the button and restores per-field autosave against `/api/settings`.
+///
+/// A successful save redirects rather than rendering: a POST left in the
+/// browser's history is one refresh away from being submitted again.
+pub async fn settings_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<SettingsForm>,
+) -> Response {
+    let values = form.into_map();
+    match apply_settings(&state, &values).await {
+        Ok(()) => (
+            set_flash(jar, Flash::SettingsSaved),
+            Redirect::to("/settings"),
+        )
+            .into_response(),
+        Err(err) => {
+            let (status, field, message) = match err {
+                SettingsError::Invalid { field, message } => {
+                    (StatusCode::BAD_REQUEST, field, message)
+                }
+                SettingsError::Internal => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "",
+                    "Could not save — check the server log".to_string(),
+                ),
+            };
+            // Re-render with what was submitted, not what is stored: the whole
+            // point is that the seven fields the operator got right survive the
+            // one they did not.
+            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            (
+                status,
+                jar,
+                settings_template(shell, &values, field, message, false),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -4317,6 +4317,17 @@ async fn the_wizard_sends_an_already_configured_appliance_to_sign_in() {
     );
 }
 
+/// A form post carrying a session cookie, for the pages behind authentication.
+fn authed_form(uri: &str, token: &str, body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("cookie", format!("session={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 fn form_post(uri: &str, body: &'static str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -4417,6 +4428,118 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     // The shell, not a client-side stand-in for it.
     assert!(html.contains(r#"action="/logout""#));
     assert!(html.contains("statusbar"));
+}
+
+/// The settings page renders every scalar setting at its current value, so the
+/// form is usable without a round trip to fill it in.
+#[tokio::test]
+async fn the_settings_page_renders_current_values() {
+    let (app, token) = setup().await;
+    app.clone()
+        .oneshot(authed(
+            "PUT",
+            "/api/settings",
+            &token,
+            Some(r#"{"log_retention_days":"21","block_mode":"nxdomain"}"#),
+        ))
+        .await
+        .unwrap();
+
+    let res = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains(r#"value="21""#), "retention was not rendered");
+    assert!(
+        html.contains(r#"<option value="nxdomain" selected>"#),
+        "the stored block mode was not selected"
+    );
+}
+
+/// A settings save redirects rather than rendering: a POST left in the
+/// browser's history is one refresh away from being submitted again.
+#[tokio::test]
+async fn a_settings_save_redirects_and_persists() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/settings",
+            &token,
+            "upstream_servers=1.1.1.1:53&upstream_strategy=round-robin&dnssec=off\
+             &block_mode=nxdomain&block_custom_ipv4=&block_custom_ipv6=\
+             &log_retention_days=14&public_url=&doh_access_policy=deny",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/settings")
+    );
+
+    let page = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains(r#"<option value="round-robin" selected>"#));
+    assert!(html.contains(r#"value="14""#));
+}
+
+/// A rejected value re-renders the form with everything the operator typed —
+/// including the seven fields that were fine — and writes nothing.
+///
+/// The no-partial-write half is the one worth pinning: validation runs before
+/// any `set_setting`, so a bad IP must not leave the retention change applied.
+#[tokio::test]
+async fn a_rejected_setting_keeps_the_whole_form_and_writes_nothing() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/settings",
+            &token,
+            "upstream_servers=9.9.9.9:53&upstream_strategy=sequential&dnssec=on\
+             &block_mode=custom_ip&block_custom_ipv4=not-an-ip&block_custom_ipv6=\
+             &log_retention_days=30&public_url=&doh_access_policy=allow",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains("Not a valid IPv4 address"),
+        "the reason did not reach the form"
+    );
+    assert!(
+        html.contains(r#"value="not-an-ip""#) && html.contains(r#"value="30""#),
+        "the operator's input was discarded"
+    );
+
+    // Nothing was written: the retention change rode along with the bad IP.
+    let page = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains(r#"value="30""#),
+        "a rejected save wrote part of itself"
+    );
 }
 
 /// Signing out through the form revokes the session and sends the browser to

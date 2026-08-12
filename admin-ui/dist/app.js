@@ -2571,105 +2571,12 @@ customElements.define('filters-page', FiltersPage);
 // --- Settings Page ---
 class SettingsPage extends HTMLElement {
   connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>
-      <div class="card fade-in">
-        <div class="card-title">Server Info</div>
-        <p style="color:var(--text-dim);font-size:0.8rem;margin-bottom:12px">These values are set via CLI arguments and cannot be changed at runtime.</p>
-        <div id="server-info" style="font-family:var(--font-sans);font-size:0.85rem;color:var(--text-secondary)">Loading...</div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="card-title">Upstream DNS</div>
-        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code class="text-accent">ip:port</code>, <code class="text-accent">tls://host</code> (DoT), or <code class="text-accent">https://host/dns-query</code> (DoH)</p>
-        <textarea id="s-upstream" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853"></textarea>
-        <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
-          <button class="btn btn-sm btn-primary" id="apply-upstream">${icons.refresh} Save &amp; apply</button>
-          <span id="upstream-apply-msg" style="font-size:0.8rem"></span>
-        </div>
-        <div id="upstream-health" style="margin-top:14px"></div>
-        <div class="card-title" style="margin-top:16px">Strategy</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
-          How upstream servers are selected for each DNS query.
-        </p>
-        <div class="input-row" style="margin-bottom:2px">
-          <select id="s-strategy">
-            <option value="sequential">Sequential (try in order)</option>
-            <option value="round-robin">Round Robin (rotate)</option>
-            <option value="lowest-latency">Lowest Latency (fastest first)</option>
-          </select>
-        </div>
-        <div class="field-msg" id="msg-strategy"></div>
-        <div id="ema-latency" style="margin-top:12px"></div>
-        <div class="card-title" style="margin-top:16px">DNSSEC</div>
-        <p class="card-desc">
-          Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
-        </p>
-        <label class="field-label" for="s-dnssec">DNSSEC status</label>
-        <div class="input-row" style="margin-bottom:2px">
-          <select id="s-dnssec">
-            <option value="on">On (surface AD)</option>
-            <option value="off">Off</option>
-          </select>
-        </div>
-        <div class="field-msg" id="msg-dnssec"></div>
-        <div class="card-title" style="margin-top:16px">Block mode</div>
-        <p class="card-desc">
-          How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
-        </p>
-        <label class="field-label" for="s-block-mode">Response</label>
-        <div class="input-row" style="margin-bottom:2px">
-          <select id="s-block-mode">
-            <option value="null_ip">Null IP (0.0.0.0 / ::)</option>
-            <option value="nxdomain">NXDOMAIN</option>
-            <option value="refused">REFUSED</option>
-            <option value="custom_ip">Custom IP</option>
-          </select>
-        </div>
-        <div class="field-msg" id="msg-block-mode"></div>
-        <div id="s-block-custom" style="display:none">
-          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv4" placeholder="Custom IPv4 for A, e.g. 192.0.2.1"></div>
-          <div class="field-msg" id="msg-block-ipv4"></div>
-          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv6" placeholder="Custom IPv6 for AAAA, e.g. 100::1"></div>
-          <div class="field-msg" id="msg-block-ipv6"></div>
-        </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.1s">
-        <div class="card-title">Log Retention</div>
-        <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-retention" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
-        <div class="field-msg" id="msg-retention"></div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.12s">
-        <div class="card-title">Public URL</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
-        <div class="input-row" style="margin-bottom:2px"><input type="url" id="s-public-url" placeholder="https://dns.example.com"></div>
-        <div class="field-msg" id="msg-public-url"></div>
-      </div>
-      <div class="fade-in" style="animation-delay:0.15s;min-height:18px;margin-top:4px">
-        <span style="color:var(--text-dim);font-size:0.8rem">Changes are saved automatically.</span>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
-        <div class="card-title">DoH Access Control</div>
-        <p class="card-desc">
-          Default policy for unauthenticated DoH requests (without a token in URL).
-        </p>
-        <label class="field-label" for="s-doh-policy">Default Policy</label>
-        <div class="input-row">
-          <select id="s-doh-policy">
-            <option value="allow">Allow (open access)</option>
-            <option value="deny">Deny (require token)</option>
-          </select>
-        </div>
-        <div class="field-msg" id="msg-doh-policy"></div>
-        <div class="card-title" style="margin-top:16px">DoH Tokens</div>
-        <p class="card-desc">
-          Each token becomes a DoH URL path: <code style="color:var(--accent);font-size:0.8rem">/dns-query/your-token</code>. Always works regardless of policy.
-        </p>
-        <div class="input-row">
-          <input type="text" id="token-value" placeholder="e.g. my-phone, home-network">
-          <button class="btn btn-primary btn-sm" id="add-token">${icons.plus} Add</button>
-        </div>
-        <div id="doh-tokens-list"></div>
-      </div>`;
+    // The server ships a submit button so the page works without JavaScript.
+    // With it, each field saves as it is changed — the button would be a second
+    // way to do the same thing, and one that discards the per-field messages
+    // the autosave path shows.
+    const saveRow = this.querySelector('#settings-save-row');
+    if (saveRow) saveRow.remove();
 
     this.load();
 
@@ -2691,7 +2598,11 @@ class SettingsPage extends HTMLElement {
       } catch (e) { el.innerHTML = '<p class="text-red">Failed to load upstreams</p>'; }
     };
 
-    this.querySelector('#apply-upstream').onclick = async () => {
+    this.querySelector('#apply-upstream').onclick = async (event) => {
+      // It is a submit button so the page works without JavaScript. Here there
+      // is JavaScript, so take over: PUT just this field and refresh the health
+      // table, rather than submitting the whole form and navigating away.
+      event.preventDefault();
       const msg = this.querySelector('#upstream-apply-msg');
       try {
         const res = await fetch('/api/settings', { method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({ upstream_servers: this.querySelector('#s-upstream').value }) });
@@ -2787,22 +2698,14 @@ class SettingsPage extends HTMLElement {
 
   async load() {
     try {
-      const [s, info] = await Promise.all([
-        api.get('/api/settings'),
-        api.get('/api/server-info'),
-      ]);
-      if (s.upstream_servers) this.querySelector('#s-upstream').value = s.upstream_servers.replace(/,\s*/g, '\n');
+      // Only what the form does not already hold. Every field on this page was
+      // rendered with its current value by the server, so re-fetching settings
+      // to fill them in would be asking a question already answered — and worse
+      // than redundant: this used to overwrite whatever the operator had typed
+      // in the window between the markup appearing and the response landing,
+      // silently reverting the change they had just made.
+      const info = await api.get('/api/server-info');
       this.renderUpstreams();
-      if (s.public_url) this.querySelector('#s-public-url').value = s.public_url;
-      if (s.log_retention_days) this.querySelector('#s-retention').value = s.log_retention_days;
-      this.querySelector('#s-doh-policy').value = s.doh_access_policy || 'allow';
-      this.querySelector('#s-strategy').value = s.upstream_strategy || 'sequential';
-      this.querySelector('#s-dnssec').value = (s.dnssec_disabled === 'true') ? 'off' : 'on';
-      this.querySelector('#s-block-mode').value = s.block_mode || 'null_ip';
-      if (s.block_custom_ipv4) this.querySelector('#s-block-ipv4').value = s.block_custom_ipv4;
-      if (s.block_custom_ipv6) this.querySelector('#s-block-ipv6').value = s.block_custom_ipv6;
-      this.querySelector('#s-block-custom').style.display =
-        (s.block_mode === 'custom_ip') ? 'block' : 'none';
       this.loadEma();
       if (info) {
         const tls = info.tls_enabled
@@ -2901,8 +2804,15 @@ const PAGES = {
 // An unrecognised path mounts the dashboard rather than nothing. Only the six
 // paths above route to this shell, so arriving with anything else means a stale
 // link that somehow reached it.
-document.getElementById('page-content').appendChild(
-  document.createElement(PAGES[location.pathname] || 'dashboard-page'));
+// Only when the server left it empty. A page whose body is server-rendered
+// ships its own component element in the markup, which upgrades in place — the
+// enhancement attaches to the rendered form instead of replacing it. Mounting a
+// second one here would leave two.
+const pageContent = document.getElementById('page-content');
+if (!pageContent.firstElementChild) {
+  pageContent.appendChild(
+    document.createElement(PAGES[location.pathname] || 'dashboard-page'));
+}
 
 // Dismiss is attached only where there is JavaScript to make it work, rather
 // than shipped in the markup as a button that does nothing without it. The

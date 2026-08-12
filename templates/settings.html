@@ -1,0 +1,141 @@
+{#
+  The settings page.
+
+  Every scalar setting is one form with one submit, rather than a POST per
+  field. Without JavaScript that is what makes the page usable at all; with it,
+  `app.js` removes the button and restores per-field autosave, so the operator
+  sees no button either way.
+
+  What is *not* here stays client-rendered because it is not settings at all:
+  the read-only server info, the upstream health table, the EMA latency figures
+  and the DoH token list. They are live data with their own refresh, and a form
+  has nothing to say about them.
+#}
+{% extends "shell.html" %}
+
+{% block page %}
+      {#
+        Wrapped in the custom element the client already defines. It upgrades in
+        place over this markup, so the enhancement — autosave, the live upstream
+        table, the token list — attaches to the server-rendered form rather than
+        replacing it. The bootstrap mounts a page component only when the server
+        left `#page-content` empty, which is how the pages P3 has not reached
+        yet keep working unchanged.
+      #}
+      <settings-page>
+      <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>
+      <div class="card fade-in">
+        <div class="card-title">Server Info</div>
+        <p style="color:var(--text-dim);font-size:0.8rem;margin-bottom:12px">These values are set via CLI arguments and cannot be changed at runtime.</p>
+        <div id="server-info" style="font-family:var(--font-sans);font-size:0.85rem;color:var(--text-secondary)">Loading...</div>
+      </div>
+      <form method="post" action="/settings" id="settings-form">
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="card-title">Upstream DNS</div>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code class="text-accent">ip:port</code>, <code class="text-accent">tls://host</code> (DoT), or <code class="text-accent">https://host/dns-query</code> (DoH)</p>
+        <textarea id="s-upstream" name="upstream_servers" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853">{{ upstream_servers }}</textarea>
+        <div class="field-msg{% if error_field == "upstream_servers" %} error{% endif %}" id="msg-upstream">{% if error_field == "upstream_servers" %}{{ error_message }}{% endif %}</div>
+        {#
+          A submit, not a plain button: without JavaScript it saves the form
+          like any other submit. `app.js` intercepts it to PUT just the upstream
+          list and refresh the health table, which is the behaviour it has
+          always had — upstreams are the one field with a visible apply step,
+          because applying them reconfigures the forwarder.
+        #}
+        <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
+          <button type="submit" class="btn btn-sm btn-primary" id="apply-upstream">Save &amp; apply</button>
+          <span id="upstream-apply-msg" style="font-size:0.8rem"></span>
+        </div>
+        <div id="upstream-health" style="margin-top:14px"></div>
+        <div class="card-title" style="margin-top:16px">Strategy</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">
+          How upstream servers are selected for each DNS query.
+        </p>
+        <div class="input-row" style="margin-bottom:2px">
+          <select id="s-strategy" name="upstream_strategy">
+            <option value="sequential"{% if upstream_strategy == "sequential" %} selected{% endif %}>Sequential (try in order)</option>
+            <option value="round-robin"{% if upstream_strategy == "round-robin" %} selected{% endif %}>Round Robin (rotate)</option>
+            <option value="lowest-latency"{% if upstream_strategy == "lowest-latency" %} selected{% endif %}>Lowest Latency (fastest first)</option>
+          </select>
+        </div>
+        <div class="field-msg" id="msg-strategy"></div>
+        <div id="ema-latency" style="margin-top:12px"></div>
+        <div class="card-title" style="margin-top:16px">DNSSEC</div>
+        <p class="card-desc">
+          Surfaces the upstream's DNSSEC verdict (AD flag) per query in the log. This is transparency, not local validation — for end-to-end trustworthy results: use a validating upstream (1.1.1.1 / 9.9.9.9), set the upstream to <code style="color:var(--accent);font-size:0.8rem">tls://…</code> so the verdict reaches noadd untampered, and point devices at noadd's DoH endpoint.
+        </p>
+        <label class="field-label" for="s-dnssec">DNSSEC status</label>
+        <div class="input-row" style="margin-bottom:2px">
+          <select id="s-dnssec" name="dnssec">
+            <option value="on"{% if dnssec_on %} selected{% endif %}>On (surface AD)</option>
+            <option value="off"{% if !dnssec_on %} selected{% endif %}>Off</option>
+          </select>
+        </div>
+        <div class="field-msg" id="msg-dnssec"></div>
+        <div class="card-title" style="margin-top:16px">Block mode</div>
+        <p class="card-desc">
+          How blocked queries are answered. Default returns a null IP (0.0.0.0 / ::).
+        </p>
+        <label class="field-label" for="s-block-mode">Response</label>
+        <div class="input-row" style="margin-bottom:2px">
+          <select id="s-block-mode" name="block_mode">
+            <option value="null_ip"{% if block_mode == "null_ip" %} selected{% endif %}>Null IP (0.0.0.0 / ::)</option>
+            <option value="nxdomain"{% if block_mode == "nxdomain" %} selected{% endif %}>NXDOMAIN</option>
+            <option value="refused"{% if block_mode == "refused" %} selected{% endif %}>REFUSED</option>
+            <option value="custom_ip"{% if block_mode == "custom_ip" %} selected{% endif %}>Custom IP</option>
+          </select>
+        </div>
+        <div class="field-msg{% if error_field == "block_mode" %} error{% endif %}" id="msg-block-mode">{% if error_field == "block_mode" %}{{ error_message }}{% endif %}</div>
+        <div id="s-block-custom"{% if block_mode != "custom_ip" %} style="display:none"{% endif %}>
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv4" name="block_custom_ipv4" value="{{ block_custom_ipv4 }}" placeholder="Custom IPv4 for A, e.g. 192.0.2.1"></div>
+          <div class="field-msg{% if error_field == "block_custom_ipv4" %} error{% endif %}" id="msg-block-ipv4">{% if error_field == "block_custom_ipv4" %}{{ error_message }}{% endif %}</div>
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv6" name="block_custom_ipv6" value="{{ block_custom_ipv6 }}" placeholder="Custom IPv6 for AAAA, e.g. 100::1"></div>
+          <div class="field-msg{% if error_field == "block_custom_ipv6" %} error{% endif %}" id="msg-block-ipv6">{% if error_field == "block_custom_ipv6" %}{{ error_message }}{% endif %}</div>
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Log Retention</div>
+        <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-retention" name="log_retention_days" value="{{ log_retention_days }}" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <div class="field-msg{% if error_field == "log_retention_days" %} error{% endif %}" id="msg-retention">{% if error_field == "log_retention_days" %}{{ error_message }}{% endif %}</div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.12s">
+        <div class="card-title">Public URL</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Used for Apple mobileconfig profiles. Must be HTTPS with a valid domain.</p>
+        <div class="input-row" style="margin-bottom:2px"><input type="url" id="s-public-url" name="public_url" value="{{ public_url }}" placeholder="https://dns.example.com"></div>
+        <div class="field-msg{% if error_field == "public_url" %} error{% endif %}" id="msg-public-url">{% if error_field == "public_url" %}{{ error_message }}{% endif %}</div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.2s;margin-top:24px">
+        <div class="card-title">DoH Access Control</div>
+        <p class="card-desc">
+          Default policy for unauthenticated DoH requests (without a token in URL).
+        </p>
+        <label class="field-label" for="s-doh-policy">Default Policy</label>
+        <div class="input-row">
+          <select id="s-doh-policy" name="doh_access_policy">
+            <option value="allow"{% if doh_access_policy == "allow" %} selected{% endif %}>Allow (open access)</option>
+            <option value="deny"{% if doh_access_policy == "deny" %} selected{% endif %}>Deny (require token)</option>
+          </select>
+        </div>
+        <div class="field-msg" id="msg-doh-policy"></div>
+      </div>
+      {# Removed by app.js, which restores per-field autosave in its place. #}
+      <div class="fade-in" id="settings-save-row" style="animation-delay:0.15s;margin-top:4px;display:flex;align-items:center;gap:10px">
+        <button type="submit" class="btn btn-primary btn-sm" id="save-settings" data-testid="save-settings">Save settings</button>
+        {%- if saved %}
+        <span style="color:var(--accent);font-size:0.8rem" data-testid="settings-saved">✔ saved</span>
+        {%- endif %}
+      </div>
+      </form>
+      <div class="card fade-in" style="animation-delay:0.22s;margin-top:24px">
+        <div class="card-title">DoH Tokens</div>
+        <p class="card-desc">
+          Each token becomes a DoH URL path: <code style="color:var(--accent);font-size:0.8rem">/dns-query/your-token</code>. Always works regardless of policy.
+        </p>
+        <div class="input-row">
+          <input type="text" id="token-value" placeholder="e.g. my-phone, home-network">
+          <button type="button" class="btn btn-primary btn-sm" id="add-token">Add</button>
+        </div>
+        <div id="doh-tokens-list"></div>
+      </div>
+      </settings-page>
+{% endblock %}

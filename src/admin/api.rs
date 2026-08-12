@@ -173,7 +173,10 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/stats", get(crate::admin::pages::shell_page))
         .route("/logs", get(crate::admin::pages::shell_page))
         .route("/filters", get(crate::admin::pages::shell_page))
-        .route("/settings", get(crate::admin::pages::shell_page))
+        .route(
+            "/settings",
+            get(crate::admin::pages::settings_page).post(crate::admin::pages::settings_submit),
+        )
         .route("/account", get(crate::admin::pages::shell_page))
         .route(
             "/login",
@@ -2197,6 +2200,133 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Why a settings save was refused.
+///
+/// The API answers any rejection with a bare 400. The settings page needs to
+/// say *which* field was wrong and why — the operator is looking at a form with
+/// eight of them, and "400" points at none. Same decision, two levels of
+/// detail.
+pub(crate) enum SettingsError {
+    Invalid {
+        field: &'static str,
+        message: String,
+    },
+    Internal,
+}
+
+/// Validate, persist and apply a set of runtime settings.
+///
+/// Shared by `PUT /api/settings` and the settings page's form post. The order
+/// here is the substance: everything is validated before anything is written,
+/// so a malformed entry rejects the whole save rather than leaving half of it
+/// applied, and the runtime handoffs at the end run only once the values are
+/// persisted. A second copy would be a second chance to get that order wrong.
+pub(crate) async fn apply_settings(
+    state: &AppState,
+    settings: &std::collections::HashMap<String, String>,
+) -> Result<(), SettingsError> {
+    // Validate upstream_servers before persisting anything — reject the whole
+    // save on a bad entry so a broken value is never stored.
+    let upstream_servers = match settings.get("upstream_servers") {
+        Some(v) => Some(
+            crate::upstream::forwarder::parse_upstreams(v).map_err(|_e| {
+                SettingsError::Invalid {
+                    field: "upstream_servers",
+                    message:
+                        "Not a valid upstream — use ip:port, tls://host, or https://host/dns-query"
+                            .to_string(),
+                }
+            })?,
+        ),
+        None => None,
+    };
+
+    // Validate block-mode settings before persisting anything.
+    if let Some(mode) = settings.get("block_mode")
+        && mode.trim().parse::<crate::dns::block::BlockMode>().is_err()
+    {
+        return Err(SettingsError::Invalid {
+            field: "block_mode",
+            message: "Unknown block mode".to_string(),
+        });
+    }
+    for key in ["block_custom_ipv4", "block_custom_ipv6"] {
+        if let Some(v) = settings.get(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                let ok = if key == "block_custom_ipv4" {
+                    v.parse::<std::net::Ipv4Addr>().is_ok()
+                } else {
+                    v.parse::<std::net::Ipv6Addr>().is_ok()
+                };
+                if !ok {
+                    return Err(SettingsError::Invalid {
+                        field: key,
+                        message: if key == "block_custom_ipv4" {
+                            "Not a valid IPv4 address".to_string()
+                        } else {
+                            "Not a valid IPv6 address".to_string()
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    for (key, value) in settings {
+        state
+            .db
+            .set_setting(key, value)
+            .await
+            .map_err(|_err| SettingsError::Internal)?;
+    }
+
+    // Apply strategy change immediately if present
+    if let Some(strategy_str) = settings.get("upstream_strategy")
+        && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
+    {
+        state.forwarder.set_strategy(strategy);
+    }
+
+    if let Some(v) = settings.get("dnssec_disabled") {
+        let new_enabled = v.trim() != "true";
+        // Only flush when the policy actually flips. Cached values are
+        // client-ready wire responses that may have been produced while upstream
+        // DO forcing had the opposite state, so a real toggle must not keep
+        // serving stale AD/RRSIG/OPT data. A settings save that re-sends the
+        // unchanged value must not needlessly wipe every client's cache.
+        if state.forwarder.dnssec_enabled() != new_enabled {
+            state.forwarder.set_dnssec_enabled(new_enabled);
+            state.cache.invalidate_all();
+        }
+    }
+
+    if let Some(servers) = upstream_servers {
+        state.forwarder.reconfigure(servers).await;
+    }
+
+    if settings.keys().any(|k| k.starts_with("block_")) {
+        // Merge: prefer the just-submitted value, else the persisted one.
+        async fn merged(
+            db: &crate::db::Database,
+            body: &std::collections::HashMap<String, String>,
+            key: &str,
+        ) -> Option<String> {
+            match body.get(key) {
+                Some(v) => Some(v.clone()),
+                None => db.get_setting(key).await.ok().flatten(),
+            }
+        }
+        let mode = merged(&state.db, settings, "block_mode").await;
+        let v4 = merged(&state.db, settings, "block_custom_ipv4").await;
+        let v6 = merged(&state.db, settings, "block_custom_ipv6").await;
+        let cfg = crate::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref());
+        state.handler.set_block_config(cfg);
+    }
+
+    Ok(())
+}
+
 /// Update one or more runtime settings.
 ///
 /// Requires an operator (session or API key). Only the keys present in the
@@ -2220,89 +2350,15 @@ async fn put_settings(
     _auth: AuthedUser,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    // Validate upstream_servers before persisting anything — reject the whole
-    // save on a bad entry so a broken value is never stored.
-    let upstream_servers = match body.settings.get("upstream_servers") {
-        Some(v) => Some(
-            crate::upstream::forwarder::parse_upstreams(v).map_err(|_e| StatusCode::BAD_REQUEST)?,
-        ),
-        None => None,
-    };
-
-    // Validate block-mode settings before persisting anything.
-    if let Some(mode) = body.settings.get("block_mode")
-        && mode.trim().parse::<crate::dns::block::BlockMode>().is_err()
-    {
-        return Err(StatusCode::BAD_REQUEST);
+    match apply_settings(&state, &body.settings).await {
+        Ok(()) => Ok(StatusCode::OK),
+        // The API has always answered a rejected value with a bare 400, and the
+        // field-level detail `SettingsError` carries is for the form. Widening
+        // this to a body would change a published contract for no caller that
+        // asked.
+        Err(SettingsError::Invalid { .. }) => Err(StatusCode::BAD_REQUEST),
+        Err(SettingsError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
-    for key in ["block_custom_ipv4", "block_custom_ipv6"] {
-        if let Some(v) = body.settings.get(key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                let ok = if key == "block_custom_ipv4" {
-                    v.parse::<std::net::Ipv4Addr>().is_ok()
-                } else {
-                    v.parse::<std::net::Ipv6Addr>().is_ok()
-                };
-                if !ok {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-            }
-        }
-    }
-
-    for (key, value) in &body.settings {
-        state
-            .db
-            .set_setting(key, value)
-            .await
-            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
-
-    // Apply strategy change immediately if present
-    if let Some(strategy_str) = body.settings.get("upstream_strategy")
-        && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
-    {
-        state.forwarder.set_strategy(strategy);
-    }
-
-    if let Some(v) = body.settings.get("dnssec_disabled") {
-        let new_enabled = v.trim() != "true";
-        // Only flush when the policy actually flips. Cached values are
-        // client-ready wire responses that may have been produced while upstream
-        // DO forcing had the opposite state, so a real toggle must not keep
-        // serving stale AD/RRSIG/OPT data. A settings save that re-sends the
-        // unchanged value must not needlessly wipe every client's cache.
-        if state.forwarder.dnssec_enabled() != new_enabled {
-            state.forwarder.set_dnssec_enabled(new_enabled);
-            state.cache.invalidate_all();
-        }
-    }
-
-    if let Some(servers) = upstream_servers {
-        state.forwarder.reconfigure(servers).await;
-    }
-
-    if body.settings.keys().any(|k| k.starts_with("block_")) {
-        // Merge: prefer the just-submitted value, else the persisted one.
-        async fn merged(
-            db: &crate::db::Database,
-            body: &std::collections::HashMap<String, String>,
-            key: &str,
-        ) -> Option<String> {
-            match body.get(key) {
-                Some(v) => Some(v.clone()),
-                None => db.get_setting(key).await.ok().flatten(),
-            }
-        }
-        let mode = merged(&state.db, &body.settings, "block_mode").await;
-        let v4 = merged(&state.db, &body.settings, "block_custom_ipv4").await;
-        let v6 = merged(&state.db, &body.settings, "block_custom_ipv6").await;
-        let cfg = crate::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref());
-        state.handler.set_block_config(cfg);
-    }
-
-    Ok(StatusCode::OK)
 }
 
 // --- Lists ---
