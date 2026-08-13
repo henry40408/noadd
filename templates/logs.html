@@ -1,0 +1,162 @@
+{#
+  The query log.
+
+  Every filter and the page number are in the URL. That is what makes this page
+  work without JavaScript — the filters are a GET form, the pager is two links,
+  and a filtered view can be refreshed, bookmarked and shared. It is also what
+  `app.js` reads back when it takes the page over, so the two agree on what is
+  being shown without either having to tell the other.
+
+  The live tail is the exception, alongside the dashboard's chart: it is an
+  `EventSource`, so its button ships hidden and `app.js` unhides it.
+
+  Row actions and Clear All are POSTs that redirect. A row action carries the
+  view it was invoked from in `next`, so acting on row 40 of page 3 of a
+  filtered view returns to row 40 of page 3 of that filtered view.
+#}
+{% extends "shell.html" %}
+
+{% block page %}
+      <logs-page>
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
+        <div><h2>Query Log</h2><p>DNS query history</p></div>
+        <button class="live-toggle paused js-only" id="log-live-btn" data-testid="logs-live-toggle" title="Stream new queries live as they arrive. Click to toggle." hidden><span class="live-dot"></span> LIVE</button>
+      </div>
+      {%- if shell.logs_cleared %}
+      <div class="rebuild-banner show done" data-testid="logs-cleared">
+        <div class="text"><span class="label">Query log cleared</span></div>
+      </div>
+      {%- endif %}
+      {#
+        A GET form: submitting it puts the filters in the URL, which is where
+        the rest of the page reads them from. `app.js` takes it over to filter
+        without the navigation, but the shape of the result is the same.
+      #}
+      <form method="get" action="/logs" class="filters-row fade-in" id="log-filters">
+        <input type="text" id="log-search" name="q" value="{{ q }}" data-testid="logs-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower).">
+        <select id="log-action" name="action" data-testid="logs-action">
+          <option value=""{% if action == "" %} selected{% endif %}>All</option>
+          <option value="allowed"{% if action == "allowed" %} selected{% endif %}>Allowed</option>
+          <option value="blocked"{% if action == "blocked" %} selected{% endif %}>Blocked</option>
+        </select>
+        <select id="log-type" name="type" data-testid="logs-type">
+          <option value=""{% if query_type == "" %} selected{% endif %}>All Types</option>
+          {%- for opt in query_types %}
+          <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+          {%- endfor %}
+        </select>
+        <select id="log-token" name="token" data-testid="logs-token">
+          <option value=""{% if token == "" %} selected{% endif %}>All Tokens</option>
+          {%- for opt in tokens %}
+          <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+          {%- endfor %}
+        </select>
+        {# Removed by app.js, which filters as the controls change. #}
+        <button type="submit" class="btn btn-sm nojs-only" data-testid="logs-filter-apply">Filter</button>
+        {#
+          Clear All posts, and the filters GET, so they cannot be the same form
+          — and a form cannot nest inside another. The `form` attribute points
+          this button at the empty POST form below, which keeps it on this row
+          where it has always been.
+        #}
+        <button type="submit" form="clear-logs-form" class="btn btn-danger btn-sm" id="clear-logs" data-testid="logs-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Clear All</button>
+      </form>
+      <form method="post" action="/logs/clear" id="clear-logs-form" hidden></form>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
+          <th>Time</th><th>Status</th><th>Query</th><th>Type</th><th>Client</th><th></th><th>Source</th><th>ms</th>
+        </tr></thead><tbody id="log-body">
+          {%- if rows.is_empty() %}
+          <tr><td colspan="8"{% if !filtered %} style="padding:0"{% else %} style="text-align:center;color:var(--text-dim)"{% endif %}>
+            {%- if filtered %}No logs found
+            {%- else %}
+            <div data-testid="logs-empty-state" style="text-align:center;color:var(--text-secondary);padding:24px 12px">
+              <div style="color:var(--text-primary);font-weight:600;margin-bottom:6px">No DNS queries logged yet</div>
+              <div style="font-size:0.9rem">Once a device uses noadd as its DNS resolver, its queries will appear here.</div>
+            </div>
+            {%- endif %}
+          </td></tr>
+          {%- else %}
+          {%- for row in rows %}
+          <tr data-testid="log-row">
+            <td><span class="timeago" data-ts="{{ row.timestamp_ms }}">{{ row.time_text }}</span></td>
+            <td style="text-align:center"><span class="st {% if row.blocked %}st-block{% else %}st-ok{% endif %}" title="{% if row.blocked %}blocked{% else %}allowed{% endif %}">{% if row.blocked %}✖{% else %}✔{% endif %}</span></td>
+            <td>
+              <div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="{{ row.domain }}">{{ row.domain }}</span>{% if row.dnssec %}<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>{% endif %}</div>
+              {%- if row.result != "" %}
+              <div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ row.result }}">→ {{ row.result }}</div>
+              {%- endif %}
+            </td>
+            <td class="mono">{{ row.query_type }}</td>
+            <td class="mono">{{ row.client_ip }}{% if row.doh_token != "" %}<br><span style="color:var(--accent);font-size:0.85rem">{{ row.doh_token }}</span>{% endif %}</td>
+            <td>
+              <form method="post" action="/logs/rules" class="inline-form">
+                <input type="hidden" name="rule" value="{{ row.action_rule }}">
+                <input type="hidden" name="next" value="{{ current_href }}">
+                <button type="submit" class="btn btn-sm log-action {% if row.blocked %}btn-allow{% else %}btn-danger{% endif %}" data-domain="{{ row.domain }}" data-blocked="{{ row.blocked }}">{{ row.action_label }}</button>
+              </form>
+            </td>
+            <td>{% if row.cached %}<span class="badge badge-cached">cached</span>{% else if row.upstream != "" %}<span class="mono" style="font-size:0.9rem">{{ row.upstream }}</span>{% else %}<span class="text-dim">-</span>{% endif %}</td>
+            <td class="mono">{{ row.response_ms }}</td>
+          </tr>
+          {%- endfor %}
+          {%- endif %}
+        </tbody></table></div>
+        <div id="log-cards" class="show-mobile">
+          {%- if rows.is_empty() %}
+          {%- if filtered %}
+          <p style="color:var(--text-dim);text-align:center;padding:16px">No logs found</p>
+          {%- else %}
+          <div style="text-align:center;color:var(--text-secondary);padding:24px 12px">
+            <div style="color:var(--text-primary);font-weight:600;margin-bottom:6px">No DNS queries logged yet</div>
+            <div style="font-size:0.9rem">Once a device uses noadd as its DNS resolver, its queries will appear here.</div>
+          </div>
+          {%- endif %}
+          {%- else %}
+          {%- for row in rows %}
+          <div class="log-card">
+            <div class="log-card-row1">
+              <span class="st {% if row.blocked %}st-block{% else %}st-ok{% endif %}" title="{% if row.blocked %}blocked{% else %}allowed{% endif %}" style="flex:0 0 auto">{% if row.blocked %}✖{% else %}✔{% endif %}</span>
+              <span class="log-card-domain" title="{{ row.domain }}">{{ row.domain }}</span>
+              {%- if row.dnssec %}<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>{% endif %}
+              <form method="post" action="/logs/rules" class="inline-form" style="flex-shrink:0">
+                <input type="hidden" name="rule" value="{{ row.action_rule }}">
+                <input type="hidden" name="next" value="{{ current_href }}">
+                <button type="submit" class="btn btn-sm log-action {% if row.blocked %}btn-allow{% else %}btn-danger{% endif %}" data-domain="{{ row.domain }}" data-blocked="{{ row.blocked }}">{{ row.action_label }}</button>
+              </form>
+            </div>
+            {%- if row.result != "" %}
+            <div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ row.result }}">→ {{ row.result }}</div>
+            {%- endif %}
+            <div class="log-card-row2">
+              <span class="lc-time"><span class="timeago" data-ts="{{ row.timestamp_ms }}">{{ row.time_text }}</span></span>
+              <span class="lc-type">{{ row.query_type }}</span>
+              <span class="lc-client text-secondary">{{ row.client_ip }}</span>
+              {%- if row.cached %}<span class="lc-cached">cached</span>{% else if row.upstream != "" %}<span class="lc-up">{{ row.upstream }}</span>{% endif %}
+              {%- if row.doh_token != "" %}<span class="lc-token">{{ row.doh_token }}</span>{% endif %}
+              <span class="lc-ms">{{ row.response_ms }}ms</span>
+            </div>
+          </div>
+          {%- endfor %}
+          {%- endif %}
+        </div>
+        {#
+          Links, not buttons: paging is a different view of the same data, and a
+          view you can bookmark and go Back out of is what the URL is for.
+        #}
+        <div class="pagination" id="log-pagination">
+          {%- if has_prev %}
+          <a class="btn btn-sm" id="pg-prev" data-testid="logs-prev" href="{{ prev_href }}">Prev</a>
+          {%- else %}
+          <span class="btn btn-sm" id="pg-prev" aria-disabled="true" style="opacity:.45">Prev</span>
+          {%- endif %}
+          <span>Page {{ page }} / {{ total_pages }}{% if total != "0" %} · {{ total }} queries{% endif %}</span>
+          {%- if has_next %}
+          <a class="btn btn-sm" id="pg-next" data-testid="logs-next" href="{{ next_href }}">Next</a>
+          {%- else %}
+          <span class="btn btn-sm" id="pg-next" aria-disabled="true" style="opacity:.45">Next</span>
+          {%- endif %}
+        </div>
+      </div>
+      </logs-page>
+{% endblock %}

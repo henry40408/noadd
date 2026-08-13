@@ -163,6 +163,20 @@ export default defineConfig({
       // interactive the instant it parses, so the card fade-in is still sliding
       // controls upward when the first click lands and Playwright rightly
       // refuses to click a moving target.
+      // The query log with scripting off: filtering and paging both live in the
+      // URL, which is the claim that page makes. Its own instance (14108/15108)
+      // because it seeds a hundred-odd rows and then clears the whole log.
+      name: 'logs-no-js',
+      testDir: 'specs',
+      testMatch: /logs-no-js\.spec\.js$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        javaScriptEnabled: false,
+        reducedMotion: 'reduce',
+        viewport: { width: 1024, height: 600 },
+      },
+    },
+    {
       name: 'filters-no-js',
       testDir: 'specs',
       testMatch: /filters-no-js\.spec\.js$/,

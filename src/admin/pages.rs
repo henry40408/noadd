@@ -171,6 +171,8 @@ pub struct ShellData {
     /// Read by the account page. Separate from `account_saved` because signing
     /// devices out is worth confirming in its own words.
     sessions_revoked: bool,
+    /// Read by the query log: the history was emptied.
+    logs_cleared: bool,
 }
 
 impl ShellData {
@@ -204,6 +206,7 @@ impl ShellData {
                 lists_updating: flash == Some(Flash::ListsUpdating),
                 account_saved: flash == Some(Flash::AccountSaved),
                 sessions_revoked: flash == Some(Flash::SessionsRevoked),
+                logs_cleared: flash == Some(Flash::LogsCleared),
             },
             jar,
         )
@@ -448,6 +451,82 @@ pub struct DashboardTemplate {
     top_upstreams: Vec<TopRowView>,
 }
 
+/// One `<option>`, with whether it is the selected one already decided.
+///
+/// Worked out here rather than compared in the template: askama would be
+/// comparing a `String` against a reference to a `&str`, and the workarounds
+/// for that are all worse than one extra field.
+pub struct OptionView {
+    value: String,
+    selected: bool,
+}
+
+/// One logged query, formatted the way the table shows it.
+pub struct LogRowView {
+    /// Milliseconds, matching `query_logs.timestamp` and what the client's
+    /// per-second ticker reads out of `data-ts`.
+    timestamp_ms: i64,
+    time_text: String,
+    blocked: bool,
+    domain: String,
+    /// The answer, when there was one worth showing. Empty otherwise.
+    result: String,
+    dnssec: bool,
+    query_type: String,
+    client_ip: String,
+    doh_token: String,
+    cached: bool,
+    upstream: String,
+    response_ms: i64,
+    /// The rule this row's one-click action would add — an allow rule for a
+    /// blocked query, a block rule for an allowed one.
+    action_rule: String,
+    action_label: String,
+}
+
+/// The query log.
+///
+/// Every filter and the page number live in the URL, which is what makes this
+/// page work without JavaScript: the filters are a GET form, the pager is two
+/// links, and a filtered view can be refreshed, bookmarked and shared.
+///
+/// The live tail is the exception, alongside the dashboard's chart. It is an
+/// `EventSource`, so the button that starts it ships hidden.
+#[derive(Template, WebTemplate)]
+#[template(path = "logs.html")]
+pub struct LogsTemplate {
+    shell: ShellData,
+    rows: Vec<LogRowView>,
+    /// The `DoH` tokens that exist, for the filter's dropdown.
+    tokens: Vec<OptionView>,
+    /// The record types the filter offers. A fixed list rather than the ones
+    /// present in the log: an operator filtering for `PTR` and finding it
+    /// missing from the dropdown learns nothing except that the dropdown is
+    /// unreliable.
+    query_types: Vec<OptionView>,
+
+    /// The filters as submitted, so the form comes back showing what is applied.
+    q: String,
+    action: String,
+    query_type: String,
+    token: String,
+
+    page: i64,
+    total_pages: i64,
+    total: String,
+    has_prev: bool,
+    has_next: bool,
+    /// Complete query strings for the pager, so paging keeps the filters.
+    prev_href: String,
+    next_href: String,
+    /// The current view as a path, which a row action carries so it can return
+    /// the operator to exactly the page they acted from.
+    current_href: String,
+    /// Whether any filter is applied, which decides whether an empty table
+    /// means "nothing matched" or "nothing has happened yet".
+    filtered: bool,
+}
+
 /// The shell around a page whose body is still painted by `app.js`.
 ///
 /// Every page still using this is one P3 has not reached yet; a page with a
@@ -531,6 +610,8 @@ pub enum Flash {
     AccountSaved,
     /// One or more sessions were signed out.
     SessionsRevoked,
+    /// The query log was emptied.
+    LogsCleared,
 }
 
 impl Flash {
@@ -544,6 +625,7 @@ impl Flash {
             Self::ListsUpdating => "lists_updating",
             Self::AccountSaved => "account_saved",
             Self::SessionsRevoked => "sessions_revoked",
+            Self::LogsCleared => "logs_cleared",
         }
     }
 
@@ -557,6 +639,7 @@ impl Flash {
             "lists_updating" => Some(Self::ListsUpdating),
             "account_saved" => Some(Self::AccountSaved),
             "sessions_revoked" => Some(Self::SessionsRevoked),
+            "logs_cleared" => Some(Self::LogsCleared),
             // An unrecognised value is a stale cookie from an older build, or
             // something hand-written. Either way there is no notice to show.
             _ => None,
@@ -893,6 +976,258 @@ pub async fn setup_submit(
         // them to create an account that is already there.
         Err(_) => Redirect::to("/login").into_response(),
     }
+}
+
+// --- Query log ---
+
+/// How many rows a page of the log holds. Matches what `app.js` asks for, so
+/// paging means the same thing whichever half of the UI is doing it.
+const LOGS_PAGE_SIZE: i64 = 50;
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    /// Domain prefix, or a `*pattern*` for a substring match.
+    q: Option<String>,
+    /// `""`, `"allowed"` or `"blocked"`.
+    action: Option<String>,
+    /// A DNS record type, e.g. `A`.
+    #[serde(rename = "type")]
+    query_type: Option<String>,
+    /// A `DoH` URL token.
+    token: Option<String>,
+    /// 1-based. Parsed leniently — a hand-edited value lands on page one rather
+    /// than 400-ing a page that otherwise renders.
+    page: Option<String>,
+}
+
+impl LogsQuery {
+    /// The filters, trimmed, with empty strings treated as "not applied".
+    fn applied(&self) -> (String, String, String, String) {
+        let clean =
+            |value: Option<&String>| value.map(|v| v.trim().to_string()).unwrap_or_default();
+        (
+            clean(self.q.as_ref()),
+            clean(self.action.as_ref()),
+            clean(self.query_type.as_ref()),
+            clean(self.token.as_ref()),
+        )
+    }
+}
+
+/// Rebuild the page's query string, with `page` replaced.
+///
+/// The pager has to carry every filter or paging would silently drop them,
+/// which is the sort of thing that looks like the filter stopped working.
+fn logs_query_string(q: &str, action: &str, query_type: &str, token: &str, page: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |key: &str, value: &str| {
+        if !value.is_empty() {
+            parts.push(format!("{key}={}", encode_query_value(value)));
+        }
+    };
+    push("q", q);
+    push("action", action);
+    push("type", query_type);
+    push("token", token);
+    if page > 1 {
+        parts.push(format!("page={page}"));
+    }
+    parts.join("&")
+}
+
+/// `/logs`, with a query string when there is one.
+fn logs_href(query: &str) -> String {
+    if query.is_empty() {
+        "/logs".to_string()
+    } else {
+        format!("/logs?{query}")
+    }
+}
+
+pub async fn logs_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (q, action, query_type, token) = query.applied();
+    let page = query
+        .page
+        .as_deref()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    let blocked = match action.as_str() {
+        "blocked" => Some(true),
+        "allowed" => Some(false),
+        _ => None,
+    };
+    let as_filter = |value: &str| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    };
+    let search = as_filter(&q);
+    let type_filter = as_filter(&query_type);
+    let token_filter = as_filter(&token);
+
+    let offset = (page - 1) * LOGS_PAGE_SIZE;
+    // Both reads take the same filters; running them together keeps a filtered
+    // page from costing two round trips to the database in sequence.
+    let (entries, total) = tokio::join!(
+        state.db.query_logs(
+            LOGS_PAGE_SIZE,
+            offset,
+            search.as_deref(),
+            blocked,
+            token_filter.as_deref(),
+            type_filter.as_deref(),
+        ),
+        state.db.count_logs(
+            search.as_deref(),
+            blocked,
+            token_filter.as_deref(),
+            type_filter.as_deref(),
+        ),
+    );
+    let entries = entries.unwrap_or_default();
+    let total = total.unwrap_or_default();
+
+    let rows = entries
+        .into_iter()
+        .map(|entry| {
+            let blocked = entry.blocked;
+            let domain = entry.domain;
+            LogRowView {
+                // The column is milliseconds; `time_ago` counts seconds.
+                time_text: time_ago(entry.timestamp / 1000),
+                timestamp_ms: entry.timestamp,
+                blocked,
+                // A blocked query is already blocked, so its one-click action
+                // is the allow rule, and vice versa.
+                action_rule: if blocked {
+                    format!("@@||{domain}^")
+                } else {
+                    format!("||{domain}^")
+                },
+                action_label: if blocked { "Allow" } else { "Block" }.to_string(),
+                domain,
+                result: entry.result.unwrap_or_default(),
+                dnssec: entry.authenticated_data,
+                query_type: entry.query_type,
+                client_ip: entry.client_ip,
+                doh_token: entry.doh_token.unwrap_or_default(),
+                cached: entry.cached,
+                upstream: entry.upstream.unwrap_or_default(),
+                response_ms: entry.response_ms,
+            }
+        })
+        .collect();
+
+    let tokens = state
+        .db
+        .get_doh_tokens()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| OptionView {
+            selected: t.token == token,
+            value: t.token,
+        })
+        .collect();
+    let query_types = LOG_QUERY_TYPES
+        .iter()
+        .map(|t| OptionView {
+            value: (*t).to_string(),
+            selected: query_type == *t,
+        })
+        .collect();
+
+    // `div_ceil` on an integer is still unstable at this crate's MSRV.
+    let total_pages = ((total + LOGS_PAGE_SIZE - 1) / LOGS_PAGE_SIZE).max(1);
+    let href_for =
+        |page: i64| logs_href(&logs_query_string(&q, &action, &query_type, &token, page));
+
+    (
+        jar,
+        LogsTemplate {
+            shell,
+            rows,
+            tokens,
+            query_types,
+            filtered: !(q.is_empty()
+                && action.is_empty()
+                && query_type.is_empty()
+                && token.is_empty()),
+            page,
+            total_pages,
+            total: thousands(total),
+            has_prev: page > 1,
+            has_next: page < total_pages,
+            prev_href: href_for(page - 1),
+            next_href: href_for(page + 1),
+            current_href: href_for(page),
+            q,
+            action,
+            query_type,
+            token,
+        },
+    )
+}
+
+/// The record types the log's filter offers.
+const LOG_QUERY_TYPES: &[&str] = &[
+    "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV", "CAA", "HTTPS",
+];
+
+#[derive(Deserialize)]
+pub struct LogRuleForm {
+    rule: String,
+    /// The view to return to, so acting on a row does not throw away the
+    /// filters and the page the operator was looking at.
+    next: Option<String>,
+}
+
+/// `POST /logs/rules`.
+///
+/// The one-click Allow/Block on a row. It goes through `create_custom_rule`,
+/// the same path `POST /api/rules` and the filters page use, so a rule added
+/// from here is parsed, de-duplicated and audited identically.
+pub async fn logs_rule_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<LogRuleForm>,
+) -> Response {
+    let _ = create_custom_rule(&state, &form.rule).await;
+    let target = form
+        .next
+        .as_deref()
+        .and_then(safe_next)
+        .unwrap_or("/logs")
+        .to_string();
+    (set_flash(jar, Flash::FiltersSaved), Redirect::to(&target)).into_response()
+}
+
+/// `POST /logs/clear`.
+///
+/// Answers on an unfiltered first page whatever view it was invoked from:
+/// every filter the operator had applied now matches nothing, and a page
+/// reading "No logs found" would look like the filter broke rather than like
+/// the log being empty.
+pub async fn logs_clear_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Response {
+    let _ = state.db.delete_all_logs().await;
+    (set_flash(jar, Flash::LogsCleared), Redirect::to("/logs")).into_response()
 }
 
 // --- Dashboard ---
