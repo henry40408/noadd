@@ -4765,3 +4765,468 @@ async fn the_wizard_reports_why_a_password_was_rejected() {
         "the rejection reason did not reach the form"
     );
 }
+
+// --- Filters page (server-rendered) ---
+
+/// A form post to a path built at runtime, which `authed_form`'s `&'static str`
+/// body cannot express.
+fn authed_form_owned(uri: &str, token: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("cookie", format!("session={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn body_text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+async fn filters_html(app: &axum::Router, token: &str, query: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(authed("GET", &format!("/filters{query}"), token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_text(res).await
+}
+
+/// The id of the first list on the page, read out of the markup the page itself
+/// rendered — the same value a browser would post back.
+fn first_list_id(html: &str) -> i64 {
+    // Off the row's own toggle rather than a form action: `/filters/lists/update`
+    // and `/filters/lists/enable-recommended` are also list actions, and both
+    // appear above the table.
+    let marker = r#"data-testid="filter-list-toggle" data-id=""#;
+    let start = html.find(marker).expect("no list row on the page") + marker.len();
+    let rest = &html[start..];
+    let end = rest.find('"').expect("malformed toggle");
+    rest[..end].parse().expect("list id was not a number")
+}
+
+/// Add one list through the form, and hand back its id.
+async fn add_list(app: &axum::Router, token: &str, name: &str, url: &str) -> i64 {
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            "/filters/lists",
+            token,
+            format!("name={name}&url={url}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER, "adding a list failed");
+    first_list_id(&filters_html(app, token, "").await)
+}
+
+/// The page arrives with the lists and rules already in it — the whole point of
+/// rendering it on the server is that nothing has to be fetched to see them.
+#[tokio::test]
+async fn the_filters_page_renders_lists_and_rules() {
+    let (app, token) = setup().await;
+    add_list(&app, &token, "E2E+List", "https://example.com/l.txt").await;
+    app.clone()
+        .oneshot(authed_form(
+            "/filters/rules",
+            &token,
+            "rule=%7C%7Crendered.example.com%5E",
+        ))
+        .await
+        .unwrap();
+
+    let html = filters_html(&app, &token, "").await;
+    assert!(
+        html.contains(r#"data-name="E2E List""#),
+        "the list was not rendered into the table"
+    );
+    assert!(
+        html.contains("rendered.example.com") && html.contains(r#"data-type="block""#),
+        "the rule was not rendered"
+    );
+    // The client mounts a page component only into an empty `#page-content`;
+    // shipping the element is what makes it upgrade in place instead.
+    assert!(html.contains("<filters-page>"), "the body was not wrapped");
+}
+
+/// The domain test is a GET, so its verdict is in the URL: refreshable, and
+/// answerable without JavaScript.
+#[tokio::test]
+async fn a_domain_test_is_answered_in_the_page() {
+    let (app, token) = setup().await;
+    app.clone()
+        .oneshot(authed_form(
+            "/filters/rules",
+            &token,
+            "rule=%7C%7Ctested.example.com%5E",
+        ))
+        .await
+        .unwrap();
+    // The rule reaches the engine through a background rebuild.
+    for _ in 0..50 {
+        let html = filters_html(&app, &token, "?test=tested.example.com").await;
+        if html.contains("badge-blocked") {
+            assert!(
+                html.contains(r#"value="tested.example.com""#),
+                "the tested domain was not kept in the field"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the domain test never reported the rule");
+}
+
+/// An untested page renders no verdict at all — an empty box, not "allowed".
+#[tokio::test]
+async fn a_page_with_no_test_renders_no_verdict() {
+    let (app, token) = setup().await;
+    let html = filters_html(&app, &token, "").await;
+    assert!(
+        !html.contains("badge-allowed") && !html.contains("badge-blocked"),
+        "a verdict was rendered for a domain nobody tested"
+    );
+}
+
+/// Adding a list redirects rather than rendering, so a refresh cannot add it
+/// twice.
+#[tokio::test]
+async fn adding_a_list_through_the_form_redirects_and_persists() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/filters/lists",
+            &token,
+            "name=Added+By+Form&url=https://example.com/added.txt",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/filters")
+    );
+
+    let html = filters_html(&app, &token, "").await;
+    assert!(html.contains(r#"data-name="Added By Form""#));
+}
+
+/// A rejected list re-renders with what was typed and writes nothing. Retyping
+/// the field that was fine is the failure this avoids.
+#[tokio::test]
+async fn a_rejected_list_keeps_what_was_typed() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/filters/lists",
+            &token,
+            "name=Bad+Scheme&url=ftp://example.com/l.txt",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let html = body_text(res).await;
+    assert!(
+        html.contains("must start with http"),
+        "the reason did not reach the form"
+    );
+    assert!(
+        html.contains(r#"value="Bad Scheme""#)
+            && html.contains(r#"value="ftp://example.com/l.txt""#),
+        "the operator's input was discarded"
+    );
+    // The rejected list must not be in the table it re-rendered.
+    assert!(
+        !html.contains(r#"data-name="Bad Scheme""#),
+        "a rejected list was created anyway"
+    );
+}
+
+/// The JSON endpoint shares that validation, so the two cannot drift into
+/// disagreeing about what a usable list is.
+#[tokio::test]
+async fn the_json_endpoint_refuses_the_same_list_the_form_does() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/lists",
+            &token,
+            Some(r#"{"name":"","url":"https://example.com/l.txt"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A checkbox posts nothing when it is unticked, which is the only signal that
+/// a list is being turned off — so both directions are pinned here.
+#[tokio::test]
+async fn toggling_a_list_through_the_form_persists_both_ways() {
+    let (app, token) = setup().await;
+    let id = add_list(&app, &token, "Toggled", "https://example.com/t.txt").await;
+
+    let off = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/toggle"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(off.status(), StatusCode::SEE_OTHER);
+    let html = filters_html(&app, &token, "").await;
+    assert!(!html.contains("checked"), "the list stayed enabled");
+    // Nothing is enabled now, which the page has to say out loud.
+    assert!(
+        !html.contains(r#"data-testid="filters-all-disabled-warning" style="display:none""#),
+        "the all-disabled warning stayed hidden"
+    );
+
+    let on = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/toggle"),
+            &token,
+            "enabled=on".to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(on.status(), StatusCode::SEE_OTHER);
+    assert!(
+        filters_html(&app, &token, "").await.contains("checked"),
+        "the list did not come back on"
+    );
+}
+
+/// Turning everything off and asking for the recommendation back is the escape
+/// hatch from a noadd that looks healthy and blocks nothing.
+#[tokio::test]
+async fn enable_recommended_turns_a_list_back_on() {
+    let (app, token) = setup().await;
+    let id = add_list(&app, &token, "Only+List", "https://example.com/o.txt").await;
+    app.clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/toggle"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(authed_form("/filters/lists/enable-recommended", &token, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        filters_html(&app, &token, "").await.contains("checked"),
+        "nothing was enabled"
+    );
+}
+
+/// `?edit=` expands a row into a form filled from storage — not from the URL,
+/// which is what stops a link pre-filling the form with values it carried.
+#[tokio::test]
+async fn expanding_a_list_for_editing_fills_the_form_from_storage() {
+    let (app, token) = setup().await;
+    let id = add_list(&app, &token, "Editable", "https://example.com/e.txt").await;
+
+    let html = filters_html(&app, &token, &format!("?edit={id}")).await;
+    assert!(
+        html.contains(r#"data-testid="filter-list-edit-row""#),
+        "the row did not expand"
+    );
+    assert!(
+        html.contains(r#"value="Editable""#)
+            && html.contains(r#"value="https://example.com/e.txt""#),
+        "the edit form was not filled from storage"
+    );
+
+    // A nonsense id expands nothing rather than failing the whole page.
+    let html = filters_html(&app, &token, "?edit=not-a-number").await;
+    assert_eq!(html.matches("filter-list-edit-row").count(), 0);
+}
+
+/// A rejected edit keeps the row expanded with the submitted values, which is
+/// the only way the operator gets to correct the field that was wrong.
+#[tokio::test]
+async fn editing_a_list_persists_and_a_rejection_keeps_the_row_open() {
+    let (app, token) = setup().await;
+    let id = add_list(&app, &token, "Before", "https://example.com/b.txt").await;
+
+    let ok = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/edit"),
+            &token,
+            "name=After&url=https://example.com/a.txt".to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER);
+    assert!(
+        filters_html(&app, &token, "")
+            .await
+            .contains(r#"data-name="After""#),
+        "the edit did not persist"
+    );
+
+    let bad = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/edit"),
+            &token,
+            "name=&url=https://example.com/a.txt".to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let html = body_text(bad).await;
+    assert!(
+        html.contains(r#"data-testid="filter-list-edit-row""#) && html.contains("Name is required"),
+        "the rejected edit did not re-render the open row"
+    );
+}
+
+/// Deleting a list is a POST — a GET would be followed by any link prefetcher
+/// that happened across it.
+#[tokio::test]
+async fn deleting_a_list_through_the_form_persists() {
+    let (app, token) = setup().await;
+    let id = add_list(&app, &token, "Doomed", "https://example.com/d.txt").await;
+
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/delete"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !filters_html(&app, &token, "")
+            .await
+            .contains(r#"data-name="Doomed""#),
+        "the list survived its deletion"
+    );
+}
+
+/// Adding and removing a custom rule, both through the form.
+#[tokio::test]
+async fn rules_can_be_added_and_deleted_through_the_form() {
+    let (app, token) = setup().await;
+    let added = app
+        .clone()
+        .oneshot(authed_form(
+            "/filters/rules",
+            &token,
+            "rule=%40%40%7C%7Cformrule.example.com%5E",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(added.status(), StatusCode::SEE_OTHER);
+
+    let html = filters_html(&app, &token, "").await;
+    assert!(
+        html.contains("formrule.example.com") && html.contains(r#"data-type="allow""#),
+        "the allow rule was not stored"
+    );
+
+    let marker = r#"action="/filters/rules/"#;
+    let start = html.find(marker).expect("no rule row") + marker.len();
+    let rest = &html[start..];
+    let id: i64 = rest[..rest.find('/').unwrap()].parse().unwrap();
+
+    let deleted = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/rules/{id}/delete"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !filters_html(&app, &token, "")
+            .await
+            .contains("formrule.example.com"),
+        "the rule survived its deletion"
+    );
+}
+
+/// Text that is not a rule re-renders with it still in the field, and says so.
+#[tokio::test]
+async fn an_unparseable_rule_re_renders_with_what_was_typed() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form("/filters/rules", &token, "rule=%20%20"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let html = body_text(res).await;
+    assert!(
+        html.contains("Not a rule noadd understands"),
+        "the reason did not reach the form"
+    );
+    // The navigation still knows which page this is, even though the POST
+    // arrived on `/filters/rules`.
+    assert!(
+        html.contains(r#"class="nav-item active" href="/filters""#),
+        "the rejected post rendered with no active nav item"
+    );
+}
+
+/// Every filters form is behind the session, like the page itself.
+#[tokio::test]
+async fn the_filters_forms_refuse_an_anonymous_browser() {
+    let (app, _token) = setup().await;
+    for path in [
+        "/filters/lists",
+        "/filters/lists/update",
+        "/filters/lists/enable-recommended",
+        "/filters/lists/1/toggle",
+        "/filters/lists/1/edit",
+        "/filters/lists/1/delete",
+        "/filters/rules",
+        "/filters/rules/1/delete",
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name=x&url=https://example.com/x.txt&rule=x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::SEE_OTHER,
+            "{path} answered an anonymous browser"
+        );
+        assert!(
+            res.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .starts_with("/login"),
+            "{path} did not send the browser to sign in"
+        );
+    }
+}

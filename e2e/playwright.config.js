@@ -153,5 +153,27 @@ export default defineConfig({
       testMatch: /reauth-prompt\.spec\.js$/,
       use: { ...devices['Desktop Chrome'] },
     },
+    {
+      // The filters page with scripting off, which is the claim the whole
+      // server-rendered body makes. Its own noadd instance (dedicated ports
+      // 14107/15107) because it adds, toggles and deletes the same lists and
+      // rules the shared @app scenarios assert on.
+      // `reducedMotion` is not incidental: with scripting off the page is
+      // interactive the instant it parses, so the card fade-in is still sliding
+      // controls upward when the first click lands and Playwright rightly
+      // refuses to click a moving target.
+      name: 'filters-no-js',
+      testDir: 'specs',
+      testMatch: /filters-no-js\.spec\.js$/,
+      // The viewport is pinned, and pinned short: the fixed status bar overlaps
+      // whatever sits at the foot of a small window, and a suite that only ever
+      // ran tall would keep that to itself until some other machine ran it.
+      use: {
+        ...devices['Desktop Chrome'],
+        javaScriptEnabled: false,
+        reducedMotion: 'reduce',
+        viewport: { width: 1024, height: 600 },
+      },
+    },
   ],
 });

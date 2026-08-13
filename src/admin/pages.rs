@@ -33,9 +33,10 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    AppState, AuthedUser, CLEAR_SITE_DATA, LoginError, MIN_PASSWORD_LENGTH, PasswordChangeError,
-    SettingsError, SetupError, apply_settings, change_password_for_session, create_first_operator,
-    end_session, needs_setup, start_password_session,
+    AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginError, MIN_PASSWORD_LENGTH,
+    PasswordChangeError, RuleError, SettingsError, SetupError, apply_settings,
+    change_password_for_session, create_custom_rule, create_filter_list, create_first_operator,
+    end_session, modify_filter_list, needs_setup, start_password_session,
 };
 
 // --- Templates ---
@@ -156,6 +157,14 @@ pub struct ShellData {
     settings_saved: bool,
     /// Read by the account page, for the same reason as `settings_saved`.
     password_changed: bool,
+    /// Read by the filters page. Every change there — a list toggled, added,
+    /// edited or removed, a rule added or deleted — kicks off a rebuild, so one
+    /// identifier covers them all; what the operator needs to know is the same
+    /// sentence either way.
+    filters_saved: bool,
+    /// Read by the filters page. Separate from `filters_saved` because
+    /// downloading every list is the one action whose effect is not immediate.
+    lists_updating: bool,
 }
 
 impl ShellData {
@@ -175,6 +184,8 @@ impl ShellData {
                 proxy_logout_notice: flash == Some(Flash::ProxyLogout),
                 settings_saved: flash == Some(Flash::SettingsSaved),
                 password_changed: flash == Some(Flash::PasswordChanged),
+                filters_saved: flash == Some(Flash::FiltersSaved),
+                lists_updating: flash == Some(Flash::ListsUpdating),
             },
             jar,
         )
@@ -220,6 +231,75 @@ pub struct AccountTemplate {
     min_password_length: usize,
     error: Option<String>,
     password_changed: bool,
+}
+
+/// One filter list, formatted the way the page shows it.
+///
+/// The numbers and the relative time are rendered here rather than in the
+/// template because the same shapes have to come back out of `app.js` when it
+/// re-draws a row after a change, and a formatting rule that lives in two
+/// languages drifts.
+pub struct FilterListView {
+    id: i64,
+    name: String,
+    url: String,
+    enabled: bool,
+    /// Thousands-separated, for the desktop table.
+    rule_count: String,
+    /// Abbreviated (`12.3K`), for the mobile card where the column is narrow.
+    rule_count_compact: String,
+    /// `"never"`, or how long ago the list was last downloaded.
+    last_updated_text: String,
+    /// The raw timestamp `app.js` re-derives its own relative text from.
+    last_updated: i64,
+}
+
+/// One custom rule, as the page shows it.
+pub struct CustomRuleView {
+    id: i64,
+    rule: String,
+    rule_type: String,
+    allow: bool,
+}
+
+/// The filters page: domain test, filter lists, and custom rules.
+///
+/// Everything here works without JavaScript, which is what the shape of this
+/// struct is about. The domain test is a GET so its verdict is in the URL and
+/// survives a refresh; every mutation is a POST that redirects. `edit_id` is
+/// how a row expands into an edit form on the server — with JavaScript that
+/// same button opens the dialog instead, and the link is never followed.
+#[derive(Template, WebTemplate)]
+#[template(path = "filters.html")]
+pub struct FiltersTemplate {
+    shell: ShellData,
+    lists: Vec<FilterListView>,
+    rules: Vec<CustomRuleView>,
+    /// Every list is off, so nothing is being blocked at all. Worth saying
+    /// loudly — it is the one state where noadd looks healthy and does nothing.
+    all_disabled: bool,
+    test_domain: String,
+    /// Whether a domain was tested at all. The verdict is flat rather than an
+    /// `Option<…>` so the template needs nothing but `{% if %}`.
+    tested: bool,
+    verdict_blocked: bool,
+    /// The rule that decided it. Empty when the domain is allowed by default —
+    /// nothing matched, which is not the same as an allow rule matching.
+    verdict_rule: String,
+    /// The list the deciding rule came from. Only set for a block.
+    verdict_list: String,
+    /// The list whose row is expanded into an edit form; `0` for none.
+    edit_id: i64,
+    edit_name: String,
+    edit_url: String,
+    edit_error: String,
+    list_name: String,
+    list_url: String,
+    /// `"name"` or `"url"`, so the message lands next to the input it is about.
+    list_error_field: &'static str,
+    list_error: String,
+    rule_text: String,
+    rule_error: String,
 }
 
 /// The shell around a page whose body is still painted by `app.js`.
@@ -297,6 +377,10 @@ pub enum Flash {
     SettingsSaved,
     /// The operator changed their own password.
     PasswordChanged,
+    /// A filter list or custom rule changed; the engine is rebuilding.
+    FiltersSaved,
+    /// Every list is being downloaded again.
+    ListsUpdating,
 }
 
 impl Flash {
@@ -306,6 +390,8 @@ impl Flash {
             Self::ProxyLogout => "proxy_logout",
             Self::SettingsSaved => "settings_saved",
             Self::PasswordChanged => "password_changed",
+            Self::FiltersSaved => "filters_saved",
+            Self::ListsUpdating => "lists_updating",
         }
     }
 
@@ -315,6 +401,8 @@ impl Flash {
             "proxy_logout" => Some(Self::ProxyLogout),
             "settings_saved" => Some(Self::SettingsSaved),
             "password_changed" => Some(Self::PasswordChanged),
+            "filters_saved" => Some(Self::FiltersSaved),
+            "lists_updating" => Some(Self::ListsUpdating),
             // An unrecognised value is a stale cookie from an older build, or
             // something hand-written. Either way there is no notice to show.
             _ => None,
@@ -963,6 +1051,450 @@ pub async fn settings_submit(
     }
 }
 
+// --- Filters ---
+
+/// Thousands-separate an integer, matching what `Intl.NumberFormat` produces
+/// for the counts `app.js` renders into the same column.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Abbreviate a count to at most one decimal (`12.3K`, `1.2M`).
+///
+/// The mobile card has room for a number, not for seven digits of one.
+fn compact(n: i64) -> String {
+    let scaled = |value: f64, suffix: &str| {
+        let rounded = (value * 10.0).round() / 10.0;
+        if (rounded.fract()).abs() < f64::EPSILON {
+            format!("{}{suffix}", rounded as i64)
+        } else {
+            format!("{rounded:.1}{suffix}")
+        }
+    };
+    #[allow(clippy::cast_precision_loss)]
+    match n {
+        n if n >= 1_000_000 => scaled(n as f64 / 1_000_000.0, "M"),
+        n if n >= 1_000 => scaled(n as f64 / 1_000.0, "K"),
+        n => thousands(n),
+    }
+}
+
+/// How long ago a timestamp was, in the wording `app.js` uses for the same
+/// column, so a row does not change its phrasing when the client redraws it.
+fn time_ago(ts: i64) -> String {
+    if ts == 0 {
+        return "never".to_string();
+    }
+    let unit =
+        |count: i64, name: &str| format!("{count} {name}{} ago", if count == 1 { "" } else { "s" });
+    let diff = (crate::now_unix() - ts).max(0);
+    match diff {
+        d if d < 60 => unit(d, "second"),
+        d if d < 3_600 => unit(d / 60, "minute"),
+        d if d < 86_400 => unit(d / 3_600, "hour"),
+        d => unit(d / 86_400, "day"),
+    }
+}
+
+/// The page's mutable bits: what was typed, what was rejected, what is expanded.
+///
+/// One struct rather than a dozen arguments, because every handler that
+/// re-renders sets one or two of these and leaves the rest alone.
+#[derive(Default)]
+struct FiltersView {
+    test_domain: String,
+    edit_id: i64,
+    edit_name: String,
+    edit_url: String,
+    edit_error: String,
+    list_name: String,
+    list_url: String,
+    list_error_field: &'static str,
+    list_error: String,
+    rule_text: String,
+    rule_error: String,
+}
+
+/// Build the page from live storage plus whatever the caller is carrying.
+///
+/// `shell.current_path` is forced to `/filters`: a rejected POST arrives on
+/// `/filters/lists` or `/filters/rules`, and the navigation would otherwise
+/// render with nothing active on a page the operator is very much looking at.
+async fn render_filters(
+    state: &AppState,
+    mut shell: ShellData,
+    view: FiltersView,
+) -> FiltersTemplate {
+    shell.current_path = "/filters".to_string();
+
+    let rows = state.db.get_filter_lists().await.unwrap_or_default();
+    let all_disabled = !rows.is_empty() && rows.iter().all(|l| !l.enabled);
+    let lists = rows
+        .into_iter()
+        .map(|l| FilterListView {
+            id: l.id,
+            name: l.name,
+            url: l.url,
+            enabled: l.enabled,
+            rule_count: thousands(l.rule_count),
+            rule_count_compact: compact(l.rule_count),
+            last_updated_text: time_ago(l.last_updated),
+            last_updated: l.last_updated,
+        })
+        .collect();
+
+    let rules = state
+        .db
+        .get_all_custom_rules()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| CustomRuleView {
+            id: r.id,
+            rule: r.rule,
+            allow: r.rule_type == "allow",
+            rule_type: r.rule_type,
+        })
+        .collect();
+
+    // The test runs against the live engine, which is what `POST
+    // /api/filter/check` does; sharing the check itself would be sharing one
+    // line, and the two answer in different shapes.
+    let domain = view.test_domain.trim().trim_end_matches('.');
+    let tested = !domain.is_empty();
+    let (verdict_blocked, verdict_rule, verdict_list) = if tested {
+        match state.filter.load().check(domain) {
+            crate::filter::engine::FilterResult::Blocked { rule, list } => (true, rule, list),
+            crate::filter::engine::FilterResult::Allowed { rule } => {
+                (false, rule.unwrap_or_default(), String::new())
+            }
+        }
+    } else {
+        (false, String::new(), String::new())
+    };
+
+    FiltersTemplate {
+        shell,
+        lists,
+        rules,
+        all_disabled,
+        test_domain: view.test_domain,
+        tested,
+        verdict_blocked,
+        verdict_rule,
+        verdict_list,
+        edit_id: view.edit_id,
+        edit_name: view.edit_name,
+        edit_url: view.edit_url,
+        edit_error: view.edit_error,
+        list_name: view.list_name,
+        list_url: view.list_url,
+        list_error_field: view.list_error_field,
+        list_error: view.list_error,
+        rule_text: view.rule_text,
+        rule_error: view.rule_error,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FiltersQuery {
+    /// A domain to test. In the query string rather than a POST body so the
+    /// verdict survives a refresh and can be linked to.
+    test: Option<String>,
+    /// The list to expand into an edit form. Parsed leniently — a hand-edited
+    /// value expands nothing rather than 400-ing a page that otherwise renders.
+    edit: Option<String>,
+}
+
+pub async fn filters_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<FiltersQuery>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let edit_id = query
+        .edit
+        .as_deref()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or_default();
+
+    // The expanded row is filled from storage, not from the URL: the operator
+    // asked to edit a list, not to pre-fill a form with values a link carried.
+    let (edit_name, edit_url) = if edit_id == 0 {
+        (String::new(), String::new())
+    } else {
+        state
+            .db
+            .get_filter_lists()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|l| l.id == edit_id)
+            .map_or_else(
+                || (String::new(), String::new()),
+                |list| (list.name, list.url),
+            )
+    };
+
+    let view = FiltersView {
+        test_domain: query.test.unwrap_or_default(),
+        edit_id,
+        edit_name,
+        edit_url,
+        ..FiltersView::default()
+    };
+    (jar, render_filters(&state, shell, view).await)
+}
+
+/// Everything that changed a filter answers the same way: redirect back to the
+/// page with a notice, so a refresh cannot resubmit it.
+fn filters_saved(jar: CookieJar, flash: Flash) -> Response {
+    (set_flash(jar, flash), Redirect::to("/filters")).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AddListForm {
+    name: String,
+    url: String,
+}
+
+/// `POST /filters/lists`.
+pub async fn filters_list_add_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<AddListForm>,
+) -> Response {
+    match create_filter_list(&state, &form.name, &form.url).await {
+        Ok(_id) => {
+            // Adding a list does not fetch it, so there is nothing to rebuild
+            // yet — but the row appearing is the confirmation that matters.
+            filters_saved(jar, Flash::FiltersSaved)
+        }
+        Err(err) => {
+            let (status, field, message) = list_error_parts(err);
+            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let view = FiltersView {
+                list_name: form.name,
+                list_url: form.url,
+                list_error_field: field,
+                list_error: message,
+                ..FiltersView::default()
+            };
+            (status, jar, render_filters(&state, shell, view).await).into_response()
+        }
+    }
+}
+
+/// Split a [`ListError`] into what the form needs: a status, the field to blame
+/// and the message to show beside it.
+fn list_error_parts(err: ListError) -> (StatusCode, &'static str, String) {
+    match err {
+        ListError::Invalid { field, message } => (StatusCode::BAD_REQUEST, field, message),
+        ListError::Internal => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "",
+            "Could not save — check the server log".to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EditListForm {
+    name: String,
+    url: String,
+}
+
+/// `POST /filters/lists/{id}/edit`.
+///
+/// A rejected edit re-renders with the row still expanded and the submitted
+/// values in it, which is the only way the operator gets to correct the one
+/// field that was wrong.
+pub async fn filters_list_edit_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<EditListForm>,
+) -> Response {
+    match modify_filter_list(&state, id, &form.name, &form.url).await {
+        Ok(()) => {
+            state.trigger_rebuild();
+            filters_saved(jar, Flash::FiltersSaved)
+        }
+        Err(err) => {
+            let (status, _field, message) = list_error_parts(err);
+            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let view = FiltersView {
+                edit_id: id,
+                edit_name: form.name,
+                edit_url: form.url,
+                edit_error: message,
+                ..FiltersView::default()
+            };
+            (status, jar, render_filters(&state, shell, view).await).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ToggleListForm {
+    /// Absent when the checkbox is unticked — that is how a browser posts an
+    /// unchecked box, and it is the only signal that the list is being turned
+    /// off.
+    enabled: Option<String>,
+}
+
+/// `POST /filters/lists/{id}/toggle`.
+pub async fn filters_list_toggle_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    jar: CookieJar,
+    Form(form): Form<ToggleListForm>,
+) -> Response {
+    if state
+        .db
+        .update_filter_list_enabled(id, form.enabled.is_some())
+        .await
+        .is_ok()
+    {
+        state.trigger_rebuild();
+    }
+    filters_saved(jar, Flash::FiltersSaved)
+}
+
+/// `POST /filters/lists/{id}/delete`.
+pub async fn filters_list_delete_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    jar: CookieJar,
+) -> Response {
+    if state.db.delete_filter_list(id).await.is_ok() {
+        state.trigger_rebuild();
+    }
+    filters_saved(jar, Flash::FiltersSaved)
+}
+
+/// `POST /filters/lists/update`.
+///
+/// Downloads every list before answering, exactly as `POST /api/lists/update`
+/// does. Without JavaScript there is nowhere to report progress to, so the
+/// request is the progress indicator.
+pub async fn filters_lists_update_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Response {
+    if state
+        .list_manager
+        .update_all_lists_no_rebuild()
+        .await
+        .is_ok()
+    {
+        state.trigger_rebuild();
+    }
+    filters_saved(jar, Flash::ListsUpdating)
+}
+
+/// `POST /filters/lists/enable-recommended`.
+///
+/// The escape hatch from the state where every list is off: turn one back on
+/// without making the operator work out which. Same pick as `app.js` makes.
+pub async fn filters_enable_recommended_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Response {
+    let lists = state.db.get_filter_lists().await.unwrap_or_default();
+    let pick = lists
+        .iter()
+        .find(|l| l.name == "AdGuard DNS filter")
+        .or_else(|| lists.first());
+    if let Some(list) = pick
+        && state
+            .db
+            .update_filter_list_enabled(list.id, true)
+            .await
+            .is_ok()
+    {
+        state.trigger_rebuild();
+    }
+    filters_saved(jar, Flash::FiltersSaved)
+}
+
+#[derive(Deserialize)]
+pub struct AddRuleForm {
+    rule: String,
+}
+
+/// `POST /filters/rules`.
+pub async fn filters_rule_add_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<AddRuleForm>,
+) -> Response {
+    match create_custom_rule(&state, &form.rule).await {
+        // A duplicate is not worth an error: the rule the operator wanted is
+        // there, which is what they asked for.
+        Ok(_) => filters_saved(jar, Flash::FiltersSaved),
+        Err(err) => {
+            let (status, message) = match err {
+                RuleError::Unparseable => (
+                    StatusCode::BAD_REQUEST,
+                    "Not a rule noadd understands — see the syntax reference below".to_string(),
+                ),
+                RuleError::Internal => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not save — check the server log".to_string(),
+                ),
+            };
+            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let view = FiltersView {
+                rule_text: form.rule,
+                rule_error: message,
+                ..FiltersView::default()
+            };
+            (status, jar, render_filters(&state, shell, view).await).into_response()
+        }
+    }
+}
+
+/// `POST /filters/rules/{id}/delete`.
+pub async fn filters_rule_delete_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    jar: CookieJar,
+) -> Response {
+    if state.db.delete_custom_rule(id).await.is_ok() {
+        state.trigger_rebuild();
+    }
+    filters_saved(jar, Flash::FiltersSaved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,5 +1531,40 @@ mod tests {
             "/logs%3Fpage%3D2%26type%3Dblocked"
         );
         assert_eq!(encode_query_value("/settings"), "/settings");
+    }
+
+    #[test]
+    fn counts_are_grouped_the_way_the_client_groups_them() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(87_654), "87,654");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn compact_counts_lose_nothing_a_reader_needs() {
+        assert_eq!(compact(999), "999");
+        // A whole thousand keeps no pointless `.0`.
+        assert_eq!(compact(1_000), "1K");
+        assert_eq!(compact(12_345), "12.3K");
+        assert_eq!(compact(1_250_000), "1.3M");
+    }
+
+    #[test]
+    fn a_list_that_never_downloaded_says_so_rather_than_dating_from_1970() {
+        assert_eq!(time_ago(0), "never");
+    }
+
+    #[test]
+    fn relative_times_are_singular_where_they_should_be() {
+        let now = crate::now_unix();
+        assert_eq!(time_ago(now), "0 seconds ago");
+        assert_eq!(time_ago(now - 1), "1 second ago");
+        assert_eq!(time_ago(now - 90), "1 minute ago");
+        assert_eq!(time_ago(now - 7_200), "2 hours ago");
+        assert_eq!(time_ago(now - 172_800), "2 days ago");
+        // A clock that moved backwards must not render a negative age.
+        assert_eq!(time_ago(now + 60), "0 seconds ago");
     }
 }

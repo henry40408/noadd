@@ -79,7 +79,11 @@ impl AppState {
     /// Spawn a background filter-engine rebuild via the coordinator.
     /// Handlers that mutate rules or lists use this so the HTTP response
     /// returns immediately while rebuilds are serialized in the background.
-    fn trigger_rebuild(&self) {
+    ///
+    /// Visible to [`crate::admin::pages`] too: the filters form mutates the
+    /// same lists and rules the JSON endpoints do, and a change that never
+    /// reaches the engine is not a change.
+    pub(crate) fn trigger_rebuild(&self) {
         let manager = self.list_manager.clone();
         self.rebuild
             .clone()
@@ -172,7 +176,42 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/", get(crate::admin::pages::shell_page))
         .route("/stats", get(crate::admin::pages::shell_page))
         .route("/logs", get(crate::admin::pages::shell_page))
-        .route("/filters", get(crate::admin::pages::shell_page))
+        .route("/filters", get(crate::admin::pages::filters_page))
+        // Every filter change is its own POST rather than one endpoint taking an
+        // action name: a form's target is the clearest statement of what it
+        // does, and the router is where that stays checkable.
+        .route(
+            "/filters/lists",
+            post(crate::admin::pages::filters_list_add_submit),
+        )
+        .route(
+            "/filters/lists/update",
+            post(crate::admin::pages::filters_lists_update_submit),
+        )
+        .route(
+            "/filters/lists/enable-recommended",
+            post(crate::admin::pages::filters_enable_recommended_submit),
+        )
+        .route(
+            "/filters/lists/{id}/toggle",
+            post(crate::admin::pages::filters_list_toggle_submit),
+        )
+        .route(
+            "/filters/lists/{id}/edit",
+            post(crate::admin::pages::filters_list_edit_submit),
+        )
+        .route(
+            "/filters/lists/{id}/delete",
+            post(crate::admin::pages::filters_list_delete_submit),
+        )
+        .route(
+            "/filters/rules",
+            post(crate::admin::pages::filters_rule_add_submit),
+        )
+        .route(
+            "/filters/rules/{id}/delete",
+            post(crate::admin::pages::filters_rule_delete_submit),
+        )
         .route(
             "/settings",
             get(crate::admin::pages::settings_page).post(crate::admin::pages::settings_submit),
@@ -2463,6 +2502,81 @@ pub struct AddListResponse {
     pub id: i64,
 }
 
+/// Why a filter list could not be created or edited.
+///
+/// `Invalid` names the field it objected to, which is what lets the filters
+/// form put the message next to the input it is about. The JSON endpoint throws
+/// that detail away and answers a bare 400 — widening its body would change a
+/// published contract no caller asked to have changed.
+pub enum ListError {
+    Invalid {
+        field: &'static str,
+        message: String,
+    },
+    Internal,
+}
+
+/// Validate a name/URL pair for a filter list.
+///
+/// Shared by the form and the JSON endpoint so the two cannot drift into
+/// disagreeing about what a usable list looks like. The URL check is
+/// deliberately shallow — a scheme noadd can actually fetch — because whether
+/// the URL *serves* a list is what `POST /api/lists/{id}/check` is for.
+fn validate_list(name: &str, url: &str) -> Result<(), ListError> {
+    if name.trim().is_empty() {
+        return Err(ListError::Invalid {
+            field: "name",
+            message: "Name is required".to_string(),
+        });
+    }
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(ListError::Invalid {
+            field: "url",
+            message: "URL is required".to_string(),
+        });
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ListError::Invalid {
+            field: "url",
+            message: "URL must start with http:// or https://".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Create a filter list, enabled, without fetching its contents.
+///
+/// The download is left to `POST /api/lists/update` or the periodic refresh:
+/// fetching here would hold the request open for as long as the remote takes,
+/// and a list that is slow to answer is not a reason to refuse to add it.
+pub async fn create_filter_list(state: &AppState, name: &str, url: &str) -> Result<i64, ListError> {
+    validate_list(name, url)?;
+    state
+        .db
+        .add_filter_list(name.trim(), url.trim(), true)
+        .await
+        .map_err(|_err| ListError::Internal)
+}
+
+/// Change a filter list's name and URL together.
+///
+/// Both at once, because a list whose URL moved usually wants renaming with it,
+/// and validating them as a pair is what keeps the two callers honest.
+pub async fn modify_filter_list(
+    state: &AppState,
+    id: i64,
+    name: &str,
+    url: &str,
+) -> Result<(), ListError> {
+    validate_list(name, url)?;
+    state
+        .db
+        .update_filter_list(id, name.trim(), url.trim())
+        .await
+        .map_err(|_err| ListError::Internal)
+}
+
 /// Add a new filter list by URL.
 ///
 /// Requires an operator (session or API key). The list is created enabled
@@ -2473,20 +2587,32 @@ pub struct AddListResponse {
     post, path = "/api/lists", tag = "lists",
     security(("api_key" = [])),
     request_body = AddListRequest,
-    responses((status = 201, description = "List created", body = AddListResponse))
+    responses(
+        (status = 201, description = "List created", body = AddListResponse),
+        (status = 400, description = "Missing name, or a URL noadd cannot fetch")
+    )
 )]
 async fn add_list(
     State(state): State<AppState>,
     _auth: AuthedUser,
     Json(body): Json<AddListRequest>,
 ) -> Result<(StatusCode, Json<AddListResponse>), StatusCode> {
-    let id = state
-        .db
-        .add_filter_list(&body.name, &body.url, true)
+    let id = create_filter_list(&state, &body.name, &body.url)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(list_error_status)?;
 
     Ok((StatusCode::CREATED, Json(AddListResponse { id })))
+}
+
+/// The status a [`ListError`] answers with over JSON.
+///
+/// The field-level detail is dropped here on purpose: it exists for the form,
+/// which has an input to put it next to.
+fn list_error_status(err: ListError) -> StatusCode {
+    match err {
+        ListError::Invalid { .. } => StatusCode::BAD_REQUEST,
+        ListError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -2528,11 +2654,9 @@ async fn update_list(
     }
 
     if let (Some(name), Some(url)) = (body.name.as_deref(), body.url.as_deref()) {
-        state
-            .db
-            .update_filter_list(id, name, url)
+        modify_filter_list(&state, id, name, url)
             .await
-            .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(list_error_status)?;
     }
 
     state.trigger_rebuild();
@@ -2870,33 +2994,56 @@ async fn add_rule(
     _auth: AuthedUser,
     Json(body): Json<AddRuleRequest>,
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
-    let rule_type = match crate::filter::parser::parse_rule(&body.rule) {
+    match create_custom_rule(&state, &body.rule).await {
+        Ok(Some(id)) => Ok((StatusCode::CREATED, Json(AddRuleResponse { id }))),
+        // Already there. A duplicate is the same end state as a create, so it is
+        // not an error — but it is not a creation either, hence 200 and no id.
+        Ok(None) => Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 }))),
+        Err(RuleError::Unparseable) => Err(StatusCode::BAD_REQUEST),
+        Err(RuleError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Why a custom rule could not be added.
+pub enum RuleError {
+    /// The text does not parse as a rule in any supported syntax.
+    Unparseable,
+    Internal,
+}
+
+/// Add a custom allow/block rule, or report that it was already there.
+///
+/// `Ok(None)` means the exact text already exists. The parse is what decides
+/// whether the rule allows or blocks, so it is also the validation — sharing it
+/// is what stops the form accepting a line the API would refuse.
+pub async fn create_custom_rule(state: &AppState, rule: &str) -> Result<Option<i64>, RuleError> {
+    let rule = rule.trim();
+    let rule_type = match crate::filter::parser::parse_rule(rule) {
         Some(parsed) => match parsed.action {
             crate::filter::parser::RuleAction::Allow => "allow",
             crate::filter::parser::RuleAction::Block => "block",
         },
-        None => return Err(StatusCode::BAD_REQUEST),
+        None => return Err(RuleError::Unparseable),
     };
 
-    // No-op if rule already exists
     if state
         .db
-        .has_custom_rule(&body.rule)
+        .has_custom_rule(rule)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| RuleError::Internal)?
     {
-        return Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 })));
+        return Ok(None);
     }
 
     let id = state
         .db
-        .add_custom_rule(&body.rule, rule_type)
+        .add_custom_rule(rule, rule_type)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| RuleError::Internal)?;
 
     state.trigger_rebuild();
 
-    Ok((StatusCode::CREATED, Json(AddRuleResponse { id })))
+    Ok(Some(id))
 }
 
 /// Delete a custom allow/block rule.

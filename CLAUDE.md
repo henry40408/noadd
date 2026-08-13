@@ -69,6 +69,17 @@ Settings is the worked example; the remaining pages follow it.
 
 ⚠️ A `querySelector` that returns `null` in a `connectedCallback` throws and **silently kills every binding after it**. When moving markup to a template, check that every id `app.js` reaches for still exists.
 
+Filters adds the conventions for a page whose body is a *list of things*:
+
+- **A read is a GET, a change is a POST.** The domain test posts nothing — it is `GET /filters?test=…`, so the verdict is refreshable, linkable, and survives the back button. Every mutation is its own route (`/filters/lists/{id}/toggle`, `…/edit`, `…/delete`, `/filters/rules`, …) rather than one endpoint switching on an action field: a form's target is the clearest statement of what it does.
+- **One form per row, not one for the table.** A browser posts only the form that was submitted, so a table-wide form would have to carry every row's state and would report every row as changed.
+- **Row state that needs a client lives in the URL.** Editing a list is `GET /filters?edit={id}`, which expands that row into a form the server filled *from storage* — never from the query string, so a link cannot pre-fill a form with values it carried. With JavaScript the same control is an `<a>` whose click is cancelled in favour of the dialog.
+- **`.nojs-only` / `.js-only`.** Both ship in the state that is correct when the script never arrives: `app.js` removes the first and unhides the second. A control that needs a client (the registry modal) ships `hidden` rather than sitting there doing nothing.
+- **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
+- Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
+
+⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/specs/filters-no-js.spec.js` submits with `Enter` and clicks row controls through a helper for the same reason, and says so.
+
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 
 After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).

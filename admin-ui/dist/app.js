@@ -2175,78 +2175,52 @@ customElements.define('logs-page', LogsPage);
 
 // --- Filters Page (merged Lists + Rules + Domain Test) ---
 class FiltersPage extends HTMLElement {
+  // The body arrives server-rendered: every control here is a real form that
+  // works on its own. What follows takes those forms over — same ids, same
+  // buttons — so with JavaScript the page updates in place instead of
+  // navigating, which is the behaviour it has always had.
+  //
+  // Nothing is loaded on connect. The lists and rules in the markup came from
+  // the same storage a fetch would ask, and re-fetching them would only replace
+  // what is already correct.
   connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
-      <div class="card fade-in">
-        <div class="card-title">Domain Test</div>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
-        <div class="input-row">
-          <input type="text" id="test-domain" data-testid="domain-test-input" placeholder="ads.example.com">
-          <button class="btn btn-primary btn-sm" id="test-btn" data-testid="domain-test-submit">${icons.refresh} Test</button>
-        </div>
-        <div id="test-result" data-testid="domain-test-result" style="margin-top:12px"></div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="card-title">Filter Lists</div>
-        <div data-testid="filters-all-disabled-warning" style="display:none;margin-bottom:12px;padding:12px;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--red)">
-          <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">No filter list is enabled</div>
-          <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Every filter list is turned off, so noadd is not blocking anything. Enable a recommended list to start filtering.</div>
-          <button class="btn btn-primary btn-sm" data-testid="filters-enable-recommended" id="enable-recommended">Enable AdGuard DNS filter</button>
-        </div>
-        <div class="filters-row" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" id="update-all">${icons.refresh} Update All</button>
-          <button class="btn btn-sm" id="browse-registry">${icons.search} Browse Registry</button>
-        </div>
-        <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
-        </tr></thead><tbody id="lists-body"></tbody></table></div>
-        <div id="lists-cards" class="show-mobile"></div>
-        <div class="card-title" style="margin-top:16px">Add Custom List</div>
-        <div class="input-row">
-          <input type="text" id="list-name" data-testid="list-name-input" placeholder="List name">
-          <input type="url" id="list-url" data-testid="list-url-input" placeholder="https://...">
-          <button class="btn btn-primary btn-sm" id="add-list" data-testid="list-add-submit">${icons.plus} Add</button>
-        </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.1s">
-        <div class="card-title">Custom Rules</div>
-        <div class="input-row">
-          <input type="text" id="add-rule-input" data-testid="rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^">
-          <button class="btn btn-primary btn-sm" id="add-rule-btn" data-testid="rule-submit">${icons.plus} Add</button>
-        </div>
-        <div id="rules-list" data-testid="rules-list" style="margin-top:12px"></div>
-        <div class="syntax-ref">
-          <strong class="text-secondary">Syntax Reference</strong>
-          <div class="syntax-ref-list">
-            <div><code>||ads.example.com^</code><br>Block domain and all subdomains</div>
-            <div><code>@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
-            <div><code>example.com</code><br>Block exact domain only</div>
-            <div><code>0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
-          </div>
-        </div>
-      </div>`;
+    // The no-JS submits are removed rather than hidden: a button that is there
+    // but does nothing is worse than one that was never shipped. The reverse
+    // for `js-only`, which the server ships hidden.
+    this.querySelectorAll('.nojs-only').forEach(el => el.remove());
+    this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
     // --- Domain Test ---
-    this.querySelector('#test-btn').onclick = () => this.testDomain();
-    this.querySelector('#test-domain').onkeydown = (e) => { if (e.key === 'Enter') this.testDomain(); };
+    // A GET form the server can answer on its own; here the verdict is fetched
+    // and written into the same element, without the navigation.
+    this.querySelector('#domain-test-form').onsubmit = (e) => {
+      e.preventDefault();
+      this.testDomain();
+    };
 
     // --- Filter Lists ---
-    this.querySelector('#update-all').onclick = async () => {
+    this.querySelector('#update-all').closest('form').onsubmit = async (e) => {
+      e.preventDefault();
       const btn = this.querySelector('#update-all');
       btn.disabled = true;
       btn.innerHTML = icons.refresh + ' Updating...';
-      try { await api.post('/api/lists/update'); } catch (e) { console.error(e); }
+      try { await api.post('/api/lists/update'); } catch (err) { console.error(err); }
       btn.disabled = false;
       btn.innerHTML = icons.refresh + ' Update All';
       this.loadLists();
     };
 
-    this.querySelector('#add-list').onclick = async () => {
+    this.querySelector('#add-list-form').onsubmit = async (e) => {
+      e.preventDefault();
       const name = this.querySelector('#list-name').value.trim();
       const url = this.querySelector('#list-url').value.trim();
       if (!name || !url) return;
-      await api.post('/api/lists', { name, url });
+      try {
+        await api.post('/api/lists', { name, url });
+      } catch (err) {
+        showBanner('Could not add that list — check the name and URL', 'error');
+        return;
+      }
       this.querySelector('#list-name').value = '';
       this.querySelector('#list-url').value = '';
       this.loadLists();
@@ -2259,24 +2233,27 @@ class FiltersPage extends HTMLElement {
       modal.open();
     };
 
-    this.querySelector('#enable-recommended').onclick = () => this.enableRecommended();
+    this.querySelector('#enable-recommended').closest('form').onsubmit = (e) => {
+      e.preventDefault();
+      this.enableRecommended();
+    };
 
     // --- Custom Rules ---
-    this.querySelector('#add-rule-btn').onclick = async () => {
+    this.querySelector('#add-rule-form').onsubmit = async (e) => {
+      e.preventDefault();
       const v = this.querySelector('#add-rule-input').value.trim();
       if (!v) return;
       try {
         await api.post('/api/rules', { rule: v });
         this.querySelector('#add-rule-input').value = '';
         this.loadRules();
-      } catch (e) {
+      } catch (err) {
         showBanner('Invalid rule syntax', 'error');
       }
     };
-    this.querySelector('#add-rule-input').onkeydown = (e) => { if (e.key === 'Enter') this.querySelector('#add-rule-btn').click(); };
 
-    this.loadLists();
-    this.loadRules();
+    this.bindLists();
+    this.bindRules();
   }
 
   async testDomain() {
@@ -2302,42 +2279,50 @@ class FiltersPage extends HTMLElement {
     }
   }
 
+  // Re-draw both the table and the cards after a change. The markup mirrors
+  // `templates/filters.html` — forms and all — so a redrawn row is the same row
+  // the server would have sent, and the bindings below apply to either.
   async loadLists() {
     try {
       const lists = await api.get('/api/lists');
-      this._lists = lists;
 
-      // Desktop table
       const body = this.querySelector('#lists-body');
       body.innerHTML = lists.map(l => html`<tr data-testid="filter-list-row" data-name="${l.name}">
         <td>
-          <label class="toggle">
-            <input type="checkbox" data-testid="filter-list-toggle" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
-            <div class="toggle-track"></div>
-            <div class="toggle-thumb"></div>
-          </label>
+          <form method="post" action="/filters/lists/${l.id}/toggle" class="list-toggle-form">
+            <label class="toggle">
+              <input type="checkbox" name="enabled" data-testid="filter-list-toggle" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
+              <div class="toggle-track"></div>
+              <div class="toggle-thumb"></div>
+            </label>
+          </form>
         </td>
         <td class="text-primary">${l.name}</td>
         <td>${formatFull(l.rule_count)}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td style="white-space:nowrap">
-          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}">Edit</button>
-          <button class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
+          <a href="/filters?edit=${l.id}" class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}">Edit</a>
+          <form method="post" action="/filters/lists/${l.id}/delete" class="inline-form">
+            <button type="submit" class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
+          </form>
         </td>
       </tr>`).join('');
 
-      // Mobile cards
       const cards = this.querySelector('#lists-cards');
       cards.innerHTML = lists.map(l => html`<div class="log-card">
         <div class="log-card-row1">
-          <label class="toggle">
-            <input type="checkbox" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
-            <div class="toggle-track"></div>
-            <div class="toggle-thumb"></div>
-          </label>
+          <form method="post" action="/filters/lists/${l.id}/toggle" class="list-toggle-form">
+            <label class="toggle">
+              <input type="checkbox" name="enabled" ${l.enabled ? raw('checked') : ''} data-id="${l.id}">
+              <div class="toggle-track"></div>
+              <div class="toggle-thumb"></div>
+            </label>
+          </form>
           <span style="flex:1;color:var(--text-primary);font-size:0.85rem">${l.name}</span>
-          <button class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}" style="flex-shrink:0">Edit</button>
-          <button class="btn btn-danger btn-sm del-list" data-id="${l.id}" style="flex-shrink:0">${icons.trash}</button>
+          <a href="/filters?edit=${l.id}" class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}" style="flex-shrink:0">Edit</a>
+          <form method="post" action="/filters/lists/${l.id}/delete" class="inline-form" style="flex-shrink:0">
+            <button type="submit" class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
+          </form>
         </div>
         <div class="log-card-row2">
           <span>${formatNum(l.rule_count)} rules</span>
@@ -2345,49 +2330,66 @@ class FiltersPage extends HTMLElement {
         </div>
       </div>`).join('');
 
-      // Bind toggles and delete buttons (both table and cards)
-      this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
-        cb.onchange = async () => {
-          await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
-          if (this._lists) {
-            const l = this._lists.find((x) => String(x.id) === String(cb.dataset.id));
-            if (l) l.enabled = cb.checked;
-          }
-          this._refreshAllDisabledWarning();
-        };
-      });
-
-      this.querySelectorAll('.del-list').forEach(btn => {
-        btn.onclick = async () => {
-          if (confirm('Delete this list?')) {
-            await api.del(`/api/lists/${btn.dataset.id}`);
-            this.loadLists();
-          }
-        };
-      });
-
-      this.querySelectorAll('.edit-list').forEach(btn => {
-        btn.onclick = () => this.showEditDialog(btn.dataset.id, btn.dataset.name, btn.dataset.url);
-      });
-
-      this._refreshAllDisabledWarning();
+      this.bindLists();
     } catch (e) { console.error(e); }
   }
 
+  // Applied to whatever rows are in the document — the ones the server rendered
+  // on first load, and the ones `loadLists` drew afterwards.
+  bindLists() {
+    this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
+      cb.onchange = async () => {
+        try {
+          await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
+        } catch (e) {
+          // Put the toggle back where it was: leaving it showing a state the
+          // server never accepted is the one outcome worse than failing.
+          cb.checked = !cb.checked;
+          showBanner('Could not change that list', 'error');
+        }
+        this._refreshAllDisabledWarning();
+      };
+    });
+
+    this.querySelectorAll('.del-list').forEach(btn => {
+      btn.closest('form').onsubmit = async (e) => {
+        e.preventDefault();
+        if (!confirm('Delete this list?')) return;
+        await api.del(`/api/lists/${btn.dataset.id}`);
+        this.loadLists();
+      };
+    });
+
+    // A link without JavaScript, which expands the row on the server. Here the
+    // navigation is cancelled and the dialog opens over the page instead.
+    this.querySelectorAll('.edit-list').forEach(link => {
+      link.onclick = (e) => {
+        e.preventDefault();
+        this.showEditDialog(link.dataset.id, link.dataset.name, link.dataset.url);
+      };
+    });
+
+    this._refreshAllDisabledWarning();
+  }
+
+  // Read off the checkboxes rather than a cached list: they are the state the
+  // operator is looking at, and after a toggle they are correct before any
+  // reload would be.
   _refreshAllDisabledWarning() {
     const warn = this.querySelector('[data-testid="filters-all-disabled-warning"]');
     if (!warn) return;
-    const lists = this._lists || [];
-    const allDisabled = lists.length > 0 && lists.every((l) => !l.enabled);
+    const boxes = [...this.querySelectorAll('#lists-body input[type=checkbox]')];
+    const allDisabled = boxes.length > 0 && boxes.every(b => !b.checked);
     warn.style.display = allDisabled ? '' : 'none';
   }
 
   async enableRecommended() {
-    const lists = this._lists || [];
-    if (!lists.length) return;
-    const pick = lists.find(l => l.name === 'AdGuard DNS filter') || lists[0];
+    const rows = [...this.querySelectorAll('#lists-body [data-testid="filter-list-row"]')];
+    const pick = rows.find(r => r.dataset.name === 'AdGuard DNS filter') || rows[0];
+    const box = pick && pick.querySelector('input[type=checkbox]');
+    if (!box) return;
     try {
-      await api.put(`/api/lists/${pick.id}`, { enabled: true });
+      await api.put(`/api/lists/${box.dataset.id}`, { enabled: true });
       await this.loadLists();
     } catch (e) { console.error(e); }
   }
@@ -2464,18 +2466,27 @@ class FiltersPage extends HTMLElement {
         markup += html`<tr data-testid="rule-row" data-rule="${r.rule}" data-type="${r.rule_type}">
           <td style="width:70px">${badge}</td>
           <td class="mono" style="color:var(--text-primary);font-size:0.85rem">${r.rule}</td>
-          <td style="width:40px"><button class="btn btn-danger btn-sm del-rule" data-testid="rule-delete" data-id="${r.id}">${icons.trash}</button></td>
+          <td style="width:40px">
+            <form method="post" action="/filters/rules/${r.id}/delete" class="inline-form">
+              <button type="submit" class="btn btn-danger btn-sm del-rule" data-testid="rule-delete" data-id="${r.id}">${icons.trash}</button>
+            </form>
+          </td>
         </tr>`;
       }
       markup += '</tbody></table>';
       el.innerHTML = markup;
-      el.querySelectorAll('.del-rule').forEach(btn => {
-        btn.onclick = async () => {
-          await api.del(`/api/rules/${btn.dataset.id}`);
-          this.loadRules();
-        };
-      });
+      this.bindRules();
     } catch (e) { console.error(e); }
+  }
+
+  bindRules() {
+    this.querySelectorAll('.del-rule').forEach(btn => {
+      btn.closest('form').onsubmit = async (e) => {
+        e.preventDefault();
+        await api.del(`/api/rules/${btn.dataset.id}`);
+        this.loadRules();
+      };
+    });
   }
 }
 customElements.define('filters-page', FiltersPage);
