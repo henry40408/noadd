@@ -384,6 +384,70 @@ pub struct FiltersTemplate {
     rule_error: String,
 }
 
+/// One row of a "top N" table: a label, a count, and its share of the visible
+/// total.
+pub struct TopRowView {
+    label: String,
+    /// A second line under the label — the `DoH` token a client came in on.
+    /// Empty when there is none.
+    sub_label: String,
+    count: String,
+    /// `"12.3%"`, or empty when the total is zero and a share would be a lie.
+    share: String,
+    /// Only the upstreams table has this column.
+    avg_ms: String,
+}
+
+/// The dashboard.
+///
+/// Everything here is a reading rather than a control, so there is not a form
+/// on the page. What that buys is a first paint with the real numbers in it:
+/// the six stat cards, the three top-N tables and the onboarding notice all
+/// arrive filled in, where they used to appear empty and then populate over
+/// five API calls.
+///
+/// The chart is the exception, and the one place the no-JS rule was always
+/// going to stop: it is drawn from a timeline series by `app.js`. Without
+/// scripting the card says so rather than sitting empty.
+#[derive(Template, WebTemplate)]
+#[template(path = "dashboard.html")]
+pub struct DashboardTemplate {
+    shell: ShellData,
+
+    queries_today: String,
+    queries_today_full: String,
+    queries_7d: String,
+    queries_30d: String,
+    blocked_today: String,
+    blocked_today_full: String,
+    blocked_7d: String,
+    blocked_30d: String,
+    block_rate: String,
+    block_rate_7d: String,
+    block_rate_30d: String,
+    cache_rate: String,
+    cache_rate_7d: String,
+    cache_rate_30d: String,
+    avg_ms: String,
+    avg_ms_7d: String,
+    avg_ms_30d: String,
+    /// The live rate from the server's 60-second window, which is what the
+    /// card's label and its flash-on-change both promise.
+    qps_now: String,
+    qps_today: String,
+    qps_7d: String,
+
+    /// False only on an appliance that has never answered a query, which is
+    /// the one state worth explaining at length.
+    has_queries: bool,
+    /// Where to point a device, shown by the onboarding notice.
+    dns_addr: String,
+
+    top_domains: Vec<TopRowView>,
+    top_clients: Vec<TopRowView>,
+    top_upstreams: Vec<TopRowView>,
+}
+
 /// The shell around a page whose body is still painted by `app.js`.
 ///
 /// Every page still using this is one P3 has not reached yet; a page with a
@@ -829,6 +893,168 @@ pub async fn setup_submit(
         // them to create an account that is already there.
         Err(_) => Redirect::to("/login").into_response(),
     }
+}
+
+// --- Dashboard ---
+
+/// Full digits below a million, abbreviated above it.
+///
+/// Mirrors `formatNumAdaptive` in `app.js`, which draws the same cards every
+/// ten seconds: a count that changed its own notation when the poll landed
+/// would read as a change in the number.
+fn format_num_adaptive(n: i64) -> String {
+    if n < 1_000_000 {
+        thousands(n)
+    } else {
+        compact(n)
+    }
+}
+
+/// A fraction as a one-decimal percentage, the way every rate on the page is
+/// written.
+fn percent1(value: f64) -> String {
+    format!("{:.1}", value * 100.0)
+}
+
+/// One row's share of the visible total. Empty when there is no total to take
+/// a share of.
+fn share_percent(count: i64, sum: i64) -> String {
+    if sum <= 0 || count <= 0 {
+        return String::new();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let pct = count as f64 / sum as f64 * 100.0;
+    format!("{pct:.1}%")
+}
+
+/// Queries per second, with the precision the size of the number deserves.
+///
+/// Two decimals on a trickle and none on a flood: `0.03 q/s` says something
+/// `0 q/s` does not, and `1,234.00 q/s` says nothing `1234` does not.
+fn format_qps(value: f64) -> String {
+    if value >= 100.0 {
+        format!("{:.0}", value.round())
+    } else if value >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+/// Where to point a device's DNS, for the onboarding notice.
+///
+/// The host comes from the request and the port from the configured DNS
+/// listener: the browser reached us on a name that resolves, and the DNS
+/// listener's own bind address is frequently `0.0.0.0`, which is not something
+/// to tell anyone to type in.
+fn dns_target(headers: &HeaderMap, dns_addr: &str) -> String {
+    let host = request_host(headers);
+    // Strip the HTTP port; the DNS one is what belongs here.
+    let host = host.split(':').next().unwrap_or_default();
+    match dns_addr.rsplit_once(':') {
+        Some((_, port)) if !port.is_empty() => format!("{host}:{port}"),
+        _ => host.to_string(),
+    }
+}
+
+pub async fn dashboard_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let now = crate::now_unix();
+
+    // The same five reads `app.js` makes on its poll, in one request. A failure
+    // renders zeroes rather than an error page: the dashboard is a reading, and
+    // a page that says nothing is more useful than one that will not load.
+    let summary = crate::admin::stats::compute_summary(&state.db, now)
+        .await
+        .unwrap_or_default();
+    // Ten rows each, which is what the page shows — the API's larger default is
+    // for callers who want to do their own slicing.
+    let domains = crate::admin::stats::compute_top_domains(&state.db, now, 10)
+        .await
+        .unwrap_or_default();
+    let clients = crate::admin::stats::compute_top_clients(&state.db, now, 10)
+        .await
+        .unwrap_or_default();
+    let upstreams = crate::admin::stats::compute_top_upstreams(&state.db, now, 10)
+        .await
+        .unwrap_or_default();
+
+    let domains_sum: i64 = domains.iter().map(|d| d.count).sum();
+    let top_domains = domains
+        .into_iter()
+        .map(|d| TopRowView {
+            label: d.domain,
+            sub_label: String::new(),
+            count: thousands(d.count),
+            share: share_percent(d.count, domains_sum),
+            avg_ms: String::new(),
+        })
+        .collect();
+
+    let clients_sum: i64 = clients.iter().map(|c| c.count).sum();
+    let top_clients = clients
+        .into_iter()
+        .map(|c| TopRowView {
+            label: c.client_ip,
+            sub_label: c.doh_token.unwrap_or_default(),
+            count: thousands(c.count),
+            share: share_percent(c.count, clients_sum),
+            avg_ms: String::new(),
+        })
+        .collect();
+
+    let upstreams_sum: i64 = upstreams.iter().map(|u| u.count).sum();
+    let top_upstreams = upstreams
+        .into_iter()
+        .map(|u| TopRowView {
+            label: u.upstream,
+            sub_label: String::new(),
+            count: thousands(u.count),
+            share: share_percent(u.count, upstreams_sum),
+            avg_ms: format!("{:.1}ms", u.avg_ms),
+        })
+        .collect();
+
+    #[allow(clippy::cast_precision_loss)]
+    let per_second = |count: i64, seconds: f64| format_qps(count as f64 / seconds);
+
+    (
+        jar,
+        DashboardTemplate {
+            shell,
+            queries_today: format_num_adaptive(summary.total_today),
+            queries_today_full: thousands(summary.total_today),
+            queries_7d: compact(summary.total_7d),
+            queries_30d: compact(summary.total_30d),
+            blocked_today: format_num_adaptive(summary.blocked_today),
+            blocked_today_full: thousands(summary.blocked_today),
+            blocked_7d: compact(summary.blocked_7d),
+            blocked_30d: compact(summary.blocked_30d),
+            block_rate: percent1(summary.block_ratio_today),
+            block_rate_7d: percent1(summary.block_ratio_7d),
+            block_rate_30d: percent1(summary.block_ratio_30d),
+            cache_rate: percent1(summary.cache_hit_rate_today),
+            cache_rate_7d: percent1(summary.cache_hit_rate_7d),
+            cache_rate_30d: percent1(summary.cache_hit_rate_30d),
+            avg_ms: format!("{:.1}", summary.avg_response_ms_today),
+            avg_ms_7d: format!("{:.1}", summary.avg_response_ms_7d),
+            avg_ms_30d: format!("{:.1}", summary.avg_response_ms_30d),
+            qps_now: per_second(summary.queries_1m, 60.0),
+            qps_today: per_second(summary.total_today, 86_400.0),
+            qps_7d: per_second(summary.total_7d, 7.0 * 86_400.0),
+            has_queries: summary.total_today + summary.total_7d + summary.total_30d > 0,
+            dns_addr: dns_target(&headers, &state.server_info.dns_addr),
+            top_domains,
+            top_clients,
+            top_upstreams,
+        },
+    )
 }
 
 // --- Account ---
@@ -2157,6 +2383,54 @@ mod tests {
     #[test]
     fn a_list_that_never_downloaded_says_so_rather_than_dating_from_1970() {
         assert_eq!(time_ago(0), "never");
+    }
+
+    #[test]
+    fn counts_switch_notation_only_above_a_million() {
+        // The client draws these same cards every ten seconds; a count that
+        // changed its own notation on the poll would read as a change in the
+        // number.
+        assert_eq!(format_num_adaptive(999_999), "999,999");
+        assert_eq!(format_num_adaptive(1_000_000), "1M");
+        assert_eq!(format_num_adaptive(1_250_000), "1.3M");
+    }
+
+    #[test]
+    fn a_rate_is_one_decimal_of_a_percent() {
+        assert_eq!(percent1(0.0), "0.0");
+        assert_eq!(percent1(0.755), "75.5");
+        assert_eq!(percent1(1.0), "100.0");
+    }
+
+    #[test]
+    fn a_share_of_nothing_is_not_a_share() {
+        assert_eq!(share_percent(0, 0), "");
+        assert_eq!(share_percent(5, 0), "");
+        // A row with no count takes no share, rather than "0.0%".
+        assert_eq!(share_percent(0, 10), "");
+        assert_eq!(share_percent(3, 4), "75.0%");
+    }
+
+    #[test]
+    fn throughput_keeps_the_precision_the_number_deserves() {
+        // `0.03 q/s` says something `0 q/s` does not.
+        assert_eq!(format_qps(0.0333), "0.03");
+        assert_eq!(format_qps(9.99), "9.99");
+        assert_eq!(format_qps(12.34), "12.3");
+        // And two decimals on a flood say nothing the integer does not.
+        assert_eq!(format_qps(1234.56), "1235");
+    }
+
+    #[test]
+    fn the_dns_target_pairs_the_browsers_host_with_the_dns_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "noadd.lan:8080".parse().unwrap());
+        // The HTTP port is dropped and the DNS listener's is used — that is the
+        // one a device has to be told about.
+        assert_eq!(dns_target(&headers, "0.0.0.0:53"), "noadd.lan:53");
+        assert_eq!(dns_target(&headers, "127.0.0.1:5353"), "noadd.lan:5353");
+        // Nothing port-shaped to take: the host alone is still useful.
+        assert_eq!(dns_target(&headers, "53"), "noadd.lan");
     }
 
     #[test]

@@ -10,7 +10,10 @@ use crate::db::{
 /// to this, so the admin UI shows the retention that is actually in effect.
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+/// `Default` is all zeroes, which is what the dashboard renders when the read
+/// fails: a page of zeroes is more useful than one that will not load, and it
+/// is the same shape an appliance that has answered nothing yet reports.
+#[derive(Debug, Clone, Default, Serialize, utoipa::ToSchema)]
 pub struct Summary {
     /// Total queries handled since local midnight today.
     pub total_today: i64,
