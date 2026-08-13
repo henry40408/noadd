@@ -572,230 +572,99 @@ class NextStepBanner extends LiveElement {
 }
 customElements.define('next-step-banner', NextStepBanner);
 
-// --- Registry Modal ---
-// Browse AdGuard HostlistsRegistry and batch-add selected filter lists.
-class RegistryModal extends LiveElement {
-  constructor() {
-    super();
-    this.data = null;            // cached { filters, groups }
-    this.existingUrls = null;    // Set of URLs already in user's lists
-    this.selected = new Set();   // filterId values currently checked
-    this.adding = false;
-  }
+// --- Registry Page ---
+// Browse AdGuard HostlistsRegistry and batch-add filter lists.
+//
+// This used to be a modal built entirely here, which made "Browse Registry" the
+// one control on the filters page that did nothing without JavaScript. The
+// server renders the page now; what is left is the part a client is actually
+// better at.
+//
+// The server filters by navigating, which starts a fresh selection. Filtering
+// in place instead is the whole enhancement: the ticks survive a change of
+// search, and the counts keep up as they go.
+class RegistryPage extends HTMLElement {
+  connectedCallback() {
+    this.form = this.querySelector('#registry-form');
+    // Nothing to enhance when the registry could not be fetched — the page is
+    // an error and a retry link.
+    if (!this.form) return;
 
-  async open() {
-    this.innerHTML = '';
-    const overlay = document.createElement('div');
-    overlay.className = 'registry-overlay';
-    overlay.innerHTML = `
-      <div class="registry-dialog" role="dialog" aria-labelledby="registry-title" aria-modal="true">
-        <div class="registry-head">
-          <h3 id="registry-title">Browse Filter Registry</h3>
-          <button class="close-btn" id="reg-close" aria-label="Close">${icons.close}</button>
-        </div>
-        <div class="registry-toolbar" style="display:none" id="reg-toolbar">
-          <input type="text" id="reg-search" placeholder="Search name or description">
-          <select id="reg-group">
-            <option value="">All groups</option>
-          </select>
-          <label class="check"><input type="checkbox" id="reg-deprecated"> Show deprecated</label>
-        </div>
-        <div class="registry-body" id="reg-body">
-          <div class="registry-loading"><div class="spin"></div>Loading registry…</div>
-        </div>
-        <div class="registry-summary" id="reg-summary" style="display:none"></div>
-        <div class="registry-foot" style="display:none" id="reg-foot">
-          <div class="count" id="reg-count">0 selected</div>
-          <button class="btn btn-sm" id="reg-cancel">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="reg-add" disabled>${icons.plus} Add Selected</button>
-        </div>
-      </div>`;
-    this.appendChild(overlay);
+    this.rows = [...this.querySelectorAll('.registry-row')];
+    this.countEl = this.querySelector('#registry-count');
+    this.selectedEl = this.querySelector('[data-testid="registry-selected"]');
+    this.addBtn = this.querySelector('#reg-add');
+    this.limit = Number(this.dataset.limit) || 50;
 
-    // Close on backdrop click + Escape + close button
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay && !this.adding) this.close();
-    });
-    this.listen(document, 'keydown', (e) => {
-      if (e.key === 'Escape' && !this.adding) this.close();
-    });
-    this.querySelector('#reg-close').onclick = () => { if (!this.adding) this.close(); };
-    this.querySelector('#reg-cancel').onclick = () => { if (!this.adding) this.close(); };
+    // The filter form never submits now, so its submit button is not a control
+    // any more. Removed rather than hidden: the state that ships is the one
+    // that is right when this file never arrives.
+    this.querySelectorAll('.nojs-only').forEach(el => el.remove());
 
-    await this.load();
-  }
-
-  // Teardown rides on removal rather than on this method, so the document-level
-  // Escape listener is released however the modal goes away.
-  close() {
-    this.remove();
-  }
-
-  async load() {
-    const body = this.querySelector('#reg-body');
-    try {
-      const [data, lists] = await Promise.all([
-        api.get('/api/registry/filters'),
-        api.get('/api/lists'),
-      ]);
-      this.data = data;
-      this.existingUrls = new Set(lists.map(l => l.url));
-      this.populateGroups();
-      this.wireControls();
-      this.querySelector('#reg-toolbar').style.display = '';
-      this.querySelector('#reg-foot').style.display = '';
-      this.render();
-    } catch (e) {
-      body.innerHTML = `
-        <div class="registry-error">
-          Failed to load registry.<br>
-          <button class="btn btn-sm" style="margin-top:14px" id="reg-retry">${icons.refresh} Retry</button>
-        </div>`;
-      this.querySelector('#reg-retry').onclick = () => { body.innerHTML = '<div class="registry-loading"><div class="spin"></div>Loading registry…</div>'; this.load(); };
+    for (const id of ['#reg-search', '#reg-group', '#reg-deprecated']) {
+      const el = this.querySelector(id);
+      if (!el) continue;
+      el.addEventListener(el.tagName === 'INPUT' && el.type === 'text' ? 'input' : 'change',
+        () => this.applyFilters());
     }
-  }
-
-  populateGroups() {
-    const sel = this.querySelector('#reg-group');
-    for (const g of this.data.groups) {
-      const opt = document.createElement('option');
-      opt.value = String(g.groupId);
-      opt.textContent = g.groupName;
-      sel.appendChild(opt);
-    }
-  }
-
-  wireControls() {
-    this.querySelector('#reg-search').oninput = () => this.render();
-    this.querySelector('#reg-group').onchange = () => this.render();
-    this.querySelector('#reg-deprecated').onchange = () => this.render();
-    this.querySelector('#reg-add').onclick = () => this.submit();
-  }
-
-  filteredFilters() {
-    const q = this.querySelector('#reg-search').value.trim().toLowerCase();
-    const groupVal = this.querySelector('#reg-group').value;
-    const showDep = this.querySelector('#reg-deprecated').checked;
-    return this.data.filters.filter(f => {
-      if (!showDep && f.deprecated) return false;
-      if (groupVal && String(f.groupId) !== groupVal) return false;
-      if (q) {
-        const hay = (f.name + ' ' + f.description).toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
+    this.form.addEventListener('change', (e) => {
+      if (e.target.matches('input[name="filter_id"]')) this.updateSelection();
     });
+
+    this.applyFilters();
   }
 
-  groupClassFor(groupId) {
-    const g = this.data.groups.find(x => x.groupId === groupId);
-    if (!g) return '';
-    const name = g.groupName.toLowerCase();
-    if (name.includes('security')) return 'security';
-    if (name.includes('regional')) return 'regional';
-    if (name.includes('general')) return 'general';
-    return '';
-  }
+  applyFilters() {
+    const q = (this.querySelector('#reg-search')?.value || '').trim().toLowerCase();
+    const group = this.querySelector('#reg-group')?.value || '';
+    const showDeprecated = this.querySelector('#reg-deprecated')?.checked;
 
-  render() {
-    const body = this.querySelector('#reg-body');
-    const filtered = this.filteredFilters();
-    if (!filtered.length) {
-      body.innerHTML = '<div class="registry-empty">No filters match your search.</div>';
-      this.updateCount();
-      return;
+    let shown = 0;
+    for (const row of this.rows) {
+      const hidden =
+        (!showDeprecated && row.dataset.deprecated === '1') ||
+        (group && row.dataset.groupId !== group) ||
+        (q && !this.haystack(row).includes(q));
+      row.hidden = hidden;
+      if (!hidden) shown++;
     }
-    const groupsById = new Map(this.data.groups.map(g => [g.groupId, g]));
-    body.innerHTML = filtered.map(f => {
-      const already = this.existingUrls.has(f.downloadUrl);
-      const checked = this.selected.has(f.filterId);
-      const groupName = groupsById.get(f.groupId)?.groupName || '';
-      const groupCls = this.groupClassFor(f.groupId);
-      const homeUrl = safeUrl(f.homepage);
-      const home = homeUrl ? html`<a class="home" href="${homeUrl}" target="_blank" rel="noopener noreferrer">${icons.external}<span>Homepage</span></a>` : '';
-      return html`
-        <label class="registry-row">
-          <input type="checkbox" data-id="${f.filterId}" ${checked ? raw('checked') : ''} ${already ? raw('disabled') : ''}>
-          <div class="info">
-            <div class="name-row">
-              <span class="name">${f.name}</span>
-              ${groupName ? html`<span class="group-pill ${groupCls}">${groupName}</span>` : ''}
-              ${already ? raw('<span class="added-pill">Added</span>') : ''}
-              ${f.deprecated ? raw('<span class="dep-pill">Deprecated</span>') : ''}
-            </div>
-            <div class="desc">${f.description || ''}</div>
-            ${home}
-          </div>
-        </label>`;
-    }).join('');
-    body.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      cb.onchange = () => {
-        const id = parseInt(cb.dataset.id, 10);
-        if (cb.checked) this.selected.add(id); else this.selected.delete(id);
-        this.updateCount();
-      };
-    });
-    this.updateCount();
+    if (this.countEl) this.countEl.textContent = `Showing ${shown} of ${this.rows.length}`;
+
+    const empty = this.querySelector('[data-testid="registry-empty"]');
+    if (empty) empty.hidden = shown > 0;
+    this.updateSelection();
   }
 
-  updateCount() {
-    const n = this.selected.size;
-    this.querySelector('#reg-count').textContent = n === 1 ? '1 selected' : `${n} selected`;
-    this.querySelector('#reg-add').disabled = n === 0 || this.adding;
+  // Name and description, the same two fields the server searches. Cached on
+  // the row: this runs on every keystroke.
+  haystack(row) {
+    if (row._hay === undefined) {
+      const name = row.querySelector('.name')?.textContent || '';
+      const desc = row.querySelector('.desc')?.textContent || '';
+      row._hay = `${name} ${desc}`.toLowerCase();
+    }
+    return row._hay;
   }
 
-  async submit() {
-    if (!this.selected.size) return;
-    this.adding = true;
-    const items = this.data.filters
-      .filter(f => this.selected.has(f.filterId))
-      .map(f => ({ name: f.name, url: f.downloadUrl }));
-    const addBtn = this.querySelector('#reg-add');
-    const cancelBtn = this.querySelector('#reg-cancel');
-    const closeBtn = this.querySelector('#reg-close');
-    addBtn.disabled = true;
-    addBtn.innerHTML = '<div class="spin" style="width:12px;height:12px;display:inline-block;vertical-align:-2px"></div> Adding…';
-    cancelBtn.disabled = true;
-    closeBtn.disabled = true;
-    try {
-      const resp = await api.post('/api/lists/batch', { items });
-      this.dispatchEvent(new CustomEvent('batch-added', { bubbles: true }));
-      if (!resp.failed || resp.failed.length === 0) {
-        this.close();
-        return;
-      }
-      const summary = this.querySelector('#reg-summary');
-      summary.style.display = '';
-      summary.classList.add('error');
-      // Plain text, escaped once where it lands in markup rather than per part.
-      const failedList = resp.failed.map(f => `${f.name} (${f.error})`).join('; ');
-      summary.innerHTML = html`Added ${resp.added.length}, failed ${resp.failed.length}: ${failedList}`;
-      this.selected.clear();
-      this.existingUrls = new Set(
-        [...this.existingUrls, ...resp.added.map(a => a.url)]
-      );
-      // Swap Cancel → Close since work is done
-      cancelBtn.textContent = 'Close';
-      cancelBtn.disabled = false;
-      closeBtn.disabled = false;
-      this.adding = false;
-      addBtn.innerHTML = `${icons.plus} Add Selected`;
-      this.render();
-    } catch (e) {
-      const summary = this.querySelector('#reg-summary');
-      summary.style.display = '';
-      summary.classList.add('error');
-      summary.textContent = 'Batch add failed. See browser console.';
-      console.error(e);
-      cancelBtn.disabled = false;
-      closeBtn.disabled = false;
-      addBtn.disabled = false;
-      addBtn.innerHTML = `${icons.plus} Add Selected`;
-      this.adding = false;
+  // A hidden row's checkbox still posts, so the count is every tick on the
+  // page rather than only the visible ones — which is the point of filtering
+  // in place, and would be a lie if the two disagreed.
+  updateSelection() {
+    const picked = this.form.querySelectorAll('input[name="filter_id"]:checked').length;
+    if (this.selectedEl) {
+      this.selectedEl.textContent = picked === 0
+        ? `Up to ${this.limit} lists at a time`
+        : picked === 1 ? '1 selected' : `${picked} selected`;
+    }
+    if (this.addBtn) {
+      this.addBtn.disabled = picked === 0 || picked > this.limit;
+      this.addBtn.title = picked > this.limit
+        ? `Too many — ${this.limit} at a time`
+        : '';
     }
   }
 }
-customElements.define('registry-modal', RegistryModal);
+customElements.define('registry-page', RegistryPage);
 
 // --- Shared touch support for charts ---
 // Pointer events fire for touch too, but a single tap doesn't reliably produce a
@@ -1868,12 +1737,8 @@ class FiltersPage extends HTMLElement {
       this.loadLists();
     };
 
-    this.querySelector('#browse-registry').onclick = () => {
-      const modal = document.createElement('registry-modal');
-      modal.addEventListener('batch-added', () => this.loadLists());
-      document.body.appendChild(modal);
-      modal.open();
-    };
+    // Browse Registry is a link to a page of its own now, so there is nothing
+    // to wire here — following it is the whole behaviour.
 
     this.querySelector('#enable-recommended').closest('form').onsubmit = (e) => {
       e.preventDefault();

@@ -7,19 +7,19 @@
   same ids — and talks to `/api/*` instead, so with JavaScript the page behaves
   exactly as it always has.
 
-  What is *not* here: the registry browser, which is a modal `app.js` mounts on
-  `document.body`. It has no server-rendered form yet and its button does
-  nothing without JavaScript, which is why it is the one control marked
-  `js-only`.
+  The registry browser used to be the exception — a modal `app.js` mounted on
+  `document.body`, and the one control here that did nothing without
+  JavaScript. It has its own page now (`templates/registry.html`), so "Browse
+  Registry" is an ordinary link.
 #}
 {% extends "shell.html" %}
 
 {% block page %}
       {#
         Wrapped in the custom element the client already defines, so it upgrades
-        in place and enhances this markup rather than replacing it. The
-        bootstrap mounts a page component only when the server left
-        `#page-content` empty.
+        in place and enhances this markup rather than replacing it. Nothing
+        mounts it: every page ships its own element now, so `app.js` has no
+        path-to-component table left.
       #}
       <filters-page>
       <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
@@ -80,8 +80,8 @@
           <form method="post" action="/filters/lists/update">
             <button type="submit" class="btn btn-primary btn-sm" id="update-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Update All</button>
           </form>
-          {# The registry browser is a client-only modal; P3.5 gives it a page. #}
-          <button type="button" class="btn btn-sm js-only" id="browse-registry" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Browse Registry</button>
+          {# A page of its own now, so this is a link and needs no client. #}
+          <a class="btn btn-sm" href="/filters/registry" id="browse-registry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Browse Registry</a>
         </div>
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
           <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>

@@ -87,71 +87,17 @@ Then('the quoted filter list name is shown as text', async ({ page }) => {
   await expect(page.getByText(INJECTED_NAME, { exact: false }).first()).toBeVisible();
 });
 
-Given('the registry offers a filter whose homepage is a javascript: URL', async ({ page }) => {
-  await page.route('**/api/registry/filters', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({
-      filters: [{
-        filterId: 990001,
-        name: 'Probe list',
-        description: 'registry entry with a hostile homepage',
-        homepage: 'javascript:window.__xss=1',
-        downloadUrl: 'https://example.com/e2e-registry-probe.txt',
-        groupId: 1,
-      }],
-      groups: [{ groupId: 1, groupName: 'Probe group' }],
-    }),
-  }));
-});
-
-Then('the registry entry is listed with no homepage link', async ({ page }) => {
-  // The row renders, so a missing link is the URL being rejected rather than the
-  // whole entry failing to load.
-  await expect(page.locator('.registry-row')).toHaveCount(1);
-  await expect(page.locator('.registry-row .name')).toHaveText('Probe list');
-  await expect(page.locator('.registry-row a.home')).toHaveCount(0);
-});
-
-// The registry modal is the only thing binding document-level keydown, so a
-// running net count of those registrations tracks exactly its Escape handler.
-Given('I am counting document keydown listeners', async ({ page }) => {
-  await page.evaluate(() => {
-    window.__keydownDelta = 0;
-    const add = document.addEventListener.bind(document);
-    const remove = document.removeEventListener.bind(document);
-    document.addEventListener = (type, fn, opts) => {
-      if (type === 'keydown') window.__keydownDelta++;
-      return add(type, fn, opts);
-    };
-    document.removeEventListener = (type, fn, opts) => {
-      if (type === 'keydown') window.__keydownDelta--;
-      return remove(type, fn, opts);
-    };
-  });
-});
-
+// An ordinary link now, so following it is an ordinary navigation.
 When('I open the registry browser', async ({ page }) => {
   await page.locator('#browse-registry').click();
-  await expect(page.locator('.registry-overlay')).toBeVisible();
 });
 
-When('I dismiss the registry browser with the Escape key', async ({ page }) => {
-  await page.keyboard.press('Escape');
-});
-
-// Removal that does not go through close(): the teardown contract has to hold
-// for any path that detaches the element, not just the button that calls close.
-When('the registry browser is removed without being closed', async ({ page }) => {
-  await page.evaluate(() => document.querySelector('registry-modal').remove());
-  await expect(page.locator('registry-modal')).toHaveCount(0);
-});
-
-Then('the registry browser is gone', async ({ page }) => {
-  await expect(page.locator('registry-modal')).toHaveCount(0);
-});
-
-Then('no document keydown listener was left behind', async ({ page }) => {
-  const delta = await page.evaluate(() => window.__keydownDelta);
-  expect(delta, 'net document keydown listeners after the modal went away').toBe(0);
+// Slashes are alternation in a Cucumber Expression, so the path stays out of
+// the step text and lives in the assertion.
+Then('the registry browser is a page of its own', async ({ page }) => {
+  await expect(page).toHaveURL(/\/filters\/registry$/);
+  await expect(page.locator('registry-page')).toBeVisible();
+  // Filters marks the page it is a view of, so the navigation still says where
+  // the operator is. Both bars carry the mark, so this asks the named one.
+  await expect(page.locator('[data-testid="nav-filters"]')).toHaveClass(/active/);
 });

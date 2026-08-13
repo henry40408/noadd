@@ -3048,6 +3048,366 @@ pub async fn filters_rule_delete_submit(
     filters_saved(jar, Flash::FiltersSaved)
 }
 
+// --- Filter registry ---
+
+/// A link that is safe to put in an `href`.
+///
+/// Escaping keeps a value inside its attribute; it does not make the value safe
+/// to navigate to. Registry entries are fetched from a third-party URL at
+/// runtime, so a `javascript:` homepage would run on click however well the
+/// string was escaped. Only absolute `http(s)` survives; everything else yields
+/// an empty string and renders no link at all.
+fn safe_url(raw: Option<&str>) -> String {
+    let candidate = raw.unwrap_or_default().trim();
+    let lowered = candidate.to_ascii_lowercase();
+    if lowered.starts_with("http://") || lowered.starts_with("https://") {
+        candidate.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// The registry page's filters, all three of them in the URL.
+#[derive(Deserialize, Default)]
+pub struct RegistryQuery {
+    q: Option<String>,
+    group: Option<String>,
+    deprecated: Option<String>,
+}
+
+impl RegistryQuery {
+    /// The search term, trimmed, as both the filter and the value the box keeps.
+    fn search(&self) -> String {
+        self.q.as_deref().unwrap_or_default().trim().to_string()
+    }
+
+    fn group_id(&self) -> Option<i64> {
+        self.group.as_deref().and_then(|raw| raw.parse().ok())
+    }
+
+    fn show_deprecated(&self) -> bool {
+        self.deprecated.is_some()
+    }
+
+    /// The query string that returns to this exact view, for the form the page
+    /// posts to and for the link back from a failure.
+    fn to_query_string(&self) -> String {
+        let mut parts = Vec::new();
+        let search = self.search();
+        if !search.is_empty() {
+            parts.push(format!("q={}", encode_query_value(&search)));
+        }
+        if let Some(group) = self.group_id() {
+            parts.push(format!("group={group}"));
+        }
+        if self.show_deprecated() {
+            parts.push("deprecated=1".to_string());
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", parts.join("&"))
+        }
+    }
+}
+
+/// One registry entry as the list shows it.
+pub struct RegistryRowView {
+    filter_id: i64,
+    /// The group this entry belongs to, for the client's in-place filtering —
+    /// the same id the `<select>` carries, so the two cannot disagree.
+    group_id: i64,
+    name: String,
+    description: String,
+    /// The list's own page, when it has one that is safe to link. Empty
+    /// otherwise, and the template renders no link.
+    homepage: String,
+    group_name: String,
+    /// The pill's colour class, matching what the client used to pick.
+    group_class: &'static str,
+    /// Already among the operator's lists, so the row is checked off and
+    /// disabled rather than hidden — "you have this" is worth saying.
+    already_added: bool,
+    deprecated: bool,
+}
+
+/// One `<option>` in the group filter.
+pub struct RegistryGroupView {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+/// One list the batch could not add, and why.
+pub struct RegistryFailureView {
+    name: String,
+    error: String,
+}
+
+/// The registry browser.
+///
+/// This was a modal `app.js` mounted on `document.body`, which made it the one
+/// control on the filters page that did nothing without JavaScript. It is a
+/// page now, with the same three filters in the URL that every other list view
+/// here puts there, and one form that posts what is ticked.
+///
+/// The registry is fetched from a third party at runtime, so `load_failed` is a
+/// state the page has to render rather than an error to fail on: the retry is
+/// an ordinary link back to the same URL.
+#[derive(Template, WebTemplate)]
+#[template(path = "registry.html")]
+pub struct RegistryTemplate {
+    shell: ShellData,
+    /// What the search box keeps.
+    q: String,
+    groups: Vec<RegistryGroupView>,
+    show_deprecated: bool,
+    rows: Vec<RegistryRowView>,
+    /// The registry itself could not be fetched — a third-party outage, not a
+    /// bad request.
+    load_failed: bool,
+    /// How many entries the filters let through, and how many exist.
+    shown: usize,
+    total: usize,
+    /// The query string that returns to this view, carried by the form.
+    current_query: String,
+    /// How many lists the batch just added. Zero on a plain GET.
+    added_count: usize,
+    /// What it could not add. Empty on a plain GET.
+    failures: Vec<RegistryFailureView>,
+    /// The cap the page will not let a selection exceed.
+    limit: usize,
+}
+
+/// Which colour a group's pill gets, matching what the client used to derive
+/// from the same names.
+fn registry_group_class(group_name: &str) -> &'static str {
+    let lowered = group_name.to_ascii_lowercase();
+    if lowered.contains("security") {
+        "security"
+    } else if lowered.contains("regional") {
+        "regional"
+    } else if lowered.contains("general") {
+        "general"
+    } else {
+        ""
+    }
+}
+
+/// Build the page for this view, whatever brought the operator to it.
+async fn build_registry(
+    state: &AppState,
+    query: &RegistryQuery,
+    shell: ShellData,
+    added_count: usize,
+    failures: Vec<RegistryFailureView>,
+) -> RegistryTemplate {
+    let search = query.search();
+    let group_id = query.group_id();
+    let show_deprecated = query.show_deprecated();
+
+    let mut template = RegistryTemplate {
+        shell,
+        q: search.clone(),
+        groups: Vec::new(),
+        show_deprecated,
+        rows: Vec::new(),
+        load_failed: false,
+        shown: 0,
+        total: 0,
+        current_query: query.to_query_string(),
+        added_count,
+        failures,
+        limit: crate::admin::api::BATCH_ADD_LIMIT,
+    };
+
+    let Ok(data) = state.registry.list().await else {
+        template.load_failed = true;
+        return template;
+    };
+
+    // What the operator already has, so a row can say so instead of offering to
+    // add it twice.
+    let existing: std::collections::HashSet<String> = state
+        .db
+        .get_filter_lists()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|list| list.url)
+        .collect();
+
+    let group_names: std::collections::HashMap<i64, String> = data
+        .groups
+        .iter()
+        .map(|group| (group.group_id, group.group_name.clone()))
+        .collect();
+
+    template.groups = data
+        .groups
+        .iter()
+        .map(|group| RegistryGroupView {
+            value: group.group_id.to_string(),
+            label: group.group_name.clone(),
+            selected: group_id == Some(group.group_id),
+        })
+        .collect();
+
+    let needle = search.to_lowercase();
+    template.total = data.filters.len();
+    template.rows = data
+        .filters
+        .into_iter()
+        .filter(|filter| show_deprecated || !filter.deprecated)
+        .filter(|filter| group_id.is_none_or(|id| filter.group_id == id))
+        .filter(|filter| {
+            needle.is_empty()
+                || format!("{} {}", filter.name, filter.description)
+                    .to_lowercase()
+                    .contains(&needle)
+        })
+        .map(|filter| {
+            let group_name = group_names
+                .get(&filter.group_id)
+                .cloned()
+                .unwrap_or_default();
+            RegistryRowView {
+                already_added: existing.contains(&filter.download_url),
+                group_class: registry_group_class(&group_name),
+                group_name,
+                homepage: safe_url(filter.homepage.as_deref()),
+                filter_id: filter.filter_id,
+                group_id: filter.group_id,
+                name: filter.name,
+                description: filter.description,
+                deprecated: filter.deprecated,
+            }
+        })
+        .collect();
+    template.shown = template.rows.len();
+
+    template
+}
+
+pub async fn registry_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<RegistryQuery>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    // The registry is a view of the filters page's subject, and it is reached
+    // from there, so the navigation keeps marking Filters.
+    let (shell, jar) = ShellData::build_for("/filters", &headers, jar);
+    (
+        jar,
+        build_registry(&state, &query, shell, 0, Vec::new()).await,
+    )
+}
+
+/// `POST /filters/registry/add` — add every ticked list.
+///
+/// A browser sends only the boxes that are ticked, each carrying its own id, so
+/// the body is however many `filter_id` fields the operator chose. `Vec<(String,
+/// String)>` is the one shape `Form` deserialises that keeps repeated keys.
+pub async fn registry_add_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<RegistryQuery>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let picked: std::collections::HashSet<i64> = fields
+        .iter()
+        .filter(|(key, _)| key == "filter_id")
+        .filter_map(|(_, value)| value.parse().ok())
+        .collect();
+
+    // One failure shape for every way this can go wrong, so the response is
+    // built once at the end rather than in four places.
+    let one = |name: &str, error: String| {
+        vec![RegistryFailureView {
+            name: name.to_string(),
+            error,
+        }]
+    };
+
+    let outcome = if picked.is_empty() {
+        // Nothing ticked. Say so where the boxes are rather than redirecting to
+        // a page that would look like it had done something.
+        Err((
+            0,
+            one(
+                "No lists selected",
+                "tick at least one list before adding".to_string(),
+            ),
+        ))
+    } else {
+        // Names and URLs come from the registry rather than from the form: the
+        // browser sends an id, and what that id means is the server's to decide.
+        match state.registry.list().await {
+            Err(_err) => Err((
+                0,
+                one(
+                    "Registry unavailable",
+                    "could not re-read the registry to resolve the selection".to_string(),
+                ),
+            )),
+            Ok(data) => {
+                let items: Vec<crate::admin::api::BatchAddItem> = data
+                    .filters
+                    .into_iter()
+                    .filter(|filter| picked.contains(&filter.filter_id))
+                    .map(|filter| crate::admin::api::BatchAddItem {
+                        name: filter.name,
+                        url: filter.download_url,
+                    })
+                    .collect();
+                match crate::admin::api::add_lists_batch(&state, items).await {
+                    // Everything landed, and what there is to see is on the
+                    // filters page. Redirect so a refresh cannot add it twice.
+                    Ok(result) if result.failed.is_empty() => Ok(()),
+                    // A partial failure is the one thing a redirect would
+                    // discard: the reasons exist in this response and nowhere
+                    // else.
+                    Ok(result) => Err((
+                        result.added.len(),
+                        result
+                            .failed
+                            .into_iter()
+                            .map(|entry| RegistryFailureView {
+                                name: entry.name,
+                                error: entry.error,
+                            })
+                            .collect(),
+                    )),
+                    Err(_status) => Err((
+                        0,
+                        one(
+                            "Nothing was added",
+                            format!(
+                                "a batch must have between 1 and {} lists in it",
+                                crate::admin::api::BATCH_ADD_LIMIT
+                            ),
+                        ),
+                    )),
+                }
+            }
+        }
+    };
+
+    let (shell, jar) = ShellData::build_for("/filters", &headers, jar);
+    match outcome {
+        Ok(()) => filters_saved(jar, Flash::FiltersSaved),
+        Err((added, failures)) => (
+            jar,
+            build_registry(&state, &query, shell, added, failures).await,
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3117,6 +3477,58 @@ mod tests {
         assert_eq!(format_num_adaptive(999_999), "999,999");
         assert_eq!(format_num_adaptive(1_000_000), "1M");
         assert_eq!(format_num_adaptive(1_250_000), "1.3M");
+    }
+
+    #[test]
+    fn only_absolute_http_urls_survive_into_an_href() {
+        assert_eq!(
+            safe_url(Some("https://example.com/list")),
+            "https://example.com/list"
+        );
+        assert_eq!(safe_url(Some("http://example.com")), "http://example.com");
+        // Case is not a disguise.
+        assert_eq!(safe_url(Some("HTTPS://example.com")), "HTTPS://example.com");
+
+        // Everything a third party could put in `homepage` to get something to
+        // run on click.
+        assert_eq!(safe_url(Some("javascript:alert(1)")), "");
+        assert_eq!(safe_url(Some("JaVaScRiPt:alert(1)")), "");
+        assert_eq!(safe_url(Some("data:text/html,<script>")), "");
+        assert_eq!(safe_url(Some("//evil.example")), "");
+        assert_eq!(safe_url(Some("/relative")), "");
+        assert_eq!(safe_url(Some("")), "");
+        assert_eq!(safe_url(None), "");
+    }
+
+    #[test]
+    fn a_group_pill_takes_its_colour_from_the_group_name() {
+        assert_eq!(registry_group_class("Security"), "security");
+        assert_eq!(registry_group_class("Regional lists"), "regional");
+        assert_eq!(registry_group_class("General"), "general");
+        assert_eq!(registry_group_class("Other"), "");
+    }
+
+    #[test]
+    fn the_registry_view_rebuilds_only_the_filters_that_are_set() {
+        let none = RegistryQuery::default();
+        assert_eq!(none.to_query_string(), "");
+
+        let all = RegistryQuery {
+            q: Some("  ads  ".to_string()),
+            group: Some("2".to_string()),
+            deprecated: Some("1".to_string()),
+        };
+        assert_eq!(all.search(), "ads");
+        assert_eq!(all.to_query_string(), "?q=ads&group=2&deprecated=1");
+
+        // A group that is not a number is no filter at all, rather than a 400.
+        let bad = RegistryQuery {
+            q: None,
+            group: Some("nonsense".to_string()),
+            deprecated: None,
+        };
+        assert_eq!(bad.group_id(), None);
+        assert_eq!(bad.to_query_string(), "");
     }
 
     #[test]

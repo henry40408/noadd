@@ -1,0 +1,114 @@
+{#
+  The filter registry browser.
+
+  This was a modal `app.js` mounted on `document.body`, which made "Browse
+  Registry" the one control on the filters page that did nothing without
+  JavaScript. It is a page now, and the button that opened it is a link.
+
+  Two forms, not one, and deliberately not nested — a browser cannot nest them
+  and a GET form cannot also be a POST form. The filters are a `method="get"`
+  form whose state lands in the URL like every other list view here; the
+  selection is a `method="post"` form wrapping the rows. Changing a filter is a
+  navigation, so it starts a fresh selection: with JavaScript `app.js` hides the
+  rows in place instead, and the ticks survive.
+
+  The registry comes from a third party at runtime, so a failure to fetch it is
+  a state this page renders rather than an error it fails on. The retry is an
+  ordinary link back to the same URL.
+#}
+{% extends "shell.html" %}
+
+{% block page %}
+      <registry-page data-limit="{{ limit }}">
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div><h2>Browse Filter Registry</h2><p>Add lists from the AdGuard HostlistsRegistry</p></div>
+        <a class="btn btn-sm" href="/filters" data-testid="registry-back">Back to Filters</a>
+      </div>
+
+      {%- if added_count != 0 %}
+      <div class="rebuild-banner show done" data-testid="registry-added">
+        <div class="text">
+          <span class="label">Added {{ added_count }}</span>
+          <span class="meta">The filter engine is rebuilding; the change takes effect in a moment.</span>
+        </div>
+      </div>
+      {%- endif %}
+      {%- if !failures.is_empty() %}
+      <div class="card fade-in registry-summary error" data-testid="registry-failures">
+        <div class="card-title">Not added</div>
+        <ul style="margin:8px 0 0;padding-left:18px">
+          {%- for failure in failures %}
+          <li><span class="mono">{{ failure.name }}</span> — {{ failure.error }}</li>
+          {%- endfor %}
+        </ul>
+      </div>
+      {%- endif %}
+
+      {%- if load_failed %}
+      <div class="card fade-in">
+        <div class="registry-error" data-testid="registry-unavailable">
+          Failed to load the registry.<br>
+          <a class="btn btn-sm" style="margin-top:14px" href="/filters/registry{{ current_query }}">Retry</a>
+        </div>
+      </div>
+      {%- else %}
+      <div class="card fade-in" style="animation-delay:0.05s">
+        {#
+          A read is a GET: the search, the group and the deprecated toggle all
+          land in the URL, so a view of the registry can be refreshed, shared and
+          navigated back to.
+        #}
+        <form method="get" action="/filters/registry" class="registry-toolbar" id="registry-filters" data-testid="registry-filters">
+          <input type="text" id="reg-search" name="q" value="{{ q }}" placeholder="Search name or description">
+          <select id="reg-group" name="group">
+            <option value="">All groups</option>
+            {%- for group in groups %}
+            <option value="{{ group.value }}"{% if group.selected %} selected{% endif %}>{{ group.label }}</option>
+            {%- endfor %}
+          </select>
+          <label class="check"><input type="checkbox" id="reg-deprecated" name="deprecated" value="1"{% if show_deprecated %} checked{% endif %}> Show deprecated</label>
+          {# Removed by `app.js`, which filters in place and never submits this. #}
+          <button type="submit" class="btn btn-sm nojs-only" id="reg-filter-submit">Apply</button>
+        </form>
+      </div>
+
+      <form method="post" action="/filters/registry/add{{ current_query }}" id="registry-form">
+      <div class="card fade-in" style="animation-delay:0.08s">
+        <div class="card-title" id="registry-count" data-testid="registry-count">Showing {{ shown }} of {{ total }}</div>
+        <div class="registry-body" id="reg-body">
+          {# Always present so `app.js` can show it when its own filtering
+             empties the list, rather than having to build one. #}
+          <div class="registry-empty" data-testid="registry-empty"{% if !rows.is_empty() %} hidden{% endif %}>No filters match your search.</div>
+          {%- for row in rows %}
+          <label class="registry-row" data-testid="registry-row" data-name="{{ row.name }}" data-group-id="{{ row.group_id }}"{% if row.deprecated %} data-deprecated="1"{% endif %}>
+            <input type="checkbox" name="filter_id" value="{{ row.filter_id }}"{% if row.already_added %} disabled{% endif %}>
+            <div class="info">
+              <div class="name-row">
+                <span class="name">{{ row.name }}</span>
+                {%- if row.group_name != "" %}<span class="group-pill {{ row.group_class }}">{{ row.group_name }}</span>{% endif %}
+                {%- if row.already_added %}<span class="added-pill">Added</span>{% endif %}
+                {%- if row.deprecated %}<span class="dep-pill">Deprecated</span>{% endif %}
+              </div>
+              <div class="desc">{{ row.description }}</div>
+              {#
+                Escaping keeps a value inside its attribute; it does not make it
+                safe to navigate to. `safe_url` already dropped anything that is
+                not absolute http(s), so an empty string here means no link.
+              #}
+              {%- if row.homepage != "" %}
+              <a class="home" href="{{ row.homepage }}" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg><span>Homepage</span></a>
+              {%- endif %}
+            </div>
+          </label>
+          {%- endfor %}
+        </div>
+      </div>
+      <div class="card fade-in registry-foot" style="animation-delay:0.1s">
+        <div class="count" data-testid="registry-selected">Up to {{ limit }} lists at a time</div>
+        <a class="btn btn-sm" href="/filters">Cancel</a>
+        <button type="submit" class="btn btn-primary btn-sm" id="reg-add" data-testid="registry-add">Add Selected</button>
+      </div>
+      </form>
+      {%- endif %}
+      </registry-page>
+{% endblock %}

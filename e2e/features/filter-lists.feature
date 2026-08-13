@@ -38,25 +38,13 @@ Feature: Filter list management
     Then no filter list row carries an inline event handler
     And the quoted filter list name is shown as text
 
-  Scenario: A javascript: homepage in registry data renders no link
-    # Registry entries are fetched from a third-party URL at runtime. Escaping
-    # keeps the value inside its href but does not stop the browser navigating
-    # to it, so a javascript: homepage would run on click regardless.
-    Given the registry offers a filter whose homepage is a javascript: URL
+  Scenario: Browsing the registry is a page of its own
+    # It was a modal mounted on document.body, which made this the one control
+    # on the page that did nothing without JavaScript. Two scenarios went with
+    # it: the modal's Escape-handler teardown, which has no subject any more,
+    # and the javascript:-homepage check, which moved to Rust —
+    # `a_hostile_homepage_never_becomes_a_link` in tests/admin_api_test.rs. The
+    # registry is fetched by the server now, so a browser-side route stub no
+    # longer intercepts it, and the Rust test exercises the rendering itself.
     When I open the registry browser
-    Then the registry entry is listed with no homepage link
-
-  Scenario: The registry browser releases its Escape handler however it goes away
-    # The modal mounts on document.body rather than inside the page, and holds a
-    # document-level keydown listener while open. Nothing else clears that
-    # listener — a page change does not remove the modal — so teardown has to
-    # ride on the element's removal rather than on the close button's handler,
-    # which only covers one of the ways it can go.
-    And I am counting document keydown listeners
-    When I open the registry browser
-    And I dismiss the registry browser with the Escape key
-    Then the registry browser is gone
-    And no document keydown listener was left behind
-    When I open the registry browser
-    And the registry browser is removed without being closed
-    Then no document keydown listener was left behind
+    Then the registry browser is a page of its own
