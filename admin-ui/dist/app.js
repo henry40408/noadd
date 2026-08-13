@@ -1666,45 +1666,23 @@ class LogsPage extends LiveElement {
     this._timeTimer = null;
   }
 
+  // The body arrives server-rendered, filters and page and all, read out of the
+  // URL. What is taken over here is the interaction: filtering without a
+  // navigation, paging without one, and the live tail — which is the documented
+  // exception to this page working without scripting.
   connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
-        <div><h2>Query Log</h2><p>DNS query history</p></div>
-        <button class="live-toggle paused" id="log-live-btn" data-testid="logs-live-toggle" title="Stream new queries live as they arrive. Click to toggle."><span class="live-dot"></span> LIVE</button>
-      </div>
-      <div class="filters-row fade-in">
-        <input type="text" id="log-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower).">
-        <select id="log-action">
-          <option value="">All</option>
-          <option value="allowed">Allowed</option>
-          <option value="blocked">Blocked</option>
-        </select>
-        <select id="log-type">
-          <option value="">All Types</option>
-          <option value="A">A</option>
-          <option value="AAAA">AAAA</option>
-          <option value="CNAME">CNAME</option>
-          <option value="MX">MX</option>
-          <option value="TXT">TXT</option>
-          <option value="NS">NS</option>
-          <option value="SOA">SOA</option>
-          <option value="PTR">PTR</option>
-          <option value="SRV">SRV</option>
-          <option value="CAA">CAA</option>
-          <option value="HTTPS">HTTPS</option>
-        </select>
-        <select id="log-token">
-          <option value="">All Tokens</option>
-        </select>
-        <button class="btn btn-danger btn-sm" id="clear-logs">${icons.trash} Clear All</button>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.05s">
-        <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Time</th><th>Status</th><th>Query</th><th>Type</th><th>Client</th><th></th><th>Source</th><th>ms</th>
-        </tr></thead><tbody id="log-body"></tbody></table></div>
-        <div id="log-cards" class="show-mobile"></div>
-        <div class="pagination" id="log-pagination"></div>
-      </div>`;
+    this.querySelectorAll('.nojs-only').forEach(el => el.remove());
+    this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
+
+    // Adopt what the server was showing rather than resetting to defaults: the
+    // operator may have arrived on a filtered, paged URL, and re-fetching page
+    // one of everything would throw that away in front of them.
+    const params = new URLSearchParams(location.search);
+    this.search = params.get('q') || '';
+    this.actionFilter = params.get('action') || '';
+    this.typeFilter = params.get('type') || '';
+    this.tokenFilter = params.get('token') || '';
+    this.offset = (Math.max(1, parseInt(params.get('page') || '1', 10) || 1) - 1) * this.limit;
 
     let debounce;
     this.querySelector('#log-search').oninput = (e) => {
@@ -1720,19 +1698,38 @@ class LogsPage extends LiveElement {
     this.querySelector('#log-type').onchange = (e) => {
       this.typeFilter = e.target.value; this.offset = 0; this.load();
     };
-    this.loadTokens();
-    this.querySelector('#clear-logs').onclick = async () => {
-      if (confirm('Delete all query logs?')) {
-        await api.del('/api/logs');
-        this.load();
-      }
+    // The form still submits without JavaScript; here the controls above have
+    // already done the work, so the navigation would only repeat it.
+    this.querySelector('#log-filters').onsubmit = (e) => e.preventDefault();
+
+    // The button lives in the filters row but belongs to the POST form below it
+    // (via its `form` attribute), so the confirmation goes on that form rather
+    // than on whichever one happens to contain the button.
+    this.querySelector('#clear-logs-form').onsubmit = (e) => {
+      if (!confirm('Delete all query logs?')) e.preventDefault();
     };
     this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
     // Both the stream and the ticker are toggled on and off during the page's
     // life, so they register single teardowns that defer to their own stoppers.
     this.track(() => { this._stopLive(); this._stopTimeTicker(); });
-    this.load();
+    // The rows on screen came from the server; bind their actions where they
+    // are instead of re-fetching a page that is already correct.
+    this._bindRowActions(this);
+    this._bindPagination();
     this._startTimeTicker();
+  }
+
+  // The pager is two links, so it works with no JavaScript. With it, they move
+  // through the same pages without the navigation.
+  _bindPagination() {
+    const go = (delta) => {
+      this.offset = Math.max(0, this.offset + delta * this.limit);
+      this.load();
+    };
+    const prev = this.querySelector('#pg-prev');
+    const next = this.querySelector('#pg-next');
+    if (prev && prev.tagName === 'A') prev.onclick = (e) => { e.preventDefault(); go(-1); };
+    if (next && next.tagName === 'A') next.onclick = (e) => { e.preventDefault(); go(1); };
   }
 
   // Relative times ("2 seconds ago") are baked in at render/insert time, so
@@ -1837,17 +1834,46 @@ class LogsPage extends LiveElement {
     }
   }
 
+  // Each row's Allow/Block is a real form, so it works with no JavaScript.
+  // Here the submit is taken over: the rule is posted and the button reports
+  // back in place, rather than the page navigating away from the row that was
+  // just acted on.
   _bindRowActions(scope) {
     (scope || this).querySelectorAll('.log-action').forEach(btn => {
       if (btn._bound) return; btn._bound = true;
-      btn.onclick = async () => {
+      const form = btn.closest('form');
+      const submit = async (e) => {
+        if (e) e.preventDefault();
         const domain = btn.dataset.domain;
         const rule = btn.dataset.blocked === 'true' ? `@@||${domain}^` : `||${domain}^`;
         await api.post('/api/rules', { rule });
         btn.textContent = 'Done';
         btn.disabled = true;
       };
+      if (form) form.onsubmit = submit; else btn.onclick = () => submit();
     });
+  }
+
+  // The rule a row's one-click action adds, mirroring what the server puts in
+  // the form's hidden field: a blocked query is already blocked, so its action
+  // is the allow rule.
+  _ruleFor(l) {
+    return l.blocked ? `@@||${l.domain}^` : `||${l.domain}^`;
+  }
+
+  // The view the client is currently showing, as a path — the same value the
+  // server renders into each row's `next`, so a row action lands back here
+  // whichever half of the UI submitted it.
+  _currentHref() {
+    const params = new URLSearchParams();
+    if (this.search) params.set('q', this.search);
+    if (this.actionFilter) params.set('action', this.actionFilter);
+    if (this.typeFilter) params.set('type', this.typeFilter);
+    if (this.tokenFilter) params.set('token', this.tokenFilter);
+    const page = Math.floor(this.offset / this.limit) + 1;
+    if (page > 1) params.set('page', String(page));
+    const query = params.toString();
+    return query ? `/logs?${query}` : '/logs';
   }
 
   async load() {
@@ -1896,17 +1922,28 @@ class LogsPage extends LiveElement {
     // Bind action buttons (both table and cards)
     this._bindRowActions(this);
 
+    // Links, matching what the server renders: same shape, and still
+    // right-clickable into a new tab. `_bindPagination` cancels the navigation
+    // and pages in place.
     const pag = this.querySelector('#log-pagination');
     const currentPage = Math.floor(this.offset / this.limit) + 1;
     const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
     const hasPrev = this.offset > 0;
     const hasNext = currentPage < totalPages;
-    pag.innerHTML = html`
-      <button class="btn btn-sm" ${hasPrev ? '' : raw('disabled')} id="pg-prev">Prev</button>
-      <span>Page ${currentPage} / ${totalPages}</span>
-      <button class="btn btn-sm" ${hasNext ? '' : raw('disabled')} id="pg-next">Next</button>`;
-    pag.querySelector('#pg-prev').onclick = () => { this.offset = Math.max(0, this.offset - this.limit); this.load(); };
-    pag.querySelector('#pg-next').onclick = () => { this.offset += this.limit; this.load(); };
+    const hrefForPage = (page) => {
+      const saved = this.offset;
+      this.offset = (page - 1) * this.limit;
+      const href = this._currentHref();
+      this.offset = saved;
+      return href;
+    };
+    const pageLink = (id, label, enabled, page) => enabled
+      ? html`<a class="btn btn-sm" id="${id}" data-testid="logs-${label.toLowerCase()}" href="${hrefForPage(page)}">${label}</a>`
+      : html`<span class="btn btn-sm" id="${id}" aria-disabled="true" style="opacity:.45">${label}</span>`;
+    pag.innerHTML = pageLink('pg-prev', 'Prev', hasPrev, currentPage - 1)
+      + html`<span>Page ${currentPage} / ${totalPages}${this.total ? ` · ${formatFull(this.total)} queries` : ''}</span>`
+      + pageLink('pg-next', 'Next', hasNext, currentPage + 1);
+    this._bindPagination();
   }
 
   _rowHtml(l) {
@@ -1916,7 +1953,7 @@ class LogsPage extends LiveElement {
         <td><div style="display:flex;align-items:center;gap:6px;max-width:300px"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--text-primary)" title="${l.domain}">${l.domain}</span>${l.authenticated_data ? html`<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>` : ''}</div>${l.result ? html`<div class="mono" style="font-size:0.85rem;color:var(--text-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.result}">→ ${l.result}</div>` : ''}</td>
         <td class="mono">${l.query_type}</td>
         <td class="mono">${l.client_ip}${l.doh_token ? html`<br><span style="color:var(--accent);font-size:0.85rem">${l.doh_token}</span>` : ''}</td>
-        <td><button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></td>
+        <td><form method="post" action="/logs/rules" class="inline-form"><input type="hidden" name="rule" value="${this._ruleFor(l)}"><input type="hidden" name="next" value="${this._currentHref()}"><button type="submit" class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></form></td>
         <td>${l.cached ? html`<span class="badge badge-cached">cached</span>` : l.upstream ? html`<span class="mono" style="font-size:0.9rem">${l.upstream}</span>` : html`<span class="text-dim">-</span>`}</td>
         <td class="mono">${l.response_ms}</td>`;
   }
@@ -1927,7 +1964,7 @@ class LogsPage extends LiveElement {
           <span class="st ${l.blocked ? 'st-block' : 'st-ok'}" title="${l.blocked ? 'blocked' : 'allowed'}" style="flex:0 0 auto">${l.blocked ? '✖' : '✔'}</span>
           <span class="log-card-domain" title="${l.domain}">${l.domain}</span>
           ${l.authenticated_data ? html`<span class="badge badge-dnssec" style="flex:0 0 auto">dnssec</span>` : ''}
-          <button class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}" style="flex-shrink:0">${l.blocked ? 'Allow' : 'Block'}</button>
+          <form method="post" action="/logs/rules" class="inline-form" style="flex-shrink:0"><input type="hidden" name="rule" value="${this._ruleFor(l)}"><input type="hidden" name="next" value="${this._currentHref()}"><button type="submit" class="btn btn-sm log-action ${l.blocked ? 'btn-allow' : 'btn-danger'}" data-domain="${l.domain}" data-blocked="${l.blocked}">${l.blocked ? 'Allow' : 'Block'}</button></form>
         </div>
         ${l.result ? html`<div class="mono" style="font-size:0.85rem;color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.result}">→ ${l.result}</div>` : ''}
         <div class="log-card-row2">
@@ -1941,18 +1978,6 @@ class LogsPage extends LiveElement {
       </div>`;
   }
 
-  async loadTokens() {
-    try {
-      const tokens = await api.get('/api/doh-tokens');
-      const sel = this.querySelector('#log-token');
-      for (const t of tokens) {
-        const opt = document.createElement('option');
-        opt.value = t.token;
-        opt.textContent = t.token;
-        sel.appendChild(opt);
-      }
-    } catch (e) { console.error(e); }
-  }
 }
 customElements.define('logs-page', LogsPage);
 

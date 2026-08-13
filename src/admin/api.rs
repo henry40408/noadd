@@ -175,7 +175,9 @@ pub fn admin_router(state: AppState) -> Router {
         // has to discover the same thing for itself.
         .route("/", get(crate::admin::pages::dashboard_page))
         .route("/stats", get(crate::admin::pages::shell_page))
-        .route("/logs", get(crate::admin::pages::shell_page))
+        .route("/logs", get(crate::admin::pages::logs_page))
+        .route("/logs/rules", post(crate::admin::pages::logs_rule_submit))
+        .route("/logs/clear", post(crate::admin::pages::logs_clear_submit))
         .route("/filters", get(crate::admin::pages::filters_page))
         // Every filter change is its own POST rather than one endpoint taking an
         // action name: a form's target is the clearest statement of what it

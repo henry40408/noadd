@@ -78,6 +78,16 @@ Filters adds the conventions for a page whose body is a *list of things*:
 - **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
 - Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
 
+The query log adds the conventions for **filtering and paging**:
+
+- **The whole view is in the URL** — `/logs?q=&action=&type=&token=&page=`. The filters are a `method="get"` form and the pager is two `<a>`s, so both work with no client; `app.js` reads the same query string back on connect and adopts it rather than resetting to page one of everything.
+- **The pager carries every filter.** Dropping them looks like the filter stopped working rather than like the page changed, so `logs_query_string` rebuilds the whole query with only `page` replaced.
+- **A row action carries where it was invoked from** in a `next` field, validated by the same `safe_next` the sign-in page uses, so acting on row 40 of page 3 of a filtered view returns there.
+- **An empty table means two things and says which**: the empty-log guide when nothing is filtered, "No logs found" when something is.
+- **Clearing answers on an unfiltered first page** whatever view it came from — every filter now matches nothing, and "No logs found" would read as the filter breaking.
+- ⚠️ **A GET form and a POST form cannot be the same form, and forms cannot nest.** Clear All stays on the filters row via `form="clear-logs-form"`, pointing at an empty POST form after it. `app.js` must bind the confirmation to *that* form, not to `closest('form')`.
+- The relative times are the one thing deliberately **not** matched between the two halves: the server renders `"3 minutes ago"` and the client's ticker replaces it with the browser's locale via `Intl.RelativeTimeFormat` (`"3 min. ago"`). The server cannot know the locale, and the alternative is shipping no time at all without scripting.
+
 Dashboard adds the conventions for a page that is **all readings and no controls**:
 
 - **The numbers are in the first response.** `dashboard_page` makes the five reads `app.js` used to make on its poll — `compute_summary`, `compute_top_domains` / `_clients` / `_upstreams` in `src/admin/stats.rs`, already shared with `/api/stats/*`. A failed read renders zeroes rather than an error page: a dashboard that says nothing beats one that will not load.

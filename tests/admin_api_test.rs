@@ -5231,6 +5231,234 @@ async fn the_filters_forms_refuse_an_anonymous_browser() {
     }
 }
 
+// --- Query log page (server-rendered) ---
+
+async fn logs_html(app: &axum::Router, token: &str, query: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(authed("GET", &format!("/logs{query}"), token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_text(res).await
+}
+
+/// Rows and the pager arrive rendered, and the filters come back showing what
+/// is applied — the whole page's state is in the URL.
+#[tokio::test]
+async fn the_logs_page_renders_rows_and_keeps_its_filters() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "ads.example.com", "10.0.0.5", 2, true).await;
+    seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
+
+    let html = logs_html(&app, &token, "").await;
+    assert!(html.contains("ads.example.com") && html.contains("good.example.com"));
+    assert!(html.contains("Page 1 / 1"), "the pager was not rendered");
+    assert!(html.contains("<logs-page>"), "the body was not wrapped");
+
+    // A filter narrows the rows and comes back selected in the form.
+    let html = logs_html(&app, &token, "?action=blocked").await;
+    assert!(html.contains("ads.example.com"));
+    assert!(
+        !html.contains("good.example.com"),
+        "the allowed query survived a blocked-only filter"
+    );
+    assert!(
+        html.contains(r#"<option value="blocked" selected>"#),
+        "the applied filter was not reflected in the form"
+    );
+
+    // And the search box keeps what was typed.
+    let html = logs_html(&app, &token, "?q=good").await;
+    assert!(
+        html.contains(r#"value="good""#),
+        "the search term was discarded"
+    );
+    assert!(
+        !html.contains("ads.example.com"),
+        "the search did not filter"
+    );
+}
+
+/// Paging carries every filter. Dropping them would look like the filter
+/// stopped working rather than like the page changed.
+#[tokio::test]
+async fn paging_keeps_the_filters_in_the_link() {
+    let (app, token, db) = setup_with_db().await;
+    // Two pages' worth, all blocked, so a filtered view still pages.
+    seed_queries(&db, "ads.example.com", "10.0.0.5", 60, true).await;
+
+    let html = logs_html(&app, &token, "?action=blocked").await;
+    assert!(
+        html.contains("Page 1 / 2"),
+        "the total did not account for the filter"
+    );
+    let hrefs: Vec<&str> = html
+        .match_indices(r#"href="/logs"#)
+        .map(|(i, _)| {
+            let rest = &html[i + 6..];
+            &rest[..rest.find('"').unwrap_or(0)]
+        })
+        .collect();
+    assert!(
+        hrefs
+            .iter()
+            .any(|h| h.contains("action=blocked") && h.contains("page=2")),
+        "the next link dropped the filter; links were {hrefs:?}"
+    );
+
+    let page2 = logs_html(&app, &token, "?action=blocked&page=2").await;
+    assert!(page2.contains("Page 2 / 2"));
+    assert!(
+        page2.contains(r#"href="/logs?action=blocked""#),
+        "the prev link did not return to an unnumbered first page"
+    );
+}
+
+/// An empty table means two different things, and says which.
+#[tokio::test]
+async fn an_empty_log_is_told_apart_from_an_empty_filter() {
+    let (app, token, db) = setup_with_db().await;
+
+    // Nothing logged at all: the guide.
+    let html = logs_html(&app, &token, "").await;
+    assert!(html.contains(r#"data-testid="logs-empty-state""#));
+
+    // Something logged, but nothing matching: not the guide.
+    seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
+    let html = logs_html(&app, &token, "?q=nothing-matches").await;
+    assert!(html.contains("No logs found"));
+    assert!(
+        !html.contains(r#"data-testid="logs-empty-state""#),
+        "a filtered miss showed the empty-log guide"
+    );
+}
+
+/// A row's one-click action goes through the same rule path the filters page
+/// uses, and returns to the view it was invoked from.
+#[tokio::test]
+async fn a_row_action_adds_the_rule_and_returns_to_the_same_view() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "tracker.example.com", "10.0.0.5", 1, false).await;
+
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/logs/rules",
+            &token,
+            "rule=%7C%7Ctracker.example.com%5E&next=/logs%3Faction%3Dblocked",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/logs?action=blocked"),
+        "the operator was not returned to the view they acted from"
+    );
+
+    // The rule is a real rule, parsed by the shared path.
+    let filters = app
+        .oneshot(authed("GET", "/filters", &token, None))
+        .await
+        .unwrap();
+    assert!(body_text(filters).await.contains("tracker.example.com"));
+}
+
+/// `next` is attacker-controlled, so it gets the same treatment as `?next=` on
+/// the sign-in page: same-origin paths only.
+#[tokio::test]
+async fn a_row_action_refuses_an_off_origin_return() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/logs/rules",
+            &token,
+            "rule=%7C%7Cevil.example.com%5E&next=https://evil.example",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/logs"),
+        "an off-origin next was honoured"
+    );
+}
+
+/// Clearing answers on an unfiltered first page, whatever view it came from:
+/// every filter now matches nothing, and "No logs found" would read as the
+/// filter breaking rather than the log being empty.
+#[tokio::test]
+async fn clearing_the_log_lands_on_an_unfiltered_first_page() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "ads.example.com", "10.0.0.5", 3, true).await;
+
+    let res = app
+        .clone()
+        .oneshot(authed_form("/logs/clear", &token, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/logs")
+    );
+
+    let html = logs_html(&app, &token, "").await;
+    assert!(!html.contains("ads.example.com"), "the log was not cleared");
+    assert!(html.contains(r#"data-testid="logs-empty-state""#));
+}
+
+/// A hand-edited page number lands on page one rather than 400-ing a page that
+/// would otherwise render.
+#[tokio::test]
+async fn a_nonsense_page_number_renders_page_one() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
+
+    for query in ["?page=not-a-number", "?page=0", "?page=-3"] {
+        let html = logs_html(&app, &token, query).await;
+        assert!(
+            html.contains("Page 1 / 1"),
+            "{query} did not land on page one"
+        );
+    }
+}
+
+/// Both logs forms are behind the session, like the page itself.
+#[tokio::test]
+async fn the_logs_forms_refuse_an_anonymous_browser() {
+    let (app, _token) = setup().await;
+    for path in ["/logs/rules", "/logs/clear"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("rule=x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::SEE_OTHER,
+            "{path} answered anonymously"
+        );
+        assert!(
+            res.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .starts_with("/login"),
+            "{path} did not send the browser to sign in"
+        );
+    }
+}
+
 // --- Dashboard page (server-rendered) ---
 
 /// A router plus the database behind it, so a test can seed the query log the
