@@ -222,6 +222,30 @@ pub fn admin_router(state: AppState) -> Router {
             post(crate::admin::pages::account_password_submit),
         )
         .route(
+            "/account/operators",
+            post(crate::admin::pages::account_operator_add_submit),
+        )
+        .route(
+            "/account/operators/{id}/delete",
+            post(crate::admin::pages::account_operator_delete_submit),
+        )
+        .route(
+            "/account/sessions/revoke-others",
+            post(crate::admin::pages::account_sessions_revoke_others_submit),
+        )
+        .route(
+            "/account/sessions/{id}/revoke",
+            post(crate::admin::pages::account_session_revoke_submit),
+        )
+        .route(
+            "/account/api-keys",
+            post(crate::admin::pages::account_api_key_create_submit),
+        )
+        .route(
+            "/account/api-keys/{id}/delete",
+            post(crate::admin::pages::account_api_key_delete_submit),
+        )
+        .route(
             "/login",
             get(crate::admin::pages::login_page).post(crate::admin::pages::login_submit),
         )
@@ -501,7 +525,7 @@ fn session_cookie_hashes(jar: &CookieJar) -> impl Iterator<Item = String> {
 /// only be overwritten — or cleared — by a cookie that itself satisfies the
 /// prefix's conditions), so the `__Host-session` removal carries `Secure`
 /// even when the plain `session` removal alongside it does not.
-fn clear_session_cookies(jar: CookieJar) -> CookieJar {
+pub(crate) fn clear_session_cookies(jar: CookieJar) -> CookieJar {
     let present: Vec<&str> = [
         crate::admin::auth::SESSION_COOKIE_HOST,
         crate::admin::auth::SESSION_COOKIE,
@@ -1384,6 +1408,42 @@ async fn reauth(
     let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
 
+    match confirm_password(&state, user_id, &token_hash, ip, &body.password).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(ReauthError::RateLimited) => Err(StatusCode::TOO_MANY_REQUESTS),
+        Err(ReauthError::Invalid) => Err(StatusCode::UNAUTHORIZED),
+        Err(ReauthError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Why a password confirmation was refused.
+pub enum ReauthError {
+    RateLimited,
+    /// Wrong password, no password to check against, or a session that went
+    /// away underneath us. One variant on purpose: they answer 401 alike, and
+    /// telling them apart would say which of the three it was.
+    Invalid,
+    Internal,
+}
+
+/// Verify an operator's own password, and stamp their session as freshly
+/// re-authenticated.
+///
+/// The one place a password is checked for a *sensitive action* — `POST
+/// /api/auth/reauth` and the account page's forms both come through here, so
+/// there is a single rate limit, a single lockout, and a single audit event
+/// rather than a second path that quietly has none of them.
+///
+/// The stamp is left even for the form path, which does not need it: the
+/// operator has just proved the password, and the window it opens is the same
+/// window the dialog used to open.
+pub(crate) async fn confirm_password(
+    state: &AppState,
+    user_id: i64,
+    token_hash: &str,
+    ip: std::net::IpAddr,
+    password: &str,
+) -> Result<(), ReauthError> {
     if !state.rate_limiter.check(ip) {
         tracing::warn!(
             event = "auth.failed",
@@ -1393,38 +1453,37 @@ async fn reauth(
             %ip,
             "reauthentication rate limited"
         );
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        return Err(ReauthError::RateLimited);
     }
     state.rate_limiter.record(ip);
 
     // Same cap as `login`, and for the same reason: bound the work an
     // over-long input can make Argon2 do before it reaches the hasher.
-    if body.password.len() > MAX_LOGIN_PASSWORD_LENGTH {
-        return Err(StatusCode::UNAUTHORIZED);
+    if password.len() > MAX_LOGIN_PASSWORD_LENGTH {
+        return Err(ReauthError::Invalid);
     }
 
     let hash = state
         .db
         .get_user_password_hash(user_id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map_err(|_err| ReauthError::Internal)?
+        .ok_or(ReauthError::Invalid)?;
     // A forward-auth-provisioned operator holds the sentinel rather than a
     // hash. They cannot reach a sensitive endpoint through this path anyway —
     // `ReauthedUser` exempts them on the strength of the proxy header — so the
     // answer here is a plain 401, not the 500 that verifying the sentinel
     // would produce.
     if has_no_password(&hash) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ReauthError::Invalid);
     }
     if state.lockout.is_locked(user_id) {
-        spend_verify_cost(&body.password);
-        return Err(StatusCode::UNAUTHORIZED);
+        spend_verify_cost(password);
+        return Err(ReauthError::Invalid);
     }
-    let ok =
-        verify_password(&body.password, &hash).map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ok = verify_password(password, &hash).map_err(|_err| ReauthError::Internal)?;
     if !ok {
-        note_account_failure(&state, user_id, ip, "reauth");
+        note_account_failure(state, user_id, ip, "reauth");
         tracing::warn!(
             event = "auth.failed",
             method = "password",
@@ -1433,24 +1492,24 @@ async fn reauth(
             %ip,
             "reauthentication rejected"
         );
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ReauthError::Invalid);
     }
     state.lockout.record_success(user_id);
-    if !crate::admin::auth::mark_reauthenticated(&state.sessions, &token_hash) {
+    if !crate::admin::auth::mark_reauthenticated(&state.sessions, token_hash) {
         // The session was validated moments ago, so losing it here means it
         // expired or was revoked in between. Nothing was stamped, and the
         // caller's next sensitive request will be rejected for want of a
         // session rather than for want of a stamp.
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ReauthError::Invalid);
     }
     tracing::info!(
         event = "auth.reauthenticated",
         user_id,
-        sid_hash = %session_log_id(&token_hash),
+        sid_hash = %session_log_id(token_hash),
         %ip,
         "password confirmed for a sensitive action"
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 /// Log out every *other* session, keeping the caller's current one signed in.
@@ -1465,13 +1524,25 @@ async fn revoke_others(
 ) -> Result<StatusCode, StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
     let current_hash = live_session_token_hash(&state, &jar);
-    let revoked_rows = crate::admin::auth::revoke_other_sessions(
-        &state.sessions,
-        &state.db,
-        current_hash.as_deref(),
-    )
-    .await
-    .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    revoke_every_other_session(&state, auth.user_id, ip, current_hash.as_deref())
+        .await
+        .map_err(|()| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
+}
+
+/// Revoke every session except the one named by `current_hash`.
+///
+/// Shared by `POST /api/auth/revoke-others` and the account page's form.
+pub(crate) async fn revoke_every_other_session(
+    state: &AppState,
+    actor_user_id: i64,
+    ip: std::net::IpAddr,
+    current_hash: Option<&str>,
+) -> Result<(), ()> {
+    let revoked_rows =
+        crate::admin::auth::revoke_other_sessions(&state.sessions, &state.db, current_hash)
+            .await
+            .map_err(|_err| ())?;
     // `revoke_other_sessions` deletes globally (every operator's sessions
     // except `current_hash`), so `scope` and the `_rows` suffix are load
     // bearing: without them this reads as "this operator's other sessions",
@@ -1482,12 +1553,12 @@ async fn revoke_others(
         event = "session.destroyed",
         reason = "revoked_others",
         scope = "all_operators",
-        user_id = auth.user_id,
+        user_id = actor_user_id,
         %ip,
         revoked_rows,
         "revoked other sessions across all operators"
     );
-    Ok(StatusCode::OK)
+    Ok(())
 }
 
 /// Log out the current session: revoke every session named by a cookie on
@@ -1654,14 +1725,55 @@ async fn create_user_handler(
     Json(body): Json<CreateUserRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let username = body.username.trim();
+    match create_operator(&state, auth.user_id, ip, &body.username, &body.password).await {
+        Ok(_id) => Ok(StatusCode::CREATED),
+        Err(OperatorError::Invalid(message)) => Err(bad_request(message)),
+        Err(OperatorError::Conflict) => Err((
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse {
+                error: "username already exists".to_string(),
+            }),
+        )),
+        // `LastOperator` and `NotFound` belong to deletion and cannot come out
+        // of a create, so they land here with the genuine failures.
+        Err(_) => Err(internal_error()),
+    }
+}
+
+/// Why an operator could not be created or removed.
+pub enum OperatorError {
+    /// Carries the reason, which the operator can act on.
+    Invalid(String),
+    /// The username is taken.
+    Conflict,
+    /// Refusing to leave the appliance with no one who can administer it.
+    LastOperator,
+    NotFound,
+    Internal,
+}
+
+/// Provision another operator.
+///
+/// Shared by `POST /api/users` and the account page's form so the validation,
+/// the password policy and the `user.created` audit event are one path. Both
+/// callers prove a password first — the API through `ReauthedUser`, the form
+/// through [`confirm_password`] — because this hands out a second key to the
+/// whole appliance.
+pub(crate) async fn create_operator(
+    state: &AppState,
+    actor_user_id: i64,
+    ip: std::net::IpAddr,
+    username: &str,
+    password: &str,
+) -> Result<i64, OperatorError> {
+    let username = username.trim();
     if username.is_empty() || username.chars().count() > 64 {
-        return Err(bad_request("invalid username".to_string()));
+        return Err(OperatorError::Invalid("invalid username".to_string()));
     }
-    if let Err(error) = validate_new_password(&body.password, &[username]) {
-        return Err(bad_request(error));
+    if let Err(error) = validate_new_password(password, &[username]) {
+        return Err(OperatorError::Invalid(error));
     }
-    let hash = hash_password(&body.password).map_err(|_err| internal_error())?;
+    let hash = hash_password(password).map_err(|_err| OperatorError::Internal)?;
     match state
         .db
         .create_user(username, &hash, crate::now_unix())
@@ -1680,13 +1792,13 @@ async fn create_user_handler(
             // rule, not a logging guarantee.
             tracing::info!(
                 event = "user.created",
-                user_id = auth.user_id,
+                user_id = actor_user_id,
                 target_user_id = id,
                 target_username = %log_safe(username, LOG_SAFE_MAX),
                 %ip,
                 "operator created"
             );
-            Ok(StatusCode::CREATED)
+            Ok(id)
         }
         // A UNIQUE violation means the username is taken (409); any other
         // database error is a genuine failure (500).
@@ -1697,13 +1809,8 @@ async fn create_user_handler(
         // is admin-only and the same caller can simply `GET /api/users`, so a
         // generic message would withhold nothing and only make a taken
         // username harder to diagnose.
-        Err(e) if e.is_unique_violation() => Err((
-            StatusCode::CONFLICT,
-            Json(ApiErrorResponse {
-                error: "username already exists".to_string(),
-            }),
-        )),
-        Err(_) => Err(internal_error()),
+        Err(e) if e.is_unique_violation() => Err(OperatorError::Conflict),
+        Err(_) => Err(OperatorError::Internal),
     }
 }
 
@@ -1715,16 +1822,35 @@ async fn delete_user_handler(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
+    match remove_operator(&state, auth.user_id, ip, id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(OperatorError::LastOperator) => Err(StatusCode::CONFLICT),
+        Err(OperatorError::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Delete an operator and take their sessions down with them.
+///
+/// Shared by `DELETE /api/users/{id}` and the account page's form, so the
+/// last-operator guard, the session eviction and both audit events happen once
+/// however the request arrived.
+pub(crate) async fn remove_operator(
+    state: &AppState,
+    actor_user_id: i64,
+    ip: std::net::IpAddr,
+    id: i64,
+) -> Result<(), OperatorError> {
     // The last-operator guard and the delete run atomically inside the DB layer,
     // so two concurrent deletes can never drop the instance to zero operators.
     match state
         .db
         .delete_user(id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_err| OperatorError::Internal)?
     {
-        crate::db::DeleteUserOutcome::LastOperator => Err(StatusCode::CONFLICT),
-        crate::db::DeleteUserOutcome::NotFound => Err(StatusCode::NOT_FOUND),
+        crate::db::DeleteUserOutcome::LastOperator => Err(OperatorError::LastOperator),
+        crate::db::DeleteUserOutcome::NotFound => Err(OperatorError::NotFound),
         crate::db::DeleteUserOutcome::Deleted => {
             // The DB `ON DELETE CASCADE` removed this operator's session rows;
             // evict the matching in-memory entries now that the durable delete
@@ -1746,7 +1872,7 @@ async fn delete_user_handler(
             tracing::info!(
                 event = "session.destroyed",
                 reason = "user_deleted",
-                user_id = auth.user_id,
+                user_id = actor_user_id,
                 target_user_id = id,
                 %ip,
                 revoked = tokens.len(),
@@ -1758,12 +1884,12 @@ async fn delete_user_handler(
             // administer this box answerable from one event name.
             tracing::info!(
                 event = "user.deleted",
-                user_id = auth.user_id,
+                user_id = actor_user_id,
                 target_user_id = id,
                 %ip,
                 "operator deleted"
             );
-            Ok(StatusCode::NO_CONTENT)
+            Ok(())
         }
     }
 }
@@ -2096,14 +2222,14 @@ async fn rotate_own_session(
 }
 
 #[derive(Serialize)]
-struct SessionResponse {
-    id: i64,
-    username: String,
-    created_at: i64,
-    last_seen: i64,
-    ip: Option<String>,
-    user_agent: Option<String>,
-    is_current: bool,
+pub struct SessionResponse {
+    pub id: i64,
+    pub username: String,
+    pub created_at: i64,
+    pub last_seen: i64,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub is_current: bool,
 }
 
 async fn list_sessions(
@@ -2116,14 +2242,25 @@ async fn list_sessions(
     // caller's own device; a forward-auth / API-key caller simply has none, so
     // no row is marked current rather than the whole request being rejected.
     let current_hash = live_session_token_hash(&state, &jar);
-    let rows = state
-        .db
-        .list_sessions()
+    sessions_snapshot(&state, current_hash.as_deref())
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // Prefer the fresher in-memory last_seen when present.
+        .map(Json)
+        .map_err(|()| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Every live session, with the caller's own marked.
+///
+/// Shared by `GET /api/sessions` and the account page, so "last seen" means the
+/// same thing in both: the in-memory value when there is one, because a session
+/// that has been active since the last DB write is fresher in the store than in
+/// the row.
+pub(crate) async fn sessions_snapshot(
+    state: &AppState,
+    current_hash: Option<&str>,
+) -> Result<Vec<SessionResponse>, ()> {
+    let rows = state.db.list_sessions().await.map_err(|_err| ())?;
     let live = state.sessions.lock();
-    let out = rows
+    Ok(rows
         .into_iter()
         .map(|r| {
             let last_seen = live.get(&r.token_hash).map_or(r.last_seen, |i| i.last_seen);
@@ -2134,11 +2271,10 @@ async fn list_sessions(
                 last_seen,
                 ip: r.ip,
                 user_agent: r.user_agent,
-                is_current: current_hash.as_deref() == Some(r.token_hash.as_str()),
+                is_current: current_hash == Some(r.token_hash.as_str()),
             }
         })
-        .collect();
-    Ok(Json(out))
+        .collect())
 }
 
 async fn revoke_session_by_id(
@@ -2153,35 +2289,55 @@ async fn revoke_session_by_id(
     // session is the caller's own device (so we clear its cookie). A forward-auth
     // / API-key caller has none and just revokes the target session.
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    // Captured before `revoke_session` below evicts the target from the
-    // store: if the caller's own session is the one being revoked, this must
-    // still see it as live to correctly clear its cookie.
+    // Captured before `revoke_session_row` evicts the target from the store: if
+    // the caller's own session is the one being revoked, this must still see it
+    // as live to correctly clear its cookie.
     let current_hash = live_session_token_hash(&state, &jar);
+    match revoke_session_row(&state, auth.user_id, ip, id, current_hash.as_deref()).await {
+        Ok(true) => Ok((clear_session_cookies(jar), StatusCode::NO_CONTENT)),
+        Ok(false) => Ok((jar, StatusCode::NO_CONTENT)),
+        Err(SessionRevokeError::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(SessionRevokeError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+pub enum SessionRevokeError {
+    NotFound,
+    Internal,
+}
+
+/// Revoke one session by row id, reporting whether it was the caller's own.
+///
+/// Shared by `DELETE /api/sessions/{id}` and the account page's form. The
+/// caller decides what to do about the cookie — the API answers 204 and the
+/// page redirects to sign-in — but the durable delete, the in-memory eviction
+/// and the audit event are the same three steps either way.
+pub(crate) async fn revoke_session_row(
+    state: &AppState,
+    actor_user_id: i64,
+    ip: std::net::IpAddr,
+    id: i64,
+    current_hash: Option<&str>,
+) -> Result<bool, SessionRevokeError> {
     let removed = state
         .db
         .delete_session_by_id(id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-    match removed {
-        Some(token_hash) => {
-            crate::admin::auth::revoke_session(&state.sessions, &token_hash);
-            tracing::info!(
-                event = "session.destroyed",
-                reason = "revoked_by_id",
-                user_id = auth.user_id,
-                session_id = id,
-                sid_hash = %session_log_id(&token_hash),
-                %ip,
-                "revoked session by id"
-            );
-            if current_hash.as_deref() == Some(token_hash.as_str()) {
-                let jar = clear_session_cookies(jar);
-                return Ok((jar, StatusCode::NO_CONTENT));
-            }
-            Ok((jar, StatusCode::NO_CONTENT))
-        }
-        None => Err(StatusCode::NOT_FOUND),
-    }
+        .map_err(|_err| SessionRevokeError::Internal)?;
+    let Some(token_hash) = removed else {
+        return Err(SessionRevokeError::NotFound);
+    };
+    crate::admin::auth::revoke_session(&state.sessions, &token_hash);
+    tracing::info!(
+        event = "session.destroyed",
+        reason = "revoked_by_id",
+        user_id = actor_user_id,
+        session_id = id,
+        sid_hash = %session_log_id(&token_hash),
+        %ip,
+        "revoked session by id"
+    );
+    Ok(current_hash == Some(token_hash.as_str()))
 }
 
 // --- Health ---
@@ -3187,34 +3343,58 @@ async fn create_api_key(
     ReauthedUser(auth): ReauthedUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
-    let name = body.name.trim().to_string();
+    match issue_api_key(&state, auth.user_id, &body.name, body.expires_at).await {
+        Ok(created) => Ok((StatusCode::CREATED, Json(created))),
+        Err(ApiKeyError::Invalid(_)) => Err(StatusCode::BAD_REQUEST),
+        Err(ApiKeyError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Why an API key could not be minted.
+pub enum ApiKeyError {
+    Invalid(String),
+    Internal,
+}
+
+/// Mint an API key for an operator, returning the one and only sight of its
+/// secret.
+///
+/// Shared by `POST /api/api-keys` and the account page's form. The token is in
+/// the return value and nowhere else — it is not stored, so whatever the caller
+/// does not show, nobody can recover.
+pub(crate) async fn issue_api_key(
+    state: &AppState,
+    user_id: i64,
+    name: &str,
+    expires_at: Option<i64>,
+) -> Result<CreateApiKeyResponse, ApiKeyError> {
+    let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 64 {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiKeyError::Invalid(
+            "Name is required, and at most 64 characters".to_string(),
+        ));
     }
     let (full, prefix, hash) = crate::admin::auth::generate_api_key();
     let now = crate::now_unix();
     let id = state
         .db
-        .insert_api_key(auth.user_id, &name, &hash, &prefix, now, body.expires_at)
+        .insert_api_key(user_id, &name, &hash, &prefix, now, expires_at)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| ApiKeyError::Internal)?;
     tracing::info!(
         event = "apikey.created",
-        user_id = auth.user_id,
+        user_id,
         key_id = id,
         %prefix,
-        expires_at = body.expires_at,
+        expires_at,
         "api key created"
     );
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateApiKeyResponse {
-            id,
-            name,
-            prefix,
-            token: full,
-        }),
-    ))
+    Ok(CreateApiKeyResponse {
+        id,
+        name,
+        prefix,
+        token: full,
+    })
 }
 
 /// Delete one of the caller's own API keys.
@@ -3236,22 +3416,32 @@ async fn delete_api_key(
     auth: AuthedUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    match revoke_api_key(&state, auth.user_id, id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(()) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Revoke one of an operator's own API keys, reporting whether it existed.
+///
+/// Scoped to `user_id` in the query itself, so a key belonging to another
+/// operator is indistinguishable from one that was never there.
+pub(crate) async fn revoke_api_key(state: &AppState, user_id: i64, id: i64) -> Result<bool, ()> {
     let deleted = state
         .db
-        .delete_api_key(id, auth.user_id)
+        .delete_api_key(id, user_id)
         .await
-        .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_err| ())?;
     if deleted {
         tracing::info!(
             event = "apikey.destroyed",
-            user_id = auth.user_id,
+            user_id,
             key_id = id,
             "api key deleted"
         );
-        Ok(StatusCode::OK)
-    } else {
-        Err(StatusCode::NOT_FOUND)
     }
+    Ok(deleted)
 }
 
 // --- Filter Check ---

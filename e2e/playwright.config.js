@@ -144,13 +144,14 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
     {
-      // The client half of re-authentication: prompt, confirm, retry. Its own
-      // noadd instance (dedicated ports 14106/15106) because it mints API keys
-      // and because `/api/auth/reauth` draws on the same five-per-minute
-      // budget as login, which the shared @auth instance has already spent.
-      name: 'reauth',
+      // The account page's three password-proofed actions. Its own noadd
+      // instance (dedicated ports 14106/15106) because it mints API keys,
+      // provisions and deletes operators, and because every password
+      // confirmation draws on the same five-per-minute budget as login, which
+      // the shared @auth instance has already spent.
+      name: 'account-actions',
       testDir: 'specs',
-      testMatch: /reauth-prompt\.spec\.js$/,
+      testMatch: /account-sensitive-actions\.spec\.js$/,
       use: { ...devices['Desktop Chrome'] },
     },
     {
