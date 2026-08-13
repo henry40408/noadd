@@ -451,6 +451,82 @@ pub struct DashboardTemplate {
     top_upstreams: Vec<TopRowView>,
 }
 
+/// One row of a horizontal bar list — the shape the statistics page uses for
+/// query types, outcomes, top domains and top sources alike.
+///
+/// The bar is sized against the largest row and the share against the visible
+/// total, so both are decided here rather than in the template: askama has no
+/// business dividing.
+pub struct BarRowView {
+    label: String,
+    /// The fill's width as a percentage of the widest row, `"42.1"`. Always a
+    /// number, because it goes straight into a `style` attribute.
+    width: String,
+    /// The count as the cell shows it.
+    count: String,
+    /// `"12.3%"`, or empty when the total is zero and a share would be a lie.
+    share: String,
+    /// The full, unabbreviated count for the cell's `title`, with the share
+    /// alongside when there is one.
+    count_title: String,
+}
+
+/// One tile in a `stat-grid`, for the two grids the statistics page builds from
+/// values rather than from a fixed list of labels.
+pub struct StatCardView {
+    label: String,
+    value: String,
+    /// A class for the value's colour, e.g. `"accent"`. Never empty.
+    value_class: &'static str,
+    /// A unit set small after the value, e.g. `"ms"`. Empty when the value is a
+    /// dash, which has no unit.
+    unit: &'static str,
+    /// The second line under the value. Empty when there is none.
+    sub: String,
+    /// The value's `title`, for a number the cell abbreviated. Empty otherwise.
+    title: String,
+    /// Unix seconds behind a value the server could only write in UTC, for
+    /// `app.js` to re-state in the browser's locale. Zero on every other card.
+    ts: i64,
+}
+
+/// One of the three range links.
+pub struct RangeOptionView {
+    label: &'static str,
+    active: bool,
+}
+
+/// One row of the range switcher's aria-current bookkeeping plus the four
+/// tables and two grids that make up the statistics page.
+///
+/// The split down this page is the one the data itself draws. `tz_offset`
+/// reaches exactly two of the computations — `compute_stats_timeline` and
+/// `compute_heatmap` — and those two feed exactly the three charts, which were
+/// already the documented exception to this UI working without JavaScript.
+/// Everything else here is a window of `now - range` with no calendar in it, so
+/// it renders on the server and never moves again: `app.js` fetches the charts
+/// with the viewer's offset and leaves the rest of the page alone.
+///
+/// That is also why the range switcher is three links rather than three
+/// buttons. The range picks the server's window, so it belongs in the URL,
+/// where it can be refreshed, bookmarked and shared like every other view on
+/// this UI.
+#[derive(Template, WebTemplate)]
+#[template(path = "stats.html")]
+pub struct StatsTemplate {
+    shell: ShellData,
+    /// `"7d"` / `"30d"` / `"90d"`, for the card titles.
+    range: &'static str,
+    ranges: Vec<RangeOptionView>,
+
+    highlights: Vec<StatCardView>,
+    query_types: Vec<BarRowView>,
+    outcomes: Vec<BarRowView>,
+    top_domains: Vec<BarRowView>,
+    top_clients: Vec<BarRowView>,
+    health: Vec<StatCardView>,
+}
+
 /// One `<option>`, with whether it is the selected one already decided.
 ///
 /// Worked out here rather than compared in the template: askama would be
@@ -525,16 +601,6 @@ pub struct LogsTemplate {
     /// Whether any filter is applied, which decides whether an empty table
     /// means "nothing matched" or "nothing has happened yet".
     filtered: bool,
-}
-
-/// The shell around a page whose body is still painted by `app.js`.
-///
-/// Every page still using this is one P3 has not reached yet; a page with a
-/// server-rendered body has its own template that embeds [`ShellData`] instead.
-#[derive(Template, WebTemplate)]
-#[template(path = "shell.html")]
-pub struct ShellTemplate {
-    shell: ShellData,
 }
 
 // --- Extractors ---
@@ -754,18 +820,6 @@ fn request_host(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string()
-}
-
-/// Every signed-in page. The shell is rendered here; only `#page-content` is
-/// left for `app.js` to fill.
-pub async fn shell_page(
-    _user: SsrUser,
-    uri: Uri,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
-    (jar, ShellTemplate { shell })
 }
 
 /// `POST /logout`.
@@ -1238,7 +1292,16 @@ pub async fn logs_clear_submit(
 /// ten seconds: a count that changed its own notation when the poll landed
 /// would read as a change in the number.
 fn format_num_adaptive(n: i64) -> String {
-    if n < 1_000_000 {
+    format_num_adaptive_at(n, 1_000_000)
+}
+
+/// The same, for the cells `app.js` gives a different threshold.
+///
+/// A total log count runs to eight digits on a busy resolver and reads fine as
+/// digits until it does, so those cards hold off abbreviating until ten
+/// million. The threshold is the only thing that differs.
+fn format_num_adaptive_at(n: i64, threshold: i64) -> String {
+    if n < threshold {
         thousands(n)
     } else {
         compact(n)
@@ -1390,6 +1453,332 @@ pub async fn dashboard_page(
             top_upstreams,
         },
     )
+}
+
+// --- Statistics ---
+
+/// The statistics page's one parameter.
+#[derive(Deserialize)]
+pub struct StatsQuery {
+    range: Option<String>,
+}
+
+/// Bytes at the precision the size deserves, matching `_formatBytes` in
+/// `app.js` so the database-health grid reads the same in both halves.
+fn format_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    #[allow(clippy::cast_precision_loss)]
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.2} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.1} KB", value / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// The same, for the cells where a zero means "not enough data to say" rather
+/// than "zero bytes" — an average over no rows at all.
+fn format_bytes_or_dash(value: f64) -> String {
+    if value > 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        format_bytes(value.round() as i64)
+    } else {
+        "—".to_string()
+    }
+}
+
+/// A date the way the server can write one: an ISO day, in UTC.
+///
+/// The cell carries its timestamp as well, and `app.js` rewrites it in the
+/// browser's locale — the same division as the query log's relative times. The
+/// server does not know the viewer's locale, and the alternative is shipping no
+/// date at all without scripting.
+fn iso_date(ts: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(ts).map_or_else(
+        |_err| "—".to_string(),
+        |dt| {
+            format!(
+                "{:04}-{:02}-{:02}",
+                dt.year(),
+                u8::from(dt.month()),
+                dt.day()
+            )
+        },
+    )
+}
+
+/// Turn counted labels into a bar list, largest first.
+///
+/// The widest bar is the largest count rather than the total, which is what
+/// makes a list of near-equal rows readable; the percentage next to it is the
+/// share of the total, which is the question a reader actually has.
+fn bar_rows(entries: Vec<(String, i64)>) -> Vec<BarRowView> {
+    let mut entries = entries;
+    entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let max = entries.iter().map(|(_, count)| *count).max().unwrap_or(0);
+    let sum: i64 = entries.iter().map(|(_, count)| *count).sum();
+    entries
+        .into_iter()
+        .map(|(label, count)| {
+            let share = share_percent(count, sum);
+            #[allow(clippy::cast_precision_loss)]
+            let width = if max > 0 {
+                format!("{:.1}", count as f64 / max as f64 * 100.0)
+            } else {
+                "0.0".to_string()
+            };
+            let full = thousands(count);
+            let count_title = if share.is_empty() {
+                full
+            } else {
+                format!("{full} ({share})")
+            };
+            BarRowView {
+                label,
+                width,
+                count: format_num_adaptive(count),
+                share,
+                count_title,
+            }
+        })
+        .collect()
+}
+
+/// A stat tile, for the two grids the page builds from values.
+fn stat_card(label: &str, value: String, value_class: &'static str) -> StatCardView {
+    StatCardView {
+        label: label.to_string(),
+        value,
+        value_class,
+        unit: "",
+        sub: String::new(),
+        title: String::new(),
+        ts: 0,
+    }
+}
+
+/// How many rows the two ranged bar lists show, matching what the API's
+/// callers get for the same question.
+const STATS_TOP_N: i64 = 10;
+
+/// The statistics page.
+///
+/// Five of the seven reads land in this response. The three that do not are the
+/// timeline, the rate trend drawn from it and the heatmap — the same three that
+/// take a `tz_offset`, because they are the only ones that put a query into a
+/// calendar rather than into a plain `now - range` window. A calendar needs the
+/// viewer's offset, which arrives with the browser and not with the request, so
+/// those cards say they are drawn in the browser and `app.js` fetches them.
+///
+/// A read that fails renders as an empty list or a dash, the way the dashboard
+/// renders zeroes: a page of readings that is missing one is more useful than
+/// one that will not load.
+pub async fn stats_page(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<StatsQuery>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    use crate::admin::stats;
+
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let now = crate::now_unix();
+    // An unrecognised range falls back to the default rather than refusing the
+    // page. This one is a link an operator can edit, and every window the page
+    // supports is spelled in the switcher right above it.
+    let range = query
+        .range
+        .as_deref()
+        .and_then(stats::StatsRange::parse)
+        .unwrap_or(stats::StatsRange::Days7);
+
+    // Five independent reads; running them together keeps the page at one
+    // round trip to the database rather than five in sequence.
+    let (highlights, breakdowns, domains, clients, health) = tokio::join!(
+        stats::compute_highlights(&state.db, now, range),
+        stats::compute_breakdowns(&state.db, now, range),
+        stats::compute_top_domains_ranged(&state.db, now, range, STATS_TOP_N),
+        stats::compute_top_clients_ranged(&state.db, now, range, STATS_TOP_N),
+        stats::compute_db_health(&state.db, now),
+    );
+
+    let highlights = highlights.ok();
+    let latency = highlights.as_ref().map(|h| &h.latency);
+    // A resolver that has answered nothing has no percentiles to report, and a
+    // zero would read as an impossibly fast one.
+    let has_latency = latency.is_some_and(|l| l.sample_count > 0);
+    let latency_card = |label: &str, value: i64, class: &'static str| StatCardView {
+        unit: if has_latency { "ms" } else { "" },
+        ..stat_card(
+            label,
+            if has_latency {
+                compact(value)
+            } else {
+                "—".to_string()
+            },
+            class,
+        )
+    };
+    let unique_domains = highlights.as_ref().map_or(0, |h| h.unique_domains);
+    let highlight_cards = vec![
+        StatCardView {
+            title: thousands(unique_domains),
+            ..stat_card(
+                "Unique Domains",
+                format_num_adaptive_at(unique_domains, 10_000_000),
+                "accent",
+            )
+        },
+        latency_card("Latency p50", latency.map_or(0, |l| l.p50_ms), "text-green"),
+        latency_card(
+            "Latency p95",
+            latency.map_or(0, |l| l.p95_ms),
+            "text-orange",
+        ),
+        latency_card("Latency p99", latency.map_or(0, |l| l.p99_ms), "text-red"),
+    ];
+
+    let (query_types, outcomes) = breakdowns
+        .map(|b| (bar_rows(b.query_types), bar_rows(b.outcomes)))
+        .unwrap_or_default();
+
+    let top_domains = bar_rows(
+        domains
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| (d.domain, d.count))
+            .collect(),
+    );
+    // A client that came in over `DoH` is named by both, the way the client
+    // draws it — the IP alone would collapse every token behind one proxy.
+    let top_clients = bar_rows(
+        clients
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| {
+                let label = match c.doh_token {
+                    Some(token) if !token.is_empty() => format!("{} · {token}", c.client_ip),
+                    _ => c.client_ip,
+                };
+                (label, c.count)
+            })
+            .collect(),
+    );
+
+    let health_cards = health.map(build_health_cards).unwrap_or_default();
+
+    let ranges = ["7d", "30d", "90d"]
+        .into_iter()
+        .map(|label| RangeOptionView {
+            label,
+            active: label == range.label(),
+        })
+        .collect();
+
+    (
+        jar,
+        StatsTemplate {
+            shell,
+            range: range.label(),
+            ranges,
+            highlights: highlight_cards,
+            query_types,
+            outcomes,
+            top_domains,
+            top_clients,
+            health: health_cards,
+        },
+    )
+}
+
+/// The ten database-health tiles, in the order the grid shows them.
+fn build_health_cards(health: crate::admin::stats::DbHealth) -> Vec<StatCardView> {
+    #[allow(clippy::cast_possible_truncation)]
+    let frag_pct = (health.fragmentation_ratio * 100.0).round() as i64;
+    let coverage = if health.log_coverage_days > 0.0 {
+        if health.log_coverage_days >= 10.0 {
+            format!("{:.0}d", health.log_coverage_days.round())
+        } else {
+            format!("{:.1}d", health.log_coverage_days)
+        }
+    } else {
+        "—".to_string()
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    let avg_per_day = if health.avg_new_rows_per_day > 0.0 {
+        compact(health.avg_new_rows_per_day.round() as i64)
+    } else {
+        "—".to_string()
+    };
+    let growth_per_day = format_bytes_or_dash(health.bytes_per_log * health.avg_new_rows_per_day);
+    let oldest = health.oldest_log_timestamp.filter(|ts| *ts > 0);
+
+    vec![
+        stat_card(
+            "Database Size",
+            format_bytes(health.db_size_bytes),
+            "accent",
+        ),
+        StatCardView {
+            title: thousands(health.total_log_count),
+            ..stat_card(
+                "Total Logs",
+                format_num_adaptive_at(health.total_log_count, 10_000_000),
+                "accent",
+            )
+        },
+        stat_card(
+            "Bytes / Log",
+            format_bytes_or_dash(health.bytes_per_log),
+            "accent",
+        ),
+        StatCardView {
+            sub: format!("{frag_pct}% of file"),
+            ..stat_card(
+                "Reclaimable",
+                format_bytes(health.reclaimable_bytes.max(0)),
+                "accent",
+            )
+        },
+        StatCardView {
+            ts: oldest.unwrap_or(0),
+            ..stat_card(
+                "Oldest Log",
+                oldest.map_or_else(|| "—".to_string(), iso_date),
+                "stat-date",
+            )
+        },
+        stat_card("Log Coverage", coverage, "accent"),
+        stat_card(
+            "Retention",
+            health
+                .log_retention_days
+                .map_or_else(|| "—".to_string(), |days| format!("{days}d")),
+            "accent",
+        ),
+        stat_card("Avg / Day", avg_per_day, "accent"),
+        stat_card("Growth / Day", growth_per_day, "accent"),
+        StatCardView {
+            sub: "at full retention".to_string(),
+            ..stat_card(
+                "Projected Full",
+                if health.projected_full_bytes > 0 {
+                    format_bytes(health.projected_full_bytes)
+                } else {
+                    "—".to_string()
+                },
+                "accent",
+            )
+        },
+    ]
 }
 
 // --- Account ---
@@ -2728,6 +3117,61 @@ mod tests {
         assert_eq!(format_num_adaptive(999_999), "999,999");
         assert_eq!(format_num_adaptive(1_000_000), "1M");
         assert_eq!(format_num_adaptive(1_250_000), "1.3M");
+    }
+
+    #[test]
+    fn the_health_grid_holds_off_abbreviating_until_ten_million() {
+        // A log count runs to eight digits on a busy resolver and reads fine as
+        // digits until it does.
+        assert_eq!(format_num_adaptive_at(9_999_999, 10_000_000), "9,999,999");
+        assert_eq!(format_num_adaptive_at(10_000_000, 10_000_000), "10M");
+    }
+
+    #[test]
+    fn sizes_are_written_the_way_the_client_writes_them() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1_536), "1.5 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
+    }
+
+    #[test]
+    fn an_average_over_no_rows_is_a_dash_rather_than_zero_bytes() {
+        assert_eq!(format_bytes_or_dash(0.0), "—");
+        assert_eq!(format_bytes_or_dash(2_048.4), "2.0 KB");
+    }
+
+    #[test]
+    fn a_date_the_server_writes_is_an_unambiguous_one() {
+        // 2026-08-13T00:00:00Z. The browser restates it in its own locale; what
+        // the server ships has to be readable when it does not.
+        assert_eq!(iso_date(1_786_579_200), "2026-08-13");
+    }
+
+    #[test]
+    fn bars_are_sized_against_the_largest_row_and_shares_against_the_total() {
+        let rows = bar_rows(vec![
+            ("b.example".to_string(), 25),
+            ("a.example".to_string(), 75),
+        ]);
+        // Largest first, whatever order they arrived in.
+        assert_eq!(rows[0].label, "a.example");
+        assert_eq!(rows[0].width, "100.0");
+        assert_eq!(rows[0].share, "75.0%");
+        assert_eq!(rows[0].count_title, "75 (75.0%)");
+        // The second bar is a third of the first, but a quarter of the total.
+        assert_eq!(rows[1].width, "33.3");
+        assert_eq!(rows[1].share, "25.0%");
+    }
+
+    #[test]
+    fn a_bar_list_of_nothing_divides_by_nothing() {
+        assert!(bar_rows(vec![]).is_empty());
+        let rows = bar_rows(vec![("none".to_string(), 0)]);
+        assert_eq!(rows[0].width, "0.0");
+        // No total to take a share of, so the cell says nothing rather than 0%.
+        assert_eq!(rows[0].share, "");
+        assert_eq!(rows[0].count_title, "0");
     }
 
     #[test]

@@ -177,6 +177,21 @@ export default defineConfig({
       },
     },
     {
+      // The statistics page with scripting off: the readings are in the first
+      // response and the range switcher is three links. Its own instance
+      // (14109/15109) because it seeds traffic spanning three weeks, which
+      // every other suite's assertions would have to account for.
+      name: 'stats-no-js',
+      testDir: 'specs',
+      testMatch: /stats-no-js\.spec\.js$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        javaScriptEnabled: false,
+        reducedMotion: 'reduce',
+        viewport: { width: 1024, height: 600 },
+      },
+    },
+    {
       name: 'filters-no-js',
       testDir: 'specs',
       testMatch: /filters-no-js\.spec\.js$/,

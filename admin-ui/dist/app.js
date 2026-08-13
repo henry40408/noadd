@@ -1233,110 +1233,46 @@ class DashboardPage extends LiveElement {
 customElements.define('dashboard-page', DashboardPage);
 
 // --- Statistics Page ---
+//
+// The server rendered this page. What is left here is the three charts and one
+// date, which is the whole of what the server could not do: the timeline, the
+// rate trend drawn from it and the heatmap are bucketed against the viewer's
+// calendar, and a calendar needs a UTC offset that arrives with the browser
+// rather than with the request. The highlights, both breakdowns, both ranged
+// lists and the health grid are plain `now - range` windows, so they are in the
+// first response and this file does not redraw them.
+//
+// The range switcher is links now, not buttons — it changes the server's
+// window, so it is a navigation.
 class StatsPage extends HTMLElement {
-  constructor() {
-    super();
-    this._range = '7d';
-  }
-
   connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
-        <div><h2>Statistics</h2><p>Long-term traffic patterns</p></div>
-        <div class="range-switcher" id="range-switcher">
-          <button class="active" data-range="7d">7d</button>
-          <button data-range="30d">30d</button>
-          <button data-range="90d">90d</button>
-        </div>
-      </div>
-      <div class="stat-grid fade-in" id="highlights-grid" style="animation-delay:0.03s"></div>
-      <div class="stats-row-2col fade-in" style="animation-delay:0.05s">
-        <div class="card" id="timeline-card">
-          <div class="card-title" id="timeline-title">Queries (last 7d)</div>
-          <div class="chart-container" id="timeline-chart"><p class="panel-empty">Loading…</p></div>
-        </div>
-        <div class="card" id="rate-trend-card">
-          <div class="card-title" id="rate-trend-title">Block &amp; Cache rate (last 7d)</div>
-          <div class="rate-chart-container" id="rate-trend-chart"><p class="panel-empty">Loading…</p></div>
-        </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.08s" id="heatmap-card">
-        <div class="card-title">Activity by hour (last 30d)</div>
-        <div id="heatmap-container"><p class="panel-empty">Loading…</p></div>
-      </div>
-      <div class="stats-row-2col fade-in" style="animation-delay:0.1s">
-        <div class="card" id="qtypes-card">
-          <div class="card-title">Query Types</div>
-          <div id="qtypes-chart"><p class="text-dim">Loading…</p></div>
-        </div>
-        <div class="card" id="outcomes-card">
-          <div class="card-title">Outcomes</div>
-          <div id="outcomes-chart"><p class="text-dim">Loading…</p></div>
-        </div>
-      </div>
-      <div class="stats-row-2col fade-in" style="animation-delay:0.15s">
-        <div class="card" id="ranged-domains-card">
-          <div class="card-title" id="ranged-domains-title">Top Domains (last 7d)</div>
-          <div id="ranged-domains"><p class="text-dim">Loading…</p></div>
-        </div>
-        <div class="card" id="ranged-clients-card">
-          <div class="card-title" id="ranged-clients-title">Top Sources (last 7d)</div>
-          <div id="ranged-clients"><p class="text-dim">Loading…</p></div>
-        </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.2s" id="health-card" data-testid="db-health-card">
-        <div class="card-title">Database Health</div>
-        <div class="stat-grid" id="health-grid"></div>
-      </div>`;
+    // Adopt the range the server answered with rather than resetting to 7d; the
+    // charts have to agree with the card titles around them.
+    const raw = new URLSearchParams(location.search).get('range');
+    this._range = ['7d', '30d', '90d'].includes(raw) ? raw : '7d';
+    this._localizeDates();
+    this._fetchTimeline();
+    this._fetchHeatmap();
+  }
 
-    this.querySelector('#range-switcher').addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-range]');
-      if (!btn) return;
-      this._range = btn.dataset.range;
-      this.querySelectorAll('#range-switcher button').forEach(b => {
-        b.classList.toggle('active', b === btn);
-      });
-      this._fetchRanged();
+  // The one cell the server could only write in UTC. Same division as the query
+  // log's relative times: the server ships a correct, unambiguous value and the
+  // browser restates it in a locale only it knows.
+  _localizeDates() {
+    this.querySelectorAll('[data-date-ts]').forEach(el => {
+      const ts = Number(el.dataset.dateTs);
+      if (ts > 0) el.textContent = new Date(ts * 1000).toLocaleDateString();
     });
-
-    this._fetchAll();
   }
 
-  async _fetchAll() {
-    await Promise.all([
-      this._fetchRanged(),
-      this._fetchHeatmap(),
-      this._fetchHealth(),
-    ]);
-  }
-
-  _updateRangedTitles() {
-    const r = this._range;
-    this.querySelector('#timeline-title').textContent = `Queries (last ${r})`;
-    this.querySelector('#rate-trend-title').innerHTML = `Block &amp; Cache rate (last ${r})`;
-    this.querySelector('#ranged-domains-title').textContent = `Top Domains (last ${r})`;
-    this.querySelector('#ranged-clients-title').textContent = `Top Sources (last ${r})`;
-  }
-
-  async _fetchRanged() {
-    this._updateRangedTitles();
+  async _fetchTimeline() {
     try {
       // Pass the viewer's UTC offset so the server aligns timeline buckets to
       // their local calendar (local midnight / hour), not UTC-epoch boundaries.
       const tzOffset = tzOffsetMinutes();
-      const [timeline, breakdown, highlights, topDomains, topClients] = await Promise.all([
-        api.get(`/api/stats/v2/timeline?range=${this._range}&tz_offset=${tzOffset}`),
-        api.get(`/api/stats/v2/breakdown?range=${this._range}`),
-        api.get(`/api/stats/v2/highlights?range=${this._range}`),
-        api.get(`/api/stats/v2/top-domains?range=${this._range}`),
-        api.get(`/api/stats/v2/top-clients?range=${this._range}`),
-      ]);
+      const timeline = await api.get(`/api/stats/v2/timeline?range=${this._range}&tz_offset=${tzOffset}`);
       this._renderTimeline(timeline);
-      this._renderBreakdown(breakdown);
       this._renderRateTrend(timeline);
-      this._renderHighlights(highlights);
-      this._renderRangedTopDomains(topDomains);
-      this._renderRangedTopClients(topClients);
     } catch (e) { console.error(e); }
   }
 
@@ -1347,21 +1283,6 @@ class StatsPage extends HTMLElement {
       const data = await api.get(`/api/stats/v2/heatmap?tz_offset=${tzOffsetMinutes()}`);
       this._renderHeatmap(data);
     } catch (e) { console.error(e); }
-  }
-
-  async _fetchHealth() {
-    try {
-      const data = await api.get('/api/stats/v2/health');
-      this._renderHealth(data);
-    } catch (e) { console.error(e); }
-  }
-
-  _formatBytes(bytes) {
-    if (bytes == null) return '—';
-    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return bytes + ' B';
   }
 
   _renderTimeline(rawData) {
@@ -1456,93 +1377,6 @@ class StatsPage extends HTMLElement {
       clearActive();
       if (!wasActive) { cell.classList.add('touch-active'); _chartTouchDismissers.set(el, clearActive); }
     });
-  }
-
-  _renderBarChart(containerId, entries, color) {
-    const el = this.querySelector(containerId);
-    if (!entries || !entries.length) {
-      el.innerHTML = '<p class="text-dim">No data yet</p>';
-      return;
-    }
-    const sorted = [...entries].sort((a, b) => b[1] - a[1]);
-    const maxVal = Math.max(...sorted.map(e => e[1]), 1);
-    const sumVal = sorted.reduce((a, e) => a + e[1], 0);
-    const barThreshold = window.innerWidth <= 768 ? 100_000 : 1_000_000;
-    let markup = '<div class="bar-list">';
-    for (const [label, count] of sorted) {
-      const barPct = (count / maxVal * 100).toFixed(1);
-      const sharePct = formatPct(count, sumVal);
-      const titleText = sharePct ? `${formatFull(count)} (${sharePct})` : formatFull(count);
-      const pctLine = sharePct ? html`<div class="bar-row-pct">${sharePct}</div>` : '';
-      markup += html`<div class="bar-row">
-        <div class="bar-row-label" title="${label}">${label}</div>
-        <div class="bar-row-track"><div class="bar-row-fill" style="width:${barPct}%;background:${color}"></div></div>
-        <div class="bar-row-count" title="${titleText}"><div>${formatNumAdaptive(count, barThreshold)}</div>${pctLine}</div>
-      </div>`;
-    }
-    markup += '</div>';
-    el.innerHTML = markup;
-  }
-
-  _renderBreakdown(data) {
-    if (!data) return;
-    this._renderBarChart('#qtypes-chart', data.query_types, 'var(--accent)');
-    this._renderBarChart('#outcomes-chart', data.outcomes, 'var(--orange)');
-  }
-
-  _renderHealth(data) {
-    const el = this.querySelector('#health-grid');
-    if (!data) { el.innerHTML = '<p class="text-dim">No data</p>'; return; }
-    const oldest = data.oldest_log_timestamp
-      ? new Date(data.oldest_log_timestamp * 1000).toLocaleDateString()
-      : '—';
-    const retention = data.log_retention_days != null ? `${data.log_retention_days}d` : '—';
-    const avgDay = data.avg_new_rows_per_day != null ? formatNum(Math.round(data.avg_new_rows_per_day)) : '—';
-    const fragPct = data.fragmentation_ratio != null ? Math.round(data.fragmentation_ratio * 100) : 0;
-    const bytesPerLog = data.bytes_per_log ? this._formatBytes(Math.round(data.bytes_per_log)) : '—';
-    const growthPerDay = data.bytes_per_log && data.avg_new_rows_per_day
-      ? this._formatBytes(Math.round(data.bytes_per_log * data.avg_new_rows_per_day))
-      : '—';
-    const cov = data.log_coverage_days || 0;
-    const coverage = cov > 0 ? `${cov >= 10 ? Math.round(cov) : cov.toFixed(1)}d` : '—';
-    const projected = data.projected_full_bytes ? this._formatBytes(data.projected_full_bytes) : '—';
-    el.innerHTML = html`
-      <div class="stat-card"><div class="stat-label">Database Size</div><div class="stat-value accent">${this._formatBytes(data.db_size_bytes)}</div></div>
-      <div class="stat-card"><div class="stat-label">Total Logs</div><div class="stat-value accent" title="${formatFull(data.total_log_count)}">${formatNumAdaptive(data.total_log_count, 10_000_000)}</div></div>
-      <div class="stat-card"><div class="stat-label">Bytes / Log</div><div class="stat-value accent">${bytesPerLog}</div></div>
-      <div class="stat-card"><div class="stat-label">Reclaimable</div><div class="stat-value accent">${this._formatBytes(data.reclaimable_bytes || 0)}</div><div class="stat-sub">${fragPct}% of file</div></div>
-      <div class="stat-card"><div class="stat-label">Oldest Log</div><div class="stat-value" style="font-size:1.1rem;color:var(--text-secondary)">${oldest}</div></div>
-      <div class="stat-card"><div class="stat-label">Log Coverage</div><div class="stat-value accent">${coverage}</div></div>
-      <div class="stat-card"><div class="stat-label">Retention</div><div class="stat-value accent">${retention}</div></div>
-      <div class="stat-card"><div class="stat-label">Avg / Day</div><div class="stat-value accent">${avgDay}</div></div>
-      <div class="stat-card"><div class="stat-label">Growth / Day</div><div class="stat-value accent">${growthPerDay}</div></div>
-      <div class="stat-card"><div class="stat-label">Projected Full</div><div class="stat-value accent">${projected}</div><div class="stat-sub">at full retention</div></div>`;
-  }
-
-  _renderHighlights(data) {
-    const el = this.querySelector('#highlights-grid');
-    if (!data) { el.innerHTML = ''; return; }
-    const lat = data.latency || {};
-    const sample = lat.sample_count || 0;
-    const hasLat = sample > 0;
-    const fmtMs = (ms) => hasLat ? `${formatNum(ms)}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span>` : '—';
-    el.innerHTML = `
-      <div class="stat-card"><div class="stat-label">Unique Domains</div><div class="stat-value accent" title="${formatFull(data.unique_domains)}">${formatNumAdaptive(data.unique_domains, 10_000_000)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p50</div><div class="stat-value text-green">${fmtMs(lat.p50_ms)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p95</div><div class="stat-value text-orange">${fmtMs(lat.p95_ms)}</div></div>
-      <div class="stat-card"><div class="stat-label">Latency p99</div><div class="stat-value text-red">${fmtMs(lat.p99_ms)}</div></div>`;
-  }
-
-  _renderRangedTopDomains(rows) {
-    this._renderBarChart('#ranged-domains', (rows || []).map(d => [d.domain, d.count]), 'var(--accent)');
-  }
-
-  _renderRangedTopClients(rows) {
-    const entries = (rows || []).map(d => {
-      const label = d.doh_token ? `${d.client_ip} · ${d.doh_token}` : d.client_ip;
-      return [label, d.count];
-    });
-    this._renderBarChart('#ranged-clients', entries, 'var(--green)');
   }
 
   _renderRateTrend(rawData) {
@@ -2514,36 +2348,20 @@ customElements.define('settings-page', SettingsPage);
 // Reaching this file at all means the server already resolved the session and
 // decided this is a page for a signed-in operator — an unauthenticated request
 // was redirected before any HTML was written. Two round trips (`/api/health`,
-// then `/api/settings`) and the repaint they forced are gone with that; what is
-// left for the client is picking the page component out of the path.
-const PAGES = {
-  '/': 'dashboard-page',
-  '/stats': 'stats-page',
-  '/logs': 'logs-page',
-  '/filters': 'filters-page',
-  '/settings': 'settings-page',
-  '/account': 'account-page',
-};
-
-// The shell is in the document already — the server rendered it, topbar and
-// navigation and status bar and all — so there is no shell component here to
-// wrap it in. Nothing below re-derives what the template settled: the active
-// navigation item is a class it set from the path it was answering, and working
-// that out again from `location.pathname` would be a second source for one
-// fact.
+// then `/api/settings`) and the repaint they forced are gone with that.
 //
-// An unrecognised path mounts the dashboard rather than nothing. Only the six
-// paths above route to this shell, so arriving with anything else means a stale
-// link that somehow reached it.
-// Only when the server left it empty. A page whose body is server-rendered
-// ships its own component element in the markup, which upgrades in place — the
-// enhancement attaches to the rendered form instead of replacing it. Mounting a
-// second one here would leave two.
-const pageContent = document.getElementById('page-content');
-if (!pageContent.firstElementChild) {
-  pageContent.appendChild(
-    document.createElement(PAGES[location.pathname] || 'dashboard-page'));
-}
+// There is nothing here that mounts a page, either. Every one of the six paths
+// renders its own body, wrapped in that page's custom element, and the element
+// upgrades in place when this file defines it: the `connectedCallback` enhances
+// markup that is already on the screen rather than replacing it. The table that
+// used to map a path to a component, and the branch that mounted one when the
+// server had left `#page-content` empty, went with the last page P3 converted.
+//
+// The shell is in the document already too — topbar, navigation, status bar and
+// all — so there is no shell component here to wrap it in, and nothing below
+// re-derives what the template settled: the active navigation item is a class
+// it set from the path it was answering, and working that out again from
+// `location.pathname` would be a second source for one fact.
 
 // Dismiss is attached only where there is JavaScript to make it work, rather
 // than shipped in the markup as a button that does nothing without it. The

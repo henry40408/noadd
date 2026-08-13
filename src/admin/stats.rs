@@ -186,6 +186,17 @@ impl StatsRange {
         }
     }
 
+    /// The spelling `parse` accepts, which is also what the range switcher puts
+    /// in the URL and every card title says. One source for all three, so a
+    /// title cannot disagree with the link that produced it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Days7 => "7d",
+            Self::Days30 => "30d",
+            Self::Days90 => "90d",
+        }
+    }
+
     /// (`since_seconds_offset`, `bucket_secs`)
     fn window(self) -> (i64, i64) {
         match self {

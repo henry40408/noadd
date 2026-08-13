@@ -5585,6 +5585,157 @@ async fn the_live_toggle_and_chart_are_marked_client_only() {
     );
 }
 
+// --- Statistics page ---
+
+async fn stats_html(app: &axum::Router, token: &str, query: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(authed("GET", &format!("/stats{query}"), token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_text(res).await
+}
+
+/// Five of the page's seven readings arrive in the first response: the
+/// highlights, both breakdowns, both ranged lists and the health grid. Only the
+/// three calendar-aligned charts are left to the client.
+#[tokio::test]
+async fn the_stats_page_renders_its_readings() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "ads.example.com", "10.0.0.5", 3, true).await;
+    seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
+
+    let html = stats_html(&app, &token, "").await;
+
+    assert!(html.contains("<stats-page>"), "the body was not wrapped");
+    // Two distinct domains were queried.
+    assert!(
+        html.contains(r#"<div class="stat-label">Unique Domains</div><div class="stat-value accent" title="2">2</div>"#),
+        "the highlights grid was not rendered"
+    );
+    // Both breakdowns: every query was an A record, three of four blocked.
+    assert!(
+        html.contains(r#"title="A">A</div>"#),
+        "the query-type breakdown was not rendered"
+    );
+    assert!(
+        html.contains(r#"title="Blocked">Blocked</div>"#),
+        "the outcome breakdown was not rendered"
+    );
+    // Both ranged lists, with the share of the visible total alongside.
+    assert!(
+        html.contains("ads.example.com") && html.contains("good.example.com"),
+        "the top-domains list was not rendered"
+    );
+    assert!(
+        html.contains("10.0.0.5"),
+        "the top-sources list was not rendered"
+    );
+    assert!(
+        html.contains(r#"<div class="bar-row-pct">75.0%</div>"#),
+        "a row's share was not rendered"
+    );
+    // The bar is sized against the largest row, so the largest one is full width.
+    assert!(html.contains("width:100.0%"), "the bars were not sized");
+    // And the health grid, which needs no traffic to have something to say.
+    assert!(
+        html.contains(r#"data-testid="db-health-card""#)
+            && html.contains(r#"<div class="stat-label">Database Size</div>"#),
+        "the database-health grid was not rendered"
+    );
+}
+
+/// The range is the server's window, so it is in the URL: the switcher is three
+/// links, the titles say which one is showing, and the active one is marked.
+#[tokio::test]
+async fn the_range_switcher_selects_the_window() {
+    let (app, token) = setup().await;
+
+    let html = stats_html(&app, &token, "").await;
+    assert!(
+        html.contains(r#"<a href="/stats?range=7d" class="active" aria-current="page">7d</a>"#),
+        "the default range was not marked active"
+    );
+    assert!(
+        html.contains("Top Domains (last 7d)"),
+        "the card titles did not name the range"
+    );
+
+    let html = stats_html(&app, &token, "?range=30d").await;
+    assert!(
+        html.contains(r#"<a href="/stats?range=30d" class="active" aria-current="page">30d</a>"#),
+        "the selected range was not marked active"
+    );
+    assert!(
+        !html.contains(r#"<a href="/stats?range=7d" class="active""#),
+        "two ranges were marked active at once"
+    );
+    assert!(
+        html.contains("Queries (last 30d)")
+            && html.contains("Block &amp; Cache rate (last 30d)")
+            && html.contains("Top Domains (last 30d)")
+            && html.contains("Top Sources (last 30d)"),
+        "a card title kept the default range"
+    );
+}
+
+/// A range someone typed themselves renders the default window rather than
+/// refusing the page. This one is a link, and every window it supports is
+/// spelled out in the switcher directly above it.
+#[tokio::test]
+async fn a_nonsense_range_renders_the_default_window() {
+    let (app, token) = setup().await;
+    let html = stats_html(&app, &token, "?range=nonsense").await;
+    assert!(
+        html.contains("Top Domains (last 7d)"),
+        "an unrecognised range did not fall back to the default"
+    );
+}
+
+/// The three charts are the documented exception to this page working without
+/// scripting, and they say so rather than sitting empty. They are also exactly
+/// the three readings that take a `tz_offset`.
+#[tokio::test]
+async fn the_charts_say_they_are_drawn_in_the_browser() {
+    let (app, token) = setup().await;
+    let html = stats_html(&app, &token, "").await;
+
+    for testid in [
+        "timeline-needs-js",
+        "rate-trend-needs-js",
+        "heatmap-needs-js",
+    ] {
+        assert!(
+            html.contains(&format!(r#"data-testid="{testid}""#)),
+            "the {testid} card did not say what it needs"
+        );
+    }
+}
+
+/// An appliance that has answered nothing still renders every card, saying so,
+/// rather than failing to load.
+#[tokio::test]
+async fn a_stats_page_with_no_traffic_renders_empty_lists() {
+    let (app, token) = setup().await;
+    let html = stats_html(&app, &token, "").await;
+
+    assert!(
+        html.matches(r#"<p class="text-dim">No data yet</p>"#)
+            .count()
+            == 4,
+        "the four bar lists did not all report an empty window"
+    );
+    // No samples means no percentiles, and a zero would read as an impossibly
+    // fast one.
+    assert!(
+        html.contains(
+            r#"<div class="stat-label">Latency p50</div><div class="stat-value text-green">—</div>"#
+        ),
+        "a latency with no samples was rendered as a number"
+    );
+}
+
 // --- Account page: tables and the password-proofed actions ---
 
 /// The admin password `build_app` provisions. Every form below that needs a

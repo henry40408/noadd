@@ -174,7 +174,7 @@ pub fn admin_router(state: AppState) -> Router {
         // unauthenticated browser is redirected rather than served a shell that
         // has to discover the same thing for itself.
         .route("/", get(crate::admin::pages::dashboard_page))
-        .route("/stats", get(crate::admin::pages::shell_page))
+        .route("/stats", get(crate::admin::pages::stats_page))
         .route("/logs", get(crate::admin::pages::logs_page))
         .route("/logs/rules", post(crate::admin::pages::logs_rule_submit))
         .route("/logs/clear", post(crate::admin::pages::logs_clear_submit))
