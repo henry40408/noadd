@@ -192,6 +192,21 @@ export default defineConfig({
       },
     },
     {
+      // The dashboard, settings and account with scripting off — the three
+      // pages the other no-JS suites do not reach. One instance (14110/15110)
+      // for all three: unlike filters, logs and stats, none of them seeds or
+      // empties anything, so they do not need one each.
+      name: 'pages-no-js',
+      testDir: 'specs',
+      testMatch: /pages-no-js\.spec\.js$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        javaScriptEnabled: false,
+        reducedMotion: 'reduce',
+        viewport: { width: 1024, height: 600 },
+      },
+    },
+    {
       name: 'filters-no-js',
       testDir: 'specs',
       testMatch: /filters-no-js\.spec\.js$/,
