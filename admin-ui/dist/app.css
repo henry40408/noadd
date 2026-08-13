@@ -1087,7 +1087,9 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   border-radius: 0;
   overflow: hidden;
 }
-.range-switcher button {
+/* Links, not buttons: the range selects the server's window, so it is in the
+   URL and switching it is a navigation. */
+.range-switcher a {
   background: none;
   border: none;
   border-right: 1px solid var(--border);
@@ -1097,11 +1099,12 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   font-size: 0.75rem;
   font-weight: 600;
   padding: 5px 14px;
+  text-decoration: none;
   transition: all var(--transition);
 }
-.range-switcher button:last-child { border-right: none; }
-.range-switcher button:hover { background: var(--bg-hover); color: var(--text-primary); }
-.range-switcher button.active { background: var(--green); color: var(--inverse-fg); }
+.range-switcher a:last-child { border-right: none; }
+.range-switcher a:hover { background: var(--bg-hover); color: var(--text-primary); }
+.range-switcher a.active { background: var(--green); color: var(--inverse-fg); }
 
 .heatmap-wrap {
   overflow-x: auto;
@@ -1283,6 +1286,9 @@ stats-page #health-grid .stat-card {
   grid-template-rows: auto 1fr 1rem;
 }
 stats-page #health-grid .stat-sub { align-self: end; margin-top: 0; white-space: nowrap; }
+/* A date, not a figure: it reads at the width of the other tiles rather than at
+   the size a six-digit count needs. */
+stats-page .stat-value.stat-date { font-size: 1.1rem; color: var(--text-secondary); }
 @media (min-width: 1024px) {
   stats-page #health-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }

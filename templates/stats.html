@@ -1,0 +1,130 @@
+{#
+  The statistics page.
+
+  The split here is the one the data draws for itself. `tz_offset` reaches
+  exactly two computations — `compute_stats_timeline` and `compute_heatmap` —
+  and those two feed exactly the three charts below. A calendar-aligned bucket
+  needs the viewer's UTC offset, which arrives with the browser rather than with
+  the request, and the charts were already the documented exception to this UI
+  working without JavaScript. So the charts say they are drawn in the browser,
+  and `app.js` fetches them with the offset.
+
+  Everything else is a plain `now - range` window with no calendar in it: the
+  highlights, both breakdowns, both ranged lists and the health grid are
+  rendered here and never move again. `app.js` does not redraw them, which is
+  why there is no second copy of this markup in it.
+
+  The range switcher is three links rather than three buttons for the same
+  reason every other view on this UI is in the URL: the range picks the server's
+  window, so `?range=30d` can be refreshed, bookmarked and shared.
+#}
+{% extends "shell.html" %}
+{%- import "_macros.html" as macros -%}
+
+{% block page %}
+      <stats-page>
+      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div><h2>Statistics</h2><p>Long-term traffic patterns</p></div>
+        {# Links, not buttons: the range is a server-side window, so it lives in the URL. #}
+        <div class="range-switcher" id="range-switcher" data-testid="range-switcher">
+          {%- for option in ranges %}
+          <a href="/stats?range={{ option.label }}"{% if option.active %} class="active" aria-current="page"{% endif %}>{{ option.label }}</a>
+          {%- endfor %}
+        </div>
+      </div>
+      <div class="stat-grid fade-in" id="highlights-grid" style="animation-delay:0.03s">
+        {%- for card in highlights %}
+        <div class="stat-card"><div class="stat-label">{{ card.label }}</div><div class="stat-value {{ card.value_class }}"{% if card.title != "" %} title="{{ card.title }}"{% endif %}>{{ card.value }}{% if card.unit != "" %}<span style="font-size:0.9rem;color:var(--text-dim)">{{ card.unit }}</span>{% endif %}</div></div>
+        {%- endfor %}
+      </div>
+      <div class="stats-row-2col fade-in" style="animation-delay:0.05s">
+        <div class="card" id="timeline-card">
+          <div class="card-title" id="timeline-title">Queries (last {{ range }})</div>
+          <div class="chart-container" id="timeline-chart">
+            {# Replaced by the drawn chart on connect; says what it is rather than leaving a gap. #}
+            <p class="panel-empty" data-testid="timeline-needs-js">This chart is drawn in the browser, aligned to its calendar. The figures around it are complete without it.</p>
+          </div>
+        </div>
+        <div class="card" id="rate-trend-card">
+          <div class="card-title" id="rate-trend-title">Block &amp; Cache rate (last {{ range }})</div>
+          <div class="rate-chart-container" id="rate-trend-chart">
+            <p class="panel-empty" data-testid="rate-trend-needs-js">Drawn in the browser from the same series as the chart beside it.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.08s" id="heatmap-card">
+        <div class="card-title">Activity by hour (last 30d)</div>
+        <div id="heatmap-container">
+          <p class="panel-empty" data-testid="heatmap-needs-js">Drawn in the browser: hour-of-day rows need the viewer's time zone to line up.</p>
+        </div>
+      </div>
+      <div class="stats-row-2col fade-in" style="animation-delay:0.1s">
+        <div class="card" id="qtypes-card">
+          <div class="card-title">Query Types</div>
+          <div id="qtypes-chart">
+            {%- if query_types.is_empty() %}
+            <p class="text-dim">No data yet</p>
+            {%- else %}
+            <div class="bar-list">
+              {%- for row in query_types %}
+              {% call macros::bar_row(row, "var(--accent)") %}{% endcall %}
+              {%- endfor %}
+            </div>
+            {%- endif %}
+          </div>
+        </div>
+        <div class="card" id="outcomes-card">
+          <div class="card-title">Outcomes</div>
+          <div id="outcomes-chart">
+            {%- if outcomes.is_empty() %}
+            <p class="text-dim">No data yet</p>
+            {%- else %}
+            <div class="bar-list">
+              {%- for row in outcomes %}
+              {% call macros::bar_row(row, "var(--orange)") %}{% endcall %}
+              {%- endfor %}
+            </div>
+            {%- endif %}
+          </div>
+        </div>
+      </div>
+      <div class="stats-row-2col fade-in" style="animation-delay:0.15s">
+        <div class="card" id="ranged-domains-card">
+          <div class="card-title" id="ranged-domains-title">Top Domains (last {{ range }})</div>
+          <div id="ranged-domains" data-testid="ranged-domains">
+            {%- if top_domains.is_empty() %}
+            <p class="text-dim">No data yet</p>
+            {%- else %}
+            <div class="bar-list">
+              {%- for row in top_domains %}
+              {% call macros::bar_row(row, "var(--accent)") %}{% endcall %}
+              {%- endfor %}
+            </div>
+            {%- endif %}
+          </div>
+        </div>
+        <div class="card" id="ranged-clients-card">
+          <div class="card-title" id="ranged-clients-title">Top Sources (last {{ range }})</div>
+          <div id="ranged-clients" data-testid="ranged-clients">
+            {%- if top_clients.is_empty() %}
+            <p class="text-dim">No data yet</p>
+            {%- else %}
+            <div class="bar-list">
+              {%- for row in top_clients %}
+              {% call macros::bar_row(row, "var(--green)") %}{% endcall %}
+              {%- endfor %}
+            </div>
+            {%- endif %}
+          </div>
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.2s" id="health-card" data-testid="db-health-card">
+        <div class="card-title">Database Health</div>
+        <div class="stat-grid" id="health-grid">
+          {%- for card in health %}
+          <div class="stat-card"><div class="stat-label">{{ card.label }}</div><div class="stat-value {{ card.value_class }}"{% if card.title != "" %} title="{{ card.title }}"{% endif %}{% if card.ts != 0 %} data-date-ts="{{ card.ts }}"{% endif %}>{{ card.value }}{% if card.unit != "" %}<span style="font-size:0.9rem;color:var(--text-dim)">{{ card.unit }}</span>{% endif %}</div>{% if card.sub != "" %}<div class="stat-sub">{{ card.sub }}</div>{% endif %}</div>
+          {%- endfor %}
+        </div>
+      </div>
+      </stats-page>
+{% endblock %}

@@ -50,7 +50,7 @@ Sign-in and setup need **no CSRF token** — `src/admin/csrf.rs` is a header-bas
 
 Password sign-in lives in **one** place, `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, the constant Argon2 cost, the lockout and the audit events are all in there — do not grow a second path.
 
-**The shell is server-rendered too** (`templates/shell.html`): topbar, both navigation bars, status bar, and any one-shot notice. `app.js` does not render it and must not re-derive what it already decided — the active nav item is a class the template set from the path it answered. Only `#page-content` is left for the client, where the page component for this path mounts. The nav table lives once, in `NAV` (`src/admin/pages.rs`), and drives both the desktop strip and the mobile F-key bar.
+**The shell is server-rendered too** (`templates/shell.html`): topbar, both navigation bars, status bar, and any one-shot notice. `app.js` does not render it and must not re-derive what it already decided — the active nav item is a class the template set from the path it answered. Only `#page-content` is left for the client, and even that arrives rendered: the page's custom element is in the markup and upgrades in place, so `app.js` enhances a body it never had to build. The nav table lives once, in `NAV` (`src/admin/pages.rs`), and drives both the desktop strip and the mobile F-key bar.
 
 Page bodies are still **vanilla-JS web components — no framework, no build step**, in `admin-ui/dist/`: `app.css` and `app.js`. There is no `index.html` and **no SPA fallback** — every page path is a real route, so an unmatched path 404s. The directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js`, `app.css`, or a file under `templates/`, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file; server-rendered pages get `no-store` from the same layer, which keys on whether a response already declares a policy.
 
@@ -61,7 +61,7 @@ One-shot notices ride a **flash cookie** (`Flash` in `src/admin/pages.rs`), read
 Settings is the worked example; the remaining pages follow it.
 
 - The page template `{% extends "shell.html" %}` and fills `{% block page %}`. Its struct embeds `ShellData` as a `shell` field — `shell.html` reads `shell.*`.
-- **Wrap the body in the page's existing custom element** (`<settings-page>…</settings-page>`). It upgrades in place, so `app.js` enhances the rendered markup instead of replacing it. The bootstrap mounts a component only when the server left `#page-content` empty, which is how not-yet-converted pages keep working.
+- **Wrap the body in the page's existing custom element** (`<settings-page>…</settings-page>`). It upgrades in place, so `app.js` enhances the rendered markup instead of replacing it. Every page does this now, so `app.js` has **no bootstrap that mounts a page**: the path→component table and the "only when `#page-content` is empty" branch went with the last page converted, and so did `shell_page` / `ShellTemplate`.
 - Validation lives in **one** function shared with the JSON endpoint (`apply_settings`), returning a field-tagged error so the form can put the message next to the offending input while the API keeps answering a bare 400.
 - A successful POST redirects with a flash; a rejected one re-renders **with the submitted values**, not the stored ones, at 400/401 — never 200.
 - When `app.js` enhances a form, it removes the no-JS submit row (`#settings-save-row`) rather than hiding it, and any submit button it takes over must `preventDefault()`.
@@ -95,6 +95,14 @@ Dashboard adds the conventions for a page that is **all readings and no controls
 - **The chart is the documented exception** to no-JS: it is drawn from a timeline series by the client. The card says so rather than sitting empty, and the client replaces that text on connect.
 - ⚠️ **A conditional `style` must be merged into the element's existing one.** Two `style` attributes means the second is dropped — the chart card's `animation-delay` and its `display:none` are one attribute for that reason.
 
+Statistics adds the conventions for a page whose readings sit in a **chosen window**, and the rule for **what the server cannot render**:
+
+- **Let the data draw the line, not the page.** `tz_offset` reaches exactly two computations — `compute_stats_timeline` and `compute_heatmap` — and those two feed exactly the three charts. A calendar-aligned bucket needs the viewer's UTC offset, which arrives with the browser and not with the request. Everything else is a plain `now - range` window with no calendar in it, so it renders on the server and never moves again: the highlights, both breakdowns, both ranged lists and the health grid are all in the first response.
+- **`app.js` does not redraw what it did not need to draw.** `StatsPage` is three charts and one date; the bar-list, health-grid and highlights renderers are gone rather than kept as a second copy of the markup. There is no polling here — this page is history, not a live reading.
+- **The range is in the URL and the switcher is three `<a>`s** (`/stats?range=30d`), because the range picks the *server's* window. `StatsRange::label()` is the one spelling shared by the link, the parse and every card title. An unrecognised range renders the default rather than 400ing — it is a link an operator can edit, and every window on offer is spelled out right above it.
+- **A date the server can only write in UTC ships as an ISO day plus its timestamp** (`data-date-ts`), and `app.js` restates it in the browser's locale — the same division as the query log's relative times, and for the same reason.
+- Four bar lists in one template share **one askama macro** (`templates/_macros.html`); `{% call … %}` needs a matching `{% endcall %}` in askama 0.16, and `{% include %}` cannot see a loop variable at all.
+
 Account adds the conventions for **actions that need a password proof**:
 
 - **The password rides in the form that needs it** (`your_password`), for adding an operator, deleting one, and minting an API key. There is no dialog and no retry-after-403: `promptForPassword` / `withReauth` are gone, and the path is identical with and without JavaScript. `POST /api/auth/reauth` still exists for API callers.
@@ -105,6 +113,8 @@ Account adds the conventions for **actions that need a password proof**:
 - Account POSTs answer as `/account` whatever path they arrived on — `ShellData::build_for("/account", …)`, so the navigation still marks the page the operator is looking at.
 
 ⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/specs/filters-no-js.spec.js` submits with `Enter` and clicks row controls through a helper for the same reason, and says so.
+
+⚠️ **With scripting off a page is interactive the moment it parses**, so a `fade-in` card is still sliding when the first click lands and Playwright refuses to click a moving target. `e2e/specs/stats-no-js.spec.js` clicks the range switcher with `force: true` and follows it with assertions that only pass if the navigation happened.
 
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 
