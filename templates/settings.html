@@ -18,9 +18,8 @@
         Wrapped in the custom element the client already defines. It upgrades in
         place over this markup, so the enhancement — autosave, the live upstream
         table, the token list — attaches to the server-rendered form rather than
-        replacing it. The bootstrap mounts a page component only when the server
-        left `#page-content` empty, which is how the pages P3 has not reached
-        yet keep working unchanged.
+        replacing it. Nothing mounts it: every page ships its own element now,
+        so `app.js` has no path-to-component table left.
       #}
       <settings-page>
       <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>

@@ -120,9 +120,10 @@ test.describe('The filters page works with no JavaScript', () => {
     await gotoFilters(page, context);
     await expect(page.getByTestId('rules-list')).toBeVisible();
     await expect(page.locator('[data-testid="nav-filters"]')).toHaveClass(/active/);
-    // The registry browser is the one control that needs a client, so it ships
-    // hidden rather than sitting there doing nothing.
-    await expect(page.locator('#browse-registry')).toBeHidden();
+    // The registry browser used to be the one control that needed a client, so
+    // it shipped hidden. It is a page of its own now, and this is a link.
+    await expect(page.locator('#browse-registry')).toBeVisible();
+    await expect(page.locator('#browse-registry')).toHaveAttribute('href', '/filters/registry');
   });
 
   test('a custom rule can be added and deleted through the forms', async ({ page, context }) => {
@@ -218,5 +219,19 @@ test.describe('The filters page works with no JavaScript', () => {
     await expect(page).toHaveURL(/test=nojs-tested\.example\.com/);
     // Refreshable and linkable: the domain came back in the field too.
     await expect(page.getByTestId('domain-test-input')).toHaveValue('nojs-tested.example.com');
+  });
+
+  test('Browse Registry is a link that reaches its page', async ({ page, context }) => {
+    await gotoFilters(page, context);
+    // This was the one control here that did nothing without JavaScript.
+    await clickRowControl(page.locator('#browse-registry'));
+    await expect(page).toHaveURL(/\/filters\/registry$/);
+    await expect(page.locator('registry-page')).toBeVisible();
+    // What the page then says depends on whether the third-party registry is
+    // reachable from wherever this is running, and both answers are the page
+    // working: entries to tick, or an explanation and a retry.
+    await expect(
+      page.locator('#registry-form, [data-testid="registry-unavailable"]').first(),
+    ).toBeVisible();
   });
 });

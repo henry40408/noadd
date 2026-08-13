@@ -5585,6 +5585,317 @@ async fn the_live_toggle_and_chart_are_marked_client_only() {
     );
 }
 
+// --- Registry page ---
+
+/// A registry with one entry per case the page has to render: a plain one, a
+/// deprecated one, one in a second group, and one whose homepage is a
+/// `javascript:` URL that must never become a link.
+fn registry_json(download_base: &str) -> String {
+    let entry = |id: i64, group: i64, name: &str, desc: &str, homepage: &str, deprecated: bool| {
+        format!(
+            r#"{{
+              "filterKey": "k{id}", "filterId": {id}, "groupId": {group},
+              "name": "{name}", "description": "{desc}",
+              "homepage": "{homepage}", "deprecated": {deprecated},
+              "tags": [], "languages": [], "version": "1", "expires": 345600,
+              "displayNumber": {id},
+              "downloadUrl": "{download_base}/list_{id}.txt",
+              "subscriptionUrl": "https://example.com/sub_{id}",
+              "timeAdded": "2021-01-01T00:00:00+0000",
+              "timeUpdated": "2026-04-19T00:00:00+0000"
+            }}"#
+        )
+    };
+    format!(
+        r#"{{
+          "filters": [
+            {},
+            {},
+            {},
+            {}
+          ],
+          "groups": [
+            {{ "groupId": 1, "groupName": "General" }},
+            {{ "groupId": 2, "groupName": "Security" }}
+          ],
+          "tags": []
+        }}"#,
+        entry(
+            1,
+            1,
+            "Alpha List",
+            "blocks alpha things",
+            "https://alpha.example",
+            false
+        ),
+        entry(
+            2,
+            2,
+            "Beta Security",
+            "blocks beta things",
+            "https://beta.example",
+            false
+        ),
+        entry(
+            3,
+            1,
+            "Gamma Retired",
+            "no longer maintained",
+            "https://gamma.example",
+            true
+        ),
+        entry(
+            4,
+            1,
+            "Delta Hostile",
+            "has a nasty homepage",
+            "javascript:alert(1)",
+            false
+        ),
+    )
+}
+
+async fn registry_html(app: &axum::Router, token: &str, query: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            &format!("/filters/registry{query}"),
+            token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_text(res).await
+}
+
+/// The whole registry arrives rendered, with the filters in the URL — the modal
+/// this replaced had none of it without JavaScript.
+#[tokio::test]
+async fn the_registry_page_renders_its_entries() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("https://lists.example"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let html = registry_html(&app, &token, "").await;
+    assert!(html.contains("<registry-page"), "the body was not wrapped");
+    // Deprecated is hidden by default, so three of the four show.
+    assert!(
+        html.contains("Showing 3 of 4"),
+        "the counts did not account for the default filters"
+    );
+    assert!(html.contains("Alpha List") && html.contains("Beta Security"));
+    assert!(
+        !html.contains("Gamma Retired"),
+        "a deprecated entry rendered without being asked for"
+    );
+    // The group pill takes its colour from the group's name.
+    assert!(
+        html.contains(r#"<span class="group-pill security">Security</span>"#),
+        "the group pill was not rendered"
+    );
+    // Every row posts its own id.
+    assert!(html.contains(r#"name="filter_id" value="1""#));
+}
+
+/// Escaping keeps a value in its attribute; it does not make it safe to
+/// navigate to. A `javascript:` homepage renders no link at all.
+#[tokio::test]
+async fn a_hostile_homepage_never_becomes_a_link() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("https://lists.example"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let html = registry_html(&app, &token, "").await;
+    assert!(html.contains("Delta Hostile"), "the row itself is missing");
+    assert!(
+        !html.contains("javascript:"),
+        "a javascript: URL reached the markup"
+    );
+    // The safe ones are still links.
+    assert!(html.contains(r#"href="https://alpha.example""#));
+}
+
+/// Search, group and the deprecated toggle all live in the URL and come back
+/// showing what is applied.
+#[tokio::test]
+async fn the_registry_filters_live_in_the_url() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("https://lists.example"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    // Search matches the description as well as the name.
+    let html = registry_html(&app, &token, "?q=beta").await;
+    assert!(html.contains("Showing 1 of 4") && html.contains("Beta Security"));
+    assert!(
+        html.contains(r#"value="beta""#),
+        "the search box did not keep what was typed"
+    );
+
+    let html = registry_html(&app, &token, "?group=2").await;
+    assert!(html.contains("Showing 1 of 4") && html.contains("Beta Security"));
+    assert!(
+        html.contains(r#"<option value="2" selected>Security</option>"#),
+        "the group select did not come back selected"
+    );
+
+    let html = registry_html(&app, &token, "?deprecated=1").await;
+    assert!(
+        html.contains("Showing 4 of 4") && html.contains("Gamma Retired"),
+        "the deprecated toggle did not let them through"
+    );
+    assert!(html.contains(r#"name="deprecated" value="1" checked"#));
+
+    // A filter that matches nothing says so rather than rendering an empty card.
+    let html = registry_html(&app, &token, "?q=nothingatall").await;
+    assert!(html.contains("Showing 0 of 4"));
+    assert!(
+        !html.contains(r#"data-testid="registry-empty" hidden"#),
+        "the empty notice was rendered hidden"
+    );
+}
+
+/// The form carries the current view, so adding from a filtered page comes back
+/// to that page rather than to all of it.
+#[tokio::test]
+async fn the_add_form_carries_the_current_view() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("https://lists.example"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let html = registry_html(&app, &token, "?q=beta&group=2&deprecated=1").await;
+    // The separators are escaped, which is what an attribute value wants — a
+    // browser reads them back as `&`.
+    assert!(
+        html.contains(r#"action="/filters/registry/add?q=beta&#38;group=2&#38;deprecated=1""#),
+        "the form did not carry the view it was submitted from"
+    );
+}
+
+/// The third party is unreachable. That is a state the page renders — with a
+/// retry that is an ordinary link — not an error it fails on.
+#[tokio::test]
+async fn an_unreachable_registry_renders_a_retry() {
+    // The default setup points at a port nothing listens on.
+    let (app, token) = setup().await;
+    let html = registry_html(&app, &token, "?q=beta").await;
+
+    assert!(
+        html.contains(r#"data-testid="registry-unavailable""#),
+        "the page did not say the registry was unreachable"
+    );
+    assert!(
+        html.contains(r#"href="/filters/registry?q=beta""#),
+        "the retry link did not return to the same view"
+    );
+}
+
+/// Ticking nothing and pressing Add says so where the boxes are, rather than
+/// redirecting to a page that would look like it had done something.
+#[tokio::test]
+async fn adding_nothing_is_answered_on_the_page() {
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("https://lists.example"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let res = app
+        .oneshot(authed_form("/filters/registry/add", &token, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_text(res).await;
+    assert!(html.contains("No lists selected"));
+    assert!(html.contains(r#"data-testid="registry-failures""#));
+}
+
+/// A successful add redirects, so a refresh cannot add the same lists twice,
+/// and the lists are really there.
+#[tokio::test]
+async fn adding_a_selection_redirects_to_the_filters_page() {
+    let lists = common::spawn_fake_upstream(
+        "/list_1.txt",
+        "||alpha.example.com^\n".to_string(),
+        "text/plain",
+    )
+    .await;
+    let base =
+        common::spawn_fake_upstream("/filters.json", registry_json(&lists), "application/json")
+            .await;
+    let (app, token, db) = {
+        let (router, token, _cache, _events, db, _sessions, _limiter) =
+            build_app_opts(&format!("{base}/filters.json"), true, false).await;
+        (router, token, db)
+    };
+
+    let res = app
+        .clone()
+        .oneshot(authed_form("/filters/registry/add", &token, "filter_id=1"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").unwrap().to_str().unwrap(),
+        "/filters"
+    );
+
+    let stored = db.get_filter_lists().await.unwrap();
+    assert!(
+        stored.iter().any(|l| l.name == "Alpha List"),
+        "the list was not added; stored: {:?}",
+        stored.iter().map(|l| &l.name).collect::<Vec<_>>()
+    );
+
+    // And the page now says so rather than offering to add it again.
+    let html = registry_html(&app, &token, "").await;
+    assert!(html.contains(r#"<span class="added-pill">Added</span>"#));
+}
+
+/// A list that cannot be downloaded comes back named, on the page, with the
+/// reason — the one thing a redirect would discard.
+#[tokio::test]
+async fn a_failed_download_is_reported_on_the_page() {
+    // The registry points its downloads at a port nothing listens on.
+    let base = common::spawn_fake_upstream(
+        "/filters.json",
+        registry_json("http://127.0.0.1:1"),
+        "application/json",
+    )
+    .await;
+    let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
+
+    let res = app
+        .oneshot(authed_form("/filters/registry/add", &token, "filter_id=1"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_text(res).await;
+    assert!(
+        html.contains(r#"data-testid="registry-failures""#) && html.contains("Alpha List"),
+        "the failure was not reported by name"
+    );
+}
+
 // --- Statistics page ---
 
 async fn stats_html(app: &axum::Router, token: &str, query: &str) -> String {

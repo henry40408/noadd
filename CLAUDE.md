@@ -44,7 +44,7 @@ Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenario
 
 ## Admin UI
 
-**Routing and authentication are server-side.** `src/admin/pages.rs` renders the browser-facing HTML from `templates/` (askama, compile-time). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/settings`, `/account` — resolves the session *before* writing any HTML, redirecting to `/login?next=…` or `/setup` when there is none. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is ordinary links with full page loads; there is no client-side router.
+**Routing and authentication are server-side.** `src/admin/pages.rs` renders the browser-facing HTML from `templates/` (askama, compile-time). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing any HTML, redirecting to `/login?next=…` or `/setup` when there is none. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is ordinary links with full page loads; there is no client-side router.
 
 Sign-in and setup need **no CSRF token** — `src/admin/csrf.rs` is a header-based origin guard covering every unsafe method on the router, so a cross-origin form post is refused before it reaches a handler.
 
@@ -77,6 +77,16 @@ Filters adds the conventions for a page whose body is a *list of things*:
 - **`.nojs-only` / `.js-only`.** Both ship in the state that is correct when the script never arrives: `app.js` removes the first and unhides the second. A control that needs a client (the registry modal) ships `hidden` rather than sitting there doing nothing.
 - **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
 - Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
+
+The registry browser (`/filters/registry`) adds the conventions for **a picker that batch-submits**:
+
+- **Two forms, never nested.** The three filters are a `method="get"` form whose state lands in the URL; the selection is a `method="post"` form wrapping the rows. A GET form cannot also be a POST form, and forms cannot nest — the same constraint the query log's Clear All hit.
+- **Filtering by navigating clears the selection, and `app.js` is what fixes that.** With a client the same three controls hide rows in place, so the ticks survive a change of search and the counts keep up. That is the enhancement — not different behaviour, just less lost.
+- **The form posts ids; the server decides what they mean.** A browser sends one `filter_id` per ticked box, and the name and URL are looked up in the registry rather than trusted from the body. `Form<Vec<(String, String)>>` is the one shape that keeps repeated keys — `serde_urlencoded` will not fill a `Vec` from them any other way.
+- **`add_lists_batch` (`src/admin/api.rs`) is the only batch-add path**, shared with `POST /api/lists/batch`: one concurrency cap, one per-item rollback, one rebuild.
+- **A full success redirects; a partial failure renders.** The reasons a list could not be added exist in that response and nowhere else, which is the same exception minting an API key takes.
+- **A third party being unreachable is a state the page renders**, with a retry that is an ordinary link back to the same URL — not a spinner, and not a 502.
+- ⚠️ **`safe_url` (`src/admin/pages.rs`) is what keeps a `javascript:` homepage out of an `href`.** Escaping keeps a value inside its attribute; it does not stop the browser navigating to it. Only absolute `http(s)` survives, and the coverage for it is Rust now (`a_hostile_homepage_never_becomes_a_link`) — the registry is fetched server-side, so a browser-side route stub no longer intercepts it.
 
 The query log adds the conventions for **filtering and paging**:
 

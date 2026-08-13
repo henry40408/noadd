@@ -214,6 +214,11 @@ pub fn admin_router(state: AppState) -> Router {
             "/filters/rules/{id}/delete",
             post(crate::admin::pages::filters_rule_delete_submit),
         )
+        .route("/filters/registry", get(crate::admin::pages::registry_page))
+        .route(
+            "/filters/registry/add",
+            post(crate::admin::pages::registry_add_submit),
+        )
         .route(
             "/settings",
             get(crate::admin::pages::settings_page).post(crate::admin::pages::settings_submit),
@@ -2974,12 +2979,29 @@ pub struct BatchAddResponse {
     pub failed: Vec<BatchFailedEntry>,
 }
 
+/// How many lists one batch may add. A registry page cannot tick more than
+/// this, and the JSON endpoint refuses more than this.
+pub const BATCH_ADD_LIMIT: usize = 50;
+
 async fn batch_add_lists(
     State(state): State<AppState>,
     _auth: AuthedUser,
     Json(body): Json<BatchAddRequest>,
 ) -> Result<Json<BatchAddResponse>, StatusCode> {
-    if body.items.is_empty() || body.items.len() > 50 {
+    Ok(Json(add_lists_batch(&state, body.items).await?))
+}
+
+/// Add every list in one batch, downloading each and rolling back the ones that
+/// fail.
+///
+/// The only place either caller does this: `POST /api/lists/batch` for API
+/// callers and the registry page's form for browsers. The concurrency cap, the
+/// per-item rollback and the single rebuild at the end are all in here.
+pub async fn add_lists_batch(
+    state: &AppState,
+    items: Vec<BatchAddItem>,
+) -> Result<BatchAddResponse, StatusCode> {
+    if items.is_empty() || items.len() > BATCH_ADD_LIMIT {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -2991,7 +3013,7 @@ async fn batch_add_lists(
 
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     let mut set = tokio::task::JoinSet::new();
-    for item in body.items {
+    for item in items {
         let permit = sem.clone().acquire_owned().await.unwrap();
         let db = state.db.clone();
         let http = client.clone();
@@ -3073,7 +3095,7 @@ async fn batch_add_lists(
 
     state.trigger_rebuild();
 
-    Ok(Json(BatchAddResponse { added, failed }))
+    Ok(BatchAddResponse { added, failed })
 }
 
 async fn get_registry_filters(
