@@ -996,32 +996,15 @@ class DashboardPage extends LiveElement {
     this._dnsAddr = '';
   }
 
+  // The body arrives server-rendered, with the real numbers already in it. What
+  // is added here is what makes it a *dashboard* rather than a snapshot: the
+  // chart, the ten-second poll, and the flash on whatever changed.
+  //
+  // The first poll re-draws cards that already hold the same values. That is
+  // deliberate — the alternative is teaching the client to trust markup it did
+  // not write, and every `_prev*` starts empty so nothing flashes on it.
   async connectedCallback() {
-    this.innerHTML = `
-      <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
-        <div><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
-        <button class="live-toggle" id="live-btn" data-testid="live-toggle" title="Auto-refresh every 10s. Click to toggle."><span class="live-dot"></span> LIVE</button>
-      </div>
-      <div class="card fade-in" id="onboard-empty" data-testid="dashboard-empty-state" style="display:none"></div>
-      <div class="stat-grid fade-in" id="stats"></div>
-      <div class="card fade-in" style="animation-delay:0.1s" id="chart-card">
-        <div class="card-title">Queries (24h)</div>
-        <div class="chart-container" id="chart"></div>
-      </div>
-      <div class="dashboard-grid-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div class="card fade-in" style="animation-delay:0.15s" id="domains-card" data-testid="top-domains-card">
-          <div class="card-title">Top Queried Domains</div>
-          <div id="top-domains"></div>
-        </div>
-        <div class="card fade-in" style="animation-delay:0.2s" id="clients-card">
-          <div class="card-title">Top Sources</div>
-          <div id="top-clients"></div>
-        </div>
-      </div>
-      <div class="card fade-in" style="animation-delay:0.25s" id="upstreams-card">
-        <div class="card-title">Upstream DNS Servers</div>
-        <div id="top-upstreams"></div>
-      </div>`;
+    this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
     this.querySelector('#live-btn').onclick = () => {
       this._live = !this._live;
@@ -1038,21 +1021,32 @@ class DashboardPage extends LiveElement {
     // single teardown that defers to its own stopper.
     this.track(() => this._stopPolling());
 
+    // The address to point a device at was rendered into the onboarding notice
+    // already; take it from there rather than asking for it again. Every
+    // appliance that has ever answered a query has no notice and needs none,
+    // which is why this is not fetched up front any more.
+    this._dnsAddr = this.querySelector('#onboard-empty code')?.textContent?.trim() || '';
+
+    await this._fetchAll();
+    // `_fetchAll` awaits, so the page may already have been swapped out —
+    // disconnectedCallback would have run back when there was still no timer to
+    // stop, leaving anything started now to poll forever.
+    if (!this.isConnected) return;
+    this._startPolling();
+  }
+
+  // Only ever needed by the onboarding notice, and only when the server did not
+  // already render one — an appliance that starts answering queries mid-session
+  // is the one case the markup cannot have covered.
+  async _resolveDnsAddr() {
+    if (this._dnsAddr) return this._dnsAddr;
     try {
       const info = await api.get('/api/server-info');
       const raw = (info && info.dns_addr) || '';
       const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : '';
       this._dnsAddr = port ? `${window.location.hostname}:${port}` : window.location.hostname;
     } catch (e) { this._dnsAddr = window.location.hostname; }
-
-    // Everything below resumes after an await, so the page may already have
-    // been swapped out — disconnectedCallback would have run back when there was
-    // still no timer to stop, leaving anything started now to poll forever.
-    if (!this.isConnected) return;
-
-    await this._fetchAll();
-    if (!this.isConnected) return;
-    this._startPolling();
+    return this._dnsAddr;
   }
 
   _startPolling() {
@@ -1165,7 +1159,7 @@ class DashboardPage extends LiveElement {
     this._renderOnboarding(s);
   }
 
-  _renderOnboarding(s) {
+  async _renderOnboarding(s) {
     const hasQueries = ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
     const box = this.querySelector('#onboard-empty');
     const chart = this.querySelector('#chart-card');
@@ -1175,6 +1169,7 @@ class DashboardPage extends LiveElement {
       if (chart) chart.style.display = '';
       return;
     }
+    await this._resolveDnsAddr();
     box.innerHTML = html`
       <div class="card-title">Point a device at noadd to get started</div>
       <p style="color:var(--text-secondary);font-size:0.9rem;margin:8px 0">

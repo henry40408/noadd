@@ -5231,6 +5231,132 @@ async fn the_filters_forms_refuse_an_anonymous_browser() {
     }
 }
 
+// --- Dashboard page (server-rendered) ---
+
+/// A router plus the database behind it, so a test can seed the query log the
+/// dashboard reads.
+async fn setup_with_db() -> (axum::Router, String, Database) {
+    let (router, token, _cache, _events, db, _sessions, _limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    (router, token, db)
+}
+
+/// Seed `count` queries for one domain, timestamped now. `query_logs.timestamp`
+/// is milliseconds, which is exactly the sort of thing a test gets wrong once
+/// and then never again.
+async fn seed_queries(db: &Database, domain: &str, client: &str, count: usize, blocked: bool) {
+    let now_ms = noadd::now_unix_ms();
+    let entries: Vec<QueryLogEntry> = (0..count)
+        .map(|i| QueryLogEntry {
+            timestamp: now_ms - i as i64,
+            domain: domain.to_string(),
+            query_type: "A".to_string(),
+            client_ip: client.to_string(),
+            blocked,
+            cached: false,
+            response_ms: 12,
+            upstream: Some("1.1.1.1:53".to_string()),
+            doh_token: None,
+            result: None,
+            authenticated_data: false,
+        })
+        .collect();
+    db.insert_query_logs(&entries).await.unwrap();
+}
+
+/// The numbers are in the first response. That is the whole point of rendering
+/// this page on the server: it used to arrive empty and fill in over five API
+/// calls.
+#[tokio::test]
+async fn the_dashboard_renders_its_numbers_and_tables() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "ads.example.com", "10.0.0.5", 3, true).await;
+    seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
+
+    let res = app.oneshot(authed("GET", "/", &token, None)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_text(res).await;
+
+    // Four queries, three of them blocked: 75.0%. Matched with the surrounding
+    // markup so a stray "4" elsewhere on the page cannot pass for the count.
+    assert!(
+        html.contains(r#"title="4">4</div>"#),
+        "the query count was not rendered"
+    );
+    assert!(
+        html.contains(r#"<div class="stat-value red">75.0%</div>"#),
+        "the block rate was not rendered"
+    );
+    // Both domains, and the client they came from.
+    assert!(
+        html.contains("ads.example.com") && html.contains("good.example.com"),
+        "the top-domains table was not rendered"
+    );
+    assert!(
+        html.contains("10.0.0.5"),
+        "the top-sources table was not rendered"
+    );
+    assert!(
+        html.contains("1.1.1.1:53"),
+        "the upstreams table was not rendered"
+    );
+    // Shares are rendered next to the counts.
+    assert!(html.contains("(75.0%)"), "a row's share was not rendered");
+    // The element the client upgrades in place.
+    assert!(
+        html.contains("<dashboard-page>"),
+        "the body was not wrapped"
+    );
+}
+
+/// With no traffic at all the page explains what to do about it, and hides the
+/// chart it would otherwise draw an empty axis for.
+#[tokio::test]
+async fn an_appliance_with_no_queries_is_told_how_to_start() {
+    let (app, token) = setup().await;
+    let res = app.oneshot(authed("GET", "/", &token, None)).await.unwrap();
+    let html = body_text(res).await;
+
+    assert!(
+        html.contains("Point a device at noadd to get started"),
+        "the onboarding notice was not rendered"
+    );
+    assert!(
+        !html.contains(r#"data-testid="dashboard-empty-state" style="display:none""#),
+        "the onboarding notice was rendered hidden"
+    );
+    // The chart card carries one `style`, animation delay and all — a second
+    // attribute would be dropped by the parser and the card would stay visible.
+    assert!(
+        html.contains(r#"id="chart-card" style="animation-delay:0.1s;display:none""#),
+        "the chart card was not hidden"
+    );
+    // Zeroes, not blanks: an appliance that has answered nothing has answered
+    // nothing, and the cards say so.
+    assert!(
+        html.contains(">0.0%<"),
+        "the rates were not rendered as zero"
+    );
+}
+
+/// The controls that only work with a client ship hidden rather than sitting
+/// there doing nothing.
+#[tokio::test]
+async fn the_live_toggle_and_chart_are_marked_client_only() {
+    let (app, token) = setup().await;
+    let res = app.oneshot(authed("GET", "/", &token, None)).await.unwrap();
+    let html = body_text(res).await;
+
+    assert!(
+        html.contains(r#"id="live-btn""#) && html.contains("js-only"),
+        "the live toggle was not marked client-only"
+    );
+    assert!(
+        html.contains(r#"data-testid="chart-needs-js""#),
+        "the chart card did not say what it needs"
+    );
+}
+
 // --- Account page: tables and the password-proofed actions ---
 
 /// The admin password `build_app` provisions. Every form below that needs a

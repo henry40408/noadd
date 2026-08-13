@@ -78,6 +78,13 @@ Filters adds the conventions for a page whose body is a *list of things*:
 - **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
 - Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
 
+Dashboard adds the conventions for a page that is **all readings and no controls**:
+
+- **The numbers are in the first response.** `dashboard_page` makes the five reads `app.js` used to make on its poll — `compute_summary`, `compute_top_domains` / `_clients` / `_upstreams` in `src/admin/stats.rs`, already shared with `/api/stats/*`. A failed read renders zeroes rather than an error page: a dashboard that says nothing beats one that will not load.
+- **`app.js` keeps polling and re-drawing the same markup**, so every shape in the template has a counterpart in `DashboardPage`. Number formatting is duplicated in Rust to match (`format_num_adaptive`, `percent1`, `share_percent`, `format_qps`) — a count that changed its own notation when the poll landed would read as a change in the number.
+- **The chart is the documented exception** to no-JS: it is drawn from a timeline series by the client. The card says so rather than sitting empty, and the client replaces that text on connect.
+- ⚠️ **A conditional `style` must be merged into the element's existing one.** Two `style` attributes means the second is dropped — the chart card's `animation-delay` and its `display:none` are one attribute for that reason.
+
 Account adds the conventions for **actions that need a password proof**:
 
 - **The password rides in the form that needs it** (`your_password`), for adding an operator, deleting one, and minting an API key. There is no dialog and no retry-after-403: `promptForPassword` / `withReauth` are gone, and the path is identical with and without JavaScript. `POST /api/auth/reauth` still exists for API callers.

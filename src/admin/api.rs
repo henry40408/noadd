@@ -173,7 +173,7 @@ pub fn admin_router(state: AppState) -> Router {
         // route resolves the session before any HTML is written, so an
         // unauthenticated browser is redirected rather than served a shell that
         // has to discover the same thing for itself.
-        .route("/", get(crate::admin::pages::shell_page))
+        .route("/", get(crate::admin::pages::dashboard_page))
         .route("/stats", get(crate::admin::pages::shell_page))
         .route("/logs", get(crate::admin::pages::shell_page))
         .route("/filters", get(crate::admin::pages::filters_page))
