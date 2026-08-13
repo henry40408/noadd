@@ -36,6 +36,10 @@ npm run screenshots # re-seeds fake traffic, re-captures docs/screenshots/
 
 Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenarios (password changes) and anything needing its own login rate-limit budget get a self-contained spec in `e2e/specs/` with dedicated ports — see `settings-autosave.spec.js`.
 
+**Every page has no-JS coverage**, in four specs with `javaScriptEnabled: false` and a pinned 1024×600 viewport: `filters-no-js`, `logs-no-js`, `stats-no-js` and `pages-no-js` (the dashboard, settings and account together — unlike the other three, none of them seeds or empties anything, so they share one instance instead of booting three). Ports run 14107–14110 with DNS on 15107–15110; a new spec takes the next pair.
+
+⚠️ **A browser posts the whole form, so a no-JS save has to satisfy every field on it.** A fresh appliance has no upstream configured, and saving settings without one is a rejection, not a partial write — which is why `pages-no-js` fills the upstream before it saves anything. This is the correct behaviour (`apply_settings` validates before it persists so a bad entry cannot leave half a save applied); it just means a test that fills one field and submits is testing the rejection path whether it meant to or not.
+
 ## Build-time behavior (`build.rs`)
 
 - Downloads the six built-in filter lists via `curl` into `OUT_DIR/lists/`. On network failure it writes an empty file and warns rather than failing.

@@ -13,7 +13,7 @@
 
 Blocks ads and trackers at the DNS level using community-maintained filter lists. Ships as a single binary with an embedded web admin UI.
 
-The admin UI is embedded in the binary — dark/light follows your OS preference, and the layout adapts to phones with a bottom tab bar.
+The admin UI is embedded in the binary — dark/light follows your OS preference, and the layout adapts to phones with a bottom tab bar. It is rendered on the server, so every page works with JavaScript disabled: signing in, changing settings, editing filters, paging and filtering the query log, adding operators and API keys. The charts and the log's live tail are the exceptions, and each says so where it sits rather than leaving a gap.
 
 ![Dashboard — live stat cards, 24h query timeline, top domains, sources and upstreams (dark theme)](docs/screenshots/dashboard-dark.png)
 
@@ -116,6 +116,20 @@ Options:
                                      terminates TLS] [env: NOADD_HSTS]
       --hsts-max-age <HSTS_MAX_AGE>  max-age in seconds for Strict-Transport-Security
                                      [default: 31536000] [env: NOADD_HSTS_MAX_AGE]
+      --log-format <LOG_FORMAT>      Diagnostic log format: full, compact, pretty, json
+                                     [default: full] [env: LOG_FORMAT]
+      --max-inflight-queries <MAX_INFLIGHT_QUERIES>
+                                     Max concurrent in-flight DNS queries across UDP/TCP/DoH; 0
+                                     disables [default: 2048] [env: NOADD_MAX_INFLIGHT_QUERIES]
+      --rate-limit-qps <RATE_LIMIT_QPS>
+                                     Per-client-IP steady-state query rate (queries/sec); 0 disables
+                                     [default: 100] [env: NOADD_RATE_LIMIT_QPS]
+      --rate-limit-burst <RATE_LIMIT_BURST>
+                                     Per-client-IP burst allowance [default: 200]
+                                     [env: NOADD_RATE_LIMIT_BURST]
+      --log-query-results            Record the answer in the query log's result column, at the cost
+                                     of an extra DNS-message parse per query
+                                     [env: NOADD_LOG_QUERY_RESULTS]
       --trusted-proxies <TRUSTED_PROXIES>
                                      CIDRs of reverse-proxy hops permitted to set X-Forwarded-For /
                                      X-Real-IP [env: NOADD_TRUSTED_PROXIES]
@@ -124,7 +138,7 @@ Options:
       --forward-auth-trusted-proxies <FORWARD_AUTH_TRUSTED_PROXIES>
                                      CIDRs allowed to set the forward-auth header [env: NOADD_FORWARD_AUTH_TRUSTED_PROXIES]
       --forward-auth-logout-url <FORWARD_AUTH_LOGOUT_URL>
-                                     Proxy/SSO logout URL the SPA redirects to on logout [env: NOADD_FORWARD_AUTH_LOGOUT_URL]
+                                     Proxy/SSO logout URL to send the browser to on logout [env: NOADD_FORWARD_AUTH_LOGOUT_URL]
   -h, --help                         Print help
 ```
 
