@@ -448,6 +448,11 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .btn::before { content: '[ '; color: inherit; opacity: 0.55; }
 .btn::after { content: ' ]'; color: inherit; opacity: 0.55; }
 
+/* A `.btn` that is a link — the filters page's Edit control, which is an anchor
+   so it resolves on the server when there is no JavaScript to open the dialog.
+   Anchors bring an underline that buttons do not. */
+a.btn { text-decoration: none; }
+
 .btn:hover { border-color: var(--green); color: var(--green); }
 
 .btn-primary {
@@ -561,6 +566,32 @@ textarea { resize: vertical; line-height: 1.7; }
   left: 19px;
   background: var(--green);
 }
+
+/* A form that exists only to carry one button — a delete, a toggle — and must
+   not introduce a line of its own where the button used to sit bare. */
+.inline-form { display: inline; }
+
+/* The toggle and, without JavaScript, the submit that applies it. `app.js`
+   removes the button and saves on change instead, leaving the toggle alone in
+   the row. */
+.list-toggle-form { display: flex; align-items: center; gap: 8px; }
+
+/* Controls that only work in one of the two worlds. `js-only` ships hidden and
+   `app.js` unhides it; `nojs-only` ships visible and `app.js` removes it. Both
+   default to the state that is right when the script never arrives. */
+.js-only[hidden] { display: none; }
+
+.all-disabled-warning {
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--red);
+}
+
+/* The row a list expands into when edited without JavaScript. */
+.edit-row > td { background: var(--bg-secondary); }
+.edit-row .input-row { margin-bottom: 0; }
 
 /* Chart */
 .chart-container {
@@ -1356,6 +1387,10 @@ rebuild-banner { display: block; }
 .notice-banner .close svg { width: 15px; height: 15px; }
 @media (prefers-reduced-motion: reduce) {
   .notice-banner { animation: none; }
+  /* Every card slides up 8px as it appears. Decoration, and decoration is
+     exactly what this setting asks us to drop — it also means a control is
+     moving under the pointer for the first 0.3s of every page. */
+  .fade-in { animation: none; }
 }
 
 /* ============================================================

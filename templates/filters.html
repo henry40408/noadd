@@ -1,0 +1,215 @@
+{#
+  The filters page: domain test, filter lists, custom rules.
+
+  Every action here is a real form. The domain test is a GET, so its verdict
+  lands in the URL and survives a refresh; everything that changes a filter is a
+  POST that redirects. `app.js` takes each of them over — the same buttons, the
+  same ids — and talks to `/api/*` instead, so with JavaScript the page behaves
+  exactly as it always has.
+
+  What is *not* here: the registry browser, which is a modal `app.js` mounts on
+  `document.body`. It has no server-rendered form yet and its button does
+  nothing without JavaScript, which is why it is the one control marked
+  `js-only`.
+#}
+{% extends "shell.html" %}
+
+{% block page %}
+      {#
+        Wrapped in the custom element the client already defines, so it upgrades
+        in place and enhances this markup rather than replacing it. The
+        bootstrap mounts a page component only when the server left
+        `#page-content` empty.
+      #}
+      <filters-page>
+      <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
+      {%- if shell.filters_saved %}
+      <div class="rebuild-banner show done" data-testid="filters-saved">
+        <div class="text">
+          <span class="label">Saved</span>
+          <span class="meta">The filter engine is rebuilding; the change takes effect in a moment.</span>
+        </div>
+      </div>
+      {%- endif %}
+      {%- if shell.lists_updating %}
+      <div class="rebuild-banner show done" data-testid="lists-updated">
+        <div class="text">
+          <span class="label">All lists downloaded</span>
+          <span class="meta">The filter engine is rebuilding with the new rules.</span>
+        </div>
+      </div>
+      {%- endif %}
+      <div class="card fade-in">
+        <div class="card-title">Domain Test</div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
+        {#
+          GET, not POST: a test changes nothing, and putting the domain in the
+          query string is what makes the verdict refreshable and linkable.
+        #}
+        <form method="get" action="/filters" class="input-row" id="domain-test-form">
+          <input type="text" id="test-domain" name="test" data-testid="domain-test-input" placeholder="ads.example.com" value="{{ test_domain }}">
+          <button type="submit" class="btn btn-primary btn-sm" id="test-btn" data-testid="domain-test-submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Test</button>
+        </form>
+        <div id="test-result" data-testid="domain-test-result" style="margin-top:12px">
+          {%- if tested %}
+          {%- if verdict_blocked %}
+          <span class="badge badge-blocked">Blocked</span>
+          <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">
+            Rule: <code class="text-primary">{{ verdict_rule }}</code>
+            &middot; List: <code class="text-primary">{{ verdict_list }}</code>
+          </span>
+          {%- else %}
+          <span class="badge badge-allowed">Allowed</span>
+          {%- if verdict_rule != "" %}
+          <span style="color:var(--text-secondary);font-size:0.85rem;margin-left:8px">Rule: <code class="text-primary">{{ verdict_rule }}</code></span>
+          {%- endif %}
+          {%- endif %}
+          {%- endif %}
+        </div>
+      </div>
+      <div class="card fade-in" style="animation-delay:0.05s">
+        <div class="card-title">Filter Lists</div>
+        <div data-testid="filters-all-disabled-warning"{% if !all_disabled %} style="display:none"{% endif %} class="all-disabled-warning">
+          <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">No filter list is enabled</div>
+          <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Every filter list is turned off, so noadd is not blocking anything. Enable a recommended list to start filtering.</div>
+          <form method="post" action="/filters/lists/enable-recommended">
+            <button type="submit" class="btn btn-primary btn-sm" data-testid="filters-enable-recommended" id="enable-recommended">Enable AdGuard DNS filter</button>
+          </form>
+        </div>
+        <div class="filters-row" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <form method="post" action="/filters/lists/update">
+            <button type="submit" class="btn btn-primary btn-sm" id="update-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Update All</button>
+          </form>
+          {# The registry browser is a client-only modal; P3.5 gives it a page. #}
+          <button type="button" class="btn btn-sm js-only" id="browse-registry" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Browse Registry</button>
+        </div>
+        <div class="table-wrap hide-mobile-block"><table><thead><tr>
+          <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
+        </tr></thead><tbody id="lists-body">
+          {%- for l in lists %}
+          <tr data-testid="filter-list-row" data-name="{{ l.name }}">
+            <td>
+              {#
+                One form per row rather than one for the table: a browser posts
+                only the form that was submitted, so a single form would need
+                every row's state in it and would report every row as changed.
+              #}
+              <form method="post" action="/filters/lists/{{ l.id }}/toggle" class="list-toggle-form">
+                <label class="toggle">
+                  <input type="checkbox" name="enabled" data-testid="filter-list-toggle" data-id="{{ l.id }}"{% if l.enabled %} checked{% endif %}>
+                  <div class="toggle-track"></div>
+                  <div class="toggle-thumb"></div>
+                </label>
+                {# Removed by app.js, which saves on change instead. #}
+                <button type="submit" class="btn btn-sm nojs-only">apply</button>
+              </form>
+            </td>
+            <td class="text-primary">{{ l.name }}</td>
+            <td>{{ l.rule_count }}</td>
+            <td><span class="timeago" data-ts="{{ l.last_updated }}">{{ l.last_updated_text }}</span></td>
+            <td style="white-space:nowrap">
+              {#
+                A link, not a button: without JavaScript it expands this row
+                into an edit form on the server. `app.js` cancels the
+                navigation and opens the dialog it always has.
+              #}
+              <a href="/filters?edit={{ l.id }}" class="btn btn-sm edit-list" data-id="{{ l.id }}" data-name="{{ l.name }}" data-url="{{ l.url }}">Edit</a>
+              <form method="post" action="/filters/lists/{{ l.id }}/delete" class="inline-form">
+                <button type="submit" class="btn btn-danger btn-sm del-list" data-id="{{ l.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </form>
+            </td>
+          </tr>
+          {%- if edit_id == l.id %}
+          <tr class="edit-row" data-testid="filter-list-edit-row">
+            <td colspan="5">
+              <form method="post" action="/filters/lists/{{ l.id }}/edit">
+                <div class="input-row">
+                  <input type="text" name="name" value="{{ edit_name }}" placeholder="List name" data-testid="list-edit-name">
+                  <input type="url" name="url" value="{{ edit_url }}" placeholder="https://..." data-testid="list-edit-url">
+                  <button type="submit" class="btn btn-primary btn-sm" data-testid="list-edit-save">Save</button>
+                  <a href="/filters" class="btn btn-sm">Cancel</a>
+                </div>
+                {%- if edit_error != "" %}
+                <div class="field-msg error" data-testid="list-edit-error">{{ edit_error }}</div>
+                {%- endif %}
+              </form>
+            </td>
+          </tr>
+          {%- endif %}
+          {%- endfor %}
+        </tbody></table></div>
+        <div id="lists-cards" class="show-mobile">
+          {%- for l in lists %}
+          <div class="log-card">
+            <div class="log-card-row1">
+              <form method="post" action="/filters/lists/{{ l.id }}/toggle" class="list-toggle-form">
+                <label class="toggle">
+                  <input type="checkbox" name="enabled" data-id="{{ l.id }}"{% if l.enabled %} checked{% endif %}>
+                  <div class="toggle-track"></div>
+                  <div class="toggle-thumb"></div>
+                </label>
+                <button type="submit" class="btn btn-sm nojs-only">apply</button>
+              </form>
+              <span style="flex:1;color:var(--text-primary);font-size:0.85rem">{{ l.name }}</span>
+              <a href="/filters?edit={{ l.id }}" class="btn btn-sm edit-list" data-id="{{ l.id }}" data-name="{{ l.name }}" data-url="{{ l.url }}" style="flex-shrink:0">Edit</a>
+              <form method="post" action="/filters/lists/{{ l.id }}/delete" class="inline-form" style="flex-shrink:0">
+                <button type="submit" class="btn btn-danger btn-sm del-list" data-id="{{ l.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </form>
+            </div>
+            <div class="log-card-row2">
+              <span>{{ l.rule_count_compact }} rules</span>
+              <span>{{ l.last_updated_text }}</span>
+            </div>
+          </div>
+          {%- endfor %}
+        </div>
+        <div class="card-title" style="margin-top:16px">Add Custom List</div>
+        <form method="post" action="/filters/lists" class="input-row" id="add-list-form">
+          <input type="text" id="list-name" name="name" data-testid="list-name-input" placeholder="List name" value="{{ list_name }}">
+          <input type="url" id="list-url" name="url" data-testid="list-url-input" placeholder="https://..." value="{{ list_url }}">
+          <button type="submit" class="btn btn-primary btn-sm" id="add-list" data-testid="list-add-submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add</button>
+        </form>
+        {%- if list_error != "" %}
+        <div class="field-msg error" id="msg-add-list" data-testid="list-add-error">{{ list_error }}{% if list_error_field != "" %} ({{ list_error_field }}){% endif %}</div>
+        {%- endif %}
+      </div>
+      <div class="card fade-in" style="animation-delay:0.1s">
+        <div class="card-title">Custom Rules</div>
+        <form method="post" action="/filters/rules" class="input-row" id="add-rule-form">
+          <input type="text" id="add-rule-input" name="rule" data-testid="rule-input" placeholder="||ads.example.com^ or @@||safe.example.com^" value="{{ rule_text }}">
+          <button type="submit" class="btn btn-primary btn-sm" id="add-rule-btn" data-testid="rule-submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add</button>
+        </form>
+        {%- if rule_error != "" %}
+        <div class="field-msg error" id="msg-add-rule" data-testid="rule-add-error">{{ rule_error }}</div>
+        {%- endif %}
+        <div id="rules-list" data-testid="rules-list" style="margin-top:12px">
+          {%- if rules.is_empty() %}
+          <p style="color:var(--text-dim);font-size:0.85rem">No rules</p>
+          {%- else %}
+          <table><tbody>
+            {%- for r in rules %}
+            <tr data-testid="rule-row" data-rule="{{ r.rule }}" data-type="{{ r.rule_type }}">
+              <td style="width:70px">{% if r.allow %}<span class="badge badge-allowed">allow</span>{% else %}<span class="badge badge-blocked">block</span>{% endif %}</td>
+              <td class="mono" style="color:var(--text-primary);font-size:0.85rem">{{ r.rule }}</td>
+              <td style="width:40px">
+                <form method="post" action="/filters/rules/{{ r.id }}/delete" class="inline-form">
+                  <button type="submit" class="btn btn-danger btn-sm del-rule" data-testid="rule-delete" data-id="{{ r.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </form>
+              </td>
+            </tr>
+            {%- endfor %}
+          </tbody></table>
+          {%- endif %}
+        </div>
+        <div class="syntax-ref">
+          <strong class="text-secondary">Syntax Reference</strong>
+          <div class="syntax-ref-list">
+            <div><code>||ads.example.com^</code><br>Block domain and all subdomains</div>
+            <div><code>@@||safe.example.com^</code><br>Allow domain and all subdomains</div>
+            <div><code>example.com</code><br>Block exact domain only</div>
+            <div><code>0.0.0.0 example.com</code><br>Block exact domain (hosts format)</div>
+          </div>
+        </div>
+      </div>
+      </filters-page>
+{% endblock %}
