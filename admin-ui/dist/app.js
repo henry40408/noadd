@@ -282,65 +282,22 @@ function showFormError(el, msg) {
   el.style.display = 'block';
 }
 
-// Ask for the account password and confirm it against /api/auth/reauth.
-// Resolves true once the server accepts it, false if the operator cancels.
-// Reuses the .dialog-overlay pattern the filter-list editor already uses.
-function promptForPassword() {
-  return new Promise((resolve) => {
-    document.querySelector('.dialog-overlay')?.remove();
-    const overlay = document.createElement('div');
-    overlay.className = 'dialog-overlay';
-    overlay.innerHTML = `
-      <div class="dialog">
-        <div class="dialog-title">Confirm your password</div>
-        <p class="card-desc">This action grants lasting access, so it needs your password again.</p>
-        <label for="reauth-pw">Password</label>
-        <input type="password" id="reauth-pw" name="current-password" autocomplete="current-password" data-testid="reauth-password">
-        <div class="login-error" id="reauth-error" data-testid="reauth-error" style="display:none"></div>
-        <div class="dialog-actions">
-          <span style="flex:1"></span>
-          <button class="btn btn-sm" id="reauth-cancel" data-testid="reauth-cancel">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="reauth-ok" data-testid="reauth-submit">Confirm</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-    const pw = overlay.querySelector('#reauth-pw');
-    const err = overlay.querySelector('#reauth-error');
-    const close = (result) => { overlay.remove(); resolve(result); };
-    const submit = async () => {
-      err.style.display = 'none';
-      try {
-        await api.post('/api/auth/reauth', { password: pw.value });
-        close(true);
-      } catch (e) {
-        // A 429 here means the shared login budget is spent — say so rather
-        // than blaming the password, which may well have been correct.
-        showFormError(err, e.status === 429
-          ? 'Too many attempts. Wait a minute and try again.'
-          : 'Incorrect password');
-        pw.select();
-      }
-    };
-    overlay.querySelector('#reauth-cancel').onclick = () => close(false);
-    overlay.querySelector('#reauth-ok').onclick = submit;
-    pw.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
-    pw.focus();
-  });
-}
+// There is no password dialog here any more. The three actions that need a
+// password proof — add an operator, delete one, mint an API key — carry a
+// "your password" field in their own form, and post it with the action. That
+// removed the retry-after-403 dance along with the dialog, and made the path
+// identical with and without JavaScript. `POST /api/auth/reauth` still exists
+// for API callers; the UI is simply not one of them any more.
 
-// Run a sensitive action, handling the server's demand for a fresh password
-// proof: prompt, confirm, retry once. Anything else — including the
-// `password_required` 403 an API-key caller gets, which no password would
-// fix — propagates to the caller's own error handling untouched.
-async function withReauth(action) {
-  try {
-    return await action();
-  } catch (e) {
-    if (e.code !== 'reauth_required') throw e;
-    if (!await promptForPassword()) return undefined;
-    return action();
-  }
+// Put a confirmation in front of the form `button` submits, cancelling the
+// submit if it is declined. Attached to the form rather than the button so it
+// also covers Enter from inside the form, and only where there is JavaScript to
+// run it — without one the submit simply goes through, which is the behaviour
+// every other destructive form on the server-rendered pages already has.
+function confirmBeforeSubmit(button, message) {
+  const form = button && button.closest('form');
+  if (!form) return;
+  form.onsubmit = (e) => { if (!confirm(message)) e.preventDefault(); };
 }
 
 // Password length band, mirroring MIN_PASSWORD_LENGTH / MAX_PASSWORD_LENGTH in
@@ -428,213 +385,44 @@ function showBanner(msg, type = 'info') {
 // --- App Shell ---
 // --- Account Page ---
 class AccountPage extends HTMLElement {
+  // The page arrives server-rendered: the three tables, every form, and every
+  // row action are real markup that works on its own. Nothing is fetched here
+  // and nothing is re-drawn — a change redirects, and the page that comes back
+  // is already correct.
+  //
+  // What is left is the one thing markup cannot do (copy to the clipboard) and
+  // a confirmation in front of the destructive submits. Deleting an operator
+  // needs neither: it expands into a named confirmation with a password field,
+  // which is a better prompt than `confirm()` and is there without scripting.
   connectedCallback() {
+    this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
-    this._me = null;
-    this.load();
-
-    this.querySelector('#op-add').onclick = () => this.addOperator();
-    this.querySelector('#logout-others').onclick = async () => {
-      if (!confirm('Log out all other sessions? Your current session stays signed in.')) return;
-      try {
-        await api.post('/api/auth/revoke-others');
-        this.loadSessions();
-        showBanner('Signed out all other sessions.', 'success');
-      } catch (e) {
-        showBanner('Could not sign out other sessions. Please try again.', 'error');
-      }
-    };
-    this.querySelector('#api-key-add').onclick = () => this.createApiKey();
-    this.querySelector('#api-key-name').onkeydown = (e) => { if (e.key === 'Enter') this.createApiKey(); };
-  }
-
-  async load() {
-    // Who is signed in, and the SSO note, are rendered by the server. What is
-    // still needed here is the id, which `loadOperators` compares against each
-    // row to mark which operator is you.
-    try {
-      this._me = await api.get('/api/auth/me');
-    } catch (e) {}
-    this.loadOperators();
-    this.loadSessions();
-    this.loadApiKeys();
-  }
-
-  async loadOperators() {
-    const body = this.querySelector('#ops-body');
-    let users;
-    try {
-      users = await api.get('/api/users');
-    } catch (e) {
-      if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td class="text-red" colspan="3">Failed to load operators</td></tr>';
-      return;
-    }
-    body.innerHTML = users.map(u => {
-      const isYou = this._me && u.id === this._me.id;
-      const last = users.length <= 1;
-      const disabled = isYou || last;
-      return html`<tr>
-        <td class="mono text-primary">${u.username}${isYou ? raw(' <span class="badge badge-allowed">you</span>') : ''}</td>
-        <td>${u.created_at ? timeAgo(u.created_at) : '—'}</td>
-        <td style="text-align:right"><button class="btn btn-danger btn-sm del-op" data-id="${u.id}" ${disabled ? raw('disabled style="opacity:.35"') : ''}>${icons.trash}</button></td>
-      </tr>`;
-    }).join('');
-    body.querySelectorAll('.del-op:not([disabled])').forEach(btn => {
-      btn.onclick = async () => {
-        if (!confirm('Delete this operator and revoke their sessions?')) return;
+    const copyBtn = this.querySelector('#api-key-copy');
+    if (copyBtn) {
+      const input = this.querySelector('#api-key-token');
+      copyBtn.onclick = async () => {
         try {
-          await withReauth(() => api.del(`/api/users/${btn.dataset.id}`));
+          await navigator.clipboard.writeText(input.value);
         } catch (e) {
-          showBanner('Could not delete operator.', 'error');
-          return;
+          input.select();
+          document.execCommand('copy');
         }
-        this.loadOperators();
-        this.loadSessions();
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
       };
-    });
-  }
-
-  async loadSessions() {
-    const body = this.querySelector('#sess-body');
-    let sessions;
-    try {
-      sessions = await api.get('/api/sessions');
-    } catch (e) {
-      if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td class="text-red" colspan="6">Failed to load sessions</td></tr>';
-      return;
     }
-    body.innerHTML = sessions.map(s => html`<tr data-testid="session-row" data-id="${s.id}">
-      <td class="mono text-primary">${s.username}${s.is_current ? raw(' <span class="badge badge-allowed">this device</span>') : ''}</td>
-      <td class="mono">${s.ip || '—'}</td>
-      <td>${s.user_agent || '—'}</td>
-      <td>${s.created_at ? timeAgo(s.created_at) : '—'}</td>
-      <td>${s.last_seen ? timeAgo(s.last_seen) : '—'}</td>
-      <td style="text-align:right"><button class="btn btn-danger btn-sm rev-sess" data-id="${s.id}" data-current="${s.is_current ? 'true' : 'false'}">${icons.trash}</button></td>
-    </tr>`).join('');
-    body.querySelectorAll('.rev-sess').forEach(btn => {
-      btn.onclick = async () => {
-        try {
-          await api.del(`/api/sessions/${btn.dataset.id}`);
-        } catch (e) {
-          showBanner('Could not revoke session.', 'error');
-          return;
-        }
-        if (btn.dataset.current === 'true') { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-        this.loadSessions();
-      };
-    });
-  }
 
-  async addOperator() {
-    const err = this.querySelector('#op-error');
-    err.style.display = 'none';
-    const user = this.querySelector('#op-user').value.trim();
-    const pw = this.querySelector('#op-pw').value;
-    const pw2 = this.querySelector('#op-pw2').value;
-    if (!user) return showFormError(err, 'Username is required');
-    const lenError = passwordLengthError(pw);
-    if (lenError) return showFormError(err, lenError);
-    if (pw !== pw2) return showFormError(err, 'Passwords do not match');
-    try {
-      await withReauth(() => api.post('/api/users', { username: user, password: pw }));
-      this.querySelector('#op-user').value = '';
-      this.querySelector('#op-pw').value = '';
-      this.querySelector('#op-pw2').value = '';
-      this.loadOperators();
-    } catch (e) {
-      showFormError(err, e.detail || 'Could not add operator (username may already exist)');
-    }
-  }
+    confirmBeforeSubmit(
+      this.querySelector('#logout-others'),
+      'Log out all other sessions? Your current session stays signed in.');
 
-  async loadApiKeys() {
-    const body = this.querySelector('#api-keys-body');
-    let keys;
-    try {
-      keys = await api.get('/api/api-keys');
-    } catch (e) {
-      if (/^401\b/.test((e && e.message) || '')) { window.dispatchEvent(new CustomEvent('auth-required')); return; }
-      body.innerHTML = '<tr><td class="text-red" colspan="6">Failed to load API keys</td></tr>';
-      return;
-    }
-    if (!keys.length) {
-      body.innerHTML = '<tr><td class="text-dim" colspan="6">No API keys yet</td></tr>';
-    } else {
-      body.innerHTML = keys.map(k => html`<tr>
-        <td class="text-primary">${k.name}</td>
-        <td class="mono">${k.prefix}</td>
-        <td>${timeAgo(k.created_at)}</td>
-        <td>${k.last_used_at ? timeAgo(k.last_used_at) : '—'}</td>
-        <td>${timeAgo(k.expires_at)}</td>
-        <td style="text-align:right"><button class="btn btn-danger btn-sm del-api-key" data-id="${k.id}">${icons.trash}</button></td>
-      </tr>`).join('');
-    }
-    body.querySelectorAll('.del-api-key').forEach(btn => {
-      btn.onclick = async () => {
-        if (!confirm('Revoke this API key? Any client using it will lose access immediately.')) return;
-        try {
-          await api.del(`/api/api-keys/${btn.dataset.id}`);
-        } catch (e) {
-          showBanner('Could not revoke API key.', 'error');
-          return;
-        }
-        this.loadApiKeys();
-      };
-    });
-  }
+    this.querySelectorAll('.rev-sess').forEach(btn => confirmBeforeSubmit(btn,
+      btn.dataset.current === 'true'
+        ? 'Revoke this session? It is this device — you will be signed out.'
+        : 'Revoke this session?'));
 
-  async createApiKey() {
-    const err = this.querySelector('#api-key-error');
-    err.style.display = 'none';
-    const name = this.querySelector('#api-key-name').value.trim();
-    const expiresDate = this.querySelector('#api-key-expires').value;
-    if (!name) return showFormError(err, 'Name is required');
-    const expires_at = expiresDate ? Math.floor(new Date(expiresDate + 'T23:59:59').getTime() / 1000) : null;
-    let created;
-    try {
-      created = await withReauth(() => api.post('/api/api-keys', { name, expires_at }));
-    } catch (e) {
-      showFormError(err, 'Could not create API key (name may be invalid)');
-      return;
-    }
-    // A cancelled password prompt resolves to undefined — nothing was
-    // created, so leave the form as the operator left it.
-    if (!created) return;
-    this.querySelector('#api-key-name').value = '';
-    this.querySelector('#api-key-expires').value = '';
-    this.showApiKeyReveal(created);
-    this.loadApiKeys();
-  }
-
-  showApiKeyReveal(created) {
-    const el = this.querySelector('#api-key-reveal');
-    el.style.cssText = 'display:block;margin:12px 0;padding:12px;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--orange)';
-    el.innerHTML = html`
-      <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">API key created: ${created.name}</div>
-      <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Copy this token now — it won't be shown again.</div>
-      <div class="input-row">
-        <input type="text" id="api-key-token" data-testid="api-key-token" class="mono" value="${created.token}" readonly style="flex:1">
-        <button class="btn btn-primary btn-sm" id="api-key-copy">Copy</button>
-        <button class="btn btn-sm" id="api-key-dismiss">Dismiss</button>
-      </div>`;
-    const copyBtn = el.querySelector('#api-key-copy');
-    copyBtn.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(created.token);
-      } catch (e) {
-        const input = el.querySelector('#api-key-token');
-        input.select();
-        document.execCommand('copy');
-      }
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
-    };
-    el.querySelector('#api-key-dismiss').onclick = () => {
-      el.style.display = 'none';
-      el.innerHTML = '';
-      this.loadApiKeys();
-    };
+    this.querySelectorAll('.del-api-key').forEach(btn => confirmBeforeSubmit(btn,
+      'Revoke this API key? Any client using it will lose access immediately.'));
   }
 }
 customElements.define('account-page', AccountPage);

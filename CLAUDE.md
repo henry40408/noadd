@@ -78,6 +78,15 @@ Filters adds the conventions for a page whose body is a *list of things*:
 - **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
 - Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
 
+Account adds the conventions for **actions that need a password proof**:
+
+- **The password rides in the form that needs it** (`your_password`), for adding an operator, deleting one, and minting an API key. There is no dialog and no retry-after-403: `promptForPassword` / `withReauth` are gone, and the path is identical with and without JavaScript. `POST /api/auth/reauth` still exists for API callers.
+- **`confirm_password` (`src/admin/api.rs`) is the only place either path checks a password** — one rate limit, one lockout, one `auth.reauthenticated` event. Do not grow a second.
+- **A destructive row action expands into a named confirmation** (`GET /account?confirm_delete={id}`) rather than putting a password field on every row. That is a better prompt than `confirm()` and it exists without scripting; `app.js` adds `confirm()` only where the server has no confirmation of its own.
+- **Creating an API key renders instead of redirecting** — the one deliberate exception to PRG on these pages. The token exists in that response and nowhere else, so a redirect would discard the only copy. A refresh re-posts and mints a second key, which the operator can see and delete.
+- **A rejected form never echoes a password back into the markup.** Only the non-secret fields (username, key name, expiry) are re-rendered.
+- Account POSTs answer as `/account` whatever path they arrived on — `ShellData::build_for("/account", …)`, so the navigation still marks the page the operator is looking at.
+
 ⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/specs/filters-no-js.spec.js` submits with `Enter` and clicks row controls through a helper for the same reason, and says so.
 
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.

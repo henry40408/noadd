@@ -5230,3 +5230,456 @@ async fn the_filters_forms_refuse_an_anonymous_browser() {
         );
     }
 }
+
+// --- Account page: tables and the password-proofed actions ---
+
+/// The admin password `build_app` provisions. Every form below that needs a
+/// password proof presents this one.
+const ACCOUNT_PASSWORD: &str = "admin";
+
+async fn account_html(app: &axum::Router, token: &str, query: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(authed("GET", &format!("/account{query}"), token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    body_text(res).await
+}
+
+/// The id of the operator with this username, read out of the page's markup.
+fn operator_id(html: &str, username: &str) -> i64 {
+    let row = format!(r#"data-testid="operator-row" data-name="{username}""#);
+    let start = html.find(&row).expect("no such operator row");
+    // The row's delete control is the link that expands it, not a form action —
+    // the form only exists once the row is expanded.
+    let marker = "?confirm_delete=";
+    let rest = &html[start..];
+    let at = rest.find(marker).expect("no delete link on the row") + marker.len();
+    let tail = &rest[at..];
+    tail[..tail.find('"').unwrap()]
+        .parse()
+        .expect("operator id was not a number")
+}
+
+/// The tables are the page now: nothing is fetched to fill them in.
+#[tokio::test]
+async fn the_account_page_renders_its_three_tables() {
+    let (app, token) = setup().await;
+    let html = account_html(&app, &token, "").await;
+
+    // The signed-in operator is listed, and marked.
+    assert!(
+        html.contains(r#"data-testid="operator-row""#) && html.contains(">you<"),
+        "the operators table was not rendered"
+    );
+    // Their own session is listed, and marked as this device.
+    assert!(
+        html.contains(r#"data-testid="session-row""#) && html.contains("this device"),
+        "the sessions table was not rendered"
+    );
+    assert!(
+        html.contains("No API keys yet"),
+        "the API keys table was not rendered"
+    );
+    // The element the client upgrades in place.
+    assert!(html.contains("<account-page>"), "the body was not wrapped");
+}
+
+/// The last operator standing cannot be deleted, and neither can you delete
+/// yourself — so no row offers a link that only exists to be refused.
+#[tokio::test]
+async fn the_only_operator_has_no_delete_link() {
+    let (app, token) = setup().await;
+    let html = account_html(&app, &token, "").await;
+    assert!(
+        !html.contains("/account/operators/"),
+        "a delete link was offered for the last operator"
+    );
+    assert!(
+        html.contains(r#"aria-disabled="true""#),
+        "the disabled state was not rendered"
+    );
+}
+
+/// Adding an operator needs the acting operator's own password, in the form.
+#[tokio::test]
+async fn adding_an_operator_needs_the_password_and_redirects() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/account/operators",
+            &token,
+            "username=second&password=another-long-passphrase&confirm=another-long-passphrase\
+             &your_password=admin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/account")
+    );
+
+    let html = account_html(&app, &token, "").await;
+    assert!(
+        html.contains(r#"data-name="second""#),
+        "the operator is not listed"
+    );
+}
+
+/// A wrong proof creates nothing and keeps the username, so only the password
+/// has to be retyped.
+#[tokio::test]
+async fn a_wrong_proof_refuses_to_add_an_operator() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/account/operators",
+            &token,
+            "username=nope&password=another-long-passphrase&confirm=another-long-passphrase\
+             &your_password=wrong",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let html = body_text(res).await;
+    assert!(
+        html.contains("password is incorrect"),
+        "the reason did not reach the form"
+    );
+    assert!(
+        html.contains(r#"value="nope""#),
+        "the typed username was discarded"
+    );
+    // No password is echoed back into the markup, ever.
+    assert!(
+        !html.contains("another-long-passphrase") && !html.contains(">wrong<"),
+        "a password was rendered into the page"
+    );
+    // The navigation still knows this is the account page, though the POST
+    // arrived on /account/operators.
+    assert!(html.contains(r#"class="nav-item active" href="/account""#));
+
+    let html = account_html(&app, &token, "").await;
+    assert!(
+        !html.contains(r#"data-name="nope""#),
+        "the operator was created anyway"
+    );
+}
+
+/// The mismatch is caught before the password is even checked, so a typo in the
+/// new password does not spend an attempt from the shared budget.
+#[tokio::test]
+async fn a_mismatched_new_password_is_refused_without_spending_an_attempt() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/account/operators",
+            &token,
+            "username=third&password=another-long-passphrase&confirm=different-passphrase\
+             &your_password=admin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(body_text(res).await.contains("Passwords do not match"));
+}
+
+/// `?confirm_delete=` expands the row into a named confirmation with its own
+/// password field — the whole of the delete prompt, on the server.
+#[tokio::test]
+async fn deleting_an_operator_confirms_by_name_then_goes_through() {
+    let (app, token) = setup().await;
+    app.clone()
+        .oneshot(authed_form(
+            "/account/operators",
+            &token,
+            "username=doomed&password=another-long-passphrase&confirm=another-long-passphrase\
+             &your_password=admin",
+        ))
+        .await
+        .unwrap();
+    let id = operator_id(&account_html(&app, &token, "").await, "doomed");
+
+    let expanded = account_html(&app, &token, &format!("?confirm_delete={id}")).await;
+    assert!(
+        expanded.contains(r#"data-testid="operator-confirm-row""#) && expanded.contains("doomed"),
+        "the confirmation did not name the operator"
+    );
+
+    // An id naming nobody expands nothing rather than confirming a delete of
+    // someone who is not there.
+    let none = account_html(&app, &token, "?confirm_delete=999999").await;
+    assert!(!none.contains(r#"data-testid="operator-confirm-row""#));
+
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/account/operators/{id}/delete"),
+            &token,
+            format!("your_password={ACCOUNT_PASSWORD}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !account_html(&app, &token, "")
+            .await
+            .contains(r#"data-name="doomed""#),
+        "the operator survived"
+    );
+}
+
+/// A wrong proof leaves the operator in place, with the row still expanded so
+/// the password can simply be retyped.
+#[tokio::test]
+async fn a_wrong_proof_refuses_to_delete_an_operator() {
+    let (app, token) = setup().await;
+    app.clone()
+        .oneshot(authed_form(
+            "/account/operators",
+            &token,
+            "username=spared&password=another-long-passphrase&confirm=another-long-passphrase\
+             &your_password=admin",
+        ))
+        .await
+        .unwrap();
+    let id = operator_id(&account_html(&app, &token, "").await, "spared");
+
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/account/operators/{id}/delete"),
+            &token,
+            "your_password=wrong".to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let html = body_text(res).await;
+    assert!(html.contains(r#"data-testid="operator-confirm-row""#));
+    assert!(html.contains("password is incorrect"));
+
+    assert!(
+        account_html(&app, &token, "")
+            .await
+            .contains(r#"data-name="spared""#),
+        "the operator was deleted despite the wrong password"
+    );
+}
+
+/// The API key form is the one success that renders rather than redirecting:
+/// the token exists in that response and nowhere else.
+#[tokio::test]
+async fn creating_an_api_key_shows_the_token_once() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/account/api-keys",
+            &token,
+            "name=ci&expires=&your_password=admin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "creating a key should render");
+    let html = body_text(res).await;
+    assert!(
+        html.contains(r#"data-testid="api-key-token""#) && html.contains("noadd_"),
+        "the token was not shown"
+    );
+    assert!(
+        html.contains(r#"data-name="ci""#),
+        "the key is not in the table"
+    );
+
+    // And it is gone from the next render — the secret is not stored, so the
+    // page cannot show it again even if it wanted to.
+    let later = account_html(&app, &token, "").await;
+    assert!(later.contains(r#"data-name="ci""#));
+    assert!(
+        !later.contains(r#"data-testid="api-key-token""#),
+        "the token came back on a later page load"
+    );
+}
+
+/// A wrong proof mints nothing and keeps the name and the expiry date.
+#[tokio::test]
+async fn a_wrong_proof_refuses_to_mint_an_api_key() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form(
+            "/account/api-keys",
+            &token,
+            "name=rejected&expires=2030-06-01&your_password=wrong",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let html = body_text(res).await;
+    assert!(html.contains("password is incorrect"));
+    assert!(
+        html.contains(r#"value="rejected""#) && html.contains(r#"value="2030-06-01""#),
+        "the submitted values were discarded"
+    );
+    assert!(!html.contains("noadd_"), "a key was minted anyway");
+}
+
+/// An unusable expiry is caught before the password is checked.
+#[tokio::test]
+async fn an_unparseable_expiry_is_refused() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed_form(
+            "/account/api-keys",
+            &token,
+            "name=ci&expires=soon&your_password=admin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(body_text(res).await.contains("YYYY-MM-DD"));
+}
+
+/// Revoking a key needs no password: it only ever reduces access.
+#[tokio::test]
+async fn an_api_key_can_be_revoked_from_the_page() {
+    let (app, token) = setup().await;
+    let created = app
+        .clone()
+        .oneshot(authed_form(
+            "/account/api-keys",
+            &token,
+            "name=doomed-key&expires=&your_password=admin",
+        ))
+        .await
+        .unwrap();
+    let html = body_text(created).await;
+    let marker = r#"action="/account/api-keys/"#;
+    let start = html.find(marker).expect("no delete form") + marker.len();
+    let rest = &html[start..];
+    let id: i64 = rest[..rest.find('/').unwrap()].parse().unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/account/api-keys/{id}/delete"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        account_html(&app, &token, "")
+            .await
+            .contains("No API keys yet"),
+        "the key survived"
+    );
+}
+
+/// Revoking someone else's session leaves you signed in; revoking your own
+/// signs you out, which is a redirect to the sign-in page rather than a notice
+/// on a page you can no longer see.
+#[tokio::test]
+async fn revoking_your_own_session_signs_you_out() {
+    let (app, token) = setup().await;
+    let html = account_html(&app, &token, "").await;
+    let marker = r#"data-testid="session-row" data-id=""#;
+    let start = html.find(marker).expect("no session row") + marker.len();
+    let rest = &html[start..];
+    let id: i64 = rest[..rest.find('"').unwrap()].parse().unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/account/sessions/{id}/revoke"),
+            &token,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/login")
+    );
+
+    // The revoked cookie no longer authenticates anything.
+    let after = app
+        .oneshot(authed("GET", "/account", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::SEE_OTHER);
+}
+
+/// Signing the other devices out keeps this one signed in — the point of the
+/// button being separate from "log out".
+#[tokio::test]
+async fn revoking_other_sessions_keeps_this_one() {
+    let (app, token) = setup().await;
+    let res = app
+        .clone()
+        .oneshot(authed_form("/account/sessions/revoke-others", &token, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/account")
+    );
+
+    let after = app
+        .oneshot(authed("GET", "/account", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        StatusCode::OK,
+        "this session was signed out too"
+    );
+}
+
+/// Every account form is behind the session, like the page itself.
+#[tokio::test]
+async fn the_account_forms_refuse_an_anonymous_browser() {
+    let (app, _token) = setup().await;
+    for path in [
+        "/account/operators",
+        "/account/operators/1/delete",
+        "/account/sessions/revoke-others",
+        "/account/sessions/1/revoke",
+        "/account/api-keys",
+        "/account/api-keys/1/delete",
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("your_password=x&username=x&name=x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::SEE_OTHER,
+            "{path} answered an anonymous browser"
+        );
+        assert!(
+            res.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .starts_with("/login"),
+            "{path} did not send the browser to sign in"
+        );
+    }
+}

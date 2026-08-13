@@ -33,10 +33,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginError, MIN_PASSWORD_LENGTH,
-    PasswordChangeError, RuleError, SettingsError, SetupError, apply_settings,
-    change_password_for_session, create_custom_rule, create_filter_list, create_first_operator,
-    end_session, modify_filter_list, needs_setup, start_password_session,
+    ApiKeyError, AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginError, MIN_PASSWORD_LENGTH,
+    OperatorError, PasswordChangeError, ReauthError, RuleError, SettingsError, SetupError,
+    apply_settings, change_password_for_session, create_custom_rule, create_filter_list,
+    create_first_operator, create_operator, end_session, issue_api_key, modify_filter_list,
+    needs_setup, remove_operator, start_password_session,
 };
 
 // --- Templates ---
@@ -165,6 +166,11 @@ pub struct ShellData {
     /// Read by the filters page. Separate from `filters_saved` because
     /// downloading every list is the one action whose effect is not immediate.
     lists_updating: bool,
+    /// Read by the account page: an operator or API key was added or removed.
+    account_saved: bool,
+    /// Read by the account page. Separate from `account_saved` because signing
+    /// devices out is worth confirming in its own words.
+    sessions_revoked: bool,
 }
 
 impl ShellData {
@@ -173,12 +179,22 @@ impl ShellData {
     /// Returns the jar that clears it alongside, because reading a flash
     /// without clearing it is the bug this mechanism exists to prevent.
     fn build(uri: &Uri, headers: &HeaderMap, jar: CookieJar) -> (Self, CookieJar) {
+        Self::build_for(uri.path(), headers, jar)
+    }
+
+    /// The same, for a response whose page is known regardless of the path the
+    /// request arrived on.
+    ///
+    /// A rejected `POST /account/operators` re-renders the account page, and
+    /// the navigation has to say `/account` — taking it from the request URI
+    /// would leave nothing active on a page the operator is looking straight at.
+    fn build_for(path: &str, headers: &HeaderMap, jar: CookieJar) -> (Self, CookieJar) {
         let (flash, jar) = take_flash(jar);
         (
             Self {
                 version: env!("GIT_VERSION"),
                 host: request_host(headers),
-                current_path: uri.path().to_string(),
+                current_path: path.to_string(),
                 nav: NAV,
                 welcome: flash == Some(Flash::Welcome),
                 proxy_logout_notice: flash == Some(Flash::ProxyLogout),
@@ -186,6 +202,8 @@ impl ShellData {
                 password_changed: flash == Some(Flash::PasswordChanged),
                 filters_saved: flash == Some(Flash::FiltersSaved),
                 lists_updating: flash == Some(Flash::ListsUpdating),
+                account_saved: flash == Some(Flash::AccountSaved),
+                sessions_revoked: flash == Some(Flash::SessionsRevoked),
             },
             jar,
         )
@@ -216,12 +234,47 @@ pub struct SettingsTemplate {
     saved: bool,
 }
 
-/// The account page.
+/// One operator, as the page lists them.
+pub struct OperatorView {
+    id: i64,
+    username: String,
+    created_text: String,
+    is_you: bool,
+    /// False for yourself and for the last operator standing. Deleting either
+    /// is refused by the server; the row says so rather than offering a button
+    /// that exists to be turned down.
+    deletable: bool,
+}
+
+/// One live session.
+pub struct SessionView {
+    id: i64,
+    username: String,
+    ip: String,
+    user_agent: String,
+    created_text: String,
+    last_seen_text: String,
+    is_current: bool,
+}
+
+/// One API key. The secret is not here — it never is again after creation.
+pub struct ApiKeyView {
+    id: i64,
+    name: String,
+    prefix: String,
+    created_text: String,
+    last_used_text: String,
+    expires_text: String,
+}
+
+/// The account page: this account, operators, sessions and API keys.
 ///
-/// Covers the shell, who is signed in, and the change-password form. The three
-/// actions needing a separate password proof — add operator, delete operator,
-/// create API key — and the tables' row actions still need JavaScript; they
-/// follow in their own change.
+/// The three actions that need a password proof — add an operator, delete one,
+/// mint an API key — carry a password field in the form itself. That is the
+/// whole mechanism: no dialog, no stale-proof round trip, and the same path
+/// whether or not there is JavaScript. `POST /api/auth/reauth` still exists for
+/// API callers, and [`crate::admin::api::confirm_password`] is the one place
+/// either of them checks a password.
 #[derive(Template, WebTemplate)]
 #[template(path = "account.html")]
 pub struct AccountTemplate {
@@ -229,8 +282,37 @@ pub struct AccountTemplate {
     username: String,
     via_sso: bool,
     min_password_length: usize,
+    /// The change-password form's message.
     error: Option<String>,
     password_changed: bool,
+
+    operators: Vec<OperatorView>,
+    sessions: Vec<SessionView>,
+    api_keys: Vec<ApiKeyView>,
+
+    /// Submitted values kept across a rejection, so only the field that was
+    /// wrong has to be retyped. Passwords are never among them.
+    operator_username: String,
+    operator_error: String,
+
+    /// The operator whose row is expanded into a delete confirmation, and the
+    /// password field that goes with it; `0` for none.
+    confirm_operator_id: i64,
+    confirm_operator_name: String,
+    confirm_operator_error: String,
+
+    api_key_name: String,
+    api_key_expires: String,
+    api_key_error: String,
+
+    /// The one and only sight of a newly minted token. Empty except on the
+    /// response that created it — it is not stored, so this is the only
+    /// chance anyone gets to copy it.
+    new_key_name: String,
+    new_key_token: String,
+
+    account_saved: bool,
+    sessions_revoked: bool,
 }
 
 /// One filter list, formatted the way the page shows it.
@@ -381,6 +463,10 @@ pub enum Flash {
     FiltersSaved,
     /// Every list is being downloaded again.
     ListsUpdating,
+    /// An operator or API key was added or removed.
+    AccountSaved,
+    /// One or more sessions were signed out.
+    SessionsRevoked,
 }
 
 impl Flash {
@@ -392,6 +478,8 @@ impl Flash {
             Self::PasswordChanged => "password_changed",
             Self::FiltersSaved => "filters_saved",
             Self::ListsUpdating => "lists_updating",
+            Self::AccountSaved => "account_saved",
+            Self::SessionsRevoked => "sessions_revoked",
         }
     }
 
@@ -403,6 +491,8 @@ impl Flash {
             "password_changed" => Some(Self::PasswordChanged),
             "filters_saved" => Some(Self::FiltersSaved),
             "lists_updating" => Some(Self::ListsUpdating),
+            "account_saved" => Some(Self::AccountSaved),
+            "sessions_revoked" => Some(Self::SessionsRevoked),
             // An unrecognised value is a stale cookie from an older build, or
             // something hand-written. Either way there is no notice to show.
             _ => None,
@@ -743,15 +833,67 @@ pub async fn setup_submit(
 
 // --- Account ---
 
-pub async fn account_page(
-    SsrUser(auth): SsrUser,
-    State(state): State<AppState>,
-    uri: Uri,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
-    let changed = shell.password_changed;
+/// When an API key stops working.
+///
+/// Three states in one column: no expiry, one still ahead, one already past.
+/// "in 30 days" and "expired" say which without the reader having to work out
+/// whether a relative time is in the future.
+fn expiry_text(ts: Option<i64>) -> String {
+    let Some(ts) = ts.filter(|t| *t != 0) else {
+        return "never".to_string();
+    };
+    let remaining = ts - crate::now_unix();
+    if remaining <= 0 {
+        return "expired".to_string();
+    }
+    let unit =
+        |count: i64, name: &str| format!("in {count} {name}{}", if count == 1 { "" } else { "s" });
+    match remaining {
+        d if d < 3_600 => unit((d / 60).max(1), "minute"),
+        d if d < 86_400 => unit(d / 3_600, "hour"),
+        d => unit(d / 86_400, "day"),
+    }
+}
+
+/// A timestamp that may not be set, for the columns where "never used" and
+/// "used at the epoch" are different answers.
+fn maybe_time_ago(ts: Option<i64>) -> String {
+    match ts.filter(|t| *t != 0) {
+        Some(ts) => time_ago(ts),
+        None => "—".to_string(),
+    }
+}
+
+/// The page's mutable bits: what was typed, what was rejected, what is expanded.
+#[derive(Default)]
+struct AccountView {
+    error: Option<String>,
+    password_changed: bool,
+    operator_username: String,
+    operator_error: String,
+    confirm_operator_id: i64,
+    confirm_operator_error: String,
+    api_key_name: String,
+    api_key_expires: String,
+    api_key_error: String,
+    new_key_name: String,
+    new_key_token: String,
+}
+
+/// Build the page from live storage plus whatever the caller is carrying.
+///
+/// The shell comes in already built — by `ShellData::build_for("/account", …)`
+/// on the POST paths, so a rejected `POST /account/operators` still renders
+/// with the account tab active.
+async fn render_account(
+    state: &AppState,
+    auth: &AuthedUser,
+    shell: ShellData,
+    view: AccountView,
+) -> AccountTemplate {
+    let account_saved = shell.account_saved;
+    let sessions_revoked = shell.sessions_revoked;
+
     let username = state
         .db
         .get_username(auth.user_id)
@@ -759,17 +901,119 @@ pub async fn account_page(
         .ok()
         .flatten()
         .unwrap_or_default();
-    (
-        jar,
-        AccountTemplate {
-            shell,
-            username,
-            via_sso: auth.via_forward_auth,
-            min_password_length: MIN_PASSWORD_LENGTH,
-            error: None,
-            password_changed: changed,
-        },
-    )
+
+    let rows = state.db.list_users().await.unwrap_or_default();
+    let last_one = rows.len() <= 1;
+    let operators: Vec<OperatorView> = rows
+        .into_iter()
+        .map(|u| {
+            let is_you = u.id == auth.user_id;
+            OperatorView {
+                id: u.id,
+                username: u.username,
+                created_text: maybe_time_ago(Some(u.created_at)),
+                is_you,
+                deletable: !is_you && !last_one,
+            }
+        })
+        .collect();
+
+    let confirm_operator_name = operators
+        .iter()
+        .find(|o| o.id == view.confirm_operator_id)
+        .map(|o| o.username.clone())
+        .unwrap_or_default();
+    // An id that names nobody expands nothing, rather than showing a
+    // confirmation for an operator who is not there.
+    let confirm_operator_id = if confirm_operator_name.is_empty() {
+        0
+    } else {
+        view.confirm_operator_id
+    };
+
+    let sessions = crate::admin::api::sessions_snapshot(state, auth.session_token_hash.as_deref())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| SessionView {
+            id: s.id,
+            username: s.username,
+            ip: s.ip.unwrap_or_else(|| "—".to_string()),
+            user_agent: s.user_agent.unwrap_or_else(|| "—".to_string()),
+            created_text: maybe_time_ago(Some(s.created_at)),
+            last_seen_text: maybe_time_ago(Some(s.last_seen)),
+            is_current: s.is_current,
+        })
+        .collect();
+
+    let api_keys = state
+        .db
+        .list_api_keys_for_user(auth.user_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| ApiKeyView {
+            id: k.id,
+            name: k.name,
+            prefix: k.prefix,
+            created_text: maybe_time_ago(Some(k.created_at)),
+            last_used_text: maybe_time_ago(k.last_used_at),
+            expires_text: expiry_text(k.expires_at),
+        })
+        .collect();
+
+    AccountTemplate {
+        shell,
+        username,
+        via_sso: auth.via_forward_auth,
+        min_password_length: MIN_PASSWORD_LENGTH,
+        error: view.error,
+        password_changed: view.password_changed,
+        operators,
+        sessions,
+        api_keys,
+        operator_username: view.operator_username,
+        operator_error: view.operator_error,
+        confirm_operator_id,
+        confirm_operator_name,
+        confirm_operator_error: view.confirm_operator_error,
+        api_key_name: view.api_key_name,
+        api_key_expires: view.api_key_expires,
+        api_key_error: view.api_key_error,
+        new_key_name: view.new_key_name,
+        new_key_token: view.new_key_token,
+        account_saved,
+        sessions_revoked,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AccountQuery {
+    /// The operator whose row is expanded into a delete confirmation. Parsed
+    /// leniently: a hand-edited value expands nothing rather than 400-ing a
+    /// page that otherwise renders.
+    confirm_delete: Option<String>,
+}
+
+pub async fn account_page(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    Query(query): Query<AccountQuery>,
+    uri: Uri,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let view = AccountView {
+        password_changed: shell.password_changed,
+        confirm_operator_id: query
+            .confirm_delete
+            .as_deref()
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .unwrap_or_default(),
+        ..AccountView::default()
+    };
+    (jar, render_account(&state, &auth, shell, view).await)
 }
 
 #[derive(Deserialize)]
@@ -792,42 +1036,31 @@ pub async fn account_password_submit(
     SsrUser(auth): SsrUser,
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
-    uri: Uri,
     headers: HeaderMap,
     jar: CookieJar,
     Form(form): Form<PasswordForm>,
 ) -> Response {
-    let reject = |status: StatusCode, message: String, jar: CookieJar, username: String| {
-        let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let reject = async |status: StatusCode, message: String, jar: CookieJar| {
+        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let view = AccountView {
+            error: Some(message),
+            ..AccountView::default()
+        };
         (
             status,
             jar,
-            AccountTemplate {
-                shell,
-                username,
-                via_sso: auth.via_forward_auth,
-                min_password_length: MIN_PASSWORD_LENGTH,
-                error: Some(message),
-                password_changed: false,
-            },
+            render_account(&state, &auth, shell, view).await,
         )
             .into_response()
     };
-    let username = state
-        .db
-        .get_username(auth.user_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
 
     if form.new_password != form.confirm_password {
         return reject(
             StatusCode::BAD_REQUEST,
             "Passwords do not match".to_string(),
             jar,
-            username,
-        );
+        )
+        .await;
     }
     // Cookie-only, like the JSON endpoint: an API-key or forward-auth caller
     // holds no session to rotate, and `SsrUser` alone does not prove which
@@ -837,8 +1070,8 @@ pub async fn account_password_submit(
             StatusCode::UNAUTHORIZED,
             "Changing a password needs a browser session".to_string(),
             jar,
-            username,
-        );
+        )
+        .await;
     };
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
 
@@ -877,9 +1110,379 @@ pub async fn account_password_submit(
             };
             // The jar was consumed by the failed attempt; a fresh one is fine
             // because nothing was set on it.
-            reject(status, message, CookieJar::new(), username)
+            reject(status, message, CookieJar::new()).await
         }
     }
+}
+
+/// Everything that changed the account answers the same way: redirect back with
+/// a notice, so a refresh cannot resubmit it.
+fn account_saved(jar: CookieJar, flash: Flash) -> Response {
+    (set_flash(jar, flash), Redirect::to("/account")).into_response()
+}
+
+/// Check the password a sensitive form carried, mapping the shared verdict onto
+/// what the form has to show.
+///
+/// Every one of the three sensitive forms starts here, and none of them reaches
+/// its action if this does not return `Ok` — which is the whole of the reauth
+/// mechanism now that the dialog is gone.
+async fn confirm_form_password(
+    state: &AppState,
+    auth: &AuthedUser,
+    ip: std::net::IpAddr,
+    password: &str,
+) -> Result<(), (StatusCode, String)> {
+    // A proxy-managed operator has no password to check — the proxy already
+    // vouched for them, which is the same exemption `ReauthedUser` makes.
+    if auth.via_forward_auth {
+        return Ok(());
+    }
+    let Some(token_hash) = auth.session_token_hash.as_deref() else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "This action needs a browser session".to_string(),
+        ));
+    };
+    match crate::admin::api::confirm_password(state, auth.user_id, token_hash, ip, password).await {
+        Ok(()) => Ok(()),
+        Err(ReauthError::RateLimited) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts — wait a minute, then retry".to_string(),
+        )),
+        Err(ReauthError::Invalid) => Err((
+            StatusCode::UNAUTHORIZED,
+            "Your password is incorrect".to_string(),
+        )),
+        Err(ReauthError::Internal) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not confirm your password — check the server log".to_string(),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AddOperatorForm {
+    username: String,
+    password: String,
+    confirm: String,
+    /// The acting operator's own password. In the form rather than behind a
+    /// dialog, so this works identically with and without JavaScript.
+    your_password: String,
+}
+
+/// `POST /account/operators`.
+pub async fn account_operator_add_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<AddOperatorForm>,
+) -> Response {
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    // The username is kept across a rejection; neither password is. Re-rendering
+    // a password field with its value in the markup would put it in the page
+    // source, the browser's cache and any proxy along the way.
+    let reject = async |status: StatusCode, message: String, jar: CookieJar| {
+        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let view = AccountView {
+            operator_username: form.username.clone(),
+            operator_error: message,
+            ..AccountView::default()
+        };
+        (
+            status,
+            jar,
+            render_account(&state, &auth, shell, view).await,
+        )
+            .into_response()
+    };
+
+    if form.password != form.confirm {
+        return reject(
+            StatusCode::BAD_REQUEST,
+            "Passwords do not match".to_string(),
+            jar,
+        )
+        .await;
+    }
+    if let Err((status, message)) =
+        confirm_form_password(&state, &auth, ip, &form.your_password).await
+    {
+        return reject(status, message, jar).await;
+    }
+
+    match create_operator(&state, auth.user_id, ip, &form.username, &form.password).await {
+        Ok(_id) => account_saved(jar, Flash::AccountSaved),
+        Err(err) => {
+            let (status, message) = match err {
+                OperatorError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+                OperatorError::Conflict => (
+                    StatusCode::CONFLICT,
+                    "That username is already taken".to_string(),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not add the operator — check the server log".to_string(),
+                ),
+            };
+            reject(status, message, jar).await
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeleteOperatorForm {
+    your_password: String,
+}
+
+/// `POST /account/operators/{id}/delete`.
+///
+/// The row is expanded into this form by `?confirm_delete={id}`, so the
+/// password field belongs to one named operator rather than sitting on every
+/// row at once.
+pub async fn account_operator_delete_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<DeleteOperatorForm>,
+) -> Response {
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    let reject = async |status: StatusCode, message: String, jar: CookieJar| {
+        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let view = AccountView {
+            confirm_operator_id: id,
+            confirm_operator_error: message,
+            ..AccountView::default()
+        };
+        (
+            status,
+            jar,
+            render_account(&state, &auth, shell, view).await,
+        )
+            .into_response()
+    };
+
+    if let Err((status, message)) =
+        confirm_form_password(&state, &auth, ip, &form.your_password).await
+    {
+        return reject(status, message, jar).await;
+    }
+
+    match remove_operator(&state, auth.user_id, ip, id).await {
+        Ok(()) => account_saved(jar, Flash::AccountSaved),
+        Err(err) => {
+            let (status, message) = match err {
+                OperatorError::LastOperator => (
+                    StatusCode::CONFLICT,
+                    "This is the last operator — deleting it would lock everyone out".to_string(),
+                ),
+                OperatorError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    "That operator is already gone".to_string(),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not delete the operator — check the server log".to_string(),
+                ),
+            };
+            reject(status, message, jar).await
+        }
+    }
+}
+
+/// `POST /account/sessions/{id}/revoke`.
+///
+/// No password: any operator can already revoke any session through the API,
+/// and a session that has to be killed in a hurry is exactly the one nobody
+/// should have to stop and authenticate for.
+pub async fn account_session_revoke_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    match crate::admin::api::revoke_session_row(
+        &state,
+        auth.user_id,
+        ip,
+        id,
+        auth.session_token_hash.as_deref(),
+    )
+    .await
+    {
+        // Revoking your own session signs you out; there is no page left to
+        // send a notice to, so the browser goes to sign-in with its cookies
+        // cleared.
+        Ok(true) => (
+            crate::admin::api::clear_session_cookies(jar),
+            [crate::admin::api::CLEAR_SITE_DATA],
+            Redirect::to("/login"),
+        )
+            .into_response(),
+        // A session that was already gone is the state the operator asked for,
+        // so it reports the same as one this request took down.
+        Ok(false) | Err(_) => account_saved(jar, Flash::SessionsRevoked),
+    }
+}
+
+/// `POST /account/sessions/revoke-others`.
+pub async fn account_sessions_revoke_others_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    let _ = crate::admin::api::revoke_every_other_session(
+        &state,
+        auth.user_id,
+        ip,
+        auth.session_token_hash.as_deref(),
+    )
+    .await;
+    account_saved(jar, Flash::SessionsRevoked)
+}
+
+#[derive(Deserialize)]
+pub struct CreateApiKeyForm {
+    name: String,
+    /// `YYYY-MM-DD` from a date input, or empty for a key that never expires.
+    expires: String,
+    your_password: String,
+}
+
+/// `POST /account/api-keys`.
+///
+/// The one success on this page that does **not** redirect. The token exists
+/// in this response and nowhere else — it is not stored — so a redirect would
+/// throw away the only copy. The form is re-rendered empty, which is what stops
+/// a refresh looking like it lost something; a refresh does re-post, and mints
+/// a second key the operator can see and delete.
+pub async fn account_api_key_create_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Form(form): Form<CreateApiKeyForm>,
+) -> Response {
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    let reject = async |status: StatusCode, message: String, jar: CookieJar| {
+        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let view = AccountView {
+            api_key_name: form.name.clone(),
+            api_key_expires: form.expires.clone(),
+            api_key_error: message,
+            ..AccountView::default()
+        };
+        (
+            status,
+            jar,
+            render_account(&state, &auth, shell, view).await,
+        )
+            .into_response()
+    };
+
+    let expires_at = match parse_expiry_date(&form.expires) {
+        Ok(value) => value,
+        Err(message) => return reject(StatusCode::BAD_REQUEST, message, jar).await,
+    };
+    if let Err((status, message)) =
+        confirm_form_password(&state, &auth, ip, &form.your_password).await
+    {
+        return reject(status, message, jar).await;
+    }
+
+    match issue_api_key(&state, auth.user_id, &form.name, expires_at).await {
+        Ok(created) => {
+            let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+            let view = AccountView {
+                new_key_name: created.name,
+                new_key_token: created.token,
+                ..AccountView::default()
+            };
+            (jar, render_account(&state, &auth, shell, view).await).into_response()
+        }
+        Err(ApiKeyError::Invalid(message)) => reject(StatusCode::BAD_REQUEST, message, jar).await,
+        Err(ApiKeyError::Internal) => {
+            reject(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not create the key — check the server log".to_string(),
+                jar,
+            )
+            .await
+        }
+    }
+}
+
+/// Turn a `YYYY-MM-DD` date into the instant that day ends.
+///
+/// End of day rather than start: an operator who types today's date means the
+/// key should last until today is over, not that it expired this morning. UTC,
+/// because the server has no way to know the browser's zone and a key's expiry
+/// is not worth guessing about.
+fn parse_expiry_date(raw: &str) -> Result<Option<i64>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || "Expiry must be a date (YYYY-MM-DD)".to_string();
+    let mut parts = raw.split('-');
+    let year: i64 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_e| invalid())?;
+    let month: i64 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_e| invalid())?;
+    let day: i64 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_e| invalid())?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(invalid());
+    }
+    Ok(Some(days_from_civil(year, month, day) * 86_400 + 86_399))
+}
+
+/// Days since the Unix epoch for a civil date, by Howard Hinnant's `days_from_civil`.
+///
+/// Written out rather than pulled in: this is the only date arithmetic in the
+/// codebase, and a dependency for one function is a dependency to audit forever.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// `POST /account/api-keys/{id}/delete`.
+///
+/// No password, matching `DELETE /api/api-keys/{id}`: revoking a key you own
+/// only ever reduces access.
+pub async fn account_api_key_delete_submit(
+    SsrUser(auth): SsrUser,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    jar: CookieJar,
+) -> Response {
+    let _ = crate::admin::api::revoke_api_key(&state, auth.user_id, id).await;
+    account_saved(jar, Flash::AccountSaved)
 }
 
 // --- Settings ---
@@ -1554,6 +2157,60 @@ mod tests {
     #[test]
     fn a_list_that_never_downloaded_says_so_rather_than_dating_from_1970() {
         assert_eq!(time_ago(0), "never");
+    }
+
+    #[test]
+    fn civil_dates_convert_to_the_days_the_epoch_counts() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        // 2000 is a leap year (the 400 rule) and 2100 is not (the 100 rule);
+        // both land the day after a February that differs in length.
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(2100, 3, 1), 47_541);
+    }
+
+    #[test]
+    fn an_expiry_date_lasts_until_that_day_is_over() {
+        // Blank means a key that never expires, not one expiring at the epoch.
+        assert_eq!(parse_expiry_date(""), Ok(None));
+        assert_eq!(parse_expiry_date("   "), Ok(None));
+
+        // 1970-01-01 ends one second before the second day begins. An operator
+        // who types today's date means "until today is over", not "this
+        // morning".
+        assert_eq!(parse_expiry_date("1970-01-01"), Ok(Some(86_399)));
+        assert_eq!(parse_expiry_date("1970-01-02"), Ok(Some(86_400 + 86_399)));
+
+        for bad in [
+            "not-a-date",
+            "2027-13-01",
+            "2027-01-32",
+            "2027-01",
+            "2027-01-01-01",
+        ] {
+            assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn an_expiry_says_which_side_of_now_it_is_on() {
+        let now = crate::now_unix();
+        assert_eq!(expiry_text(None), "never");
+        // A stored zero is "unset", not 1970.
+        assert_eq!(expiry_text(Some(0)), "never");
+        assert_eq!(expiry_text(Some(now - 60)), "expired");
+        assert_eq!(expiry_text(Some(now + 86_400 * 30 + 10)), "in 30 days");
+        assert_eq!(expiry_text(Some(now + 7_200 + 10)), "in 2 hours");
+        // Under a minute still reads as time remaining rather than as "in 0".
+        assert_eq!(expiry_text(Some(now + 5)), "in 1 minute");
+    }
+
+    #[test]
+    fn a_column_with_nothing_in_it_says_so() {
+        assert_eq!(maybe_time_ago(None), "—");
+        assert_eq!(maybe_time_ago(Some(0)), "—");
+        assert_eq!(maybe_time_ago(Some(crate::now_unix())), "0 seconds ago");
     }
 
     #[test]

@@ -595,9 +595,22 @@ textarea { resize: vertical; line-height: 1.7; }
   border: 1px solid var(--red);
 }
 
-/* The row a list expands into when edited without JavaScript. */
+/* The row a list expands into when edited without JavaScript, and the row an
+   operator expands into to confirm a delete. */
 .edit-row > td { background: var(--bg-secondary); }
 .edit-row .input-row { margin-bottom: 0; }
+
+/* A newly minted API key's one and only appearance. Orange rather than the
+   usual border: it is the only thing on the page that cannot be recovered by
+   reloading it. */
+.api-key-reveal {
+  display: block;
+  margin: 12px 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--orange);
+}
 
 /* Chart */
 .chart-container {

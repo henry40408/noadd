@@ -1,21 +1,34 @@
 {#
-  The account page.
+  The account page: this account, operators, sessions and API keys.
 
-  This change covers the shell of the page, who is signed in, and the change-
-  password form — the one sensitive action whose proof is the password it
-  already asks for. The three that need a separate reauth (add operator, delete
-  operator, create API key) and the tables' row actions still need JavaScript;
-  they follow in their own change.
+  The three sensitive actions — add an operator, delete one, mint an API key —
+  carry a "your password" field in the form itself. There is no dialog and no
+  stale-proof round trip: the password travels with the action that needs it, so
+  the path is the same with JavaScript and without. `POST /api/auth/reauth` is
+  still there for API callers.
 
-  The tables are left for the client on purpose: operators, sessions and API
-  keys are live lists with their own refresh, and rows whose only actions need
-  JavaScript would be a form that half works.
+  Deleting an operator expands the row via `?confirm_delete={id}` rather than
+  putting a password field on every row at once — the field then belongs to one
+  named operator, which is also what makes the confirmation meaningful.
 #}
 {% extends "shell.html" %}
 
 {% block page %}
       <account-page>
       <div class="page-header fade-in"><h2>Account</h2><p>Operator accounts and active sessions</p></div>
+      {%- if account_saved %}
+      <div class="rebuild-banner show done" data-testid="account-saved">
+        <div class="text"><span class="label">Saved</span></div>
+      </div>
+      {%- endif %}
+      {%- if sessions_revoked %}
+      <div class="rebuild-banner show done" data-testid="sessions-revoked">
+        <div class="text">
+          <span class="label">Signed out</span>
+          <span class="meta">Those devices will have to sign in again.</span>
+        </div>
+      </div>
+      {%- endif %}
       <div class="card fade-in">
         <div class="card-title">This Account</div>
         <p id="acct-whoami" class="card-desc">Signed in as <code style="color:var(--accent);font-size:0.85rem">{{ username }}</code>{% if via_sso %} <span class="text-dim">· via SSO</span>{% endif %}</p>
@@ -36,14 +49,56 @@
         <p class="card-desc">All operators have full admin access. The last operator cannot be deleted; deleting one revokes all their sessions.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
-          <tbody id="ops-body"></tbody>
+          <tbody id="ops-body">
+            {%- for op in operators %}
+            <tr data-testid="operator-row" data-name="{{ op.username }}">
+              <td class="mono text-primary">{{ op.username }}{% if op.is_you %} <span class="badge badge-allowed">you</span>{% endif %}</td>
+              <td>{{ op.created_text }}</td>
+              <td style="text-align:right">
+                {%- if op.deletable %}
+                {#
+                  A link, not a button: it expands this row into a confirmation
+                  with a password field, on the server, with no JavaScript.
+                #}
+                <a href="/account?confirm_delete={{ op.id }}" class="btn btn-danger btn-sm del-op" data-id="{{ op.id }}" aria-label="Delete {{ op.username }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></a>
+                {%- else %}
+                <span class="btn btn-danger btn-sm" aria-disabled="true" style="opacity:.35"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span>
+                {%- endif %}
+              </td>
+            </tr>
+            {%- if confirm_operator_id == op.id %}
+            <tr class="edit-row" data-testid="operator-confirm-row">
+              <td colspan="3">
+                <form method="post" action="/account/operators/{{ op.id }}/delete">
+                  <p class="card-desc" style="margin-bottom:8px">Delete <code class="text-primary">{{ confirm_operator_name }}</code> and revoke all their sessions? Confirm with your own password.</p>
+                  <div class="input-row">
+                    <input type="password" name="your_password" autocomplete="current-password" data-testid="operator-delete-password" placeholder="your password" style="max-width:220px">
+                    <button type="submit" class="btn btn-danger btn-sm" data-testid="operator-delete-confirm">Delete operator</button>
+                    <a href="/account" class="btn btn-sm">Cancel</a>
+                  </div>
+                  {%- if confirm_operator_error != "" %}
+                  <div class="field-msg error" data-testid="operator-delete-error">{{ confirm_operator_error }}</div>
+                  {%- endif %}
+                </form>
+              </td>
+            </tr>
+            {%- endif %}
+            {%- endfor %}
+          </tbody>
         </table></div>
         <div class="card-title" style="margin-top:16px">Add Operator</div>
-        <div class="login-error" id="op-error" style="display:none"></div>
-        <div class="input-row"><input type="text" id="op-user" name="new-operator-username" autocomplete="off" placeholder="username" style="max-width:200px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" name="new-operator-password" autocomplete="new-password" placeholder="password (min {{ min_password_length }})" style="max-width:220px"></div>
-        <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" name="confirm-operator-password" autocomplete="new-password" placeholder="confirm password" style="max-width:220px"></div>
-        <button class="btn btn-primary btn-sm" id="op-add" style="margin-top:12px">Add Operator</button>
+        <div class="login-error" id="op-error" data-testid="operator-add-error"{% if operator_error != "" %} style="display:block"{% else %} style="display:none"{% endif %}>{{ operator_error }}</div>
+        <form method="post" action="/account/operators" id="add-operator-form">
+          <div class="input-row"><input type="text" id="op-user" name="username" autocomplete="off" data-testid="operator-username" placeholder="username" value="{{ operator_username }}" style="max-width:200px"></div>
+          <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" name="password" autocomplete="new-password" data-testid="operator-password" placeholder="password (min {{ min_password_length }})" style="max-width:220px"></div>
+          <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" name="confirm" autocomplete="new-password" data-testid="operator-password-confirm" placeholder="confirm password" style="max-width:220px"></div>
+          {#
+            The proof for this action. Without JavaScript there is nowhere to
+            raise a dialog, and with it there is no reason to.
+          #}
+          <div class="input-row" style="margin-top:8px"><input type="password" name="your_password" autocomplete="current-password" data-testid="operator-your-password" placeholder="your password" style="max-width:220px"></div>
+          <button type="submit" class="btn btn-primary btn-sm" id="op-add" data-testid="operator-add" style="margin-top:12px">Add Operator</button>
+        </form>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Active Sessions</div>
@@ -54,9 +109,26 @@
         </div>
         <div class="table-wrap"><table>
           <thead><tr><th>Operator</th><th>IP</th><th>Browser</th><th>Signed in</th><th>Last seen</th><th></th></tr></thead>
-          <tbody id="sess-body"></tbody>
+          <tbody id="sess-body">
+            {%- for s in sessions %}
+            <tr data-testid="session-row" data-id="{{ s.id }}">
+              <td class="mono text-primary">{{ s.username }}{% if s.is_current %} <span class="badge badge-allowed">this device</span>{% endif %}</td>
+              <td class="mono">{{ s.ip }}</td>
+              <td>{{ s.user_agent }}</td>
+              <td>{{ s.created_text }}</td>
+              <td>{{ s.last_seen_text }}</td>
+              <td style="text-align:right">
+                <form method="post" action="/account/sessions/{{ s.id }}/revoke" class="inline-form">
+                  <button type="submit" class="btn btn-danger btn-sm rev-sess" data-id="{{ s.id }}" data-current="{% if s.is_current %}true{% else %}false{% endif %}" aria-label="Revoke session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </form>
+              </td>
+            </tr>
+            {%- endfor %}
+          </tbody>
         </table></div>
-        <button class="btn btn-danger" id="logout-others" data-testid="logout-other-sessions" style="margin-top:14px">Log Out Other Sessions</button>
+        <form method="post" action="/account/sessions/revoke-others">
+          <button type="submit" class="btn btn-danger" id="logout-others" data-testid="logout-other-sessions" style="margin-top:14px">Log Out Other Sessions</button>
+        </form>
       </div>
       <div class="card fade-in" style="animation-delay:0.15s">
         <div class="card-title">API Keys</div>
@@ -65,16 +137,55 @@
         </p>
         <div class="table-wrap"><table>
           <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
-          <tbody id="api-keys-body"></tbody>
+          <tbody id="api-keys-body">
+            {%- if api_keys.is_empty() %}
+            <tr><td class="text-dim" colspan="6">No API keys yet</td></tr>
+            {%- else %}
+            {%- for k in api_keys %}
+            <tr data-testid="api-key-row" data-name="{{ k.name }}">
+              <td class="text-primary">{{ k.name }}</td>
+              <td class="mono">{{ k.prefix }}</td>
+              <td>{{ k.created_text }}</td>
+              <td>{{ k.last_used_text }}</td>
+              <td>{{ k.expires_text }}</td>
+              <td style="text-align:right">
+                <form method="post" action="/account/api-keys/{{ k.id }}/delete" class="inline-form">
+                  <button type="submit" class="btn btn-danger btn-sm del-api-key" data-id="{{ k.id }}" aria-label="Revoke {{ k.name }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </form>
+              </td>
+            </tr>
+            {%- endfor %}
+            {%- endif %}
+          </tbody>
         </table></div>
-        <div id="api-key-reveal" data-testid="api-key-reveal" style="display:none"></div>
-        <div class="card-title" style="margin-top:16px">Create API Key</div>
-        <div class="login-error" id="api-key-error" style="display:none"></div>
-        <div class="input-row">
-          <input type="text" id="api-key-name" data-testid="api-key-name" placeholder="name, e.g. home-assistant" style="max-width:220px">
-          <input type="date" id="api-key-expires" title="Expiry date (optional — leave blank for never)" style="max-width:160px">
-          <button class="btn btn-primary btn-sm" id="api-key-add" data-testid="api-key-create">Create</button>
+        {#
+          The only sight of the token there will ever be — it is not stored.
+          This is why creating a key renders rather than redirects.
+        #}
+        <div id="api-key-reveal" data-testid="api-key-reveal"{% if new_key_token == "" %} style="display:none"{% else %} class="api-key-reveal"{% endif %}>
+          {%- if new_key_token != "" %}
+          <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">API key created: {{ new_key_name }}</div>
+          <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Copy this token now — it won't be shown again.</div>
+          <div class="input-row">
+            <input type="text" id="api-key-token" data-testid="api-key-token" class="mono" value="{{ new_key_token }}" readonly style="flex:1">
+            {# Copying needs a clipboard, so the button ships hidden and app.js unhides it. #}
+            <button type="button" class="btn btn-primary btn-sm js-only" id="api-key-copy" hidden>Copy</button>
+            <a href="/account" class="btn btn-sm" id="api-key-dismiss">Dismiss</a>
+          </div>
+          {%- endif %}
         </div>
+        <div class="card-title" style="margin-top:16px">Create API Key</div>
+        <div class="login-error" id="api-key-error" data-testid="api-key-error"{% if api_key_error != "" %} style="display:block"{% else %} style="display:none"{% endif %}>{{ api_key_error }}</div>
+        <form method="post" action="/account/api-keys" id="create-api-key-form">
+          <div class="input-row">
+            <input type="text" id="api-key-name" name="name" data-testid="api-key-name" placeholder="name, e.g. home-assistant" value="{{ api_key_name }}" style="max-width:220px">
+            <input type="date" id="api-key-expires" name="expires" title="Expiry date (optional — leave blank for never)" value="{{ api_key_expires }}" style="max-width:160px">
+          </div>
+          <div class="input-row" style="margin-top:8px">
+            <input type="password" name="your_password" autocomplete="current-password" data-testid="api-key-your-password" placeholder="your password" style="max-width:220px">
+            <button type="submit" class="btn btn-primary btn-sm" id="api-key-add" data-testid="api-key-create">Create</button>
+          </div>
+        </form>
       </div>
       </account-page>
 {% endblock %}
