@@ -169,6 +169,12 @@ body::after {
 
 .fnbar { display: none; }
 
+/* The status bar is fixed to the bottom, so anything the browser scrolls to —
+   a focused field reached by Tab, an anchor target — can land underneath it.
+   `scroll-padding` is what keeps scrolling clear of it; the `padding-bottom`
+   below only helps at the very end of the page. */
+:root { scroll-padding-bottom: 56px; }
+
 .main-content {
   max-width: 1240px;
   margin: 0 auto;

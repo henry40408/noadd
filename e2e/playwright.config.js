@@ -165,10 +165,14 @@ export default defineConfig({
       name: 'filters-no-js',
       testDir: 'specs',
       testMatch: /filters-no-js\.spec\.js$/,
+      // The viewport is pinned, and pinned short: the fixed status bar overlaps
+      // whatever sits at the foot of a small window, and a suite that only ever
+      // ran tall would keep that to itself until some other machine ran it.
       use: {
         ...devices['Desktop Chrome'],
         javaScriptEnabled: false,
         reducedMotion: 'reduce',
+        viewport: { width: 1024, height: 600 },
       },
     },
   ],

@@ -87,16 +87,32 @@ async function gotoFilters(page, context, query = '') {
   await expect(page.getByTestId('app-shell')).toBeVisible();
 }
 
-// Enter in a text field, which is how HTML submits a form with a submit button
-// in it — a real path, and the one a keyboard user takes.
+// Submitting with Enter from a text field, which is how HTML submits a form
+// that has a submit button in it — a real path, and the one a keyboard user
+// takes.
 //
-// It is used here in place of clicking the button for a mechanical reason too:
-// with an empty list table and no scripting, Playwright's stability check never
-// settles on `#add-list` and refuses to click it. The button itself is fine —
-// `click({ force: true })` submits the form and the list is created — so this
-// avoids a harness limitation rather than papering over a broken control.
+// It is also the one that does not depend on where the button happens to sit.
+// The status bar is fixed to the bottom of the viewport, so on a short enough
+// window a control near the foot of the page is underneath it and a click
+// lands on the status bar instead ("intercepts pointer events"). That is a
+// genuine constraint of the layout rather than a test artefact — which is why
+// `:root` now carries `scroll-padding-bottom` — but it makes clicking those
+// particular buttons a function of the window height, and these tests are
+// about the forms, not the furniture.
 async function submitAddList(page) {
   await page.getByTestId('list-name-input').press('Enter');
+}
+
+async function submitAddRule(page) {
+  await page.getByTestId('rule-input').press('Enter');
+}
+
+// For the row controls, which have no text field to press Enter in. `force`
+// skips the hit-target check that the fixed status bar can fail; every one of
+// these is followed by an assertion that only passes if the POST landed, so a
+// button that genuinely did nothing still fails the test.
+async function clickRowControl(locator) {
+  await locator.click({ force: true });
 }
 
 test.describe('The filters page works with no JavaScript', () => {
@@ -112,7 +128,7 @@ test.describe('The filters page works with no JavaScript', () => {
   test('a custom rule can be added and deleted through the forms', async ({ page, context }) => {
     await gotoFilters(page, context);
     await page.getByTestId('rule-input').fill('||nojs-added.example.com^');
-    await page.getByTestId('rule-submit').click();
+    await submitAddRule(page);
 
     const row = page.locator('[data-testid="rule-row"]').filter({ hasText: 'nojs-added.example.com' });
     await expect(row).toBeVisible();
@@ -121,7 +137,7 @@ test.describe('The filters page works with no JavaScript', () => {
     // refresh here re-renders rather than re-submitting.
     await expect(page).toHaveURL(/\/filters$/);
 
-    await row.getByTestId('rule-delete').click();
+    await clickRowControl(row.getByTestId('rule-delete'));
     await expect(
       page.locator('[data-testid="rule-row"]').filter({ hasText: 'nojs-added.example.com' }),
     ).toHaveCount(0);
@@ -130,7 +146,7 @@ test.describe('The filters page works with no JavaScript', () => {
   test('a rule that does not parse comes back in the field with a reason', async ({ page, context }) => {
     await gotoFilters(page, context);
     await page.getByTestId('rule-input').fill('   ');
-    await page.getByTestId('rule-submit').click();
+    await submitAddRule(page);
 
     await expect(page.getByTestId('rule-add-error')).toContainText('Not a rule noadd understands');
     // Still the filters page, with the navigation knowing it, even though the
@@ -150,28 +166,26 @@ test.describe('The filters page works with no JavaScript', () => {
 
     // Untick, then submit — two steps without a script, which is the trade the
     // no-JS path makes. The submit is the button `app.js` would have removed.
-    await row.locator('label.toggle').click();
-    // `force` for the same harness reason as `submitAddList`: inside a table
-    // cell with no scripting, Playwright's stability check never settles on
-    // this button. The submit itself works — the assertion right below is what
-    // proves it, since it only passes if the POST actually landed.
-    await row.locator('.nojs-only').click({ force: true });
+    await clickRowControl(row.locator('label.toggle'));
+    await clickRowControl(row.locator('.nojs-only'));
     await expect(
       page.locator('[data-testid="filter-list-row"][data-name="No JS List"]')
         .getByTestId('filter-list-toggle'),
     ).not.toBeChecked();
 
     // Edit expands the row on the server rather than opening a dialog.
-    await page.locator('[data-testid="filter-list-row"][data-name="No JS List"] .edit-list').click();
+    await clickRowControl(
+      page.locator('[data-testid="filter-list-row"][data-name="No JS List"] .edit-list'),
+    );
     await expect(page.getByTestId('filter-list-edit-row')).toBeVisible();
     await expect(page.getByTestId('list-edit-name')).toHaveValue('No JS List');
     await page.getByTestId('list-edit-name').fill('Renamed Without JS');
-    await page.getByTestId('list-edit-save').click();
+    await page.getByTestId('list-edit-name').press('Enter');
 
     const renamed = page.locator('[data-testid="filter-list-row"][data-name="Renamed Without JS"]');
     await expect(renamed).toBeVisible();
 
-    await renamed.locator('.del-list').click();
+    await clickRowControl(renamed.locator('.del-list'));
     await expect(
       page.locator('[data-testid="filter-list-row"][data-name="Renamed Without JS"]'),
     ).toHaveCount(0);
@@ -192,7 +206,7 @@ test.describe('The filters page works with no JavaScript', () => {
   test('a domain test is answered in the page and stays in the URL', async ({ page, context }) => {
     await gotoFilters(page, context);
     await page.getByTestId('rule-input').fill('||nojs-tested.example.com^');
-    await page.getByTestId('rule-submit').click();
+    await submitAddRule(page);
 
     // The verdict comes from the live engine, which a background rebuild
     // refreshes; re-run the GET until the rule has landed.
