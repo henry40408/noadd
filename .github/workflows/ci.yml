@@ -102,44 +102,39 @@ jobs:
 
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # `e2e` is its own workspace, deliberately outside the one at the
+          # repository root, so it has to be named or none of its dependencies
+          # are cached.
+          workspaces: |
+            .
+            e2e
 
+      # The suites start this binary themselves; building it here keeps the
+      # compile off their own timeouts, and the admin UI is embedded at compile
+      # time, so a stale binary would be testing yesterday's markup.
       - name: Build noadd (embeds the admin UI)
         run: cargo build
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: e2e/package-lock.json
-
-      - name: Install dependencies
+      # `e2e` is linted here rather than in `check`, so it shares the build this
+      # job already pays for. It is deliberately outside `cargo deny`: the
+      # browser stack pulls in licences the server's allow-list does not carry,
+      # and none of it is distributed — the Docker image contains the server
+      # alone.
+      - name: Check formatting (e2e)
         working-directory: e2e
-        run: npm ci
+        run: cargo fmt --check
 
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('e2e/package-lock.json') }}
-
-      - name: Install Playwright browser
+      - name: Clippy (e2e)
         working-directory: e2e
-        run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            npx playwright install-deps chromium
-          else
-            npx playwright install --with-deps chromium
-          fi
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run E2E tests
+      # No browser install step: `WebDriver::managed` downloads a matching
+      # chromedriver on demand, and the runner image already ships Chrome.
+      - name: Run the Cucumber features
         working-directory: e2e
-        run: npm test
+        run: cargo test --test e2e
 
-      - name: Upload Playwright report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: playwright-report
-          path: e2e/playwright-report/
-          retention-days: 7
+      - name: Run the specs
+        working-directory: e2e
+        run: cargo test --test specs
