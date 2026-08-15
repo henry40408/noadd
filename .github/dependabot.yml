@@ -29,13 +29,15 @@ updates:
     cooldown:
       default-days: 7
 
-  - package-ecosystem: "npm"
+  # e2e is its own cargo workspace, so its manifest is not covered by the "/"
+  # entry above and needs naming separately.
+  - package-ecosystem: "cargo"
     directory: "/e2e"
     schedule:
       interval: "weekly"
     cooldown:
       default-days: 7
     groups:
-      npm:
+      cargo-e2e:
         patterns:
           - "*"

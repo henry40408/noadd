@@ -1,8 +1,2 @@
-node_modules/
+target/
 .tmp/
-.auth/
-.features-gen/
-test-results/
-playwright-report/
-blob-report/
-playwright/.cache/

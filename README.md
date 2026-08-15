@@ -477,34 +477,37 @@ RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.
 
 ### End-to-end tests
 
-Browser-based BDD tests for the admin UI live in [`e2e/`](e2e/), built with
-[playwright-bdd](https://github.com/vitalets/playwright-bdd). Playwright starts
-the `noadd` binary itself (on throwaway ports and SQLite files), so build the
-binary first:
+Browser-based tests for the admin UI live in [`e2e/`](e2e/), built with
+[cucumber](https://github.com/cucumber-rs/cucumber) and
+[thirtyfour](https://github.com/stevepryde/thirtyfour). `e2e/` is its own cargo
+workspace, and the suites start the `noadd` binary themselves (on throwaway
+ports and SQLite files), so build the binary first:
 
 ```bash
-cargo build                       # embeds the admin UI into the binary
+cargo build                  # embeds the admin UI into the binary
 cd e2e
-npm ci
-npx playwright install chromium
-npm test                          # generates step bindings, then runs the suite
+cargo test --test e2e        # the Gherkin features
+cargo test --test specs      # the regression specs
 ```
 
-Gherkin features are in `e2e/features/`; step definitions in `e2e/steps/`. The
-suite also runs in CI via the `e2e` job.
+A local Chrome or Chromium is required: the driver manager downloads a matching
+chromedriver on demand, but not the browser.
+
+Gherkin features are in `e2e/features/`; step definitions in
+`e2e/tests/e2e/steps.rs`, and the tests that are regressions rather than user
+journeys in `e2e/tests/specs/`. Both run in CI via the `e2e` job.
 
 ### Regenerating README screenshots
 
 The images in `docs/screenshots/` are produced by a repeatable pipeline that
 seeds a throwaway database with ~90 days of fake traffic, boots `noadd` on
-throwaway ports, and re-captures every page with Playwright. Re-run it after
+throwaway ports, and re-captures every page in a real browser. Re-run it after
 any admin-UI change and commit the updated PNGs:
 
 ```bash
-cargo build                       # embeds the current admin UI into the binary
+cargo build                  # embeds the current admin UI into the binary
 cd e2e
-npm ci && npx playwright install chromium   # first time only
-npm run screenshots
+cargo run --bin screenshots
 ```
 
 ## License

@@ -5,13 +5,8 @@
 # Rebuilt in the builder stage, and shadowed by the target cache mount anyway.
 /target
 
-# e2e is a separate npm project; none of it reaches the binary.
-/e2e/node_modules
-/e2e/test-results
-/e2e/playwright-report
-/e2e/.features-gen
-/e2e/.auth
-/e2e/.tmp
+# e2e is a separate cargo workspace; none of it reaches the binary.
+/e2e
 
 # Local runtime state — the SQLite DB carries password hashes and sessions.
 **/*.sqlite3

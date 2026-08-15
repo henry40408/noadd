@@ -25,20 +25,32 @@ Integration tests live in `tests/`, not `src/`; shared helpers in `tests/common/
 
 ### End-to-end (admin UI)
 
-Playwright-BDD in `e2e/`. Playwright boots the `noadd` binary itself, so **`cargo build` first** or the UI under test is stale.
+`cucumber` + `thirtyfour` in `e2e/`, which is **its own cargo workspace** — deliberately outside the root one, so a `--workspace` coverage run never compiles the browser stack or drives a real browser. There is no Node.js anywhere in this repository. The suites boot the `noadd` binary themselves, so **`cargo build` first** or the UI under test is stale.
 
 ```bash
 cargo build
-cd e2e && npm ci && npx playwright install chromium
-npm test            # generates BDD step bindings, then runs the suite
-npm run screenshots # re-seeds fake traffic, re-captures docs/screenshots/
+cd e2e
+cargo test --test e2e        # the Gherkin features
+cargo test --test specs      # the regression specs
+cargo run --bin screenshots  # re-seeds fake traffic, re-captures docs/screenshots/
 ```
 
-Gherkin features in `e2e/features/`, steps in `e2e/steps/`. Destructive scenarios (password changes) and anything needing its own login rate-limit budget get a self-contained spec in `e2e/specs/` with dedicated ports — see `settings-autosave.spec.js`.
+A local **Chrome or Chromium is a prerequisite**: `WebDriver::managed` downloads and supervises a matching chromedriver, but not the browser, which is the one capability Playwright had and this does not (`brew install --cask ungoogled-chromium`; CI's runner image already ships Chrome).
 
-**Every page has no-JS coverage**, in four specs with `javaScriptEnabled: false` and a pinned 1024×600 viewport: `filters-no-js`, `logs-no-js`, `stats-no-js` and `pages-no-js` (the dashboard, settings and account together — unlike the other three, none of them seeds or empties anything, so they share one instance instead of booting three). Ports run 14107–14110 with DNS on 15107–15110; a new spec takes the next pair.
+Gherkin features in `e2e/features/` — unchanged by the port, `cucumber` reads the same files — with steps in `e2e/tests/e2e/steps.rs`. Which instance a feature runs against is the tag it already carried (`@app`, `@auth`, `@onboarding`); `tests/e2e/main.rs` starts one server per tag and a `before` hook picks by it.
 
-⚠️ **A browser posts the whole form, so a no-JS save has to satisfy every field on it.** A fresh appliance has no upstream configured, and saving settings without one is a rejection, not a partial write — which is why `pages-no-js` fills the upstream before it saves anything. This is the correct behaviour (`apply_settings` validates before it persists so a bad entry cannot leave half a save applied); it just means a test that fills one field and submits is testing the rejection path whether it meant to or not.
+Destructive scenarios (password changes) and anything needing its own login rate-limit budget get a self-contained file in `e2e/tests/specs/` with dedicated ports — see `settings_autosave.rs`. Those files run concurrently, capped at `available_parallelism` and four; cases *within* a file run in the order they are written, which several depend on.
+
+Two Playwright conveniences are rebuilt in `e2e/src/`, and are the first place to look when an assertion behaves oddly:
+
+- **`expect()` retried; `WebDriver` does not.** Every `Locator::expect_*` in `src/dom.rs` polls for 30 s and reports the last value it saw.
+- ⚠️ **Text is `textContent`, not the rendered text.** WebDriver's "Get Element Text" applies `text-transform`, and this UI uppercases badges and headings in CSS — a verdict written `Blocked` comes back as `BLOCKED`. `Locator::text` reads `textContent` so assertions are phrased against the markup, not the stylesheet.
+
+**Every page has no-JS coverage**, in four files using `Profile::no_js()` — `Emulation.setScriptExecutionDisabled` (what Playwright's `javaScriptEnabled: false` did underneath) and a pinned 1024×600 viewport: `filters_no_js`, `logs_no_js`, `stats_no_js` and `pages_no_js` (the dashboard, settings and account together — unlike the other three, none of them seeds or empties anything, so they share one instance instead of booting three). Ports run 14107–14110 with DNS on 15107–15110; a new file takes the next pair from `ports` in `e2e/src/lib.rs`, where every instance's ports now live in one place.
+
+⚠️ **`setScriptExecutionDisabled` applies to the *next* document**, so sessions are per-case and the flag is set before the first navigation. It also stops the page's own scripts only — `Execute Script` still runs, which is what lets the no-JS files measure anything. The exception is a callback the DOM has to invoke: a `TreeWalker` filter is page script and is refused, so `Page::has_text` walks the elements itself.
+
+⚠️ **A browser posts the whole form, so a no-JS save has to satisfy every field on it.** A fresh appliance has no upstream configured, and saving settings without one is a rejection, not a partial write — which is why `pages_no_js` fills the upstream before it saves anything. This is the correct behaviour (`apply_settings` validates before it persists so a bad entry cannot leave half a save applied); it just means a test that fills one field and submits is testing the rejection path whether it meant to or not.
 
 ## Build-time behavior (`build.rs`)
 
@@ -126,13 +138,13 @@ Account adds the conventions for **actions that need a password proof**:
 - **A rejected form never echoes a password back into the markup.** Only the non-secret fields (username, key name, expiry) are re-rendered.
 - Account POSTs answer as `/account` whatever path they arrived on — `ShellData::build_for("/account", …)`, so the navigation still marks the page the operator is looking at.
 
-⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/specs/filters-no-js.spec.js` submits with `Enter` and clicks row controls through a helper for the same reason, and says so.
+⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/tests/specs/filters_no_js.rs` submits with `Enter` and activates row controls with `Locator::click_js` for the same reason, and says so.
 
-⚠️ **With scripting off a page is interactive the moment it parses**, so a `fade-in` card is still sliding when the first click lands and Playwright refuses to click a moving target. `e2e/specs/stats-no-js.spec.js` clicks the range switcher with `force: true` and follows it with assertions that only pass if the navigation happened.
+⚠️ **With scripting off a page is interactive the moment it parses**, so a `fade-in` card is still sliding when the first click lands and a click aimed at its centre lands somewhere else. `e2e/tests/specs/stats_no_js.rs` activates the range switcher with `Locator::click_js` and follows it with assertions that only pass if the navigation happened.
 
 `/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
 
-After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && npm run screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
+After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && cargo run --bin screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
 
 ## Architecture essentials
 
