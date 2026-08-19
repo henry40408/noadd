@@ -83,8 +83,9 @@
           {# A page of its own now, so this is a link and needs no client. #}
           <a class="btn btn-sm" href="/filters/registry" id="browse-registry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Browse Registry</a>
         </div>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Impact is what you would stop blocking by turning a list off. Two lists holding the same rules both read <em>No impact</em> — turn one off at a time, and the rest recompute.</p>
         <div class="table-wrap hide-mobile-block"><table><thead><tr>
-          <th>Enabled</th><th>Name</th><th>Rules</th><th>Updated</th><th></th>
+          <th>Enabled</th><th>Name</th><th>Rules</th><th>Impact</th><th>Updated</th><th></th>
         </tr></thead><tbody id="lists-body">
           {%- for l in lists %}
           <tr data-testid="filter-list-row" data-name="{{ l.name }}">
@@ -106,6 +107,11 @@
             </td>
             <td class="text-primary">{{ l.name }}</td>
             <td>{{ l.rule_count }}</td>
+            {#
+              What turning this list off would actually cost. Zero is the value
+              an operator acts on, so it is a badge rather than a number.
+            #}
+            <td data-testid="filter-list-impact">{% if l.impact_none %}<span class="badge badge-off">{{ l.impact_text }}</span>{% else %}{{ l.impact_text }}{% endif %}</td>
             <td><span class="timeago" data-ts="{{ l.last_updated }}">{{ l.last_updated_text }}</span></td>
             <td style="white-space:nowrap">
               {#
@@ -121,7 +127,7 @@
           </tr>
           {%- if edit_id == l.id %}
           <tr class="edit-row" data-testid="filter-list-edit-row">
-            <td colspan="5">
+            <td colspan="6">
               <form method="post" action="/filters/lists/{{ l.id }}/edit">
                 <div class="input-row">
                   <input type="text" name="name" value="{{ edit_name }}" placeholder="List name" data-testid="list-edit-name">
@@ -158,6 +164,7 @@
             </div>
             <div class="log-card-row2">
               <span>{{ l.rule_count_compact }} rules</span>
+              <span data-testid="filter-list-impact-card">{{ l.impact_text }}</span>
               <span>{{ l.last_updated_text }}</span>
             </div>
           </div>

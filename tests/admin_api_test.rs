@@ -4810,6 +4810,20 @@ fn first_list_id(html: &str) -> i64 {
     rest[..end].parse().expect("list id was not a number")
 }
 
+/// The id of the row for `name`, read out of the markup the page rendered.
+fn list_id_by_name(html: &str, name: &str) -> i64 {
+    let start = html
+        .find(&format!(r#"data-name="{name}""#))
+        .unwrap_or_else(|| panic!("no row for {name}"));
+    let marker = r#"data-testid="filter-list-toggle" data-id=""#;
+    let rest = &html[start..];
+    let at = rest.find(marker).expect("row without a toggle") + marker.len();
+    let rest = &rest[at..];
+    rest[..rest.find('"').expect("malformed toggle")]
+        .parse()
+        .expect("list id was not a number")
+}
+
 /// Add one list through the form, and hand back its id.
 async fn add_list(app: &axum::Router, token: &str, name: &str, url: &str) -> i64 {
     let res = app
@@ -5004,6 +5018,148 @@ async fn toggling_a_list_through_the_form_persists_both_ways() {
     assert!(
         filters_html(&app, &token, "").await.contains("checked"),
         "the list did not come back on"
+    );
+}
+
+/// The Impact column answers one question: what stops being blocked if this
+/// list goes away. Two lists holding the same rule each answer "nothing",
+/// because removing either one on its own changes nothing — which is exactly
+/// why the page tells the operator to turn them off one at a time.
+#[tokio::test]
+async fn the_filters_page_says_what_each_list_uniquely_provides() {
+    let (app, token, _cache, _events, db, _sessions, _limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    for (name, file) in [("Shared", "a"), ("Overlapping", "b"), ("Alone", "c")] {
+        add_list(
+            &app,
+            &token,
+            name,
+            &format!("https://example.com/{file}.txt"),
+        )
+        .await;
+    }
+    // `add_list` hands back the id of the *first* row, which is the same list
+    // every time once there is more than one — so each id is read off its own
+    // row here instead.
+    let page = filters_html(&app, &token, "").await;
+    let id_of = |name: &str| list_id_by_name(&page, name);
+    let (shared, overlapping, alone) = (id_of("Shared"), id_of("Overlapping"), id_of("Alone"));
+    // The download could not have succeeded against 127.0.0.1:1, so the content
+    // is seeded directly — this test is about the comparison, not the fetch.
+    db.set_filter_list_content(shared, "||ads.example^\n")
+        .await
+        .unwrap();
+    db.set_filter_list_content(overlapping, "||ads.example^\n")
+        .await
+        .unwrap();
+    db.set_filter_list_content(alone, "||tracker.example^\n||beacon.example^\n")
+        .await
+        .unwrap();
+
+    // Any list change rebuilds the engine, and the engine is where the counts
+    // come from. Posting the state a list is already in is the smallest thing
+    // that triggers one — turning it off and on again would leave a window
+    // where the engine is a rebuild that excluded it.
+    let before = noadd::now_unix();
+    let res = app
+        .clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{alone}/toggle"),
+            &token,
+            "enabled=on".to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    wait_for_rebuild(&app, &token, before).await;
+
+    let html = filters_html(&app, &token, "").await;
+    let row = |name: &str| {
+        let start = html
+            .find(&format!(r#"data-name="{name}""#))
+            .unwrap_or_else(|| panic!("no row for {name}"));
+        let rest = &html[start..];
+        let end = rest.find("</tr>").expect("unterminated row");
+        rest[..end].to_string()
+    };
+
+    assert!(
+        row("Shared").contains("No impact"),
+        "a rule another list also holds is not this list's own contribution: {}",
+        row("Shared")
+    );
+    assert!(
+        row("Overlapping").contains("No impact"),
+        "the comparison has to be symmetric — both rows say the same thing"
+    );
+    assert!(
+        row("Alone").contains("2 rules"),
+        "rules no other list holds are what removing this list would cost"
+    );
+}
+
+/// The same numbers reach `/api/lists`, because `app.js` redraws these rows
+/// from it and a redrawn row has to be the row the server would have sent.
+#[tokio::test]
+async fn the_lists_api_carries_what_each_list_uniquely_provides() {
+    let (app, token, _cache, _events, db, _sessions, _limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+
+    let id = add_list(&app, &token, "Solo", "https://example.com/a.txt").await;
+    db.set_filter_list_content(id, "||ads.example^\n")
+        .await
+        .unwrap();
+
+    let before = noadd::now_unix();
+    app.clone()
+        .oneshot(authed_form_owned(
+            &format!("/filters/lists/{id}/toggle"),
+            &token,
+            "enabled=on".to_string(),
+        ))
+        .await
+        .unwrap();
+    wait_for_rebuild(&app, &token, before).await;
+
+    let res = app
+        .clone()
+        .oneshot(authed("GET", "/api/lists", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+    let list = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == id)
+        .expect("the list is missing from /api/lists");
+    assert_eq!(list["unique_rules"], 1);
+}
+
+/// A list the engine never loaded has nothing to compare, and saying so beats
+/// printing a zero that would read as "safe to remove". A failed download looks
+/// identical to a healthy list in every other column on the row.
+#[tokio::test]
+async fn a_list_that_never_downloaded_reports_no_rules_rather_than_no_impact() {
+    let (app, token) = setup().await;
+    add_list(&app, &token, "Never fetched", "https://example.com/a.txt").await;
+
+    let html = filters_html(&app, &token, "").await;
+    // Scoped to the row: the sentence above the table explains what "No impact"
+    // means, so the phrase is on the page whether or not any list carries it.
+    let row = {
+        let start = html
+            .find(r#"data-name="Never fetched""#)
+            .expect("no row for the list");
+        let rest = &html[start..];
+        &rest[..rest.find("</tr>").expect("unterminated row")]
+    };
+    assert!(row.contains("No rules"), "{row}");
+    assert!(
+        !row.contains("No impact"),
+        "an empty list must not read as a redundant one"
     );
 }
 

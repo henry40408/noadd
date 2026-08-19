@@ -1,4 +1,4 @@
-use noadd::filter::engine::{FilterEngine, FilterResult};
+use noadd::filter::engine::{FilterEngine, FilterResult, ListMeta};
 use noadd::filter::parser::{ParsedRule, RuleAction};
 
 fn block_rule(domain: &str, is_subdomain: bool) -> ParsedRule {
@@ -145,7 +145,7 @@ fn new_with_pre_interned_list_names_resolves_provenance() {
     // Production path: caller hands FilterEngine an already-deduplicated list
     // name table plus (rule, list_idx) pairs. This is what `rebuild_filter`
     // does so it can avoid cloning the same list name once per rule.
-    let list_names: Vec<Box<str>> = vec!["easylist".into(), "adguard".into()];
+    let list_names = vec![ListMeta::new("easylist", 1), ListMeta::new("adguard", 2)];
     let block_rules = vec![
         (block_rule("tracker.net", false), 0u16),
         (block_rule("ads.example.com", true), 1u16),
@@ -185,7 +185,7 @@ fn build_is_insertion_order_independent() {
     rules_b.reverse();
     rules_a.swap(0, 3);
 
-    let list_names: Vec<Box<str>> = vec!["L".into()];
+    let list_names = vec![ListMeta::new("L", 1)];
     let engine_a = FilterEngine::new(list_names.clone(), rules_a, vec![]);
     let engine_b = FilterEngine::new(list_names, rules_b, vec![]);
 

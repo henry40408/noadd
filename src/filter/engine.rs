@@ -29,6 +29,28 @@ pub enum FilterResult {
     Blocked { rule: String, list: String },
 }
 
+/// The synthetic list id for operator-written custom rules, which have no row
+/// in `filter_lists`. Real ids come from `AUTOINCREMENT` and start at 1, so
+/// zero can never collide with one.
+pub const CUSTOM_LIST_ID: i64 = 0;
+
+/// A filter list as the engine knows it: what to call it, and which row it came
+/// from. Interned once per rebuild; block rules store only a `u16` index here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListMeta {
+    pub name: Box<str>,
+    pub id: i64,
+}
+
+impl ListMeta {
+    pub fn new(name: &str, id: i64) -> Self {
+        Self {
+            name: Box::from(name),
+            id,
+        }
+    }
+}
+
 /// Sentinel: this trie node is not a terminal.
 const NOT_TERMINAL: u16 = u16::MAX;
 
@@ -287,6 +309,74 @@ fn reconstruct_domain(labels: &[&str], depth: usize) -> String {
     parts.join(".")
 }
 
+/// Bit identifying a list inside a coverage mask.
+///
+/// Indices past 63 all share the top bit, so two such lists look like one to
+/// the "is anyone else covering this rule?" test and a shared rule reads as
+/// unique. That over-reports impact rather than under-reporting it — the safe
+/// direction for a number an operator reads as "what removing this costs me".
+#[inline]
+fn list_bit(idx: u16) -> u64 {
+    1u64 << (idx as usize).min(63)
+}
+
+/// Count, per list, the rules no *other* list provides — what an operator
+/// would actually stop blocking by removing that list.
+///
+/// Coverage is asymmetric, which is the whole reason this is not a set
+/// difference over domain strings: a subdomain rule (`||ads.example^`) covers
+/// the domain *and* everything under it, so only another subdomain rule can
+/// stand in for one, while an exact rule can be replaced by either kind.
+///
+/// A list that repeats the same rule counts it twice, the same way the
+/// `rule_count` shown beside this number does.
+fn compute_unique_rules(
+    list_count: usize,
+    exact_rules: &[(String, u16)],
+    sub_rules: &[(String, u16)],
+) -> Vec<u32> {
+    let mut exact_owners: HashMap<&str, u64, FxBuildHasher> =
+        HashMap::with_capacity_and_hasher(exact_rules.len(), FxBuildHasher);
+    for (domain, idx) in exact_rules {
+        *exact_owners.entry(domain.as_str()).or_default() |= list_bit(*idx);
+    }
+    let mut sub_owners: HashMap<&str, u64, FxBuildHasher> =
+        HashMap::with_capacity_and_hasher(sub_rules.len(), FxBuildHasher);
+    for (domain, idx) in sub_rules {
+        *sub_owners.entry(domain.as_str()).or_default() |= list_bit(*idx);
+    }
+
+    // Every list holding a subdomain rule that covers `domain`: the domain
+    // itself, or any parent of it.
+    let covering_subs = |domain: &str| -> u64 {
+        let mut mask = 0u64;
+        let mut rest = Some(domain);
+        while let Some(current) = rest {
+            if let Some(owners) = sub_owners.get(current) {
+                mask |= owners;
+            }
+            rest = current.split_once('.').map(|(_, parent)| parent);
+        }
+        mask
+    };
+
+    let mut unique = vec![0u32; list_count];
+    for (domain, idx) in sub_rules {
+        if covering_subs(domain) & !list_bit(*idx) == 0 {
+            unique[*idx as usize] += 1;
+        }
+    }
+    for (domain, idx) in exact_rules {
+        let elsewhere = (exact_owners.get(domain.as_str()).copied().unwrap_or(0)
+            | covering_subs(domain))
+            & !list_bit(*idx);
+        if elsewhere == 0 {
+            unique[*idx as usize] += 1;
+        }
+    }
+    unique
+}
+
 /// Split a domain into reversed labels for trie operations.
 fn reversed_labels(domain: &str) -> Vec<&str> {
     domain.split('.').rev().collect()
@@ -296,8 +386,8 @@ fn reversed_labels(domain: &str) -> Vec<&str> {
 
 /// The filter engine.  Immutable after construction — rebuild to update rules.
 pub struct FilterEngine {
-    /// Interned list names.  Block rules store only a `u16` index into this.
-    list_names: Vec<Box<str>>,
+    /// Interned lists.  Block rules store only a `u16` index into this.
+    lists: Vec<ListMeta>,
     /// Exact-match blocklist: domain → list index (FST map).
     exact_block: FstMap<Vec<u8>>,
     /// Subdomain blocklist (flat trie, reversed labels).
@@ -306,6 +396,9 @@ pub struct FilterEngine {
     exact_allow: FstSet<Vec<u8>>,
     /// Subdomain allowlist (flat trie, reversed labels).
     allow_trie: FlatTrie,
+    /// Per-list count of rules no other list in this engine provides, indexed
+    /// the same way as `lists`.
+    unique_rules: Vec<u32>,
 }
 
 /// Marker value stored in allow-trie terminals (any value != `NOT_TERMINAL`).
@@ -315,7 +408,7 @@ impl FilterEngine {
     /// Build a new engine from rules with caller-interned list names.
     ///
     /// `block_rules` is `(ParsedRule, list_idx)` where `list_idx` indexes into
-    /// `list_names`. This is what `rebuild_filter` calls so the same list
+    /// `lists`. This is what `rebuild_filter` calls so the same list
     /// name is interned once at the rebuild site instead of being cloned per
     /// rule (a 500k× allocation cut on large blocklists).
     ///
@@ -323,7 +416,7 @@ impl FilterEngine {
     /// guarantees this on every code path. The engine does not re-lowercase
     /// rule domains; only the query passed to [`check`] is folded.
     pub fn new(
-        list_names: Vec<Box<str>>,
+        lists: Vec<ListMeta>,
         block_rules: Vec<(ParsedRule, u16)>,
         allow_rules: Vec<ParsedRule>,
     ) -> Self {
@@ -364,61 +457,82 @@ impl FilterEngine {
             }
         }
 
-        // The trie build and the FST build touch disjoint data, and on a large
-        // blocklist they cost roughly the same (tens of ms each). Running them
-        // concurrently makes the rebuild cost the slower of the two rather than
-        // their sum. `thread::scope` keeps the borrows here and needs no
-        // runtime — `new` is already called from a blocking worker.
-        let (block_trie, allow_trie, exact_block, exact_allow) = std::thread::scope(|scope| {
-            let block_trie_job = scope.spawn(|| {
-                let mut build = BuildNode::new();
-                for (domain, list_idx) in &sub_block_rules {
-                    build.insert(&reversed_labels(domain), *list_idx);
-                }
-                build.flatten()
-            });
-            let allow_trie_job = scope.spawn(|| {
-                let mut build = BuildNode::new();
-                for domain in &sub_allow_rules {
-                    build.insert(&reversed_labels(domain), ALLOW_MARKER);
-                }
-                build.flatten()
-            });
-            let exact_block_job = scope.spawn(|| {
-                // FST construction requires sorted, deduplicated input.
-                exact_block_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-                exact_block_entries.dedup_by(|(a, _), (b, _)| a == b);
-                FstMap::from_iter(
-                    exact_block_entries
-                        .iter()
-                        .map(|(d, idx)| (d.as_str(), *idx as u64)),
+        // The trie build, the FST build and the per-list unique-rule count touch
+        // disjoint data, and on a large blocklist they cost roughly the same.
+        // Running them concurrently makes the rebuild cost the slowest of them
+        // rather than their sum, which is what keeps the count off the clock
+        // entirely: measured on 1.2M rules over six lists, counting is ~950 ms
+        // of work, and `new` takes 844 ms without it against 821-887 ms with it
+        // — the trie build was always the long pole. `thread::scope` keeps the
+        // borrows here and needs no runtime; `new` is already called from a
+        // blocking worker.
+        let (block_trie, allow_trie, exact_block, unique_rules, exact_allow) =
+            std::thread::scope(|scope| {
+                let block_trie_job = scope.spawn(|| {
+                    let mut build = BuildNode::new();
+                    for (domain, list_idx) in &sub_block_rules {
+                        build.insert(&reversed_labels(domain), *list_idx);
+                    }
+                    build.flatten()
+                });
+                let allow_trie_job = scope.spawn(|| {
+                    let mut build = BuildNode::new();
+                    for domain in &sub_allow_rules {
+                        build.insert(&reversed_labels(domain), ALLOW_MARKER);
+                    }
+                    build.flatten()
+                });
+                let exact_block_job = scope.spawn(|| {
+                    // FST construction requires sorted, deduplicated input. The
+                    // order is a permutation rather than a sort of the entries
+                    // themselves, so the unique-rule job can read the same
+                    // vector at the same time — it needs every list's copy of a
+                    // domain, which the dedup is about to throw away. Stable, so
+                    // duplicates still resolve to the first list that had one.
+                    let mut order: Vec<u32> = (0..exact_block_entries.len() as u32).collect();
+                    order.sort_by(|&a, &b| {
+                        exact_block_entries[a as usize]
+                            .0
+                            .cmp(&exact_block_entries[b as usize].0)
+                    });
+                    order.dedup_by(|&mut a, &mut b| {
+                        exact_block_entries[a as usize].0 == exact_block_entries[b as usize].0
+                    });
+                    FstMap::from_iter(order.iter().map(|&i| {
+                        let (domain, list_idx) = &exact_block_entries[i as usize];
+                        (domain.as_str(), u64::from(*list_idx))
+                    }))
+                    .expect("sorted exact_block")
+                });
+                let unique_job = scope.spawn(|| {
+                    compute_unique_rules(lists.len(), &exact_block_entries, &sub_block_rules)
+                });
+
+                // Smallest job by far (allow lists are orders of magnitude
+                // shorter than block lists), so the caller's thread takes it
+                // rather than paying to spawn another.
+                exact_allow_entries.sort();
+                exact_allow_entries.dedup();
+                let exact_allow =
+                    FstSet::from_iter(exact_allow_entries.iter().map(std::string::String::as_str))
+                        .expect("sorted exact_allow");
+
+                (
+                    block_trie_job.join().expect("block trie build panicked"),
+                    allow_trie_job.join().expect("allow trie build panicked"),
+                    exact_block_job.join().expect("exact block build panicked"),
+                    unique_job.join().expect("unique rule count panicked"),
+                    exact_allow,
                 )
-                .expect("sorted exact_block")
             });
-
-            // Smallest job by far (allow lists are orders of magnitude shorter
-            // than block lists), so the caller's thread takes it rather than
-            // paying to spawn a fourth.
-            exact_allow_entries.sort();
-            exact_allow_entries.dedup();
-            let exact_allow =
-                FstSet::from_iter(exact_allow_entries.iter().map(std::string::String::as_str))
-                    .expect("sorted exact_allow");
-
-            (
-                block_trie_job.join().expect("block trie build panicked"),
-                allow_trie_job.join().expect("allow trie build panicked"),
-                exact_block_job.join().expect("exact block build panicked"),
-                exact_allow,
-            )
-        });
 
         Self {
-            list_names,
+            lists,
             exact_block,
             block_trie,
             exact_allow,
             allow_trie,
+            unique_rules,
         }
     }
 
@@ -430,18 +544,20 @@ impl FilterEngine {
         block_rules: Vec<(ParsedRule, String)>,
         allow_rules: Vec<ParsedRule>,
     ) -> Self {
-        let mut list_names: Vec<Box<str>> = Vec::new();
+        let mut lists: Vec<ListMeta> = Vec::new();
         let mut list_intern: HashMap<String, u16> = HashMap::new();
         let mut indexed = Vec::with_capacity(block_rules.len());
         for (rule, name) in block_rules {
             let idx = *list_intern.entry(name).or_insert_with_key(|k| {
-                let i = list_names.len() as u16;
-                list_names.push(Box::from(k.as_str()));
+                let i = lists.len() as u16;
+                // Ad-hoc callers have no `filter_lists` row to point at, so the
+                // ids are positional. `rebuild_filter` passes the real ones.
+                lists.push(ListMeta::new(k.as_str(), i as i64 + 1));
                 i
             });
             indexed.push((rule, idx));
         }
-        Self::new(list_names, indexed, allow_rules)
+        Self::new(lists, indexed, allow_rules)
     }
 
     /// Check whether `domain` should be blocked.
@@ -482,7 +598,7 @@ impl FilterEngine {
         if let Some(list_idx) = self.exact_block.get(lower.as_bytes()) {
             return FilterResult::Blocked {
                 rule: lower.to_string(),
-                list: self.list_names[list_idx as usize].to_string(),
+                list: self.lists[list_idx as usize].name.to_string(),
             };
         }
 
@@ -490,12 +606,28 @@ impl FilterEngine {
         if let Some((list_idx, depth)) = self.block_trie.lookup(&labels) {
             return FilterResult::Blocked {
                 rule: reconstruct_domain(&labels, depth),
-                list: self.list_names[list_idx as usize].to_string(),
+                list: self.lists[list_idx as usize].name.to_string(),
             };
         }
 
         // 5. Default
         FilterResult::Allowed { rule: None }
+    }
+
+    /// What each list is contributing that nothing else does, keyed by
+    /// `filter_lists.id` ([`CUSTOM_LIST_ID`] for custom rules).
+    ///
+    /// A list absent from the map contributed no block rules at all — it is
+    /// disabled, empty, or failed to download. Zero means every rule it holds
+    /// is also provided by another list, so removing it changes nothing *while
+    /// those lists stay*: remove one list at a time and read the number again,
+    /// because two identical lists both report zero.
+    pub fn unique_rules_by_list(&self) -> HashMap<i64, u32> {
+        self.lists
+            .iter()
+            .zip(&self.unique_rules)
+            .map(|(meta, count)| (meta.id, *count))
+            .collect()
     }
 
     /// Approximate count of blocked domains (exact entries + trie terminals).
@@ -523,6 +655,131 @@ mod tests {
             action: RuleAction::Block,
             is_subdomain: true,
         }
+    }
+
+    fn block_exact(domain: &str) -> ParsedRule {
+        ParsedRule {
+            domain: domain.to_string(),
+            action: RuleAction::Block,
+            is_subdomain: false,
+        }
+    }
+
+    /// Build an engine whose lists carry the given ids, so the per-list counts
+    /// can be looked up the way the filters page looks them up.
+    fn engine_with_lists(rules: Vec<(ParsedRule, i64)>) -> FilterEngine {
+        let mut lists: Vec<ListMeta> = Vec::new();
+        let mut indexed = Vec::new();
+        for (rule, id) in rules {
+            let idx = if let Some(i) = lists.iter().position(|m| m.id == id) {
+                i as u16
+            } else {
+                lists.push(ListMeta::new(&format!("list-{id}"), id));
+                (lists.len() - 1) as u16
+            };
+            indexed.push((rule, idx));
+        }
+        FilterEngine::new(lists, indexed, Vec::new())
+    }
+
+    #[test]
+    fn a_lists_own_rules_are_all_unique_when_it_is_the_only_list() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("ads.example"), 1),
+            (block_exact("tracker.example"), 1),
+        ]);
+        assert_eq!(engine.unique_rules_by_list(), HashMap::from([(1, 2)]));
+    }
+
+    /// The case the filters page exists for: two lists holding the same rule
+    /// each report nothing of their own, because removing either one on its own
+    /// changes nothing.
+    #[test]
+    fn a_rule_two_lists_both_hold_is_unique_to_neither() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("ads.example"), 1),
+            (block_subdomain("ads.example"), 2),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(1, 0), (2, 0)])
+        );
+    }
+
+    /// A subdomain rule covers everything under it, so a second list's rules
+    /// inside that space are already provided and count for nothing.
+    #[test]
+    fn a_broader_subdomain_rule_covers_a_narrower_rule_in_another_list() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("example"), 1),
+            (block_subdomain("ads.example"), 2),
+            (block_exact("deep.ads.example"), 2),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(1, 1), (2, 0)])
+        );
+    }
+
+    /// The asymmetry that makes this more than a set difference: an exact rule
+    /// blocks one domain, so it cannot stand in for a subdomain rule covering
+    /// that domain *and everything under it*.
+    #[test]
+    fn an_exact_rule_elsewhere_does_not_cover_a_subdomain_rule() {
+        let engine = engine_with_lists(vec![
+            (block_exact("ads.example"), 1),
+            (block_subdomain("ads.example"), 2),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(1, 0), (2, 1)]),
+            "the exact rule is covered by the subdomain one, but not the reverse"
+        );
+    }
+
+    /// A parent domain in another list covers an exact rule, since the exact
+    /// rule blocks nothing the broader one does not already block.
+    #[test]
+    fn a_parent_subdomain_rule_covers_an_exact_rule_in_another_list() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("example"), 1),
+            (block_exact("ads.example"), 2),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(1, 1), (2, 0)])
+        );
+    }
+
+    /// Sibling domains are not parents of one another, so neither covers the
+    /// other. Guards the suffix walk against matching on a bare label boundary.
+    #[test]
+    fn a_sibling_domain_does_not_cover_anything() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("ads.example"), 1),
+            (block_subdomain("cdn.example"), 2),
+            // Not a subdomain of `ads.example` — it merely ends with the same
+            // text without a label boundary.
+            (block_subdomain("notads.example"), 2),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(1, 1), (2, 2)])
+        );
+    }
+
+    /// Custom rules are a list like any other for this purpose: they can make
+    /// a downloaded list redundant, and be made redundant by one.
+    #[test]
+    fn custom_rules_take_part_in_the_comparison() {
+        let engine = engine_with_lists(vec![
+            (block_subdomain("ads.example"), CUSTOM_LIST_ID),
+            (block_subdomain("ads.example"), 3),
+        ]);
+        assert_eq!(
+            engine.unique_rules_by_list(),
+            HashMap::from([(CUSTOM_LIST_ID, 0), (3, 0)])
+        );
     }
 
     /// A single trie node can hold more than `u16::MAX` children on large

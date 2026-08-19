@@ -215,12 +215,12 @@ pub fn screenshots(now: i64) -> String {
            ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
             .to_string(),
         format!(
-            "UPDATE filter_lists SET enabled = 1, rule_count = 59842, last_updated = {}
+            "UPDATE filter_lists SET enabled = 1, rule_count = 7, last_updated = {}
                WHERE name = 'AdGuard DNS filter';",
             lu - 7200
         ),
         format!(
-            "UPDATE filter_lists SET enabled = 1, rule_count = 6540, last_updated = {}
+            "UPDATE filter_lists SET enabled = 1, rule_count = 1, last_updated = {}
                WHERE name = 'AdAway Default Blocklist';",
             lu - 7200
         ),
@@ -232,8 +232,10 @@ pub fn screenshots(now: i64) -> String {
             lu - 90000
         ),
         // Content for the enabled lists so the second boot's rebuild yields a
-        // live engine without touching the network. `rule_count` above is what
-        // the UI displays, so the mismatch is invisible.
+        // live engine without touching the network. `rule_count` above has to
+        // match what is seeded here: the filters page's Impact column is
+        // computed from the loaded rules, so a list claiming 59,842 rules and
+        // contributing seven would read as a bug in the screenshots.
         "INSERT INTO filter_list_content (list_id, content)
            SELECT id, '||doubleclick.net^' || char(10) || '||googlesyndication.com^' || char(10) ||
                       '||app-measurement.com^' || char(10) || '||graph.facebook.com^' || char(10) ||

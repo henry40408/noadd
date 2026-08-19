@@ -121,7 +121,7 @@ pub struct ServerInfo {
         AddListRequest, AddListResponse, UpdateListRequest,
         AddRuleRequest, AddRuleResponse,
         FilterCheckRequest, CreateApiKeyRequest, CreateApiKeyResponse,
-        crate::db::CustomRuleRow, crate::db::FilterListRow, crate::db::ApiKeyRow,
+        crate::db::CustomRuleRow, FilterListResponse, crate::db::ApiKeyRow,
         crate::admin::stats::Summary,
     )),
     modifiers(&SecurityAddon),
@@ -2636,19 +2636,59 @@ async fn put_settings(
 #[utoipa::path(
     get, path = "/api/lists", tag = "lists",
     security(("api_key" = [])),
-    responses((status = 200, description = "All filter lists", body = [crate::db::FilterListRow]))
+    responses((status = 200, description = "All filter lists", body = [FilterListResponse]))
 )]
 async fn get_lists(
     State(state): State<AppState>,
     _auth: AuthedUser,
-) -> Result<Json<Vec<crate::db::FilterListRow>>, StatusCode> {
+) -> Result<Json<Vec<FilterListResponse>>, StatusCode> {
     let lists = state
         .db
         .get_filter_lists()
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // From the live engine, not storage: what a list uniquely provides is a
+    // property of the rule set currently loaded, not of the row.
+    let unique = state.filter.load().unique_rules_by_list();
 
-    Ok(Json(lists))
+    Ok(Json(
+        lists
+            .into_iter()
+            .map(|l| FilterListResponse {
+                unique_rules: unique.get(&l.id).map(|n| i64::from(*n)),
+                id: l.id,
+                name: l.name,
+                url: l.url,
+                enabled: l.enabled,
+                last_updated: l.last_updated,
+                rule_count: l.rule_count,
+            })
+            .collect(),
+    ))
+}
+
+/// A filter list, plus what removing it would cost.
+///
+/// The fields of `FilterListRow` are spelled out rather than flattened so the
+/// `OpenAPI` document describes one flat object, which is what the response is.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct FilterListResponse {
+    /// List id.
+    pub id: i64,
+    /// Display name.
+    pub name: String,
+    /// Source URL the list's contents are fetched from.
+    pub url: String,
+    /// Whether the list's rules are currently applied by the filter engine.
+    pub enabled: bool,
+    /// Unix timestamp (seconds) the list was last downloaded, or `0` if never.
+    pub last_updated: i64,
+    /// Number of rules parsed out of the list's content on last download.
+    pub rule_count: i64,
+    /// Rules this list provides that no other loaded list does — what would
+    /// stop being blocked if it were removed. `null` when the list contributes
+    /// no rules at all: it is disabled, empty, or its download failed.
+    pub unique_rules: Option<i64>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

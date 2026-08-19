@@ -15,6 +15,11 @@ ignore = [
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",
+    # h2 queues empty DATA frames without limit (low-severity DoS). Fixed in
+    # h2 0.4.16, published 2026-08-17 — inside the seven-day cooldown this
+    # project holds new releases to, so the bump waits rather than the CI gate
+    # being switched off. Remove this entry with that bump; tracked in #240.
+    "RUSTSEC-2026-0258",
 ]
 
 [licenses]
