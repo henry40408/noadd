@@ -119,6 +119,12 @@ pub async fn run() -> Result<Vec<String>> {
                 row.testid("filter-list-toggle")
                     .expect_checked(true)
                     .await?;
+                // Impact is rendered by the server like every other cell. This
+                // list downloaded nothing, which is a different answer from
+                // "nothing would be lost" and has to read as one.
+                row.testid("filter-list-impact")
+                    .expect_text_eq("No rules")
+                    .await?;
 
                 // Untick, then submit — two steps without a script, which is
                 // the trade the no-JS path makes. The submit is the button
@@ -128,6 +134,11 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc(r#"[data-testid="filter-list-row"][data-name="No JS List"]"#)
                     .testid("filter-list-toggle")
                     .expect_checked(false)
+                    .await?;
+                // A list that is off is not being asked what it contributes.
+                page.loc(r#"[data-testid="filter-list-row"][data-name="No JS List"]"#)
+                    .testid("filter-list-impact")
+                    .expect_text_eq("Disabled")
                     .await?;
 
                 // Edit expands the row on the server rather than opening a dialog.

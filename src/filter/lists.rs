@@ -4,7 +4,7 @@ use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::db::Database;
-use crate::filter::engine::FilterEngine;
+use crate::filter::engine::{CUSTOM_LIST_ID, FilterEngine, ListMeta};
 use crate::filter::parser::{RuleAction, parse_list, parse_rule};
 
 #[derive(Debug, Error)]
@@ -49,12 +49,12 @@ impl ListManager {
         let lists = self.db.get_filter_lists().await?;
 
         // Read each enabled list's content sequentially (a single SQLite
-        // connection serializes the calls anyway) into a `(name, content)`
+        // connection serializes the calls anyway) into an `(id, name, content)`
         // vector. Parse + trie build then run on the blocking pool.
-        let mut list_payloads: Vec<(String, String)> = Vec::new();
+        let mut list_payloads: Vec<(i64, String, String)> = Vec::new();
         for list in lists.iter().filter(|l| l.enabled) {
             if let Some(content) = self.db.get_filter_list_content(list.id).await? {
-                list_payloads.push((list.name.clone(), content));
+                list_payloads.push((list.id, list.name.clone(), content));
             }
         }
 
@@ -67,16 +67,19 @@ impl ListManager {
         // Parse each list on its own blocking worker so the parse cost (line
         // tokenising + per-rule `to_lowercase`) is shared across cores.
         let parse_start = std::time::Instant::now();
-        let mut set: tokio::task::JoinSet<(usize, String, Vec<crate::filter::parser::ParsedRule>)> =
-            tokio::task::JoinSet::new();
-        for (idx, (name, content)) in list_payloads.into_iter().enumerate() {
-            set.spawn_blocking(move || (idx, name, parse_list(&content)));
+        let mut set: tokio::task::JoinSet<(
+            usize,
+            ListMeta,
+            Vec<crate::filter::parser::ParsedRule>,
+        )> = tokio::task::JoinSet::new();
+        for (idx, (id, name, content)) in list_payloads.into_iter().enumerate() {
+            set.spawn_blocking(move || (idx, ListMeta::new(&name, id), parse_list(&content)));
         }
-        let mut parsed_lists: Vec<Option<(String, Vec<crate::filter::parser::ParsedRule>)>> =
+        let mut parsed_lists: Vec<Option<(ListMeta, Vec<crate::filter::parser::ParsedRule>)>> =
             (0..set.len()).map(|_| None).collect();
         while let Some(joined) = set.join_next().await {
-            let (idx, name, parsed) = joined?;
-            parsed_lists[idx] = Some((name, parsed));
+            let (idx, meta, parsed) = joined?;
+            parsed_lists[idx] = Some((meta, parsed));
         }
         let parse_ms = parse_start.elapsed().as_millis() as u64;
 
@@ -84,15 +87,15 @@ impl ListManager {
         // (FST + flat trie build) doesn't pin a runtime worker. DNS queries
         // served from other listener tasks keep moving while we rebuild.
         let engine = tokio::task::spawn_blocking(move || {
-            let mut list_names: Vec<Box<str>> = Vec::new();
+            let mut lists: Vec<ListMeta> = Vec::new();
             let mut block_rules: Vec<(crate::filter::parser::ParsedRule, u16)> = Vec::new();
             let mut allow_rules: Vec<crate::filter::parser::ParsedRule> = Vec::new();
 
             for slot in parsed_lists {
-                let Some((name, parsed)) = slot else {
+                let Some((meta, parsed)) = slot else {
                     continue;
                 };
-                let list_idx = list_names.len() as u16;
+                let list_idx = lists.len() as u16;
                 let mut used = false;
                 for rule in parsed {
                     match rule.action {
@@ -106,7 +109,7 @@ impl ListManager {
                     }
                 }
                 if used {
-                    list_names.push(Box::from(name.as_str()));
+                    lists.push(meta);
                 }
             }
 
@@ -116,8 +119,8 @@ impl ListManager {
             for rule_text in custom_block_rules {
                 if let Some(rule) = parse_rule(&rule_text) {
                     let idx = *custom_idx.get_or_insert_with(|| {
-                        let i = list_names.len() as u16;
-                        list_names.push(Box::from("Custom"));
+                        let i = lists.len() as u16;
+                        lists.push(ListMeta::new("Custom", CUSTOM_LIST_ID));
                         i
                     });
                     block_rules.push((rule, idx));
@@ -131,7 +134,7 @@ impl ListManager {
 
             let block_count = block_rules.len();
             let allow_count = allow_rules.len();
-            let engine = FilterEngine::new(list_names, block_rules, allow_rules);
+            let engine = FilterEngine::new(lists, block_rules, allow_rules);
             (engine, block_count, allow_count)
         })
         .await?;

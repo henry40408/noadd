@@ -337,6 +337,13 @@ pub struct FilterListView {
     last_updated_text: String,
     /// The raw timestamp `app.js` re-derives its own relative text from.
     last_updated: i64,
+    /// What stopping this list would cost, already phrased: `"41,200 rules"`,
+    /// `"No impact"`, or why there is no number to give.
+    impact_text: String,
+    /// The impact is zero — every rule is provided by another list too. Drawn
+    /// as a badge rather than a number, because it is the one value an
+    /// operator acts on.
+    impact_none: bool,
 }
 
 /// One custom rule, as the page shows it.
@@ -1830,6 +1837,32 @@ struct AccountView {
     new_key_token: String,
 }
 
+/// Phrase what removing one list would cost, from the engine's per-list counts.
+///
+/// The answers are deliberately different sentences rather than one number with
+/// edge cases: a disabled list is not being asked the question, a list the
+/// engine never loaded has nothing to compare, and only a list actually in the
+/// engine gets a count. A zero would read as "redundant" in every one of those
+/// cases, which is true in exactly one of them.
+pub fn list_impact<S: std::hash::BuildHasher>(
+    unique: &std::collections::HashMap<i64, u32, S>,
+    list: &crate::db::FilterListRow,
+) -> (String, bool) {
+    match unique.get(&list.id) {
+        Some(0) => ("No impact".to_string(), true),
+        Some(&1) => ("1 rule".to_string(), false),
+        Some(&count) => (format!("{} rules", thousands(i64::from(count))), false),
+        None if !list.enabled => ("Disabled".to_string(), false),
+        // Enabled and still not in the engine. Rules it parsed but did not
+        // contribute are allow rules, which block nothing and so have no impact
+        // to report; none at all means the download failed or parsed to
+        // nothing, which looks identical to a healthy list in every other
+        // column on this row.
+        None if list.rule_count > 0 => ("No block rules".to_string(), false),
+        None => ("No rules".to_string(), false),
+    }
+}
+
 /// Build the page from live storage plus whatever the caller is carrying.
 ///
 /// The shell comes in already built — by `ShellData::build_for("/account", …)`
@@ -2693,17 +2726,26 @@ async fn render_filters(
 
     let rows = state.db.get_filter_lists().await.unwrap_or_default();
     let all_disabled = !rows.is_empty() && rows.iter().all(|l| !l.enabled);
+    // Read from the live engine rather than storage: what a list uniquely
+    // provides is a fact about the rule set currently loaded, and it is
+    // recomputed by the rebuild that every change to any list already triggers.
+    let unique = state.filter.load().unique_rules_by_list();
     let lists = rows
         .into_iter()
-        .map(|l| FilterListView {
-            id: l.id,
-            name: l.name,
-            url: l.url,
-            enabled: l.enabled,
-            rule_count: thousands(l.rule_count),
-            rule_count_compact: compact(l.rule_count),
-            last_updated_text: time_ago(l.last_updated),
-            last_updated: l.last_updated,
+        .map(|l| {
+            let (impact_text, impact_none) = list_impact(&unique, &l);
+            FilterListView {
+                id: l.id,
+                name: l.name,
+                url: l.url,
+                enabled: l.enabled,
+                rule_count: thousands(l.rule_count),
+                rule_count_compact: compact(l.rule_count),
+                last_updated_text: time_ago(l.last_updated),
+                last_updated: l.last_updated,
+                impact_text,
+                impact_none,
+            }
         })
         .collect();
 

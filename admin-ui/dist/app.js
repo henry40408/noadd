@@ -1685,6 +1685,19 @@ class LogsPage extends LiveElement {
 customElements.define('logs-page', LogsPage);
 
 // --- Filters Page (merged Lists + Rules + Domain Test) ---
+// What turning a list off would cost, phrased exactly as `list_impact` in
+// `src/admin/pages.rs` phrases it — a column that reworded itself when the
+// poll landed would read as the value having changed.
+function listImpact(l) {
+  if (l.unique_rules === null || l.unique_rules === undefined) {
+    if (!l.enabled) return { text: 'Disabled', none: false };
+    return { text: l.rule_count > 0 ? 'No block rules' : 'No rules', none: false };
+  }
+  if (l.unique_rules === 0) return { text: 'No impact', none: true };
+  if (l.unique_rules === 1) return { text: '1 rule', none: false };
+  return { text: `${formatFull(l.unique_rules)} rules`, none: false };
+}
+
 class FiltersPage extends HTMLElement {
   // The body arrives server-rendered: every control here is a real form that
   // works on its own. What follows takes those forms over — same ids, same
@@ -1794,7 +1807,7 @@ class FiltersPage extends HTMLElement {
       const lists = await api.get('/api/lists');
 
       const body = this.querySelector('#lists-body');
-      body.innerHTML = lists.map(l => html`<tr data-testid="filter-list-row" data-name="${l.name}">
+      body.innerHTML = lists.map(l => { const impact = listImpact(l); return html`<tr data-testid="filter-list-row" data-name="${l.name}">
         <td>
           <form method="post" action="/filters/lists/${l.id}/toggle" class="list-toggle-form">
             <label class="toggle">
@@ -1806,6 +1819,7 @@ class FiltersPage extends HTMLElement {
         </td>
         <td class="text-primary">${l.name}</td>
         <td>${formatFull(l.rule_count)}</td>
+        <td data-testid="filter-list-impact">${impact.none ? html`<span class="badge badge-off">${impact.text}</span>` : impact.text}</td>
         <td>${l.last_updated ? timeAgo(l.last_updated) : 'never'}</td>
         <td style="white-space:nowrap">
           <a href="/filters?edit=${l.id}" class="btn btn-sm edit-list" data-id="${l.id}" data-name="${l.name}" data-url="${l.url}">Edit</a>
@@ -1813,7 +1827,7 @@ class FiltersPage extends HTMLElement {
             <button type="submit" class="btn btn-danger btn-sm del-list" data-id="${l.id}">${icons.trash}</button>
           </form>
         </td>
-      </tr>`).join('');
+      </tr>`; }).join('');
 
       const cards = this.querySelector('#lists-cards');
       cards.innerHTML = lists.map(l => html`<div class="log-card">
@@ -1833,6 +1847,7 @@ class FiltersPage extends HTMLElement {
         </div>
         <div class="log-card-row2">
           <span>${formatNum(l.rule_count)} rules</span>
+          <span data-testid="filter-list-impact-card">${listImpact(l).text}</span>
           <span>${l.last_updated ? timeAgo(l.last_updated) : 'never updated'}</span>
         </div>
       </div>`).join('');
