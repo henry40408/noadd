@@ -33,7 +33,12 @@
         without the navigation, but the shape of the result is the same.
       #}
       <form method="get" action="/logs" class="filters-row fade-in" id="log-filters">
-        <input type="text" id="log-search" name="q" value="{{ q }}" data-testid="logs-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower).">
+        <input type="text" id="log-search" name="q" value="{{ q }}" data-testid="logs-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower)."{% if !domain_suggestions.is_empty() %} list="log-domain-list"{% endif %} autocomplete="off">
+        {% if !domain_suggestions.is_empty() %}
+        <datalist id="log-domain-list">
+          {% for d in domain_suggestions %}<option value="{{ d }}">{% endfor %}
+        </datalist>
+        {% endif %}
         <select id="log-action" name="action" data-testid="logs-action">
           <option value=""{% if action == "" %} selected{% endif %}>All</option>
           <option value="allowed"{% if action == "allowed" %} selected{% endif %}>Allowed</option>

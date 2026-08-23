@@ -47,7 +47,12 @@
           query string is what makes the verdict refreshable and linkable.
         #}
         <form method="get" action="/filters" class="input-row" id="domain-test-form">
-          <input type="text" id="test-domain" name="test" data-testid="domain-test-input" placeholder="ads.example.com" value="{{ test_domain }}">
+          <input type="text" id="test-domain" name="test" data-testid="domain-test-input" placeholder="ads.example.com" value="{{ test_domain }}"{% if !domain_suggestions.is_empty() %} list="domain-list"{% endif %} autocomplete="off">
+          {% if !domain_suggestions.is_empty() %}
+          <datalist id="domain-list">
+            {% for d in domain_suggestions %}<option value="{{ d }}">{% endfor %}
+          </datalist>
+          {% endif %}
           <button type="submit" class="btn btn-primary btn-sm" id="test-btn" data-testid="domain-test-submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Test</button>
         </form>
         <div id="test-result" data-testid="domain-test-result" style="margin-top:12px">

@@ -123,6 +123,34 @@ pub async fn compute_top_domains(
     db.top_domains_since(since, limit).await
 }
 
+/// How far back the domain suggestions look. A week rather than the
+/// dashboard's day: those two boxes are used to chase something already
+/// noticed, and "it was misbehaving on Friday" has to still be offered on
+/// Monday. It also matches [`DEFAULT_LOG_RETENTION_DAYS`], so the window is
+/// the log itself on a default install.
+const DOMAIN_SUGGESTION_WINDOW_SECS: i64 = DEFAULT_LOG_RETENTION_DAYS * 86400;
+
+/// How many domains those boxes offer. Long enough to cover a home network's
+/// regulars, short enough that the dropdown stays a shortlist — past a screenful
+/// scrolling it is slower than typing.
+const DOMAIN_SUGGESTION_LIMIT: i64 = 20;
+
+/// The domains to suggest in a box the operator types a domain into: the
+/// `/filters` tester and the `/logs` search.
+///
+/// Ordered by how often each was queried, not alphabetically — the whole point
+/// is that the domain being chased is near the top, and a browser renders a
+/// datalist in document order. Empty on a read failure or an empty log, which
+/// the pages turn into no `<datalist>` at all rather than an empty one.
+pub async fn domain_suggestions(db: &Database, now: i64) -> Vec<String> {
+    db.top_domains_since(now - DOMAIN_SUGGESTION_WINDOW_SECS, DOMAIN_SUGGESTION_LIMIT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| d.domain)
+        .collect()
+}
+
 pub async fn compute_top_clients(
     db: &Database,
     now: i64,
@@ -475,6 +503,82 @@ mod tests {
         assert_eq!(h.bytes_per_log, 0.0);
         assert_eq!(h.log_coverage_days, 0.0);
         assert_eq!(h.projected_full_bytes, 0);
+    }
+
+    fn log_for(domain: &str, ms: i64) -> crate::db::QueryLogEntry {
+        crate::db::QueryLogEntry {
+            domain: domain.into(),
+            ..log_at(ms)
+        }
+    }
+
+    /// The suggestions are a shortlist of what the resolver has actually seen,
+    /// most-queried first — the domain being chased should be near the top,
+    /// and a browser renders a datalist in document order.
+    #[tokio::test]
+    async fn domain_suggestions_are_ordered_by_how_often_each_was_queried() {
+        let db = Database::open(":memory:").await.unwrap();
+        let now = 10 * 86_400;
+        let recent_ms = (now - 3600) * 1000;
+
+        let mut logs = vec![log_for("rare.example", recent_ms)];
+        logs.extend((0..5).map(|_| log_for("common.example", recent_ms)));
+        logs.extend((0..3).map(|_| log_for("middling.example", recent_ms)));
+        db.insert_query_logs(&logs).await.unwrap();
+
+        assert_eq!(
+            domain_suggestions(&db, now).await,
+            vec![
+                "common.example".to_string(),
+                "middling.example".to_string(),
+                "rare.example".to_string(),
+            ]
+        );
+    }
+
+    /// The window is a week, not the dashboard's day: chasing something first
+    /// noticed on Friday has to still work on Monday.
+    #[tokio::test]
+    async fn domain_suggestions_span_a_week_but_no_further() {
+        let db = Database::open(":memory:").await.unwrap();
+        let now = 30 * 86_400;
+
+        db.insert_query_logs(&[
+            log_for("within.example", (now - 6 * 86_400) * 1000),
+            log_for("expired.example", (now - 8 * 86_400) * 1000),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(
+            domain_suggestions(&db, now).await,
+            vec!["within.example".to_string()]
+        );
+    }
+
+    /// A fresh install has nothing to suggest, and says so with an empty list
+    /// rather than an error — the pages turn that into no `<datalist>` at all.
+    #[tokio::test]
+    async fn domain_suggestions_are_empty_when_nothing_has_been_queried() {
+        let db = Database::open(":memory:").await.unwrap();
+        assert!(domain_suggestions(&db, 10 * 86_400).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn domain_suggestions_stay_a_shortlist() {
+        let db = Database::open(":memory:").await.unwrap();
+        let now = 10 * 86_400;
+        let recent_ms = (now - 3600) * 1000;
+
+        let logs: Vec<_> = (0..DOMAIN_SUGGESTION_LIMIT + 10)
+            .map(|i| log_for(&format!("d{i}.example"), recent_ms))
+            .collect();
+        db.insert_query_logs(&logs).await.unwrap();
+
+        assert_eq!(
+            domain_suggestions(&db, now).await.len(),
+            usize::try_from(DOMAIN_SUGGESTION_LIMIT).unwrap()
+        );
     }
 
     #[tokio::test]

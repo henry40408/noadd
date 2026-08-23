@@ -5564,6 +5564,24 @@ async fn logs_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
+/// Just the log table's rows.
+///
+/// Which queries survived a filter is a question about the rows, and asking it
+/// of the whole document asks something else: the search box's `<datalist>`
+/// offers every domain seen in the past week whatever the filter says, so
+/// `!html.contains(domain)` on the full page would fail for a row that is
+/// correctly absent.
+fn log_rows(html: &str) -> &str {
+    let start = html
+        .find(r#"<tbody id="log-body">"#)
+        .expect("the log table body was not rendered");
+    let end = html[start..]
+        .find("</tbody>")
+        .expect("the log table body was not closed")
+        + start;
+    &html[start..end]
+}
+
 /// Rows and the pager arrive rendered, and the filters come back showing what
 /// is applied — the whole page's state is in the URL.
 #[tokio::test]
@@ -5573,15 +5591,17 @@ async fn the_logs_page_renders_rows_and_keeps_its_filters() {
     seed_queries(&db, "good.example.com", "10.0.0.6", 1, false).await;
 
     let html = logs_html(&app, &token, "").await;
-    assert!(html.contains("ads.example.com") && html.contains("good.example.com"));
+    let rows = log_rows(&html);
+    assert!(rows.contains("ads.example.com") && rows.contains("good.example.com"));
     assert!(html.contains("Page 1 / 1"), "the pager was not rendered");
     assert!(html.contains("<logs-page>"), "the body was not wrapped");
 
     // A filter narrows the rows and comes back selected in the form.
     let html = logs_html(&app, &token, "?action=blocked").await;
-    assert!(html.contains("ads.example.com"));
+    let rows = log_rows(&html);
+    assert!(rows.contains("ads.example.com"));
     assert!(
-        !html.contains("good.example.com"),
+        !rows.contains("good.example.com"),
         "the allowed query survived a blocked-only filter"
     );
     assert!(
@@ -5596,9 +5616,75 @@ async fn the_logs_page_renders_rows_and_keeps_its_filters() {
         "the search term was discarded"
     );
     assert!(
-        !html.contains("ads.example.com"),
+        !log_rows(&html).contains("ads.example.com"),
         "the search did not filter"
     );
+}
+
+/// Both boxes an operator types a domain into offer what the resolver has
+/// actually seen, most-queried first. The two pages share one source, so this
+/// covers both.
+#[tokio::test]
+async fn the_domain_boxes_suggest_recently_queried_domains() {
+    let (app, token, db) = setup_with_db().await;
+    seed_queries(&db, "rare.example.com", "10.0.0.5", 1, false).await;
+    seed_queries(&db, "common.example.com", "10.0.0.6", 5, true).await;
+
+    for (path, list_id) in [("/logs", "log-domain-list"), ("/filters", "domain-list")] {
+        let res = app
+            .clone()
+            .oneshot(authed("GET", path, &token, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_text(res).await;
+
+        assert!(
+            html.contains(&format!(r#"<datalist id="{list_id}">"#)),
+            "{path}: {list_id} not rendered"
+        );
+        assert!(
+            html.contains(&format!(r#"list="{list_id}""#)),
+            "{path}: the input does not reference {list_id}"
+        );
+
+        let common_at = html
+            .find(r#"<option value="common.example.com">"#)
+            .unwrap_or_else(|| panic!("{path}: common.example.com not offered"));
+        let rare_at = html
+            .find(r#"<option value="rare.example.com">"#)
+            .unwrap_or_else(|| panic!("{path}: rare.example.com not offered"));
+        assert!(
+            common_at < rare_at,
+            "{path}: the more-queried domain should be offered first"
+        );
+    }
+}
+
+/// A fresh install has seen nothing, so neither box gets a `<datalist>` — an
+/// empty one would open a dropdown with nothing in it.
+#[tokio::test]
+async fn the_domain_boxes_offer_no_list_before_anything_is_queried() {
+    let (app, token) = setup().await;
+
+    for (path, list_id) in [("/logs", "log-domain-list"), ("/filters", "domain-list")] {
+        let res = app
+            .clone()
+            .oneshot(authed("GET", path, &token, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_text(res).await;
+
+        assert!(
+            !html.contains(&format!(r#"<datalist id="{list_id}">"#)),
+            "{path}: an empty datalist was rendered"
+        );
+        assert!(
+            !html.contains(&format!(r#"list="{list_id}""#)),
+            "{path}: the input points at a datalist that is not there"
+        );
+    }
 }
 
 /// Paging carries every filter. Dropping them would look like the filter

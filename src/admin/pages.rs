@@ -377,6 +377,9 @@ pub struct FiltersTemplate {
     /// loudly — it is the one state where noadd looks healthy and does nothing.
     all_disabled: bool,
     test_domain: String,
+    /// Recently-queried domains, backing the tester's `<datalist>`. Empty on a
+    /// fresh install, which the template renders as no list at all.
+    domain_suggestions: Vec<String>,
     /// Whether a domain was tested at all. The verdict is flat rather than an
     /// `Option<…>` so the template needs nothing but `{% if %}`.
     tested: bool,
@@ -593,6 +596,10 @@ pub struct LogsTemplate {
     /// missing from the dropdown learns nothing except that the dropdown is
     /// unreliable.
     query_types: Vec<OptionView>,
+
+    /// Recently-queried domains, backing the search box's `<datalist>`. Empty
+    /// on a fresh install, which the template renders as no list at all.
+    domain_suggestions: Vec<String>,
 
     /// The filters as submitted, so the form comes back showing what is applied.
     q: String,
@@ -1221,6 +1228,9 @@ pub async fn logs_page(
     let href_for =
         |page: i64| logs_href(&logs_query_string(&q, &action, &query_type, &token, page));
 
+    let domain_suggestions =
+        crate::admin::stats::domain_suggestions(&state.db, crate::now_unix()).await;
+
     (
         jar,
         LogsTemplate {
@@ -1228,6 +1238,7 @@ pub async fn logs_page(
             rows,
             tokens,
             query_types,
+            domain_suggestions,
             filtered: !(q.is_empty()
                 && action.is_empty()
                 && query_type.is_empty()
@@ -2788,12 +2799,16 @@ async fn render_filters(
         (false, String::new(), String::new())
     };
 
+    let domain_suggestions =
+        crate::admin::stats::domain_suggestions(&state.db, crate::now_unix()).await;
+
     FiltersTemplate {
         shell,
         lists,
         rules,
         all_disabled,
         test_domain: view.test_domain,
+        domain_suggestions,
         tested,
         verdict_blocked,
         verdict_rule,
