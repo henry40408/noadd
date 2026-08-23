@@ -10,6 +10,17 @@ use crate::db::{
 /// to this, so the admin UI shows the retention that is actually in effect.
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
+/// Retention spans the settings form suggests, ascending, from a day of
+/// debugging up to a year. [`DEFAULT_LOG_RETENTION_DAYS`] is among them so the
+/// list can restore the default the operator started from.
+///
+/// Unlike the block-mode addresses, `apply_settings` does not validate this
+/// field — an unparseable value is stored and every reader falls back to the
+/// default. The suggestions are therefore held to the stricter bar the readers
+/// actually need: each must parse as a positive `i64`. Enforced by
+/// `log_retention_suggestions_are_usable`.
+pub const LOG_RETENTION_DAYS_SUGGESTIONS: &[i64] = &[1, 7, 14, 30, 90, 365];
+
 /// `Default` is all zeroes, which is what the dashboard renders when the read
 /// fails: a page of zeroes is more useful than one that will not load, and it
 /// is the same shape an appliance that has answered nothing yet reports.
@@ -398,6 +409,36 @@ mod tests {
         db.set_setting("log_retention_days", "30").await.unwrap();
         let h = compute_db_health(&db, 0).await.unwrap();
         assert_eq!(h.log_retention_days, Some(30));
+    }
+
+    /// The retention field takes anything the save is given, so the guarantee
+    /// the suggestions have to meet is the readers': each must come back as a
+    /// positive count rather than silently collapsing to the default.
+    #[tokio::test]
+    async fn log_retention_suggestions_are_usable() {
+        assert!(LOG_RETENTION_DAYS_SUGGESTIONS.contains(&DEFAULT_LOG_RETENTION_DAYS));
+
+        // A browser renders a datalist in document order, so an unsorted list
+        // reads as arbitrary.
+        assert!(
+            LOG_RETENTION_DAYS_SUGGESTIONS
+                .windows(2)
+                .all(|w| w[0] < w[1])
+        );
+
+        let db = Database::open(":memory:").await.unwrap();
+        for days in LOG_RETENTION_DAYS_SUGGESTIONS {
+            assert!(*days > 0, "retention of {days} days would keep nothing");
+            db.set_setting("log_retention_days", &days.to_string())
+                .await
+                .unwrap();
+            let h = compute_db_health(&db, 0).await.unwrap();
+            assert_eq!(
+                h.log_retention_days,
+                Some(*days),
+                "suggestion {days} did not survive the read back"
+            );
+        }
     }
 
     #[tokio::test]

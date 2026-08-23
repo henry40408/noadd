@@ -232,6 +232,12 @@ pub struct SettingsTemplate {
     log_retention_days: String,
     public_url: String,
     doh_access_policy: String,
+    /// Back the three free-text fields' `<datalist>`s. Slices of the constants
+    /// that live beside the checks they have to satisfy, so the suggestions
+    /// and the tests proving they are accepted share one source.
+    block_custom_ipv4_suggestions: &'static [&'static str],
+    block_custom_ipv6_suggestions: &'static [&'static str],
+    log_retention_suggestions: &'static [i64],
     error_field: &'static str,
     error_message: String,
     saved: bool,
@@ -2528,6 +2534,9 @@ fn settings_template(
             "" => "allow".to_string(),
             other => other.to_string(),
         },
+        block_custom_ipv4_suggestions: crate::admin::api::BLOCK_CUSTOM_IPV4_SUGGESTIONS,
+        block_custom_ipv6_suggestions: crate::admin::api::BLOCK_CUSTOM_IPV6_SUGGESTIONS,
+        log_retention_suggestions: crate::admin::stats::LOG_RETENTION_DAYS_SUGGESTIONS,
         error_field,
         error_message,
         saved,

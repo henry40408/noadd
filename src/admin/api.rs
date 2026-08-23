@@ -2468,6 +2468,23 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
+/// Addresses the settings form suggests for `block_custom_ipv4`, in the order
+/// shown. `0.0.0.0` is the same answer the built-in `null_ip` mode gives, and
+/// it earns its place here anyway: the two custom fields are set
+/// independently, so pinning A records to a real host while leaving AAAA at
+/// null is a normal thing to want. `192.0.2.1` is TEST-NET-1 (RFC 5737),
+/// reserved for exactly this kind of use.
+///
+/// Every entry must parse as [`std::net::Ipv4Addr`], the same check
+/// [`apply_settings`] runs — a suggestion the form rejects is worse than none,
+/// because the operator picked it out of the browser's own dropdown. Enforced
+/// by `block_custom_ip_suggestions_are_all_accepted`.
+pub const BLOCK_CUSTOM_IPV4_SUGGESTIONS: &[&str] = &["0.0.0.0", "127.0.0.1", "192.0.2.1"];
+
+/// The IPv6 half of [`BLOCK_CUSTOM_IPV4_SUGGESTIONS`], same contract against
+/// [`std::net::Ipv6Addr`]. `100::` is the discard-only prefix (RFC 6666).
+pub const BLOCK_CUSTOM_IPV6_SUGGESTIONS: &[&str] = &["::", "::1", "100::"];
+
 /// Why a settings save was refused.
 ///
 /// The API answers any rejection with a bare 400. The settings page needs to

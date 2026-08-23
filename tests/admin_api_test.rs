@@ -176,6 +176,23 @@ async fn build_app_opts(
     )
 }
 
+/// The `value` of the `<input>` carrying `id`, or `None` if there is no such
+/// input.
+///
+/// Worth the twenty lines: a bare `html.contains(r#"value="30""#)` also matches
+/// the `<option>`s inside the settings page's datalists, so a field asserted
+/// that way passes whether or not it holds the value — and passes hardest when
+/// the number is a common one, which is exactly what a suggestion list is made
+/// of. Anchoring to the input's own tag keeps the assertion about the field.
+fn input_value<'a>(html: &'a str, id: &str) -> Option<&'a str> {
+    let id_at = html.find(&format!(r#"id="{id}""#))?;
+    let tag_start = html[..id_at].rfind('<')?;
+    let tag = &html[tag_start..tag_start + html[tag_start..].find('>')?];
+    let value_at = tag.find(r#"value=""#)? + r#"value=""#.len();
+    let rest = &tag[value_at..];
+    Some(&rest[..rest.find('"')?])
+}
+
 #[tokio::test]
 async fn rebuild_status_unauthenticated_returns_401() {
     let (app, _token) = setup().await;
@@ -1554,6 +1571,92 @@ async fn test_invalid_block_custom_ipv4_rejected() {
         json.get("block_mode").is_none(),
         "block_mode must not be persisted when the request is rejected, got: {json}"
     );
+}
+
+/// The `<datalist>` promise for the two custom-IP fields: every address the
+/// settings form offers is one the save actually takes. A suggestion the form
+/// rejects is worse than none — the operator picked it out of the browser's
+/// own dropdown, so a 400 there reads as a bug rather than a typo.
+#[tokio::test]
+async fn block_custom_ip_suggestions_are_all_accepted() {
+    use noadd::admin::api::{BLOCK_CUSTOM_IPV4_SUGGESTIONS, BLOCK_CUSTOM_IPV6_SUGGESTIONS};
+
+    let (app, token) = setup().await;
+
+    assert!(!BLOCK_CUSTOM_IPV4_SUGGESTIONS.is_empty());
+    assert_eq!(
+        BLOCK_CUSTOM_IPV6_SUGGESTIONS.len(),
+        BLOCK_CUSTOM_IPV4_SUGGESTIONS.len(),
+        "the form shows the two lists side by side; keep them the same depth"
+    );
+
+    // Pair them off so each save exercises both fields at once, which is how
+    // custom_ip mode is actually used.
+    for (v4, v6) in BLOCK_CUSTOM_IPV4_SUGGESTIONS
+        .iter()
+        .zip(BLOCK_CUSTOM_IPV6_SUGGESTIONS)
+    {
+        let body = format!(
+            r#"{{"block_mode":"custom_ip","block_custom_ipv4":"{v4}","block_custom_ipv6":"{v6}"}}"#
+        );
+        let response = app
+            .clone()
+            .oneshot(authed("PUT", "/api/settings", &token, Some(&body)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "suggested pair {v4} / {v6} was rejected"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(authed("GET", "/api/settings", &token, None))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["block_custom_ipv4"], *v4);
+        assert_eq!(json["block_custom_ipv6"], *v6);
+    }
+}
+
+/// The same promise for the retention field, which `apply_settings` does not
+/// validate: the save takes anything, so the bar is that every suggestion
+/// round-trips and reads back as the positive count the prune task needs.
+#[tokio::test]
+async fn log_retention_suggestions_are_all_accepted() {
+    use noadd::admin::stats::LOG_RETENTION_DAYS_SUGGESTIONS;
+
+    let (app, token) = setup().await;
+
+    for days in LOG_RETENTION_DAYS_SUGGESTIONS {
+        let body = format!(r#"{{"log_retention_days":"{days}"}}"#);
+        let response = app
+            .clone()
+            .oneshot(authed("PUT", "/api/settings", &token, Some(&body)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "suggested retention {days} was rejected"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(authed("GET", "/api/settings", &token, None))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["log_retention_days"], days.to_string());
+    }
 }
 
 #[tokio::test]
@@ -4430,6 +4533,57 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     assert!(html.contains("statusbar"));
 }
 
+/// The render half of the `<datalist>` contract — the API tests prove the save
+/// takes every suggestion, this proves the page actually offers them.
+#[tokio::test]
+async fn the_settings_page_offers_suggestions_for_its_free_text_fields() {
+    use noadd::admin::api::{BLOCK_CUSTOM_IPV4_SUGGESTIONS, BLOCK_CUSTOM_IPV6_SUGGESTIONS};
+    use noadd::admin::stats::LOG_RETENTION_DAYS_SUGGESTIONS;
+
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed("GET", "/settings", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+
+    // Each input points at its list, and the list exists.
+    for (input_id, list_id) in [
+        ("s-block-ipv4", "block-ipv4-list"),
+        ("s-block-ipv6", "block-ipv6-list"),
+        ("s-retention", "retention-list"),
+    ] {
+        assert!(
+            html.contains(&format!(r#"id="{input_id}""#)),
+            "{input_id} input missing"
+        );
+        assert!(
+            html.contains(&format!(r#"list="{list_id}""#)),
+            "{input_id} does not reference {list_id}"
+        );
+        assert!(
+            html.contains(&format!(r#"<datalist id="{list_id}">"#)),
+            "{list_id} not rendered"
+        );
+    }
+
+    for v in BLOCK_CUSTOM_IPV4_SUGGESTIONS
+        .iter()
+        .chain(BLOCK_CUSTOM_IPV6_SUGGESTIONS)
+        .map(std::string::ToString::to_string)
+        .chain(LOG_RETENTION_DAYS_SUGGESTIONS.iter().map(i64::to_string))
+    {
+        assert!(
+            html.contains(&format!(r#"<option value="{v}">"#)),
+            "suggestion {v} not offered"
+        );
+    }
+}
+
 /// The account page names who is signed in without the client asking.
 #[tokio::test]
 async fn the_account_page_renders_who_is_signed_in() {
@@ -4555,7 +4709,11 @@ async fn the_settings_page_renders_current_values() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&bytes);
-    assert!(html.contains(r#"value="21""#), "retention was not rendered");
+    assert_eq!(
+        input_value(&html, "s-retention"),
+        Some("21"),
+        "retention was not rendered"
+    );
     assert!(
         html.contains(r#"<option value="nxdomain" selected>"#),
         "the stored block mode was not selected"
@@ -4593,7 +4751,7 @@ async fn a_settings_save_redirects_and_persists() {
         .unwrap();
     let html = String::from_utf8_lossy(&bytes);
     assert!(html.contains(r#"<option value="round-robin" selected>"#));
-    assert!(html.contains(r#"value="14""#));
+    assert_eq!(input_value(&html, "s-retention"), Some("14"));
 }
 
 /// A rejected value re-renders the form with everything the operator typed —
@@ -4624,8 +4782,14 @@ async fn a_rejected_setting_keeps_the_whole_form_and_writes_nothing() {
         html.contains("Not a valid IPv4 address"),
         "the reason did not reach the form"
     );
-    assert!(
-        html.contains(r#"value="not-an-ip""#) && html.contains(r#"value="30""#),
+    assert_eq!(
+        input_value(&html, "s-block-ipv4"),
+        Some("not-an-ip"),
+        "the operator's input was discarded"
+    );
+    assert_eq!(
+        input_value(&html, "s-retention"),
+        Some("30"),
         "the operator's input was discarded"
     );
 
@@ -4637,8 +4801,9 @@ async fn a_rejected_setting_keeps_the_whole_form_and_writes_nothing() {
     let bytes = axum::body::to_bytes(page.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(
-        !String::from_utf8_lossy(&bytes).contains(r#"value="30""#),
+    assert_eq!(
+        input_value(&String::from_utf8_lossy(&bytes), "s-retention"),
+        Some(""),
         "a rejected save wrote part of itself"
     );
 }

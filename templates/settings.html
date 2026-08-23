@@ -86,15 +86,24 @@
         </div>
         <div class="field-msg{% if error_field == "block_mode" %} error{% endif %}" id="msg-block-mode">{% if error_field == "block_mode" %}{{ error_message }}{% endif %}</div>
         <div id="s-block-custom"{% if block_mode != "custom_ip" %} style="display:none"{% endif %}>
-          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv4" name="block_custom_ipv4" value="{{ block_custom_ipv4 }}" placeholder="Custom IPv4 for A, e.g. 192.0.2.1"></div>
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv4" name="block_custom_ipv4" value="{{ block_custom_ipv4 }}" placeholder="Custom IPv4 for A, e.g. 192.0.2.1" list="block-ipv4-list" autocomplete="off"></div>
+          <datalist id="block-ipv4-list">
+            {% for ip in block_custom_ipv4_suggestions %}<option value="{{ ip }}">{% endfor %}
+          </datalist>
           <div class="field-msg{% if error_field == "block_custom_ipv4" %} error{% endif %}" id="msg-block-ipv4">{% if error_field == "block_custom_ipv4" %}{{ error_message }}{% endif %}</div>
-          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv6" name="block_custom_ipv6" value="{{ block_custom_ipv6 }}" placeholder="Custom IPv6 for AAAA, e.g. 100::1"></div>
+          <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-block-ipv6" name="block_custom_ipv6" value="{{ block_custom_ipv6 }}" placeholder="Custom IPv6 for AAAA, e.g. 100::1" list="block-ipv6-list" autocomplete="off"></div>
+          <datalist id="block-ipv6-list">
+            {% for ip in block_custom_ipv6_suggestions %}<option value="{{ ip }}">{% endfor %}
+          </datalist>
           <div class="field-msg{% if error_field == "block_custom_ipv6" %} error{% endif %}" id="msg-block-ipv6">{% if error_field == "block_custom_ipv6" %}{{ error_message }}{% endif %}</div>
         </div>
       </div>
       <div class="card fade-in" style="animation-delay:0.1s">
         <div class="card-title">Log Retention</div>
-        <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-retention" name="log_retention_days" value="{{ log_retention_days }}" placeholder="7" style="max-width:80px"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <div class="input-row" style="margin-bottom:2px"><input type="text" id="s-retention" name="log_retention_days" value="{{ log_retention_days }}" placeholder="7" style="max-width:80px" list="retention-list" autocomplete="off"><span style="color:var(--text-dim);font-size:0.85rem">days</span></div>
+        <datalist id="retention-list">
+          {% for d in log_retention_suggestions %}<option value="{{ d }}">{% endfor %}
+        </datalist>
         <div class="field-msg{% if error_field == "log_retention_days" %} error{% endif %}" id="msg-retention">{% if error_field == "log_retention_days" %}{{ error_message }}{% endif %}</div>
       </div>
       <div class="card fade-in" style="animation-delay:0.12s">
