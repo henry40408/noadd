@@ -227,7 +227,7 @@ fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let s = std::str::from_utf8(chunk).ok()?;
         out[i] = u8::from_str_radix(s, 16).ok()?;
     }

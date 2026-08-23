@@ -2106,11 +2106,13 @@ async fn change_own_password(
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChangePasswordRequest>,
-) -> Result<(CookieJar, StatusCode), Response> {
-    let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)
-        .map_err(IntoResponse::into_response)?;
+) -> Response {
+    let (user_id, token_hash) = match current_session(&state, connect.as_deref(), &headers, &jar) {
+        Ok(session) => session,
+        Err(status) => return status.into_response(),
+    };
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    let jar = change_password_for_session(
+    match change_password_for_session(
         &state,
         &headers,
         jar,
@@ -2121,13 +2123,13 @@ async fn change_own_password(
         &body.new_password,
     )
     .await
-    .map_err(|err| match err {
-        PasswordChangeError::RateLimited => StatusCode::TOO_MANY_REQUESTS.into_response(),
-        PasswordChangeError::Rejected(message) => bad_request(message).into_response(),
-        PasswordChangeError::WrongPassword => StatusCode::UNAUTHORIZED.into_response(),
-        PasswordChangeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    })?;
-    Ok((jar, StatusCode::NO_CONTENT))
+    {
+        Ok(jar) => (jar, StatusCode::NO_CONTENT).into_response(),
+        Err(PasswordChangeError::RateLimited) => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        Err(PasswordChangeError::Rejected(message)) => bad_request(message).into_response(),
+        Err(PasswordChangeError::WrongPassword) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(PasswordChangeError::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Replace the caller's session with a freshly minted one and hand back the
