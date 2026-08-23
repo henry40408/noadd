@@ -27,7 +27,7 @@ fn post_content_type_ok(headers: &HeaderMap) -> bool {
     let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) else {
         return true;
     };
-    ct.to_str().ok().is_some_and(|s| {
+    ct.to_str().is_ok_and(|s| {
         s.split(';')
             .next()
             .unwrap_or("")
