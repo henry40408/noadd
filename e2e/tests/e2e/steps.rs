@@ -117,8 +117,6 @@ async fn set_list_enabled(page: &Page, name: &str, enabled: bool) -> Result<()> 
     toggle.expect_checked(enabled).await
 }
 
-// --- common ---------------------------------------------------------------
-
 #[given("I am signed in to the admin UI")]
 async fn signed_in(world: &mut NoaddWorld) -> StepResult {
     ensure_signed_in(world.page()?).await?;
@@ -143,8 +141,6 @@ async fn see_section(world: &mut NoaddWorld, name: String) -> StepResult {
     world.page()?.expect_text(&name).await?;
     Ok(())
 }
-
-// --- first-run setup and authentication -----------------------------------
 
 #[given("the admin UI has never been configured")]
 async fn never_configured(world: &mut NoaddWorld) -> StepResult {
@@ -296,8 +292,6 @@ async fn reload_keeps_signed_in(world: &mut NoaddWorld) -> StepResult {
     page.testid("login-submit").expect_count(0).await?;
     Ok(())
 }
-
-// --- dashboard and statistics ---------------------------------------------
 
 #[then(expr = "I see the {string} summary card")]
 async fn see_summary_card(world: &mut NoaddWorld, name: String) -> StepResult {
@@ -490,8 +484,6 @@ async fn throughput_mean(world: &mut NoaddWorld, value: String) -> StepResult {
     Ok(())
 }
 
-// --- filter lists ---------------------------------------------------------
-
 #[then(expr = "I see a filter list named {string}")]
 async fn see_list_named(world: &mut NoaddWorld, name: String) -> StepResult {
     list_row(world.page()?, &name).expect_visible().await?;
@@ -624,8 +616,6 @@ async fn registry_is_a_page(world: &mut NoaddWorld) -> StepResult {
     Ok(())
 }
 
-// --- custom rules and the domain test -------------------------------------
-
 #[when(regex = r#"^I (?:add|have added) the custom rule "(.*)"$"#)]
 #[given(regex = r#"^I (?:add|have added) the custom rule "(.*)"$"#)]
 async fn add_rule(world: &mut NoaddWorld, rule: String) -> StepResult {
@@ -735,8 +725,6 @@ async fn domain_test_mentions(world: &mut NoaddWorld, text: String) -> StepResul
         .await?;
     Ok(())
 }
-
-// --- onboarding guidance --------------------------------------------------
 
 #[then("I see a setup error about the password being too short")]
 async fn setup_too_short(world: &mut NoaddWorld) -> StepResult {

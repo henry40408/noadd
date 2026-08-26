@@ -581,7 +581,6 @@ async fn test_login_success() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Should have a Set-Cookie header
     let set_cookie = response.headers().get("set-cookie");
     assert!(set_cookie.is_some(), "Expected Set-Cookie header");
     let cookie_str = set_cookie.unwrap().to_str().unwrap();
@@ -1120,7 +1119,6 @@ async fn test_lists_crud() {
     let (app, token) = setup().await;
     let cookie = format!("session={token}");
 
-    // Add a list
     let response = app
         .clone()
         .oneshot(
@@ -1138,7 +1136,6 @@ async fn test_lists_crud() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Get lists
     let response = app
         .clone()
         .oneshot(
@@ -1197,7 +1194,6 @@ async fn test_rules_unified_api() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Get all rules
     let response = app
         .clone()
         .oneshot(
@@ -1221,7 +1217,6 @@ async fn test_rules_unified_api() {
     assert_eq!(rules[1]["rule"], "||ads.example.com^");
     assert_eq!(rules[1]["rule_type"], "block");
 
-    // Delete first rule
     let id = rules[0]["id"].as_i64().unwrap();
     let response = app
         .oneshot(
@@ -1284,7 +1279,6 @@ async fn test_logs_endpoint() {
     let (app, token) = setup().await;
     let cookie = format!("session={token}");
 
-    // Get logs (empty)
     let response = app
         .clone()
         .oneshot(
@@ -1371,7 +1365,6 @@ async fn test_setup_initial_password() {
         forward_auth: None,
     });
 
-    // Setup should succeed
     let response = app
         .clone()
         .oneshot(
@@ -1432,7 +1425,6 @@ async fn test_setup_initial_password() {
 async fn test_upstream_strategy_setting() {
     let (app, token) = setup().await;
 
-    // Set strategy to round-robin
     let response = app
         .clone()
         .oneshot(
@@ -1448,7 +1440,6 @@ async fn test_upstream_strategy_setting() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Read it back
     let response = app
         .oneshot(
             Request::builder()
@@ -1471,7 +1462,6 @@ async fn test_upstream_strategy_setting() {
 async fn test_dnssec_disabled_setting_round_trip() {
     let (app, token) = setup().await;
 
-    // Write dnssec_disabled = "true"
     let response = app
         .clone()
         .oneshot(
@@ -4163,8 +4153,6 @@ async fn check_list_url_unknown_id_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// --- Server-rendered pages ---
-
 /// A browser asking for a page it has no session for is redirected to the
 /// sign-in form, carrying where it was trying to go. The API answers the same
 /// situation with a 401; the two are halves of one guard, and they share the
@@ -4931,8 +4919,6 @@ async fn the_wizard_reports_why_a_password_was_rejected() {
     );
 }
 
-// --- Filters page (server-rendered) ---
-
 /// A form post to a path built at runtime, which `authed_form`'s `&'static str`
 /// body cannot express.
 fn authed_form_owned(uri: &str, token: &str, body: String) -> Request<Body> {
@@ -5552,8 +5538,6 @@ async fn the_filters_forms_refuse_an_anonymous_browser() {
     }
 }
 
-// --- Query log page (server-rendered) ---
-
 async fn logs_html(app: &axum::Router, token: &str, query: &str) -> String {
     let res = app
         .clone()
@@ -5866,8 +5850,6 @@ async fn the_logs_forms_refuse_an_anonymous_browser() {
     }
 }
 
-// --- Dashboard page (server-rendered) ---
-
 /// A router plus the database behind it, so a test can seed the query log the
 /// dashboard reads.
 async fn setup_with_db() -> (axum::Router, String, Database) {
@@ -5991,8 +5973,6 @@ async fn the_live_toggle_and_chart_are_marked_client_only() {
         "the chart card did not say what it needs"
     );
 }
-
-// --- Registry page ---
 
 /// A registry with one entry per case the page has to render: a plain one, a
 /// deprecated one, one in a second group, and one whose homepage is a
@@ -6303,8 +6283,6 @@ async fn a_failed_download_is_reported_on_the_page() {
     );
 }
 
-// --- Statistics page ---
-
 async fn stats_html(app: &axum::Router, token: &str, query: &str) -> String {
     let res = app
         .clone()
@@ -6453,8 +6431,6 @@ async fn a_stats_page_with_no_traffic_renders_empty_lists() {
         "a latency with no samples was rendered as a number"
     );
 }
-
-// --- Account page: tables and the password-proofed actions ---
 
 /// The admin password `build_app` provisions. Every form below that needs a
 /// password proof presents this one.

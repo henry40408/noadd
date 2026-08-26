@@ -40,8 +40,6 @@ use crate::admin::api::{
     needs_setup, remove_operator, start_password_session,
 };
 
-// --- Templates ---
-
 /// The sign-in screen.
 ///
 /// `error` and `username` exist so a refused sign-in can re-render this same
@@ -623,8 +621,6 @@ pub struct LogsTemplate {
     filtered: bool,
 }
 
-// --- Extractors ---
-
 /// An authenticated operator for a *page* request.
 ///
 /// Wraps [`AuthedUser`] and changes only what happens on failure: an API caller
@@ -669,8 +665,6 @@ impl FromRequestParts<AppState> for MaybeUser {
         ))
     }
 }
-
-// --- Flash notices ---
 
 /// A one-shot notice left behind by a redirect.
 ///
@@ -764,8 +758,6 @@ fn take_flash(jar: CookieJar) -> (Option<Flash>, CookieJar) {
     (Some(flash), jar)
 }
 
-// --- Redirect targets ---
-
 /// Accept only a same-origin destination expressed as an absolute path.
 ///
 /// `next` is attacker-controlled — it arrives in the query string, and the
@@ -821,8 +813,6 @@ fn encode_query_value(value: &str) -> String {
     }
     out
 }
-
-// --- Handlers ---
 
 #[derive(Deserialize)]
 pub struct NextQuery {
@@ -1051,8 +1041,6 @@ pub async fn setup_submit(
         Err(_) => Redirect::to("/login").into_response(),
     }
 }
-
-// --- Query log ---
 
 /// How many rows a page of the log holds. Matches what `app.js` asks for, so
 /// paging means the same thing whichever half of the UI is doing it.
@@ -1308,8 +1296,6 @@ pub async fn logs_clear_submit(
     (set_flash(jar, Flash::LogsCleared), Redirect::to("/logs")).into_response()
 }
 
-// --- Dashboard ---
-
 /// Full digits below a million, abbreviated above it.
 ///
 /// Mirrors `formatNumAdaptive` in `app.js`, which draws the same cards every
@@ -1478,8 +1464,6 @@ pub async fn dashboard_page(
         },
     )
 }
-
-// --- Statistics ---
 
 /// The statistics page's one parameter.
 #[derive(Deserialize)]
@@ -1804,8 +1788,6 @@ fn build_health_cards(health: crate::admin::stats::DbHealth) -> Vec<StatCardView
         },
     ]
 }
-
-// --- Account ---
 
 /// When an API key stops working.
 ///
@@ -2485,8 +2467,6 @@ pub async fn account_api_key_delete_submit(
     account_saved(jar, Flash::AccountSaved)
 }
 
-// --- Settings ---
-
 /// The settings the page renders. Absent keys come back as empty strings, which
 /// is what an unset setting means to every input on the page.
 async fn current_settings(state: &AppState) -> std::collections::HashMap<String, String> {
@@ -2656,8 +2636,6 @@ pub async fn settings_submit(
         }
     }
 }
-
-// --- Filters ---
 
 /// Thousands-separate an integer, matching what `Intl.NumberFormat` produces
 /// for the counts `app.js` renders into the same column.
@@ -3113,8 +3091,6 @@ pub async fn filters_rule_delete_submit(
     }
     filters_saved(jar, Flash::FiltersSaved)
 }
-
-// --- Filter registry ---
 
 /// A link that is safe to put in an `href`.
 ///

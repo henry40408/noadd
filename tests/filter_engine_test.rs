@@ -138,8 +138,6 @@ fn test_empty_engine_allows_everything() {
     assert_eq!(engine.blocked_domain_count(), 0);
 }
 
-// --- Build-path optimization (HashMap children + pre-interned names) ---
-
 #[test]
 fn new_with_pre_interned_list_names_resolves_provenance() {
     // Production path: caller hands FilterEngine an already-deduplicated list

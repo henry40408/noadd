@@ -77,7 +77,6 @@ impl QueryLogger {
                             flush(&self.db, &mut buffer).await;
                         }
                     } else {
-                        // Channel closed, flush remaining and exit
                         if !buffer.is_empty() {
                             flush(&self.db, &mut buffer).await;
                         }

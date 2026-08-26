@@ -93,7 +93,6 @@ async fn is_open_access(db: &Database) -> bool {
     if let Ok(Some(policy)) = db.get_setting("doh_access_policy").await {
         return policy.trim() != "deny";
     }
-    // Default: allow
     true
 }
 
@@ -104,8 +103,6 @@ async fn validate_token(db: &Database, token: &str) -> Result<String, StatusCode
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::FORBIDDEN)
 }
-
-// --- Token-authenticated routes ---
 
 async fn handle_get_with_token(
     State(state): State<DohState>,
@@ -152,8 +149,6 @@ async fn handle_post_with_token(
     let ip = client_ip_for(&state, connect.as_deref(), &headers);
     handle_dns_query(&state.handler, &body, ip, token_name).await
 }
-
-// --- Unauthenticated routes ---
 
 async fn handle_get(
     State(state): State<DohState>,

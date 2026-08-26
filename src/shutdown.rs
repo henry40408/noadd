@@ -94,9 +94,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_signal_returns_sender() {
         let (tx, _future) = shutdown_signal();
-        // Verify we can subscribe to the sender
         let mut rx = tx.subscribe();
-        // Manually send a shutdown signal
         tx.send(()).unwrap();
         let result = rx.recv().await;
         assert!(result.is_ok());

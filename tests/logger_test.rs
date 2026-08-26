@@ -15,10 +15,8 @@ async fn test_logger_flushes_on_threshold() {
     let threshold = 5;
     let (logger, tx) = QueryLogger::new(db.clone(), threshold, 300);
 
-    // Spawn the logger
     let handle = tokio::spawn(logger.run());
 
-    // Send exactly `threshold` entries
     for i in 0..threshold {
         let ctx = QueryContext {
             timestamp: 1000 + i as i64,
@@ -45,7 +43,6 @@ async fn test_logger_flushes_on_threshold() {
     drop(tx);
     handle.await.unwrap();
 
-    // Verify entries were written to the database
     let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), threshold);
 
@@ -139,7 +136,6 @@ async fn test_logger_flushes_on_interval() {
     let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), 2);
 
-    // Clean up
     drop(tx);
     handle.await.unwrap();
 }

@@ -174,9 +174,8 @@ async fn test_slot_released_after_fetcher_completes() {
     handler.handle(&query, client_ip, None).await.unwrap();
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
 
-    // Evict by using a different query type (A vs AAAA would be a separate
-    // key). Simpler: wait for TTL, but cached TTL is 60s. Instead, build
-    // a second handler sharing the upstream to verify the slot is reusable.
+    // A second handler shares the upstream but starts with an empty cache, so
+    // the slot is exercised again without waiting out the 60s cached TTL.
     let (handler2, _rx2) = make_test_handler(upstream_addr).await;
     handler2.handle(&query, client_ip, None).await.unwrap();
     assert_eq!(

@@ -27,7 +27,7 @@ pub fn user_agent() -> String {
 pub fn reclaim_memory() {
     // SAFETY: `mi_collect` is a thread-safe no-side-effect collection call;
     // `true` forces it to also return memory to the OS.
-    // FFI: mimalloc heap collection, no safe wrapper exists
+    // FFI: no safe wrapper exists for `mi_collect`.
     #[allow(unsafe_code)]
     unsafe {
         libmimalloc_sys::mi_collect(true);

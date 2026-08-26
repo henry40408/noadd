@@ -249,10 +249,9 @@ impl DnsHandler {
     ) -> Result<HandleOutcome, HandlerError> {
         let start = Instant::now();
 
-        // 0. Acquire in-flight permit. Held until this function returns, so
-        // the total number of queries actively consuming upstream / cache /
-        // filter resources is bounded — regardless of how many tasks upstream
-        // listeners have spawned.
+        // Held until this function returns, so the number of queries actively
+        // consuming upstream / cache / filter resources is bounded regardless
+        // of how many tasks the listeners have spawned.
         let _permit = match &self.concurrency_limit {
             Some(sem) => Some(
                 sem.clone()
@@ -263,15 +262,14 @@ impl DnsHandler {
             None => None,
         };
 
-        // 1. Parse query
         let message = Message::from_bytes(query_bytes)?;
 
-        // 1a. Reject requests we don't implement before touching the filter,
-        // cache, or upstream. A forwarding resolver only serves standard
-        // queries: any other opcode (STATUS/NOTIFY/UPDATE/...) gets NOTIMP,
-        // and an unsupported EDNS version gets BADVERS (RFC 6891 §6.1.3). Both
-        // echo the client's question and RD bit; neither is logged or
-        // rate-limited (they carry no domain to attribute).
+        // Rejected before touching the filter, cache, or upstream. A
+        // forwarding resolver only serves standard queries: any other opcode
+        // (STATUS/NOTIFY/UPDATE/...) gets NOTIMP, and an unsupported EDNS
+        // version gets BADVERS (RFC 6891 §6.1.3). Both echo the client's
+        // question and RD bit; neither is logged or rate-limited (they carry
+        // no domain to attribute).
         if message.metadata.op_code != OpCode::Query {
             return Ok(HandleOutcome {
                 bytes: build_notimp_response(&message)?,
@@ -287,7 +285,6 @@ impl DnsHandler {
 
         let query = message.queries.first().ok_or(HandlerError::NoQuery)?;
         let domain = query.name().to_ascii();
-        // Strip trailing dot for filter matching
         let domain_clean = domain.trim_end_matches('.');
         let query_type = query.query_type();
         let query_type_u16: u16 = query_type.into();
@@ -302,10 +299,10 @@ impl DnsHandler {
             upstream_dnssec_enabled: self.forwarder.dnssec_enabled(),
         };
 
-        // 2a. Per-IP rate limit. Token drained here protects upstream and
-        // cache from a single noisy client. REFUSED (rcode 5) is the
-        // semantically correct response; it tells the client the server
-        // is unwilling, not broken (as SERVFAIL would).
+        // The token drained here is what protects upstream and cache from a
+        // single noisy client. REFUSED (rcode 5) is the semantically correct
+        // answer; it tells the client the server is unwilling, not broken (as
+        // SERVFAIL would).
         if let Some(limiter) = &self.rate_limiter
             && !limiter.try_acquire(client_ip)
         {
@@ -340,7 +337,6 @@ impl DnsHandler {
             });
         }
 
-        // 2b. Check filter
         let filter_guard = self.filter.load();
         let filter_result = filter_guard.check(domain_clean);
 
@@ -382,7 +378,6 @@ impl DnsHandler {
                 };
                 let cache_key = CacheKey::new(domain_lower, query_type_u16, response_profile);
 
-                // 3. Check cache
                 if let Some(cached) = self.cache.get(&cache_key).await {
                     let bytes = prepare_cached_response(&cached, query_id);
                     let remaining = remaining_ttl_secs(&cached);
@@ -445,11 +440,10 @@ impl DnsHandler {
                         cached.authenticated_data(),
                     )
                 } else {
-                    // 4. Forward upstream, coalescing concurrent misses.
-                    //    If another task is already fetching this key,
-                    //    subscribe to its Notify, re-check cache once it
-                    //    fires, and only fall back to our own forward if
-                    //    the original fetcher failed.
+                    // Concurrent misses coalesce: if another task is already
+                    // fetching this key, subscribe to its Notify, re-check the
+                    // cache once it fires, and only forward ourselves if the
+                    // original fetcher failed.
                     let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
                         BeginResult::Fetcher(g) => Some(g),
                         BeginResult::Waiter(notify) => {
@@ -523,7 +517,6 @@ impl DnsHandler {
 
         let elapsed = start.elapsed().as_millis() as i64;
 
-        // 5. Send log context (non-blocking)
         let result = if self.log_query_results {
             extract_result_summary(&response_bytes)
         } else {

@@ -47,7 +47,6 @@ fn looks_like_ip(s: &str) -> bool {
 pub fn parse_rule(line: &str) -> Option<ParsedRule> {
     let trimmed = line.trim();
 
-    // Empty or whitespace-only
     if trimmed.is_empty() {
         return None;
     }
@@ -87,7 +86,7 @@ pub fn parse_rule(line: &str) -> Option<ParsedRule> {
     if looks_like_ip(trimmed) {
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() >= 2 {
-            // Take the second token as the domain, ignore inline comments
+            // Anything past the domain is an inline comment.
             let domain = parts[1].to_lowercase();
             if is_localhost_entry(&domain) || !domain.contains('.') {
                 return None;
@@ -102,7 +101,7 @@ pub fn parse_rule(line: &str) -> Option<ParsedRule> {
         return None;
     }
 
-    // Plain domain: must contain a dot, no spaces
+    // Plain domain.
     if !trimmed.contains(' ') && trimmed.contains('.') {
         let domain = trimmed.to_lowercase();
         if is_localhost_entry(&domain) {

@@ -52,7 +52,6 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                     break;
                 }
 
-                // 2. Read the DNS message
                 let mut buf = vec![0u8; len];
                 if let Err(e) = reader.read_exact(&mut buf).await {
                     debug!(
@@ -65,7 +64,6 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                     break;
                 }
 
-                // 3. Handle the query
                 let response = match handler.handle(&buf, client_ip, None).await {
                     Ok(outcome) => outcome.bytes,
                     Err(e) => {
@@ -80,7 +78,6 @@ pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::
                     }
                 };
 
-                // 4. Write 2-byte length prefix + response
                 let resp_len = response.len() as u16;
                 if let Err(e) = writer.write_u16(resp_len).await {
                     debug!(

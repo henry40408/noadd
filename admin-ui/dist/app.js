@@ -1,6 +1,3 @@
-// ============================================================
-// Legacy hash routes
-// ============================================================
 // Routing moved to the server, so `#settings` became `/settings`. A bookmark or
 // a link from before that still carries the hash, and left alone it would land
 // on the dashboard with no sign anything was missed. Rewritten here, before
@@ -18,9 +15,6 @@ if (LEGACY_HASH_ROUTES[location.hash]) {
   location.replace(LEGACY_HASH_ROUTES[location.hash]);
 }
 
-// ============================================================
-// API Client
-// ============================================================
 // Endpoints where a 401 means "that credential was wrong", not "your session
 // is gone". Everywhere else a 401 is the signal to bounce back to the login
 // screen; on these it would throw an operator out of a live session for
@@ -67,9 +61,6 @@ const api = {
   del: (p) => api.request('DELETE', p),
 };
 
-// ============================================================
-// Component base
-// ============================================================
 // A custom element discards its own DOM when it is removed, but not what it
 // attached elsewhere: interval timers, EventSource connections, and listeners
 // on window/document. Those outlive the element, and each stranded closure also
@@ -121,9 +112,6 @@ class LiveElement extends HTMLElement {
   }
 }
 
-// ============================================================
-// Utility
-// ============================================================
 const fullNumberFormatter = new Intl.NumberFormat();
 const compactDecimalFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 function formatNum(n) {
@@ -319,9 +307,6 @@ function passwordLengthError(pw) {
   return null;
 }
 
-// ============================================================
-// Icons (inline SVG)
-// ============================================================
 const icons = {
   dashboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   logs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
@@ -343,9 +328,7 @@ const icons = {
 // them. Doing it centrally also means no template needs raw() for an icon.
 for (const key of Object.keys(icons)) icons[key] = raw(icons[key]);
 
-// ============================================================
-// Notice banners (in-flow, dismissible; replaces alert())
-// ============================================================
+// Notice banners: in-flow and dismissible, replacing alert().
 const NOTICE_ICONS = {
   error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="7" x2="12" y2="13"/><circle cx="12" cy="16.75" r="1.15" fill="currentColor" stroke="none"/></svg>',
   success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="8 12.5 11 15.5 16 9"/></svg>',
@@ -378,12 +361,6 @@ function showBanner(msg, type = 'info') {
   return el;
 }
 
-// ============================================================
-// Web Components
-// ============================================================
-
-// --- App Shell ---
-// --- Account Page ---
 class AccountPage extends HTMLElement {
   // The page arrives server-rendered: the three tables, every form, and every
   // row action are real markup that works on its own. Nothing is fetched here
@@ -427,7 +404,6 @@ class AccountPage extends HTMLElement {
 }
 customElements.define('account-page', AccountPage);
 
-// --- Rebuild Banner ---
 // Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
 // the filter engine is rebuilding, plus a brief success flash on completion.
 class RebuildBanner extends LiveElement {
@@ -491,7 +467,6 @@ class RebuildBanner extends LiveElement {
 }
 customElements.define('rebuild-banner', RebuildBanner);
 
-// --- Next-Step Onboarding Banner ---
 // On a fresh install, tells the admin how to point a device's DNS at noadd
 // and shows the server's DNS address. Auto-hides once a real DNS query has
 // been served (polls /api/stats/summary every 3s). Can be dismissed; the
@@ -572,7 +547,6 @@ class NextStepBanner extends LiveElement {
 }
 customElements.define('next-step-banner', NextStepBanner);
 
-// --- Registry Page ---
 // Browse AdGuard HostlistsRegistry and batch-add filter lists.
 //
 // This used to be a modal built entirely here, which made "Browse Registry" the
@@ -666,7 +640,6 @@ class RegistryPage extends HTMLElement {
 }
 customElements.define('registry-page', RegistryPage);
 
-// --- Shared touch support for charts ---
 // Pointer events fire for touch too, but a single tap doesn't reliably produce a
 // `pointermove`, and `pointerleave` fires the instant the finger lifts — so on
 // mobile the hover-driven tooltip never shows. addChartTouch() adds tap-to-show
@@ -740,7 +713,6 @@ function downsampleBuckets(data, maxBars) {
 const MAX_BARS_STACKED = () => (window.innerWidth <= 480 ? 24 : 56);
 const MAX_BARS_GROUPED = () => (window.innerWidth <= 480 ? 14 : 30);
 
-// --- Shared SVG stacked-bar chart for query-volume timelines ---
 // Used by Dashboard "Queries (24h)" and Statistics "Queries (last Nd)".
 // One stacked bar per bucket: the sub-series stack from the bottom and the
 // remainder (total − subs) is painted on top in series[0]'s colour, so the bar
@@ -851,7 +823,6 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   addChartTouch(svg, el, onMove, onLeave);
 }
 
-// --- Dashboard Page ---
 class DashboardPage extends LiveElement {
   constructor() {
     super();
@@ -1101,7 +1072,6 @@ class DashboardPage extends LiveElement {
 }
 customElements.define('dashboard-page', DashboardPage);
 
-// --- Statistics Page ---
 //
 // The server rendered this page. What is left here is the three charts and one
 // date, which is the whole of what the server could not do: the timeline, the
@@ -1212,7 +1182,6 @@ class StatsPage extends HTMLElement {
     }
     markup += '</div>';
 
-    // Data rows
     markup += '<div class="heatmap-table">';
     for (let ri = 0; ri < 7; ri++) {
       const wd = displayOrder[ri];
@@ -1354,7 +1323,6 @@ class StatsPage extends HTMLElement {
 }
 customElements.define('stats-page', StatsPage);
 
-// --- Query Log Page ---
 class LogsPage extends LiveElement {
   constructor() {
     super();
@@ -1602,7 +1570,6 @@ class LogsPage extends LiveElement {
         <div style="color:var(--text-primary);font-weight:600;margin-bottom:6px">No DNS queries logged yet</div>
         <div style="font-size:0.9rem">Once a device uses noadd as its DNS resolver, its queries will appear here.</div>
       </div>`;
-    // Desktop table
     const body = this.querySelector('#log-body');
     if (!logs.length) {
       body.innerHTML = noFilters
@@ -1612,7 +1579,6 @@ class LogsPage extends LiveElement {
       body.innerHTML = logs.map(l => html`<tr>${this._rowHtml(l)}</tr>`).join('');
     }
 
-    // Mobile card list
     const cards = this.querySelector('#log-cards');
     if (!logs.length) {
       cards.innerHTML = noFilters
@@ -1622,7 +1588,6 @@ class LogsPage extends LiveElement {
       cards.innerHTML = logs.map(l => this._cardHtml(l)).join('');
     }
 
-    // Bind action buttons (both table and cards)
     this._bindRowActions(this);
 
     // Links, matching what the server renders: same shape, and still
@@ -1684,7 +1649,6 @@ class LogsPage extends LiveElement {
 }
 customElements.define('logs-page', LogsPage);
 
-// --- Filters Page (merged Lists + Rules + Domain Test) ---
 // What turning a list off would cost, phrased exactly as `list_impact` in
 // `src/admin/pages.rs` phrases it — a column that reworded itself when the
 // poll landed would read as the value having changed.
@@ -1714,7 +1678,6 @@ class FiltersPage extends HTMLElement {
     this.querySelectorAll('.nojs-only').forEach(el => el.remove());
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
-    // --- Domain Test ---
     // A GET form the server can answer on its own; here the verdict is fetched
     // and written into the same element, without the navigation.
     this.querySelector('#domain-test-form').onsubmit = (e) => {
@@ -1722,7 +1685,6 @@ class FiltersPage extends HTMLElement {
       this.testDomain();
     };
 
-    // --- Filter Lists ---
     this.querySelector('#update-all').closest('form').onsubmit = async (e) => {
       e.preventDefault();
       const btn = this.querySelector('#update-all');
@@ -1758,7 +1720,6 @@ class FiltersPage extends HTMLElement {
       this.enableRecommended();
     };
 
-    // --- Custom Rules ---
     this.querySelector('#add-rule-form').onsubmit = async (e) => {
       e.preventDefault();
       const v = this.querySelector('#add-rule-input').value.trim();
@@ -1917,7 +1878,6 @@ class FiltersPage extends HTMLElement {
   }
 
   showEditDialog(id, name, url) {
-    // Remove existing dialog if any
     const existing = document.querySelector('.dialog-overlay');
     if (existing) existing.remove();
 
@@ -2013,7 +1973,6 @@ class FiltersPage extends HTMLElement {
 }
 customElements.define('filters-page', FiltersPage);
 
-// --- Settings Page ---
 class SettingsPage extends HTMLElement {
   connectedCallback() {
     // The server ships a submit button so the page works without JavaScript.
@@ -2058,7 +2017,7 @@ class SettingsPage extends HTMLElement {
       } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
-    // --- Unified auto-save: every control saves on change/blur and reports its
+    // Unified auto-save: every control saves on change/blur and reports its
     // own result inline, right next to that field. Invalid values never PUT.
     const setMsg = (id, ok, msg) => {
       const el = this.querySelector(id);
@@ -2222,9 +2181,6 @@ class SettingsPage extends HTMLElement {
 }
 customElements.define('settings-page', SettingsPage);
 
-// ============================================================
-// App Bootstrap
-// ============================================================
 // Reaching this file at all means the server already resolved the session and
 // decided this is a page for a signed-in operator — an unauthenticated request
 // was redirected before any HTML was written. Two round trips (`/api/health`,

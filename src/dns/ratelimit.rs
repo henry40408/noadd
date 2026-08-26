@@ -59,7 +59,6 @@ impl IpRateLimiter {
             last_refill: now,
             last_seen: now,
         });
-        // Refill based on elapsed wall time.
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.qps).min(self.burst);
         bucket.last_refill = now;

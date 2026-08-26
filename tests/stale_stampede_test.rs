@@ -140,7 +140,6 @@ async fn test_stale_refresh_is_deduplicated() {
     let query_bytes = make_query_bytes(domain, RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    // Prime the cache
     let prime_resp = handler.handle(&query_bytes, client_ip, None).await.unwrap();
     assert!(!prime_resp.bytes.is_empty());
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -197,7 +196,6 @@ async fn test_refresh_lock_released_after_completion() {
     let query_bytes = make_query_bytes(domain, RecordType::A);
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    // Prime
     let prime_resp = handler.handle(&query_bytes, client_ip, None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
@@ -250,7 +248,6 @@ async fn test_different_domains_refresh_independently() {
     let (handler, cache, _log_rx) = make_test_handler(upstream_addr).await;
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    // Prime two different domains
     let domains = ["alpha.example.com", "beta.example.com"];
     let mut primed = Vec::new();
     for domain in &domains {

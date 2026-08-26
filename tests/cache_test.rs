@@ -99,13 +99,11 @@ async fn test_cache_invalidate_all() {
         )
         .await;
 
-    // Both entries should be present
     assert!(cache.get(&key_a).await.is_some());
     assert!(cache.get(&key_aaaa).await.is_some());
 
     cache.invalidate_all();
 
-    // Both entries should be gone
     assert!(cache.get(&key_a).await.is_none());
     assert!(cache.get(&key_aaaa).await.is_none());
 }
