@@ -264,13 +264,13 @@ pub fn admin_router(state: AppState) -> Router {
         // something a link prefetcher would happily follow on the operator's
         // behalf.
         .route("/logout", post(crate::admin::pages::logout_submit))
-        // Auth (no auth required)
+        // No auth required.
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/reauth", post(reauth))
         .route("/api/auth/revoke-others", post(revoke_others))
         .route("/api/auth/logout", post(logout))
-        // Health + server info (no auth required for health)
+        // `health` needs no auth.
         .route("/api/health", get(health))
         .route("/api/server-info", get(get_server_info))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -286,7 +286,6 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/registry/filters", get(get_registry_filters))
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
-        // Operator management
         .route("/api/auth/me", get(get_me))
         .route(
             "/api/users",
@@ -314,9 +313,9 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
         .route("/api/logs", get(get_logs).delete(delete_logs))
         .route("/api/logs/stream", get(stream_logs))
-        // Apple mobileconfig (no auth — token in URL is the credential)
+        // No auth: the token in the URL is the credential.
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
-        // Apple touch icon (rendered from favicon.svg at build time)
+        // Rendered from favicon.svg at build time.
         .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
         // OpenAPI spec + Scalar docs UI (schema only, no data — but still
         // gated: this is a security appliance and we minimize pre-auth recon)
@@ -437,8 +436,6 @@ async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     }
 }
 
-// --- Client IP extraction ---
-
 /// Resolve the client IP for rate-limiting and audit purposes via the shared
 /// `extract_client_ip` helper. Headers (`X-Forwarded-For`, `X-Real-IP`) are
 /// trusted only when the TCP peer is loopback or matches a configured CIDR
@@ -490,8 +487,6 @@ pub(crate) fn header_log_value(headers: &HeaderMap, name: impl AsHeaderName) -> 
 fn user_agent_log_value(headers: &HeaderMap) -> &str {
     header_log_value(headers, axum::http::header::USER_AGENT)
 }
-
-// --- Auth helper ---
 
 /// The **token hashes** of the session cookies on this request, innermost
 /// name first. Both names are accepted so a deployment that gains or loses
@@ -916,8 +911,6 @@ async fn resolve_forward_auth_user(
         Err(e) => Err(e),
     }
 }
-
-// --- Auth endpoints ---
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -1672,8 +1665,6 @@ async fn logout(
     ))
 }
 
-// --- Operator management ---
-
 #[derive(Serialize)]
 struct MeResponse {
     id: i64,
@@ -2349,8 +2340,6 @@ pub(crate) async fn revoke_session_row(
     Ok(current_hash == Some(token_hash.as_str()))
 }
 
-// --- Health ---
-
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     /// Always `"ok"` while the process is up and serving requests.
@@ -2411,8 +2400,6 @@ async fn get_server_info(
     Ok(Json(state.server_info.clone()))
 }
 
-// --- Settings ---
-
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingsMap {
     /// Flattened key/value pairs, e.g. `upstream_servers`,
@@ -2438,7 +2425,6 @@ async fn get_settings(
     State(state): State<AppState>,
     _auth: AuthedUser,
 ) -> Result<Json<SettingsMap>, StatusCode> {
-    // Return known settings
     let keys = [
         "upstream_servers",
         "upstream_strategy",
@@ -2566,7 +2552,6 @@ pub(crate) async fn apply_settings(
             .map_err(|_err| SettingsError::Internal)?;
     }
 
-    // Apply strategy change immediately if present
     if let Some(strategy_str) = settings.get("upstream_strategy")
         && let Ok(strategy) = strategy_str.parse::<crate::upstream::strategy::UpstreamStrategy>()
     {
@@ -2645,8 +2630,6 @@ async fn put_settings(
         Err(SettingsError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
-
-// --- Lists ---
 
 /// List all configured filter lists.
 ///
@@ -2897,7 +2880,6 @@ async fn check_list_url(
     Path(id): Path<i64>,
     body: Option<Json<CheckListUrlRequest>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Use provided URL or fetch from DB
     let url = if let Some(Json(b)) = body
         && let Some(u) = b.url
     {
@@ -3174,8 +3156,6 @@ async fn get_registry_filters(
     }
 }
 
-// --- Rules ---
-
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddRuleRequest {
     /// Rule text in hosts-file or Adblock-style syntax, e.g.
@@ -3312,8 +3292,6 @@ async fn delete_rule(
     Ok(StatusCode::OK)
 }
 
-// --- DoH Tokens ---
-
 async fn get_doh_tokens(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -3360,8 +3338,6 @@ async fn delete_doh_token_endpoint(
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
-
-// --- API Keys ---
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateApiKeyRequest {
@@ -3527,8 +3503,6 @@ pub(crate) async fn revoke_api_key(state: &AppState, user_id: i64, id: i64) -> R
     Ok(deleted)
 }
 
-// --- Filter Check ---
-
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct FilterCheckRequest {
     /// Domain to evaluate, e.g. `"ads.example.com"`. A trailing dot is
@@ -3575,8 +3549,6 @@ async fn filter_check(
     }
 }
 
-// --- Upstream Health ---
-
 async fn upstream_health(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -3595,8 +3567,6 @@ async fn upstream_health(
     Ok(Json(json))
 }
 
-// --- Upstream Latency ---
-
 async fn upstream_latency(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -3604,7 +3574,6 @@ async fn upstream_latency(
     let latencies = state.forwarder.latencies();
     let strategy = state.forwarder.strategy();
 
-    // Find the preferred server (lowest EMA)
     let preferred = if strategy == crate::upstream::strategy::UpstreamStrategy::LowestLatency {
         latencies
             .iter()
@@ -3626,8 +3595,6 @@ async fn upstream_latency(
         .collect();
     Ok(Json(json))
 }
-
-// --- Stats ---
 
 /// Get aggregate query statistics for today, the last 7 days, and the last 30 days.
 ///
@@ -3716,8 +3683,6 @@ async fn get_stats_top_upstreams(
 
     Ok(Json(upstreams))
 }
-
-// --- Stats v2 ---
 
 // Each stats/v2 endpoint declares exactly the parameters it honours, and
 // `deny_unknown_fields` makes anything else a 400 rather than a silent no-op.
@@ -3864,8 +3829,6 @@ async fn get_stats_v2_top_clients(
     Ok(Json(rows))
 }
 
-// --- Apple mobileconfig ---
-
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct MobileConfigProfile {
@@ -3984,8 +3947,6 @@ async fn get_mobileconfig(
 fn make_uuid(seed: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes()).to_string()
 }
-
-// --- Logs ---
 
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]

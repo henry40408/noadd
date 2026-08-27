@@ -158,7 +158,6 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
         "application/dns-message"
     );
 
-    // Verify the DNS response is SERVFAIL
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -232,7 +231,6 @@ async fn test_doh_get_malformed_body_returns_400() {
 async fn test_doh_token_required_when_configured() {
     let handler = make_handler().await;
     let db = test_db().await;
-    // Configure a token and set policy to deny
     db.add_doh_token("my-secret-token").await.unwrap();
     db.set_setting("doh_access_policy", "deny").await.unwrap();
     let app = doh_router(

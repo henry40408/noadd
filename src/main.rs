@@ -40,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
     let db_path = noadd::config::resolve_db_path(args.db_path);
     let db = Database::open(db_path.to_str().unwrap_or(noadd::config::DEFAULT_DB_PATH)).await?;
 
-    // Auto-set public_url from ACME domain if not already configured
     if !args.acme_domain.is_empty() && db.get_setting("public_url").await?.is_none() {
         let url = format!("https://{}", args.acme_domain[0]);
         db.set_setting("public_url", &url).await?;
@@ -518,7 +517,6 @@ async fn main() -> anyhow::Result<()> {
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else if use_tls {
-        // Manual TLS with provided cert/key
         let tls_config = noadd::tls::load_tls_config(
             args.tls_cert.as_ref().unwrap(),
             args.tls_key.as_ref().unwrap(),
@@ -542,7 +540,6 @@ async fn main() -> anyhow::Result<()> {
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
-        // Plain HTTP
         let listener = tokio::net::TcpListener::bind(http_addr).await?;
         tracing::info!(
             event = "server.started",

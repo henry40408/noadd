@@ -58,8 +58,6 @@ const NOT_TERMINAL: u16 = u16::MAX;
 /// Layout: `label_offset(u32)` + `label_len(u16)` + `child_node_offset(u32)` = 10.
 const CHILD_ENTRY: usize = 10;
 
-// ── Flat trie ───────────────────────────────────────────────────────────
-
 /// Compact trie serialized into two contiguous byte buffers.
 ///
 /// ### Node layout (`nodes` buffer)
@@ -132,8 +130,6 @@ impl FlatTrie {
         &self.labels[lo..lo + len]
     }
 }
-
-// ── Flat trie builder ───────────────────────────────────────────────────
 
 /// `FxHash` — the hash rustc uses internally. `SipHash` (the `std` default) is
 /// DoS-resistant, which the trie build does not need: keys are DNS labels
@@ -285,8 +281,6 @@ impl BuildNode {
     }
 }
 
-// ── Byte helpers ────────────────────────────────────────────────────────
-
 #[inline]
 fn read_u16(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([buf[off], buf[off + 1]])
@@ -296,8 +290,6 @@ fn read_u16(buf: &[u8], off: usize) -> u16 {
 fn read_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Reconstruct the domain from reversed labels up to (and including) `depth`.
 fn reconstruct_domain(labels: &[&str], depth: usize) -> String {
@@ -378,8 +370,6 @@ fn compute_unique_rules(
 fn reversed_labels(domain: &str) -> Vec<&str> {
     domain.split('.').rev().collect()
 }
-
-// ── Filter engine ───────────────────────────────────────────────────────
 
 /// The filter engine.  Immutable after construction — rebuild to update rules.
 pub struct FilterEngine {
@@ -576,14 +566,12 @@ impl FilterEngine {
         };
         let lower: &str = lower_storage.as_deref().unwrap_or(domain);
 
-        // 1. Exact allow
         if self.exact_allow.contains(lower.as_bytes()) {
             return FilterResult::Allowed {
                 rule: Some(lower.to_string()),
             };
         }
 
-        // 2. Subdomain allow (trie)
         let labels = reversed_labels(lower);
         if let Some((_marker, depth)) = self.allow_trie.lookup(&labels) {
             return FilterResult::Allowed {
@@ -591,7 +579,6 @@ impl FilterEngine {
             };
         }
 
-        // 3. Exact block
         if let Some(list_idx) = self.exact_block.get(lower.as_bytes()) {
             return FilterResult::Blocked {
                 rule: lower.to_string(),
@@ -599,7 +586,6 @@ impl FilterEngine {
             };
         }
 
-        // 4. Subdomain block (trie)
         if let Some((list_idx, depth)) = self.block_trie.lookup(&labels) {
             return FilterResult::Blocked {
                 rule: reconstruct_domain(&labels, depth),
@@ -607,7 +593,6 @@ impl FilterEngine {
             };
         }
 
-        // 5. Default
         FilterResult::Allowed { rule: None }
     }
 

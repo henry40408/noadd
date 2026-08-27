@@ -43,7 +43,6 @@ async fn test_settings_get_set() {
     let val = db.get_setting("dns_port").await.unwrap();
     assert_eq!(val, Some("5353".to_string()));
 
-    // Update existing setting
     db.set_setting("dns_port", "1053").await.unwrap();
     let val = db.get_setting("dns_port").await.unwrap();
     assert_eq!(val, Some("1053".to_string()));
@@ -109,14 +108,12 @@ async fn test_insert_and_query_logs() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    // Query all
     let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
     assert_eq!(logs.len(), 2);
     // Should be ordered by timestamp desc
     assert_eq!(logs[0].domain, "ads.tracker.com");
     assert_eq!(logs[1].domain, "example.com");
 
-    // Filter by blocked
     let blocked = db
         .query_logs(100, 0, None, Some(true), None, None)
         .await
@@ -124,7 +121,6 @@ async fn test_insert_and_query_logs() {
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0].domain, "ads.tracker.com");
 
-    // Filter by search
     let searched = db
         .query_logs(100, 0, Some("example"), None, None, None)
         .await
@@ -273,14 +269,12 @@ async fn test_query_logs_pagination() {
 async fn test_filter_lists_crud() {
     let db = test_db().await;
 
-    // Add
     let id = db
         .add_filter_list("EasyList", "https://easylist.example.com/list.txt", true)
         .await
         .unwrap();
     assert!(id > 0);
 
-    // Get all
     let lists = db.get_filter_lists().await.unwrap();
     assert_eq!(lists.len(), 1);
     assert_eq!(lists[0].name, "EasyList");
@@ -288,18 +282,15 @@ async fn test_filter_lists_crud() {
     assert!(lists[0].enabled);
     assert_eq!(lists[0].rule_count, 0);
 
-    // Update enabled
     db.update_filter_list_enabled(id, false).await.unwrap();
     let lists = db.get_filter_lists().await.unwrap();
     assert!(!lists[0].enabled);
 
-    // Update stats
     db.update_filter_list_stats(id, 42000, 9001).await.unwrap();
     let lists = db.get_filter_lists().await.unwrap();
     assert_eq!(lists[0].rule_count, 9001);
     assert_eq!(lists[0].last_updated, 42000);
 
-    // Delete
     db.delete_filter_list(id).await.unwrap();
     let lists = db.get_filter_lists().await.unwrap();
     assert_eq!(lists.len(), 0);
@@ -309,7 +300,6 @@ async fn test_filter_lists_crud() {
 async fn test_custom_rules_crud() {
     let db = test_db().await;
 
-    // Add
     let id = db
         .add_custom_rule("||ads.example.com^", "block")
         .await
@@ -321,7 +311,6 @@ async fn test_custom_rules_crud() {
         .await
         .unwrap();
 
-    // Get by type
     let block_rules = db.get_custom_rules_by_type("block").await.unwrap();
     assert_eq!(block_rules.len(), 1);
     assert_eq!(block_rules[0].rule, "||ads.example.com^");
@@ -330,7 +319,6 @@ async fn test_custom_rules_crud() {
     assert_eq!(allow_rules.len(), 1);
     assert_eq!(allow_rules[0].rule, "@@||allowed.example.com^");
 
-    // Delete
     db.delete_custom_rule(id).await.unwrap();
     let block_rules = db.get_custom_rules_by_type("block").await.unwrap();
     assert_eq!(block_rules.len(), 0);
@@ -344,7 +332,6 @@ async fn test_custom_rules_crud() {
 async fn test_filter_list_content() {
     let db = test_db().await;
 
-    // Add a filter list first
     let id = db
         .add_filter_list("TestList", "https://example.com/list.txt", true)
         .await
@@ -354,7 +341,6 @@ async fn test_filter_list_content() {
     let content = db.get_filter_list_content(id).await.unwrap();
     assert_eq!(content, None);
 
-    // Set content
     db.set_filter_list_content(id, "||ads.example.com^\n||tracker.example.com^")
         .await
         .unwrap();
@@ -365,7 +351,6 @@ async fn test_filter_list_content() {
         Some("||ads.example.com^\n||tracker.example.com^".to_string())
     );
 
-    // Update content
     db.set_filter_list_content(id, "||newrule.com^")
         .await
         .unwrap();
@@ -478,7 +463,6 @@ async fn test_top_domains_since() {
     assert_eq!(top[1].domain, "rare.com");
     assert_eq!(top[1].count, 1);
 
-    // With limit
     let top = db.top_domains_since(0, 1).await.unwrap();
     assert_eq!(top.len(), 1);
 }

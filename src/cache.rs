@@ -152,7 +152,6 @@ impl DnsCache {
     /// trigger a background refresh if true.
     pub async fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         let entry = self.cache.get(key).await?;
-        // Evict if beyond stale window
         if entry.inner.inserted_at.elapsed() > entry.inner.ttl + self.stale_window {
             self.cache.invalidate(key).await;
             return None;
@@ -289,9 +288,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Short TTL entry should be gone (beyond stale window)
         assert!(cache.get(&key_short).await.is_none());
-        // Long TTL entry should still exist and fresh
         let long = cache.get(&key_long).await.unwrap();
         assert!(!long.is_stale());
     }

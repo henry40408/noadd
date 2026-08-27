@@ -26,14 +26,13 @@ async fn test_forward_resolves_known_domain() {
         .await
         .expect("forward should succeed");
 
-    // Response should be non-empty and contain at least a DNS header (12 bytes).
+    // 12 bytes is the DNS header alone.
     assert!(
         response.len() >= 12,
         "response too short: {} bytes",
         response.len()
     );
 
-    // The upstream address should be one of the configured servers.
     assert!(!upstream.is_empty(), "upstream address should not be empty");
 }
 

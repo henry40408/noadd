@@ -53,17 +53,14 @@ async fn test_seed_default_lists_idempotent() {
 async fn test_rebuild_filter_from_custom_rules() {
     let (db, manager, filter) = setup_with_filter().await;
 
-    // Add a custom block rule
     db.add_custom_rule("||ads.example.com^", "block")
         .await
         .unwrap();
 
-    // Add a custom allow rule
     db.add_custom_rule("@@||safe.ads.example.com^", "allow")
         .await
         .unwrap();
 
-    // Rebuild the filter engine
     manager.rebuild_filter().await.unwrap();
 
     let engine = filter.load();

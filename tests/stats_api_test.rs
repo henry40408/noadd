@@ -187,7 +187,7 @@ async fn stats_v2_health_returns_expected_fields() {
     assert!(body.get("avg_new_rows_per_day").is_some());
 }
 
-// --- stats/v2 query parameters: each endpoint accepts exactly what it honours ---
+// Each stats/v2 endpoint accepts exactly the parameters it honours.
 //
 // These endpoints shared one `range` + `tz_offset` struct, so the heatmap took a
 // `range` it could not apply (its window is a fixed 30 days) and the range-only

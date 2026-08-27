@@ -178,18 +178,15 @@ pub async fn compute_timeline(
 ) -> Result<Vec<TimelinePoint>, DbError> {
     let max_since = now - hours * 3600;
 
-    // Find the earliest log timestamp to determine actual data range
     let earliest = db.earliest_log_timestamp().await?;
     let since = match earliest {
         Some(ts_ms) => {
             let ts_secs = ts_ms / 1000;
-            // Use the later of: earliest log or max lookback
             ts_secs.max(max_since)
         }
         None => max_since,
     };
 
-    // Dynamic bucket: divide actual range by target bar count
     let range = (now - since).max(1);
     // Round bucket to a clean interval (minimum 60s)
     let raw_bucket = range / TARGET_BARS;
@@ -392,7 +389,6 @@ pub async fn compute_db_health(db: &Database, now: i64) -> Result<DbHealth, DbEr
         0.0
     };
 
-    // Actual span of retained data (newest − oldest). Reported in days.
     let log_coverage_days = match (earliest_ms, latest_ms) {
         (Some(min_ms), Some(max_ms)) if max_ms > min_ms => (max_ms - min_ms) as f64 / 86_400_000.0,
         _ => 0.0,

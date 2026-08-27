@@ -518,8 +518,6 @@ impl Locator {
         Ok(false)
     }
 
-    // --- actions ---------------------------------------------------------
-
     /// Clears the field and types `text` into it.
     ///
     /// Real key events rather than an assigned `value`, which matters: the
@@ -649,8 +647,6 @@ impl Locator {
         let at = |i: usize| rect[i].as_f64().context("incomplete element rect");
         Ok((at(0)?, at(1)?, at(2)?, at(3)?))
     }
-
-    // --- assertions ------------------------------------------------------
 
     /// `toBeVisible`.
     ///

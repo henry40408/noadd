@@ -6,8 +6,6 @@ use axum::http::HeaderMap;
 
 use noadd::net::{TrustedProxies, extract_client_ip};
 
-// --- Cidr / TrustedProxies parsing ---
-
 #[test]
 fn parse_empty_string_yields_empty_set() {
     let tp = TrustedProxies::parse("").expect("empty parses");
@@ -77,8 +75,6 @@ fn parse_mixed_family_does_not_cross_match() {
     let tp = TrustedProxies::parse("10.0.0.0/8").unwrap();
     assert!(!tp.contains(IpAddr::V6(Ipv6Addr::from_str("::ffff:10.0.0.1").unwrap())));
 }
-
-// --- extract_client_ip helper ---
 
 #[allow(
     clippy::unnecessary_wraps,

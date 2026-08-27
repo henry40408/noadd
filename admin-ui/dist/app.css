@@ -273,7 +273,6 @@ body::after {
   padding: 40px;
 }
 
-/* Stat Grid */
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -339,7 +338,6 @@ body::after {
   letter-spacing: -0.01em;
 }
 
-/* Tables */
 .table-wrap {
   overflow-x: auto;
 }
@@ -434,7 +432,6 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .st-ok { color: var(--green); text-shadow: var(--glow); }
 .st-block { color: var(--red); text-shadow: var(--glow-red); }
 
-/* Buttons */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -492,7 +489,6 @@ a.btn { text-decoration: none; }
 .btn-sm svg { width: 12px; height: 12px; }
 .btn { white-space: nowrap; }
 
-/* Inputs */
 input[type="text"], input[type="password"], input[type="url"], input[type="date"], select, textarea {
   padding: 8px 12px;
   border-radius: 0;
@@ -530,7 +526,6 @@ textarea { resize: vertical; line-height: 1.7; }
 /* Label sitting above its form control (consistent placement for every field). */
 .field-label { display: block; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 6px; }
 
-/* Toggle */
 .toggle {
   display: inline-block;
   position: relative;
@@ -612,7 +607,6 @@ textarea { resize: vertical; line-height: 1.7; }
   border: 1px solid var(--orange);
 }
 
-/* Chart */
 .chart-container {
   height: 200px;
   position: relative;
@@ -721,7 +715,6 @@ textarea { resize: vertical; line-height: 1.7; }
   align-items: center;
 }
 
-/* Filters row */
 .filters-row {
   display: flex;
   gap: 8px;
@@ -733,7 +726,6 @@ textarea { resize: vertical; line-height: 1.7; }
 .filters-row input { max-width: 300px; }
 .filters-row select { max-width: 150px; }
 
-/* Login / boot screen */
 .login-container {
   display: flex;
   align-items: center;
@@ -842,7 +834,6 @@ textarea { resize: vertical; line-height: 1.7; }
   box-shadow: var(--glow-red);
 }
 
-/* Pagination */
 .pagination {
   display: flex;
   gap: 8px;
@@ -857,7 +848,6 @@ textarea { resize: vertical; line-height: 1.7; }
   color: var(--text-dim);
 }
 
-/* Live indicator */
 .live-toggle {
   display: inline-flex;
   align-items: center;
@@ -963,7 +953,6 @@ logs-page td { font-size: 1rem; padding: 12px 12px; }
 logs-page .log-card-domain { font-size: 0.95rem; }
 logs-page .log-card-row2 { font-size: 0.85rem; }
 
-/* Dialog */
 .dialog-overlay {
   position: fixed;
   inset: 0;
@@ -1008,7 +997,6 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   font-size: 0.8rem;
 }
 
-/* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -1022,7 +1010,6 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   .login-box { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
 }
 
-/* Responsive */
 @media (max-width: 768px) {
   /* Hide desktop chrome, show mobile F-key bar */
   .nav-strip, .topbar-meta, .statusbar { display: none; }
@@ -1303,9 +1290,7 @@ stats-page #rate-trend-card { overflow: visible; }
   .stats-row-2col { grid-template-columns: 1fr; }
 }
 
-/* ============================================================
-   Rebuild Status Strip — card-aligned status row with accent rail
-   ============================================================ */
+/* Rebuild status strip — card-aligned status row with accent rail. */
 rebuild-banner { display: block; }
 .rebuild-banner { display: none; }
 .rebuild-banner.show {
@@ -1374,12 +1359,10 @@ rebuild-banner { display: block; }
   to { opacity: 1; transform: none; }
 }
 
-/* ============================================================
-   Notice banner — in-flow, persistent, dismissible messages.
+/* Notice banner — in-flow, persistent, dismissible messages.
    Deliberately NOT a floating auto-dismiss toast: banners stay in the
    reading order, don't time out before assistive tech reaches them, and
-   are closed by the user. Shares the rebuild-banner visual language.
-   ============================================================ */
+   are closed by the user. Shares the rebuild-banner visual language. */
 #notice-host { display: flex; flex-direction: column; gap: 8px; }
 #notice-host:not(:empty) { margin-bottom: 16px; }
 .notice-banner {
@@ -1418,11 +1401,9 @@ rebuild-banner { display: block; }
   .fade-in { animation: none; }
 }
 
-/* ============================================================
-   Registry page — filter picker
+/* Registry page — filter picker.
    The overlay and dialog are gone: this is a page, and the cards
-   around these blocks supply the frame the modal used to draw.
-   ============================================================ */
+   around these blocks supply the frame the modal used to draw. */
 .registry-toolbar {
   display: flex;
   align-items: center;

@@ -387,7 +387,6 @@ impl Database {
         self.conn
             .call(|conn| {
                 conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-                // Performance pragmas
                 conn.execute_batch(
                     "
                     PRAGMA journal_mode = WAL;
@@ -487,9 +486,8 @@ impl Database {
     /// New databases start at the latest version (tables already have all columns).
     /// Existing databases get migrated incrementally.
     //
-    // Fresh databases already have the target columns from CREATE TABLE, so
-    // `add_column_if_missing` is used below to make each migration idempotent
-    // whether run against a fresh or pre-existing DB.
+    // `add_column_if_missing` keeps each step idempotent, so the same migration
+    // runs against a fresh database and a pre-existing one alike.
     fn run_migrations(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
@@ -669,8 +667,6 @@ impl Database {
         Ok(tables)
     }
 
-    // --- Settings ---
-
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         let val = self
@@ -700,8 +696,6 @@ impl Database {
             .await?;
         Ok(())
     }
-
-    // --- Query Logs ---
 
     pub async fn insert_query_logs(&self, entries: &[QueryLogEntry]) -> Result<(), DbError> {
         let entries: Vec<QueryLogEntry> = entries.to_vec();
@@ -882,8 +876,6 @@ impl Database {
         Ok(())
     }
 
-    // --- Filter Lists ---
-
     pub async fn add_filter_list(
         &self,
         name: &str,
@@ -1006,8 +998,6 @@ impl Database {
         Ok(())
     }
 
-    // --- Custom Rules ---
-
     pub async fn has_custom_rule(&self, rule: &str) -> Result<bool, DbError> {
         let rule = rule.to_string();
         let exists = self
@@ -1096,8 +1086,6 @@ impl Database {
         Ok(())
     }
 
-    // --- Filter List Content ---
-
     pub async fn get_filter_list_content(&self, list_id: i64) -> Result<Option<String>, DbError> {
         let val = self
             .reader()
@@ -1130,8 +1118,6 @@ impl Database {
             .await?;
         Ok(())
     }
-
-    // --- DoH Tokens ---
 
     pub async fn get_doh_tokens(&self) -> Result<Vec<DohTokenRow>, DbError> {
         let rows = self
@@ -1201,8 +1187,6 @@ impl Database {
             .await?;
         Ok(count > 0)
     }
-
-    // --- API Keys ---
 
     pub async fn insert_api_key(
         &self,
@@ -1329,8 +1313,6 @@ impl Database {
         }
         Ok(Some(user_id))
     }
-
-    // --- Users ---
 
     pub async fn create_user(
         &self,
@@ -1497,8 +1479,6 @@ impl Database {
             .await?;
         Ok(val)
     }
-
-    // --- Sessions ---
 
     /// Persist a session. `token_hash` is the digest, never the raw token —
     /// see [`SessionRow::token_hash`].
@@ -1739,8 +1719,6 @@ impl Database {
             .await?;
         Ok(())
     }
-
-    // --- Stats ---
 
     /// Returns the earliest log timestamp in milliseconds, or None if no logs.
     pub async fn earliest_log_timestamp(&self) -> Result<Option<i64>, DbError> {
@@ -2216,7 +2194,6 @@ impl Database {
         let rows = self
             .reader()
             .call(move |conn| {
-                // Convert seconds to milliseconds to match timestamp storage
                 let since_ms = since * 1000;
                 let bucket_ms = bucket_secs * 1000;
                 let mut stmt = conn.prepare_cached(
