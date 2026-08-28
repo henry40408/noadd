@@ -114,11 +114,35 @@ pub struct DnsCache {
     stale_window: Duration,
 }
 
+/// What an entry costs beyond its response bytes and its domain: moka's node,
+/// the `Arc` header, the `CacheKey` struct and the TTL-offsets allocation.
+///
+/// Measured, not estimated — `cache_memory_bench` reports it, so a change in
+/// the entry's shape shows up as this constant drifting rather than as a cache
+/// that quietly holds more memory than it was told to.
+const ENTRY_OVERHEAD_BYTES: u32 = 365;
+
+/// Resident cost of one entry, for moka to bound the cache by bytes.
+///
+/// Saturating rather than wrapping: a response large enough to overflow a `u32`
+/// cannot be produced by DNS (65535 bytes is the wire maximum), but a weight
+/// that wrapped to a small number would admit an entry by claiming it is tiny.
+fn entry_weight(key: &CacheKey, value: &CacheValue) -> u32 {
+    let variable = key.domain.len() + value.bytes().len() + value.ttl_offsets().len() * 4;
+    ENTRY_OVERHEAD_BYTES.saturating_add(u32::try_from(variable).unwrap_or(u32::MAX))
+}
+
 impl DnsCache {
-    /// Create a new cache with the given maximum entry capacity.
-    pub fn new(max_capacity: u64) -> Self {
+    /// Create a cache bounded by the total resident bytes of its entries.
+    ///
+    /// Bytes rather than entry count because a DNS response spans tens of bytes
+    /// to tens of kilobytes: a bound of N entries leaves the memory a full cache
+    /// occupies decided by whatever traffic it happened to see, which is the
+    /// wrong thing to leave open on the small hosts noadd targets.
+    pub fn with_capacity_bytes(max_capacity_bytes: u64) -> Self {
         let cache = Cache::builder()
-            .max_capacity(max_capacity)
+            .max_capacity(max_capacity_bytes)
+            .weigher(entry_weight)
             .eviction_policy(EvictionPolicy::lru())
             .build();
 
@@ -195,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_get() {
-        let cache = DnsCache::new(100);
+        let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         let key = key("example.com", 1);
         let data = vec![1, 2, 3];
 
@@ -215,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stale_entry_still_returned() {
-        let cache = DnsCache::new(100);
+        let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         let key = key("stale.test", 1);
 
         cache
@@ -232,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_beyond_stale_window_not_returned() {
-        let mut cache = DnsCache::new(100);
+        let mut cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         cache.stale_window = Duration::from_millis(10); // very short for testing
         let key = key("gone.test", 1);
 
@@ -251,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalidate_all() {
-        let cache = DnsCache::new(100);
+        let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         let key = key("clear.test", 1);
 
         cache
@@ -266,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_different_ttls_per_entry() {
-        let mut cache = DnsCache::new(100);
+        let mut cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         cache.stale_window = Duration::from_millis(5);
         let key_short = key("short.test", 1);
         let key_long = key("long.test", 1);
@@ -300,7 +324,7 @@ mod tests {
         ));
         let bytes = msg.to_vec().unwrap();
 
-        let cache = DnsCache::new(100);
+        let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         let key = key("example.com", 1);
         cache
             .insert(key.clone(), bytes, Duration::from_secs(60), false)
@@ -320,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_response_that_is_not_a_dns_message_gets_no_offsets() {
-        let cache = DnsCache::new(100);
+        let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
         let key = key("garbage.test", 1);
         cache
             .insert(

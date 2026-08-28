@@ -84,7 +84,7 @@ async fn make_test_handler(addr: SocketAddr) -> Arc<DnsHandler> {
         vec![],
         vec![],
     )));
-    let cache = DnsCache::new(100_000);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(
         UpstreamForwarder::new(UpstreamConfig {
             servers: vec![addr.to_string()],

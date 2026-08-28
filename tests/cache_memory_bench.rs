@@ -212,7 +212,7 @@ async fn an_entry_does_not_retain_its_caller_s_spare_capacity() {
     // orders of magnitude below `SLACK`.
     const BUDGET: isize = 1024;
 
-    let cache = DnsCache::new(16);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
 
     let slack_key = bench_key(2);
     let tight = retained_by_insert(&cache, bench_key(1), PAYLOAD).await;
@@ -243,7 +243,7 @@ async fn serving_an_entry_retains_nothing() {
     // would add.
     const BUDGET: isize = 512;
 
-    let cache = DnsCache::new(16);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let key = bench_key(3);
     let response = build_response(&key.domain, record_type_for(3), 3);
     let response_len = response.len();
@@ -279,7 +279,7 @@ async fn cache_memory_bench() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
 
-    let cache = DnsCache::new(n_entries as u64 * 2);
+    let cache = DnsCache::with_capacity_bytes(n_entries as u64 * 1024);
 
     // Keys and responses are built inside the measured window on purpose. The
     // buffer `Message::to_vec` allocates is the buffer the cache goes on to
@@ -341,6 +341,14 @@ async fn cache_memory_bench() {
     eprintln!(
         "  overhead vs wire = {:.2}x",
         (cold + by_serving) as f64 / wire_bytes as f64
+    );
+    // What an entry costs beyond the two things that vary with it: moka's node,
+    // the `Arc` header, the key struct and the offsets allocation. This is the
+    // constant the weigher adds to every entry, so it is reported rather than
+    // left to be re-derived by hand from the three lines above.
+    eprintln!(
+        "  fixed overhead   = {:.1} bytes/entry   <- ENTRY_OVERHEAD_BYTES",
+        (cold + by_serving - wire_bytes as isize - key_bytes as isize) as f64 / n
     );
 
     // Hold the cache past the final counter read so nothing measured above is

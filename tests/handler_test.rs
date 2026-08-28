@@ -33,7 +33,7 @@ async fn make_handler(
 ) -> (DnsHandler, mpsc::Receiver<QueryContext>) {
     let engine = FilterEngine::from_named_rules(block_rules, allow_rules);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let config = UpstreamConfig::default();
     let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (tx, rx) = mpsc::channel(64);
@@ -193,7 +193,7 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     )];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (tx, mut rx) = mpsc::channel(16);
     // qps=1, burst=1 — back-to-back queries happen in microseconds, far
@@ -262,7 +262,7 @@ async fn test_handler_serves_queries_while_log_channel_is_saturated() {
     )];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (tx, _rx) = mpsc::channel(1);
     let handler = DnsHandler::new(filter, cache, forwarder, tx);
@@ -300,7 +300,7 @@ async fn test_handler_inflight_limit_serves_all_queries() {
     )];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (tx, _rx) = mpsc::channel(256);
     let handler = Arc::new(DnsHandler::with_max_inflight(

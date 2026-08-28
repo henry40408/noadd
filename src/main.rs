@@ -31,6 +31,14 @@ use noadd::net::TrustedProxies;
 use noadd::shutdown::shutdown_signal;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
+/// Resident bytes the DNS response cache may occupy.
+///
+/// 5 MiB holds roughly the 10,000 entries this was bounded by before, at the
+/// ~499 bytes an entry measures on ordinary traffic — the point of the change
+/// is not to cache less but to stop the ceiling depending on response sizes.
+/// A run of large DNSSEC or TXT answers now evicts instead of growing.
+const DNS_CACHE_CAPACITY_BYTES: u64 = 5 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
@@ -122,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
         "loaded setting from database"
     );
 
-    let cache = DnsCache::new(10_000);
+    let cache = DnsCache::with_capacity_bytes(DNS_CACHE_CAPACITY_BYTES);
 
     let (log_events, _) = tokio::sync::broadcast::channel(256);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
