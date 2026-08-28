@@ -46,7 +46,7 @@ async fn test_full_query_pipeline_block() {
     let manager = ListManager::new(db.clone(), filter.clone());
     manager.rebuild_filter().await.unwrap();
 
-    let cache = DnsCache::new(1000);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger_handle = tokio::spawn(logger.run());
@@ -95,7 +95,7 @@ async fn test_full_query_pipeline_allow() {
     let manager = ListManager::new(db.clone(), filter.clone());
     manager.rebuild_filter().await.unwrap();
 
-    let cache = DnsCache::new(1000);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger_handle = tokio::spawn(logger.run());

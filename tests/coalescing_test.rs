@@ -81,7 +81,7 @@ async fn make_test_handler(
         vec![],
         vec![],
     )));
-    let cache = DnsCache::new(10_000);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let config = UpstreamConfig {
         servers: vec![upstream_addr.to_string()],
         timeout_ms: 10_000,

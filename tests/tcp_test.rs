@@ -49,7 +49,7 @@ async fn build_blocking_handler() -> (Arc<DnsHandler>, mpsc::Receiver<QueryConte
     )];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (tx, rx) = mpsc::channel(64);
     (Arc::new(DnsHandler::new(filter, cache, forwarder, tx)), rx)
