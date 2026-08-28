@@ -855,7 +855,7 @@ fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> 
         cached_bytes
     } else {
         let fresh = decrement_ttl(cached.bytes(), elapsed);
-        cached.store_patched_bytes(elapsed, fresh.clone());
+        cached.store_patched_bytes(elapsed, &fresh);
         fresh
     };
     let id_bytes = query_id.to_be_bytes();

@@ -49,7 +49,13 @@ pub struct CacheValue {
 }
 
 struct CacheValueInner {
-    bytes: Vec<u8>,
+    /// A `Box<[u8]>` rather than a `Vec<u8>`: a cached response never grows, so
+    /// the capacity field buys nothing and the spare capacity costs real
+    /// resident memory. `Message::to_vec` hands back a buffer reserved at 512
+    /// bytes whatever the answer's size, and a typical A response is under 100
+    /// — the shrink at insert is what stops the cache holding that difference
+    /// for every entry.
+    bytes: Box<[u8]>,
     ttl: Duration,
     inserted_at: Instant,
     /// Upstream resolver's Authenticated Data verdict for this answer, captured
@@ -67,7 +73,10 @@ struct CacheValueInner {
 
 struct PatchSnapshot {
     elapsed_secs: u32,
-    bytes: Vec<u8>,
+    /// Boxed for the same reason as `CacheValueInner::bytes`, and it matters
+    /// twice over: the snapshot is a second copy of the response held for as
+    /// long as the entry is hot, and every cache hit copies out of it.
+    bytes: Box<[u8]>,
 }
 
 impl CacheValue {
@@ -103,17 +112,21 @@ impl CacheValue {
         let snap = self.inner.patched.lock();
         snap.as_ref()
             .filter(|s| s.elapsed_secs == elapsed_secs)
-            .map(|s| s.bytes.clone())
+            .map(|s| s.bytes.to_vec())
     }
 
     /// Replace the patched-bytes snapshot. Last writer wins; if two callers
     /// race they both produce identical bytes for the same `elapsed_secs`,
     /// so overwriting either is safe.
-    pub fn store_patched_bytes(&self, elapsed_secs: u32, bytes: Vec<u8>) {
+    ///
+    /// Takes a slice because the caller's buffer is an encoder's, sized to its
+    /// own reservation rather than to the response; copying to an exact-sized
+    /// box here is what keeps that reservation out of the entry.
+    pub fn store_patched_bytes(&self, elapsed_secs: u32, bytes: &[u8]) {
         let mut snap = self.inner.patched.lock();
         *snap = Some(PatchSnapshot {
             elapsed_secs,
-            bytes,
+            bytes: Box::from(bytes),
         });
     }
 }
@@ -172,7 +185,7 @@ impl DnsCache {
                 key,
                 CacheValue {
                     inner: Arc::new(CacheValueInner {
-                        bytes,
+                        bytes: bytes.into_boxed_slice(),
                         ttl,
                         inserted_at: Instant::now(),
                         authenticated_data,
@@ -186,6 +199,14 @@ impl DnsCache {
     /// Invalidate all cached entries (called when filter rules change).
     pub fn invalidate_all(&self) {
         self.cache.invalidate_all();
+    }
+
+    /// Drain moka's write buffer so the cache holds exactly the entries that
+    /// have been inserted. Only measurement needs this: moka applies writes
+    /// asynchronously, so a memory reading taken right after a batch of
+    /// inserts would otherwise count the buffer rather than the entries.
+    pub async fn run_pending_tasks(&self) {
+        self.cache.run_pending_tasks().await;
     }
 }
 
@@ -311,7 +332,7 @@ mod tests {
         // No snapshot stored yet — first lookup misses.
         assert!(entry.try_patched_bytes(0).is_none());
 
-        entry.store_patched_bytes(0, vec![1, 2, 3]);
+        entry.store_patched_bytes(0, &[1, 2, 3]);
         assert_eq!(
             entry.try_patched_bytes(0).as_deref(),
             Some([1, 2, 3].as_slice())
@@ -321,7 +342,7 @@ mod tests {
         assert!(entry.try_patched_bytes(1).is_none());
 
         // Replacing the snapshot for a new window evicts the old one.
-        entry.store_patched_bytes(1, vec![4, 5, 6]);
+        entry.store_patched_bytes(1, &[4, 5, 6]);
         assert_eq!(
             entry.try_patched_bytes(1).as_deref(),
             Some([4, 5, 6].as_slice())
@@ -345,7 +366,7 @@ mod tests {
             .await;
 
         let a = cache.get(&key).await.unwrap();
-        a.store_patched_bytes(0, vec![9, 9, 9]);
+        a.store_patched_bytes(0, &[9, 9, 9]);
 
         let b = cache.get(&key).await.unwrap();
         assert_eq!(
