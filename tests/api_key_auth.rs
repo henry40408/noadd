@@ -36,7 +36,7 @@ async fn build_app() -> (axum::Router, Database, noadd::admin::auth::SessionStor
         vec![],
         vec![],
     )));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (log_tx, _log_rx) = mpsc::channel(64);

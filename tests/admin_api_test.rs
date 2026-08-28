@@ -88,7 +88,7 @@ async fn build_app_opts(
         vec![],
         vec![],
     )));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(
@@ -1314,7 +1314,7 @@ async fn test_setup_initial_password() {
         vec![],
         vec![],
     )));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
     let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(

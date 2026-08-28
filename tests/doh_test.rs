@@ -42,7 +42,7 @@ async fn make_handler() -> Arc<DnsHandler> {
     )];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let config = UpstreamConfig::default();
     let forwarder = Arc::new(UpstreamForwarder::new(config).await);
     let (tx, _rx) = mpsc::channel::<QueryContext>(64);
@@ -119,7 +119,7 @@ async fn test_doh_upstream_failure_returns_servfail_not_500() {
     let block_rules = vec![];
     let engine = FilterEngine::from_named_rules(block_rules, vec![]);
     let filter = Arc::new(ArcSwap::from_pointee(engine));
-    let cache = DnsCache::new(100);
+    let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let config = UpstreamConfig {
         servers: vec!["192.0.2.1:53".into()], // TEST-NET-1, unreachable
         timeout_ms: 500,
