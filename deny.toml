@@ -15,6 +15,11 @@ ignore = [
     # rustls-pemfile is unmaintained (repo archived). Still pulled in
     # transitively; no drop-in replacement wired up yet, low risk.
     "RUSTSEC-2025-0134",
+    # chacha20 0.10.0 and 0.10.1 were both yanked. The only unyanked 0.10.x is
+    # 0.10.2, published 2026-08-27, which is inside our 7-day cooldown on new
+    # releases — so this waits rather than pulling in a day-old crate. Revisit
+    # from 2026-09-03; tracked in henry40408/noadd#253.
+    { crate = "chacha20@0.10.0", reason = "yanked; replacement is inside the dependency cooldown" },
 ]
 
 [licenses]
