@@ -12,12 +12,10 @@
 //! an integration test is its own binary and does not link it, so this crate is
 //! free to install its own.
 //!
-//! Two numbers are reported because an entry grows once it is served:
-//! `prepare_cached_response` stores a TTL-decremented snapshot on the entry, so
-//! an entry under real traffic holds a second copy of the response. The
-//! snapshot here is produced by re-encoding through hickory exactly as
-//! `decrement_ttl` does, because how the encoder sizes its buffer is part of
-//! what this measures.
+//! Entries are also served once, because an entry that grows when it is read
+//! costs whatever that growth is for as long as it stays hot. It used to grow
+//! by a whole second copy of the response; the serving figure is what watches
+//! for that coming back.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -28,9 +26,9 @@ use std::time::Duration;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::{A, AAAA, TXT};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::serialize::binary::BinDecodable;
 
 use noadd::cache::{CacheKey, CacheValue, ClientResponseProfile, DnsCache};
+use noadd::dns::ttl;
 
 struct TrackingAllocator;
 
@@ -190,25 +188,19 @@ async fn retained_by_insert(cache: &DnsCache, key: CacheKey, capacity: usize) ->
     live_delta(before, counters())
 }
 
-/// The same measurement for the TTL-decremented snapshot an entry holds once
-/// it has been served.
-///
-/// The caller's buffer is dropped before the second reading, as the handler's
-/// is once the response has been sent — what is being measured is what the
-/// entry keeps, not what the caller was still holding.
-fn retained_by_snapshot(entry: &CacheValue, capacity: usize) -> isize {
-    let before = counters();
-    let mut patched = Vec::with_capacity(capacity);
-    patched.extend_from_slice(&[0xCD; PAYLOAD]);
-    entry.store_patched_bytes(0, &patched);
-    drop(patched);
-    live_delta(before, counters())
+/// What the handler does on a cache hit, minus writing the client's
+/// transaction ID: copy the response, then rewrite its TTLs in place.
+fn serve(entry: &CacheValue) -> Vec<u8> {
+    let mut bytes = entry.bytes().to_vec();
+    let elapsed = entry.elapsed().as_secs() as u32;
+    ttl::apply_elapsed(&mut bytes, entry.ttl_offsets(), elapsed);
+    bytes
 }
 
 /// An entry must not retain the slack capacity of the buffer it was handed.
 ///
-/// Each path is measured twice — once with a buffer sized to the response, once
-/// with a heavily over-reserved one — and only the difference is asserted on.
+/// Measured twice — once with a buffer sized to the response, once with a
+/// heavily over-reserved one — and only the difference is asserted on.
 /// Comparing the two cancels the entry's own bookkeeping and moka's, so the
 /// threshold does not encode anything about how either is implemented.
 ///
@@ -222,9 +214,8 @@ async fn an_entry_does_not_retain_its_caller_s_spare_capacity() {
 
     let cache = DnsCache::new(16);
 
-    let tight_key = bench_key(1);
     let slack_key = bench_key(2);
-    let tight = retained_by_insert(&cache, tight_key, PAYLOAD).await;
+    let tight = retained_by_insert(&cache, bench_key(1), PAYLOAD).await;
     let slack = retained_by_insert(&cache, slack_key.clone(), SLACK).await;
 
     assert!(
@@ -239,19 +230,44 @@ async fn an_entry_does_not_retain_its_caller_s_spare_capacity() {
         [0xAB; PAYLOAD],
         "shrinking must not truncate"
     );
+}
 
-    let tight = retained_by_snapshot(&entry, PAYLOAD);
-    let slack = retained_by_snapshot(&entry, SLACK);
+/// Serving an entry must not make it bigger.
+///
+/// It used to: the TTL-decremented response was cached on the entry, so an
+/// entry under traffic held a second copy of its own bytes. The offsets are
+/// found at insert now and a hit rewrites a copy, which leaves nothing behind.
+#[tokio::test]
+async fn serving_an_entry_retains_nothing() {
+    // Room for allocator noise, and well below the response size a second copy
+    // would add.
+    const BUDGET: isize = 512;
+
+    let cache = DnsCache::new(16);
+    let key = bench_key(3);
+    let response = build_response(&key.domain, record_type_for(3), 3);
+    let response_len = response.len();
+    cache
+        .insert(key.clone(), response, Duration::from_secs(300), false)
+        .await;
+    cache.run_pending_tasks().await;
+
+    let entry = cache.get(&key).await.expect("entry must be cached");
+    assert!(
+        !entry.ttl_offsets().is_empty(),
+        "the fixture must be a response whose TTLs are actually found"
+    );
+
+    let before = counters();
+    for _ in 0..8 {
+        drop(serve(&entry));
+    }
+    let retained = live_delta(before, counters());
 
     assert!(
-        slack - tight < BUDGET,
-        "a {SLACK}-byte buffer cost {slack} bytes to snapshot where a tight one \
-         cost {tight}; the spare capacity is being retained"
-    );
-    assert_eq!(
-        entry.try_patched_bytes(0).as_deref(),
-        Some(&[0xCD; PAYLOAD][..]),
-        "shrinking must not truncate"
+        retained < BUDGET,
+        "serving retained {retained} bytes for a {response_len}-byte response; \
+         the entry is growing when it is read"
     );
 }
 
@@ -286,27 +302,19 @@ async fn cache_memory_bench() {
     cache.run_pending_tasks().await;
     let after_insert = counters();
 
-    // Serve every entry once so each materialises its TTL-decremented
-    // snapshot — the state a cache under real traffic sits in.
+    // Serve every entry once — the state a cache under real traffic sits in.
     let before_serve = counters();
     for i in 0..n_entries {
         let key = bench_key(i);
         let entry = cache.get(&key).await.expect("entry must still be cached");
-        let elapsed = entry.elapsed().as_secs() as u32;
-        if entry.try_patched_bytes(elapsed).is_none() {
-            let reencoded = Message::from_bytes(entry.bytes())
-                .unwrap()
-                .to_vec()
-                .unwrap();
-            entry.store_patched_bytes(elapsed, &reencoded);
-        }
+        drop(serve(&entry));
     }
     cache.run_pending_tasks().await;
     let after_serve = counters();
 
     let n = n_entries as f64;
     let cold = live_delta(before_insert, after_insert);
-    let snapshot = live_delta(before_serve, after_serve);
+    let by_serving = live_delta(before_serve, after_serve);
 
     eprintln!("cache_memory_bench: {n_entries} entries (56% A, 25% AAAA, 19% TXT)");
     eprintln!(
@@ -323,17 +331,16 @@ async fn cache_memory_bench() {
         (after_insert.allocs - before_insert.allocs) as f64 / n
     );
     eprintln!(
-        "  patched snapshot = {:.1} bytes/entry ({snapshot} total), {:.2} allocs/entry",
-        snapshot as f64 / n,
-        (after_serve.allocs - before_serve.allocs) as f64 / n
+        "  added by serving = {:.1} bytes/entry ({by_serving} total)",
+        by_serving as f64 / n
     );
     eprintln!(
         "  served entry     = {:.1} bytes/entry   <- the number to compare",
-        (cold + snapshot) as f64 / n
+        (cold + by_serving) as f64 / n
     );
     eprintln!(
         "  overhead vs wire = {:.2}x",
-        (cold + snapshot) as f64 / wire_bytes as f64
+        (cold + by_serving) as f64 / wire_bytes as f64
     );
 
     // Hold the cache past the final counter read so nothing measured above is

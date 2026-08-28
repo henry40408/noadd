@@ -10,8 +10,9 @@ use hickory_proto::serialize::binary::BinDecodable;
 use tokio::sync::mpsc;
 
 use noadd::cache::DnsCache;
-use noadd::dns::handler::{self, DnsHandler, QueryAction, QueryContext};
+use noadd::dns::handler::{DnsHandler, QueryAction, QueryContext};
 use noadd::dns::ratelimit::IpRateLimiter;
+use noadd::dns::ttl;
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::parser::{ParsedRule, RuleAction};
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -157,7 +158,7 @@ fn build_response_with_ttl(id: u16, domain: &str, ttl: u32) -> Vec<u8> {
 #[test]
 fn test_decrement_ttl_reduces_answer_ttl() {
     let original = build_response_with_ttl(0xABCD, "example.com.", 300);
-    let patched = handler::decrement_ttl(&original, 120);
+    let patched = ttl::decrement_ttl(&original, 120);
 
     let msg = Message::from_bytes(&patched).unwrap();
     let answer_ttl = msg.answers[0].ttl;
@@ -170,7 +171,7 @@ fn test_decrement_ttl_reduces_answer_ttl() {
 #[test]
 fn test_decrement_ttl_clamps_to_minimum_1() {
     let original = build_response_with_ttl(0x1234, "example.com.", 60);
-    let patched = handler::decrement_ttl(&original, 9999);
+    let patched = ttl::decrement_ttl(&original, 9999);
 
     let msg = Message::from_bytes(&patched).unwrap();
     let answer_ttl = msg.answers[0].ttl;
@@ -402,7 +403,7 @@ async fn test_unsupported_edns_version_returns_badvers() {
 #[test]
 fn test_decrement_ttl_zero_elapsed_unchanged() {
     let original = build_response_with_ttl(0x5678, "example.com.", 300);
-    let patched = handler::decrement_ttl(&original, 0);
+    let patched = ttl::decrement_ttl(&original, 0);
 
     let msg = Message::from_bytes(&patched).unwrap();
     let answer_ttl = msg.answers[0].ttl;

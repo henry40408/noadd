@@ -16,6 +16,7 @@ use crate::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use crate::dns::block::{BlockConfig, BlockMode};
 use crate::dns::inflight::{BeginResult, InflightUpstream};
 use crate::dns::ratelimit::IpRateLimiter;
+use crate::dns::ttl;
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 
@@ -642,38 +643,6 @@ fn build_blocked_response(
     Ok(response.to_vec()?)
 }
 
-/// Decrement the TTL of every resource record in a DNS response by `elapsed`
-/// seconds. Returns the patched wire-format bytes. If parsing fails, the
-/// original bytes are returned unchanged. TTL is clamped to a minimum of 1
-/// to avoid clients treating 0 as "do not cache" and re-querying immediately.
-pub fn decrement_ttl(response_bytes: &[u8], elapsed_secs: u32) -> Vec<u8> {
-    let Ok(msg) = Message::from_bytes(response_bytes) else {
-        return response_bytes.to_vec();
-    };
-
-    let patch = |records: Vec<Record>| -> Vec<Record> {
-        records
-            .into_iter()
-            .map(|mut r| {
-                let new_ttl = r.ttl.saturating_sub(elapsed_secs).max(1);
-                r.ttl = new_ttl;
-                r
-            })
-            .collect()
-    };
-
-    let mut patched = msg.clone();
-    let answers = patch(msg.answers.clone());
-    let ns = patch(msg.authorities.clone());
-    let additionals = patch(msg.additionals.clone());
-
-    patched.answers = answers;
-    patched.authorities = ns;
-    patched.additionals = additionals;
-
-    patched.to_vec().unwrap_or_else(|_| response_bytes.to_vec())
-}
-
 /// Decide whether and for how long a DNS response should be cached.
 ///
 /// Returns `Some(ttl)` if the response is cacheable, `None` if it must not
@@ -845,19 +814,13 @@ fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
 /// Produce a cache-hit response: decrement TTLs by how long the entry has been
 /// cached, then overwrite the DNS transaction ID with the client's query ID.
 ///
-/// Within a single integer-second window the decremented bytes are identical
-/// across all callers, so we cache them on the entry itself. The fast path is
-/// then a single `Vec<u8>` clone instead of parse + walk + reencode (~30-50us
-/// saved per cache hit after the first one in the window).
+/// Both edits are writes at offsets the entry already knows, so a hit copies
+/// the response once and touches a few bytes of it — no parse, no re-encode,
+/// and no second copy of the response held on the entry to amortise them.
 fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> Vec<u8> {
+    let mut bytes = cached.bytes().to_vec();
     let elapsed = cached.elapsed().as_secs() as u32;
-    let mut bytes = if let Some(cached_bytes) = cached.try_patched_bytes(elapsed) {
-        cached_bytes
-    } else {
-        let fresh = decrement_ttl(cached.bytes(), elapsed);
-        cached.store_patched_bytes(elapsed, &fresh);
-        fresh
-    };
+    ttl::apply_elapsed(&mut bytes, cached.ttl_offsets(), elapsed);
     let id_bytes = query_id.to_be_bytes();
     if bytes.len() >= 2 {
         bytes[0] = id_bytes[0];

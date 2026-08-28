@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use moka::future::Cache;
 use moka::policy::EvictionPolicy;
-use parking_lot::Mutex;
 
 /// Client capabilities that affect the DNS wire response.
 ///
@@ -40,9 +39,8 @@ impl CacheKey {
 
 /// Cache value: raw DNS response bytes + TTL metadata for optimistic serving.
 ///
-/// Backed by an `Arc<Inner>` so clones (one per `cache.get()`) share the
-/// patched-bytes cache below — without sharing, every cache hit would
-/// recompute the TTL-decremented response from scratch.
+/// Backed by an `Arc<Inner>` so the clone `cache.get()` hands back is a
+/// refcount bump rather than a copy of the response.
 #[derive(Clone)]
 pub struct CacheValue {
     inner: Arc<CacheValueInner>,
@@ -63,20 +61,11 @@ struct CacheValueInner {
     /// `bytes` because a non-DO client's cached wire response has the AD bit
     /// stripped, yet the query log must still surface the upstream verdict.
     authenticated_data: bool,
-    /// Snapshot of the TTL-decremented response, valid for one integer
-    /// second. Within that second multiple cache hits share the result;
-    /// when the second rolls over the next caller recomputes and replaces.
-    /// Whole-domain TTLs are integer seconds, so within a second the
-    /// decremented bytes are identical and reusing them is safe.
-    patched: Mutex<Option<PatchSnapshot>>,
-}
-
-struct PatchSnapshot {
-    elapsed_secs: u32,
-    /// Boxed for the same reason as `CacheValueInner::bytes`, and it matters
-    /// twice over: the snapshot is a second copy of the response held for as
-    /// long as the entry is hot, and every cache hit copies out of it.
-    bytes: Box<[u8]>,
+    /// Where the decrementable TTL fields sit inside `bytes`, found once here
+    /// so serving the entry never has to parse it again. A typical answer has
+    /// one to three records, so this is a handful of bytes against the second
+    /// full copy of the response it replaces.
+    ttl_offsets: Box<[u32]>,
 }
 
 impl CacheValue {
@@ -105,29 +94,10 @@ impl CacheValue {
         self.inner.authenticated_data
     }
 
-    /// Return cached patched bytes if a snapshot exists for this exact
-    /// `elapsed_secs`. Caller falls back to recomputing + `store_patched_bytes`
-    /// when this returns `None`.
-    pub fn try_patched_bytes(&self, elapsed_secs: u32) -> Option<Vec<u8>> {
-        let snap = self.inner.patched.lock();
-        snap.as_ref()
-            .filter(|s| s.elapsed_secs == elapsed_secs)
-            .map(|s| s.bytes.to_vec())
-    }
-
-    /// Replace the patched-bytes snapshot. Last writer wins; if two callers
-    /// race they both produce identical bytes for the same `elapsed_secs`,
-    /// so overwriting either is safe.
-    ///
-    /// Takes a slice because the caller's buffer is an encoder's, sized to its
-    /// own reservation rather than to the response; copying to an exact-sized
-    /// box here is what keeps that reservation out of the entry.
-    pub fn store_patched_bytes(&self, elapsed_secs: u32, bytes: &[u8]) {
-        let mut snap = self.inner.patched.lock();
-        *snap = Some(PatchSnapshot {
-            elapsed_secs,
-            bytes: Box::from(bytes),
-        });
+    /// Offsets of the TTL fields inside [`bytes`](Self::bytes), for
+    /// `dns::ttl::apply_elapsed` to rewrite on a copy of them.
+    pub fn ttl_offsets(&self) -> &[u32] {
+        &self.inner.ttl_offsets
     }
 }
 
@@ -180,6 +150,7 @@ impl DnsCache {
         ttl: Duration,
         authenticated_data: bool,
     ) {
+        let ttl_offsets = crate::dns::ttl::ttl_offsets(&bytes);
         self.cache
             .insert(
                 key,
@@ -189,7 +160,7 @@ impl DnsCache {
                         ttl,
                         inserted_at: Instant::now(),
                         authenticated_data,
-                        patched: Mutex::new(None),
+                        ttl_offsets,
                     }),
                 },
             )
@@ -315,63 +286,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_patched_bytes_window_reuse() {
+    async fn ttl_offsets_are_found_when_the_entry_is_inserted() {
+        use hickory_proto::op::{Message, MessageType, OpCode};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, Record};
+        use std::str::FromStr;
+
+        let mut msg = Message::new(0x1234, MessageType::Response, OpCode::Query);
+        msg.add_answer(Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            300,
+            RData::A(A(std::net::Ipv4Addr::new(203, 0, 113, 1))),
+        ));
+        let bytes = msg.to_vec().unwrap();
+
         let cache = DnsCache::new(100);
-        let key = key("patched.test", 1);
+        let key = key("example.com", 1);
+        cache
+            .insert(key.clone(), bytes, Duration::from_secs(60), false)
+            .await;
+
+        let entry = cache.get(&key).await.unwrap();
+        let offsets = entry.ttl_offsets();
+        assert_eq!(offsets.len(), 1, "one answer record means one TTL field");
+
+        let at = offsets[0] as usize;
+        let stored = u32::from_be_bytes(entry.bytes()[at..at + 4].try_into().unwrap());
+        assert_eq!(
+            stored, 300,
+            "the offset must point at the record's TTL in the cached bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_that_is_not_a_dns_message_gets_no_offsets() {
+        let cache = DnsCache::new(100);
+        let key = key("garbage.test", 1);
         cache
             .insert(
                 key.clone(),
-                vec![0xab, 0xcd, 0xef],
+                vec![0xab, 0xcd],
                 Duration::from_secs(60),
                 false,
             )
             .await;
 
         let entry = cache.get(&key).await.unwrap();
-
-        // No snapshot stored yet — first lookup misses.
-        assert!(entry.try_patched_bytes(0).is_none());
-
-        entry.store_patched_bytes(0, &[1, 2, 3]);
-        assert_eq!(
-            entry.try_patched_bytes(0).as_deref(),
-            Some([1, 2, 3].as_slice())
-        );
-
-        // Different elapsed_secs window: cache miss.
-        assert!(entry.try_patched_bytes(1).is_none());
-
-        // Replacing the snapshot for a new window evicts the old one.
-        entry.store_patched_bytes(1, &[4, 5, 6]);
-        assert_eq!(
-            entry.try_patched_bytes(1).as_deref(),
-            Some([4, 5, 6].as_slice())
-        );
-        assert!(entry.try_patched_bytes(0).is_none());
-    }
-
-    #[tokio::test]
-    async fn test_patched_bytes_shared_across_clones() {
-        // CacheValue's Arc inner means a clone obtained from a separate
-        // cache.get() call must observe the same patched snapshot.
-        let cache = DnsCache::new(100);
-        let key = key("shared.test", 1);
-        cache
-            .insert(
-                key.clone(),
-                vec![0xde, 0xad, 0xbe, 0xef],
-                Duration::from_secs(60),
-                false,
-            )
-            .await;
-
-        let a = cache.get(&key).await.unwrap();
-        a.store_patched_bytes(0, &[9, 9, 9]);
-
-        let b = cache.get(&key).await.unwrap();
-        assert_eq!(
-            b.try_patched_bytes(0).as_deref(),
-            Some([9, 9, 9].as_slice())
+        assert!(
+            entry.ttl_offsets().is_empty(),
+            "an unwalkable response must serve with its TTLs untouched, not panic"
         );
     }
 }
