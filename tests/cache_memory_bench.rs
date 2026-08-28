@@ -12,6 +12,14 @@
 //! an integration test is its own binary and does not link it, so this crate is
 //! free to install its own.
 //!
+//! ⚠️ **The two kinds of figure need opposite arrangements, so they come from
+//! separate fills.** Bytes are measured with the responses built inside the
+//! window, because the encoder's reservation is part of what an entry occupies
+//! and the builder's temporaries are freed before the window closes, netting
+//! out of a live-byte reading. Allocations have no such cancellation — a freed
+//! allocation still happened — so `allocations_per_entry` builds everything
+//! first and counts only what caching it costs.
+//!
 //! Entries are also served once, because an entry that grows when it is read
 //! costs whatever that growth is for as long as it stays hot. It used to grow
 //! by a whole second copy of the response; the serving figure is what watches
@@ -271,6 +279,41 @@ async fn serving_an_entry_retains_nothing() {
     );
 }
 
+/// Allocations one entry costs, counted with its response and key built
+/// beforehand.
+///
+/// This needs its own pass, in the opposite arrangement to the byte figures.
+/// Those build inside their window on purpose, because the encoder's
+/// reservation is part of what an entry occupies, and the builder's temporaries
+/// are freed before the window closes so they net out of a *live-byte* reading.
+/// A count of allocations has no such cancellation: every `Name`, `Record` and
+/// `String` the builder touches is an allocation that happened, and there are
+/// far more of them than the handful the cache itself makes.
+async fn allocations_per_entry(n_entries: usize) -> f64 {
+    let cache = DnsCache::with_capacity_bytes(n_entries as u64 * 1024);
+    let prepared: Vec<(CacheKey, Vec<u8>)> = (0..n_entries)
+        .map(|i| {
+            let key = bench_key(i);
+            let bytes = build_response(&key.domain, record_type_for(i), i as u16);
+            (key, bytes)
+        })
+        .collect();
+
+    let before = counters();
+    for (key, bytes) in prepared {
+        cache
+            .insert(key, bytes, Duration::from_secs(300), false)
+            .await;
+    }
+    // Included in the window: moka applies writes asynchronously, so the node
+    // allocation for an entry lands here rather than in the `insert` call.
+    cache.run_pending_tasks().await;
+    let allocs = counters().allocs - before.allocs;
+
+    drop(cache);
+    allocs as f64 / n_entries as f64
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "benchmark; run manually with --ignored"]
 async fn cache_memory_bench() {
@@ -326,9 +369,12 @@ async fn cache_memory_bench() {
         key_bytes as f64 / n
     );
     eprintln!(
-        "  cold entry       = {:.1} bytes/entry ({cold} total), {:.2} allocs/entry",
-        cold as f64 / n,
-        (after_insert.allocs - before_insert.allocs) as f64 / n
+        "  cold entry       = {:.1} bytes/entry ({cold} total)",
+        cold as f64 / n
+    );
+    eprintln!(
+        "  allocations      = {:.2} allocs/entry",
+        allocations_per_entry(n_entries).await
     );
     eprintln!(
         "  added by serving = {:.1} bytes/entry ({by_serving} total)",
