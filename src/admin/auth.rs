@@ -3,37 +3,11 @@ use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use blake2::{Blake2b512, Digest};
 use parking_lot::Mutex;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
-
-/// Wrapper around `rand::rngs::OsRng` that implements `rand_core` 0.6 traits
-/// needed by `password-hash`'s `SaltString::generate`.
-struct OsRngCompat;
-
-impl argon2::password_hash::rand_core::RngCore for OsRngCompat {
-    fn next_u32(&mut self) -> u32 {
-        rand::random()
-    }
-    fn next_u64(&mut self) -> u64 {
-        rand::random()
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        dest.fill_with(rand::random);
-    }
-    fn try_fill_bytes(
-        &mut self,
-        dest: &mut [u8],
-    ) -> Result<(), argon2::password_hash::rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl argon2::password_hash::rand_core::CryptoRng for OsRngCompat {}
 
 /// Session expiry in seconds (7 days).
 pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
@@ -519,9 +493,8 @@ pub async fn revoke_user_sessions_except(
 
 /// Hash a password using Argon2 with a random salt.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRngCompat);
     let argon2 = Argon2::default();
-    let hash = argon2.hash_password(password.as_bytes(), &salt)?;
+    let hash = argon2.hash_password(password.as_bytes())?;
     Ok(hash.to_string())
 }
 
@@ -531,7 +504,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     let argon2 = Argon2::default();
     match argon2.verify_password(password.as_bytes(), &parsed) {
         Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(e) => Err(e),
     }
 }

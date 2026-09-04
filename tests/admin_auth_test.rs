@@ -43,6 +43,20 @@ fn test_password_hash_and_verify() {
     assert!(hash.starts_with("$argon2"));
 }
 
+/// Every operator password already on disk was written by an older argon2, so
+/// an upgrade that changed the PHC encoding or the default parameters would
+/// lock out every existing account on the first sign-in after the deploy —
+/// silently, and with the stored hash the only evidence. The literal below was
+/// produced by argon2 0.5 and verified there before being pinned here, so it
+/// tests the one thing hashing and verifying in the same process cannot.
+#[test]
+fn a_hash_written_by_the_previous_argon2_still_verifies() {
+    let stored = "$argon2id$v=19$m=19456,t=2,p=1$CFgBxAxypIe+BAv7VNQH0A$cMNXkJbVMEIFcFx0ets3cdrhZEbcp5IAIs5lkC2ppaQ";
+
+    assert!(verify_password("correct horse battery staple", stored).unwrap());
+    assert!(!verify_password("not the password", stored).unwrap());
+}
+
 /// `spend_verify_cost` exists to make a login against an unknown username cost
 /// what a login against a known one costs, so the two cannot be told apart by
 /// response time. That property is a *duration*, so it is the duration this
