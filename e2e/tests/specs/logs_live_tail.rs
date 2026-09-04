@@ -55,7 +55,9 @@ pub async fn run() -> Result<Vec<String>> {
                 page.testid("logs-live-toggle").expect_visible().await?;
                 // Unlike the dashboard's, this button keeps its label and
                 // carries its state in a class, so that is what is asserted.
-                page.testid("logs-live-toggle").expect_class("paused").await?;
+                page.testid("logs-live-toggle")
+                    .expect_class("paused")
+                    .await?;
                 page.testid("logs-live-toggle").click().await?;
                 page.testid("logs-live-toggle")
                     .expect_not_class("paused")
@@ -91,7 +93,9 @@ pub async fn run() -> Result<Vec<String>> {
                 // Off again. The subscription goes with it; the connection, and
                 // so the indicator, stays.
                 page.testid("logs-live-toggle").click().await?;
-                page.testid("logs-live-toggle").expect_class("paused").await?;
+                page.testid("logs-live-toggle")
+                    .expect_class("paused")
+                    .await?;
 
                 dns::send_query(dns_port, "not-tailed.example").await?;
 
