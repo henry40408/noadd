@@ -112,6 +112,124 @@ class LiveElement extends HTMLElement {
   }
 }
 
+// The admin UI's single push connection.
+//
+// One EventSource per page, not one per feature: the status indicator sits in
+// the shell and therefore on every page, so a stream per consumer would hold
+// two or three connections per tab. A browser talking HTTP/1.1 to a
+// plain-HTTP appliance gets six per origin before ordinary navigation starts
+// queueing behind them.
+//
+// Whoever needs it first calls start(); the call is idempotent, and `wantStats`
+// is sticky because the query string is fixed when the connection opens and
+// this is an MPA — the page never changes without a full reload taking the
+// connection with it.
+const serverEvents = {
+  _es: null,
+  _wantStats: false,
+  _listeners: new Map(),
+  _statusListeners: new Set(),
+  _status: 'connecting',
+  _watchdog: null,
+  // Three missed ticks. A single dropped one is not worth flickering the
+  // status bar over, and the server ticks every 10 seconds.
+  STALE_AFTER_MS: 30000,
+
+  start(wantStats) {
+    if (wantStats) this._wantStats = true;
+    if (this._es) return;
+    const qs = this._wantStats ? '?stats=1' : '';
+    this._es = new EventSource(`/api/events${qs}`);
+
+    this._es.addEventListener('open', () => this._setStatus('online'));
+    // EventSource reconnects on its own, so this is a report rather than a
+    // recovery: readyState CLOSED means it gave up (an auth failure, say) and
+    // nothing further will arrive.
+    this._es.addEventListener('error', () => {
+      this._setStatus(this._es && this._es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
+    });
+
+    this._es.addEventListener('ping', () => {
+      this._setStatus('online');
+      this._armWatchdog();
+    });
+
+    this._es.addEventListener('stats', (e) => {
+      this._setStatus('online');
+      this._armWatchdog();
+      let data;
+      try { data = JSON.parse(e.data); } catch (_) { return; }
+      this._emit('stats', data);
+    });
+
+    this._armWatchdog();
+  },
+
+  // A TCP connection can die without the browser noticing, and SSE keep-alive
+  // comments never surface to EventSource — so silence, not an error event, is
+  // what "the server went away" actually looks like from here.
+  _armWatchdog() {
+    clearTimeout(this._watchdog);
+    this._watchdog = setTimeout(() => this._setStatus('offline'), this.STALE_AFTER_MS);
+  },
+
+  on(type, fn) {
+    if (!this._listeners.has(type)) this._listeners.set(type, new Set());
+    this._listeners.get(type).add(fn);
+    return () => this._listeners.get(type).delete(fn);
+  },
+
+  onStatus(fn) {
+    this._statusListeners.add(fn);
+    fn(this._status);
+    return () => this._statusListeners.delete(fn);
+  },
+
+  _emit(type, data) {
+    const set = this._listeners.get(type);
+    if (!set) return;
+    for (const fn of set) {
+      try { fn(data); } catch (e) { console.error(e); }
+    }
+  },
+
+  _setStatus(status) {
+    if (this._status === status) return;
+    this._status = status;
+    for (const fn of this._statusListeners) {
+      try { fn(status); } catch (e) { console.error(e); }
+    }
+  },
+};
+
+// The status bar's liveness lamp. Ships hidden, and without JavaScript stays
+// that way: a page that cannot sense the server must not claim it is up, which
+// is exactly what the hardcoded ONLINE it replaces did.
+class ServerStatus extends LiveElement {
+  connectedCallback() {
+    this.removeAttribute('hidden');
+    this.track(serverEvents.onStatus(state => this._render(state)));
+    // The dashboard is the only page that wants snapshots, and it is in the
+    // markup already — server-rendered, like every page body — so this holds
+    // whichever element upgrades first.
+    serverEvents.start(!!document.querySelector('dashboard-page'));
+  }
+
+  _render(state) {
+    const label = state === 'online' ? 'ONLINE' : state === 'offline' ? 'OFFLINE' : 'CONNECTING';
+    this.classList.toggle('offline', state === 'offline');
+    this.classList.toggle('connecting', state === 'connecting');
+    this.textContent = label;
+    this.setAttribute('data-state', state);
+    this.title = state === 'online'
+      ? 'Connected to the server.'
+      : state === 'offline'
+        ? 'No response from the server.'
+        : 'Reconnecting to the server…';
+  }
+}
+customElements.define('server-status', ServerStatus);
+
 const fullNumberFormatter = new Intl.NumberFormat();
 const compactDecimalFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 function formatNum(n) {
@@ -826,7 +944,6 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
 class DashboardPage extends LiveElement {
   constructor() {
     super();
-    this._pollTimer = null;
     this._live = true;
     this._prevStats = null;
     this._prevChart = null;
@@ -838,11 +955,11 @@ class DashboardPage extends LiveElement {
 
   // The body arrives server-rendered, with the real numbers already in it. What
   // is added here is what makes it a *dashboard* rather than a snapshot: the
-  // chart, the ten-second poll, and the flash on whatever changed.
+  // chart, the pushed updates, and the flash on whatever changed.
   //
-  // The first poll re-draws cards that already hold the same values. That is
-  // deliberate — the alternative is teaching the client to trust markup it did
-  // not write, and every `_prev*` starts empty so nothing flashes on it.
+  // The opening snapshot re-draws cards that already hold the same values. That
+  // is deliberate — the alternative is teaching the client to trust markup it
+  // did not write, and every `_prev*` starts empty so nothing flashes on it.
   async connectedCallback() {
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
@@ -853,13 +970,15 @@ class DashboardPage extends LiveElement {
       btn.innerHTML = this._live
         ? '<span class="live-dot"></span> LIVE'
         : '<span class="live-dot"></span> PAUSED';
-      if (this._live) this._startPolling();
-      else this._stopPolling();
     };
 
-    // The poll timer is start/stop-able from the live toggle, so it registers a
-    // single teardown that defers to its own stopper.
-    this.track(() => this._stopPolling());
+    // Pausing does not close the stream: the status indicator in the shell is
+    // on the other end of it, and it must keep reporting whether the server is
+    // there whatever this page is doing. What pausing stops is applying what
+    // arrives.
+    this.track(serverEvents.on('stats', (snapshot) => {
+      if (this._live) this._apply(snapshot);
+    }));
 
     // The address to point a device at was rendered into the onboarding notice
     // already; take it from there rather than asking for it again. Every
@@ -867,12 +986,10 @@ class DashboardPage extends LiveElement {
     // which is why this is not fetched up front any more.
     this._dnsAddr = this.querySelector('#onboard-empty code')?.textContent?.trim() || '';
 
-    await this._fetchAll();
-    // `_fetchAll` awaits, so the page may already have been swapped out —
-    // disconnectedCallback would have run back when there was still no timer to
-    // stop, leaving anything started now to poll forever.
-    if (!this.isConnected) return;
-    this._startPolling();
+    // The server sends one snapshot as soon as the stream opens, so there is
+    // nothing to fetch here and no window in which the page shows the markup
+    // and the first push disagreeing.
+    serverEvents.start(true);
   }
 
   // Only ever needed by the onboarding notice, and only when the server did not
@@ -889,29 +1006,17 @@ class DashboardPage extends LiveElement {
     return this._dnsAddr;
   }
 
-  _startPolling() {
-    this._stopPolling();
-    this._pollTimer = setInterval(() => this._fetchAll(), 10000);
-  }
-
-  _stopPolling() {
-    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
-  }
-
-  async _fetchAll() {
+  // One pushed snapshot carries what five separate polls used to fetch. The
+  // field names are those endpoints' response bodies unchanged, so every
+  // renderer below is the one that read them before.
+  _apply(snapshot) {
+    if (!snapshot) return;
     try {
-      const [summary, timeline, domains, clients, upstreams] = await Promise.all([
-        api.get('/api/stats/summary'),
-        api.get('/api/stats/timeline'),
-        api.get('/api/stats/top-domains'),
-        api.get('/api/stats/top-clients'),
-        api.get('/api/stats/top-upstreams'),
-      ]);
-      this.renderStats(summary);
-      this.renderChart(timeline);
-      this.renderTopDomains(domains);
-      this.renderTopClients(clients);
-      this.renderTopUpstreams(upstreams);
+      this.renderStats(snapshot.summary);
+      this.renderChart(snapshot.timeline);
+      this.renderTopDomains(snapshot.top_domains);
+      this.renderTopClients(snapshot.top_clients);
+      this.renderTopUpstreams(snapshot.top_upstreams);
     } catch (e) { console.error(e); }
   }
 

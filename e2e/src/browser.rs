@@ -455,20 +455,29 @@ pub const RECORD_REQUESTS: &str = r"
 /// racing the logger's flush, so the figures are injected instead — see the
 /// scenario in `dashboard.feature` for why they are chosen to differ.
 pub fn override_summary(queries_1m: i64, total_today: i64) -> String {
+    // Patches `EventSource`, not `fetch`: the dashboard's readings arrive as
+    // `stats` events on the shared stream now, so a wrapper around
+    // `/api/stats/summary` would intercept a request the page no longer makes
+    // and the card would keep showing the real zeroes.
+    //
+    // `MessageEvent.data` is read-only, so the listener is handed a
+    // reconstructed event rather than a mutated one.
     format!(
         r"
-        const __fetch = window.fetch;
-        window.fetch = async function (input, init) {{
-            const url = typeof input === 'string' ? input : input.url;
-            const res = await __fetch.apply(this, arguments);
-            if (!String(url).includes('/api/stats/summary')) return res;
-            const body = await res.clone().json();
-            body.queries_1m = {queries_1m};
-            body.total_today = {total_today};
-            return new Response(JSON.stringify(body), {{
-                status: res.status,
-                headers: {{ 'content-type': 'application/json' }},
-            }});
+        const __add = EventSource.prototype.addEventListener;
+        EventSource.prototype.addEventListener = function (type, fn, opts) {{
+            if (type !== 'stats' || typeof fn !== 'function') {{
+                return __add.call(this, type, fn, opts);
+            }}
+            return __add.call(this, type, function (e) {{
+                let data;
+                try {{ data = JSON.parse(e.data); }} catch (_) {{ return fn(e); }}
+                if (data && data.summary) {{
+                    data.summary.queries_1m = {queries_1m};
+                    data.summary.total_today = {total_today};
+                }}
+                fn(new MessageEvent(e.type, {{ data: JSON.stringify(data) }}));
+            }}, opts);
         }};
         "
     )

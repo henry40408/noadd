@@ -89,6 +89,7 @@ async fn setup() -> (axum::Router, String) {
         forwarder,
         handler,
         log_events: tokio::sync::broadcast::channel(256).0,
+        events: std::sync::Arc::new(noadd::admin::events::EventHub::new(8)),
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),

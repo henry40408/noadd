@@ -324,6 +324,22 @@ async fn see_metric(world: &mut NoaddWorld, name: String) -> StepResult {
     Ok(())
 }
 
+/// The badge ships hidden with a placeholder label; both the unhide and the
+/// text come from the event stream connecting, so asserting on the text alone
+/// would pass against markup that never reached the server.
+#[then("the status bar reports the server is online")]
+async fn status_bar_online(world: &mut NoaddWorld) -> StepResult {
+    let page = world.page()?;
+    page.testid("server-status").expect_visible().await?;
+    page.testid("server-status")
+        .expect_text_contains("ONLINE")
+        .await?;
+    page.testid("server-status")
+        .expect_attr("data-state", "online")
+        .await?;
+    Ok(())
+}
+
 #[then("live updates are active")]
 async fn live_active(world: &mut NoaddWorld) -> StepResult {
     world
