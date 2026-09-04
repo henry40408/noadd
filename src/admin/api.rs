@@ -29,6 +29,7 @@ use crate::admin::auth::{
     hash_password, session_log_id, spend_verify_cost, store_session, validate_session,
     verify_password,
 };
+use crate::admin::events;
 use crate::admin::stats;
 use crate::cache::DnsCache;
 use crate::db::{Database, QueryLogEntry};
@@ -61,6 +62,9 @@ pub struct AppState {
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
+    /// Hub behind `GET /api/events`, the one stream the shell's status
+    /// indicator and the dashboard share.
+    pub events: std::sync::Arc<crate::admin::events::EventHub>,
     pub server_info: ServerInfo,
     /// Whether to set `Secure` on the admin session cookie. Resolved once at
     /// startup by [`crate::config::resolve_cookie_secure`]. Kept off
@@ -313,6 +317,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
         .route("/api/logs", get(get_logs).delete(delete_logs))
         .route("/api/logs/stream", get(stream_logs))
+        .route("/api/events", get(stream_events))
         // No auth: the token in the URL is the credential.
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Rendered from favicon.svg at build time.
@@ -4021,6 +4026,111 @@ async fn stream_logs(
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Query for [`stream_events`].
+#[derive(Deserialize)]
+pub struct EventStreamQuery {
+    /// Ask for `stats` events as well as the heartbeat. Only the dashboard
+    /// does; every other page holds the same stream open for the status
+    /// indicator alone, and computing a snapshot for it would be waste.
+    ///
+    /// Read as a string rather than a `bool` because `serde_urlencoded` only
+    /// accepts `true`/`false` for one, and `?stats=1` — what anyone writes by
+    /// hand — would 400 with nothing to explain why.
+    pub stats: Option<String>,
+}
+
+impl EventStreamQuery {
+    fn wants_stats(&self) -> bool {
+        matches!(self.stats.as_deref(), Some("1" | "true"))
+    }
+}
+
+/// The admin UI's one push channel.
+///
+/// Emits `ping` on every tick — the status indicator's heartbeat, which has to
+/// be a real event because SSE keep-alive comments never reach `EventSource`,
+/// leaving a silently-dead socket indistinguishable from an idle one — and
+/// `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
+///
+/// A client asking for stats gets one snapshot immediately rather than waiting
+/// out the first tick: the page is server-rendered with real numbers already,
+/// and up to ten seconds of divergence between that markup and the first push
+/// would read as a stale dashboard that suddenly jumps.
+async fn stream_events(
+    State(state): State<AppState>,
+    _auth: AuthedUser,
+    Query(query): Query<EventStreamQuery>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let wants_stats = query.wants_stats();
+    let hub = state.events.clone();
+    let mut ticks = hub.subscribe();
+
+    // Dropping this is what tells the ticker to stop computing snapshots once
+    // the last dashboard goes away, so it is moved into the pump task and
+    // lives exactly as long as the connection.
+    let guard = wants_stats.then(|| hub.stats_guard());
+
+    let initial = if wants_stats {
+        match events::compute_snapshot(&state.db, crate::now_unix()).await {
+            Ok(snap) => Event::default().event("stats").json_data(&snap).ok(),
+            Err(e) => {
+                tracing::warn!(
+                    event = "events.snapshot_failed",
+                    stage = "initial",
+                    error = %e,
+                    "failed to compute the opening dashboard snapshot"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // A tick becomes one or two events, which no single stream combinator
+    // expresses; pumping into a channel says it plainly instead. The client
+    // going away drops the receiver, the next send fails, and the task and its
+    // guard end with it.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
+    tokio::spawn(async move {
+        let _guard = guard;
+
+        if let Some(event) = initial
+            && tx.send(Ok(event)).await.is_err()
+        {
+            return;
+        }
+
+        loop {
+            let tick = match ticks.recv().await {
+                Ok(tick) => tick,
+                // Lagged: this client fell behind the buffer. The next tick is
+                // ten seconds away and carries the whole state, so there is
+                // nothing to replay.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+
+            if let Ok(event) = Event::default()
+                .event("ping")
+                .json_data(serde_json::json!({ "seq": tick.seq, "at": tick.at }))
+                && tx.send(Ok(event)).await.is_err()
+            {
+                break;
+            }
+
+            if let Some(snapshot) = tick.snapshot.as_ref()
+                && let Ok(event) = Event::default().event("stats").json_data(&**snapshot)
+                && tx.send(Ok(event)).await.is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// Delete all DNS query logs.

@@ -119,7 +119,7 @@ The query log adds the conventions for **filtering and paging**:
 Dashboard adds the conventions for a page that is **all readings and no controls**:
 
 - **The numbers are in the first response.** `dashboard_page` makes the five reads `app.js` used to make on its poll — `compute_summary`, `compute_top_domains` / `_clients` / `_upstreams` in `src/admin/stats.rs`, already shared with `/api/stats/*`. A failed read renders zeroes rather than an error page: a dashboard that says nothing beats one that will not load.
-- **`app.js` keeps polling and re-drawing the same markup**, so every shape in the template has a counterpart in `DashboardPage`. Number formatting is duplicated in Rust to match (`format_num_adaptive`, `percent1`, `share_percent`, `format_qps`) — a count that changed its own notation when the poll landed would read as a change in the number.
+- **`app.js` re-draws the same markup from a pushed snapshot**, so every shape in the template has a counterpart in `DashboardPage`. The five polls are gone: the numbers arrive as `stats` events on the shared stream (see *The event stream* below), and `_apply` reads the same five response bodies the fetches returned, so every renderer is the one that read them before. Number formatting is duplicated in Rust to match (`format_num_adaptive`, `percent1`, `share_percent`, `format_qps`) — a count that changed its own notation when an update landed would read as a change in the number.
 - **The chart is the documented exception** to no-JS: it is drawn from a timeline series by the client. The card says so rather than sitting empty, and the client replaces that text on connect.
 - ⚠️ **A conditional `style` must be merged into the element's existing one.** Two `style` attributes means the second is dropped — the chart card's `animation-delay` and its `display:none` are one attribute for that reason.
 
@@ -139,6 +139,21 @@ Account adds the conventions for **actions that need a password proof**:
 - **Creating an API key renders instead of redirecting** — the one deliberate exception to PRG on these pages. The token exists in that response and nowhere else, so a redirect would discard the only copy. A refresh re-posts and mints a second key, which the operator can see and delete.
 - **A rejected form never echoes a password back into the markup.** Only the non-secret fields (username, key name, expiry) are re-rendered.
 - Account POSTs answer as `/account` whatever path they arrived on — `ShellData::build_for("/account", …)`, so the navigation still marks the page the operator is looking at.
+
+### The event stream
+
+`GET /api/events` (`stream_events` in `src/admin/api.rs`, hub in `src/admin/events.rs`) is the admin UI's **one** push channel, and `serverEvents` in `app.js` is the single `EventSource` behind it.
+
+- **One connection per page, not one per feature.** The status indicator is in the shell and therefore on every page, so a stream per consumer would hold two or three per tab. Nothing here configures HTTP/2, so a browser talking plain HTTP gets six connections per origin before ordinary navigation queues behind them. `/api/logs/stream` is still separate and is the obvious next thing to fold in.
+- **`ping` every tick, always.** It is the status indicator's heartbeat and has to be a real event: SSE keep-alive comments never surface to `EventSource`, so a socket that died silently would look exactly like an idle one. The client flips to OFFLINE after three missed ticks — silence, not an `error` event, is what a dead server actually looks like from the browser.
+- **`stats` only when asked** (`?stats=1`, which only the dashboard sends). An idle settings page holding the stream open must not cost five aggregate queries a tick. A `StatsGuard` drops the claim when the connection does, which is the normal way an SSE connection ends.
+- **The snapshot is computed once per tick and shared**, not once per client — the ticker is O(1) in connected dashboards, where the polling it replaced was O(n).
+- **A `stats=1` client gets a snapshot as the stream opens**, not on the first tick, so the server-rendered numbers are never up to ten seconds out of step with the first push.
+- **Nothing ticks while nobody is connected.** `run()` skips the whole cycle on `connection_count() == 0`.
+- The dashboard's LIVE toggle no longer starts and stops a timer: pausing stops *applying* what arrives, because the shell's indicator is on the other end of the same connection and must keep reporting.
+- ⚠️ **A browser-side stub that wraps `fetch` no longer reaches the dashboard.** `override_summary` (`e2e/src/browser.rs`) patches `EventSource.prototype.addEventListener` instead, and hands the listener a reconstructed `MessageEvent` because `data` is read-only.
+
+⚠️ **The status bar's indicator reports the stream, not the markup.** It ships `hidden` with a placeholder label and is unhidden by its own `connectedCallback`; with no JavaScript it stays hidden, because a page that cannot sense the server must not claim it is up — which is exactly what the hardcoded `ONLINE` it replaced did.
 
 ⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/tests/specs/filters_no_js.rs` submits with `Enter` and activates row controls with `Locator::click_js` for the same reason, and says so.
 

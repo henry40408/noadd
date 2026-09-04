@@ -153,6 +153,7 @@ async fn build_app_opts(
         forwarder,
         handler,
         log_events: log_events.clone(),
+        events: std::sync::Arc::new(noadd::admin::events::EventHub::new(8)),
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -1352,6 +1353,7 @@ async fn test_setup_initial_password() {
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: tokio::sync::broadcast::channel(256).0,
+        events: std::sync::Arc::new(noadd::admin::events::EventHub::new(8)),
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -1393,6 +1395,7 @@ async fn test_setup_initial_password() {
         forwarder,
         handler,
         log_events: tokio::sync::broadcast::channel(256).0,
+        events: std::sync::Arc::new(noadd::admin::events::EventHub::new(8)),
         server_info: ServerInfo {
             dns_addr: "127.0.0.1:53".into(),
             http_addr: "127.0.0.1:3000".into(),
@@ -3861,6 +3864,120 @@ async fn test_logs_stream_sse_delivers_published_entry() {
     );
 }
 
+/// The stream is the shell's status indicator, which is on every page, so an
+/// unauthenticated one would be a pre-auth handle on the appliance.
+#[tokio::test]
+async fn event_stream_refuses_an_unauthenticated_client() {
+    let (app, _token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A dashboard must not sit on server-rendered markup for a whole tick waiting
+/// for the first push, so the snapshot goes out as the stream opens rather than
+/// on the ticker.
+#[tokio::test]
+async fn event_stream_opens_with_a_snapshot_when_stats_are_asked_for() {
+    let (app, token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/events?stats=1")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ctype.starts_with("text/event-stream"),
+        "unexpected content-type: {ctype}"
+    );
+
+    let mut stream = resp.into_body().into_data_stream();
+    let mut seen = String::new();
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.unwrap();
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+            if seen.contains("event: stats") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("timed out waiting for the opening snapshot");
+    assert!(found, "no stats event on connect; got: {seen}");
+
+    // The five fields are the shapes `app.js` renders; a rename here is a blank
+    // dashboard, which nothing else in the suite would catch.
+    for field in [
+        "summary",
+        "timeline",
+        "top_domains",
+        "top_clients",
+        "top_upstreams",
+    ] {
+        assert!(
+            seen.contains(&format!("\"{field}\"")),
+            "snapshot is missing `{field}`; got: {seen}"
+        );
+    }
+}
+
+/// Every page holds this stream open for the status indicator alone. Sending
+/// them a dashboard snapshot would make an idle settings page cost five
+/// aggregate queries every tick.
+#[tokio::test]
+async fn event_stream_sends_no_snapshot_when_stats_are_not_asked_for() {
+    let (app, token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/events")
+                .header("cookie", format!("session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Bounded negative: read whatever arrives in the window an opening snapshot
+    // would have used, and require that none of it is one.
+    let mut stream = resp.into_body().into_data_stream();
+    let mut seen = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.unwrap();
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    })
+    .await;
+    assert!(
+        !seen.contains("event: stats"),
+        "a stream that did not ask for stats received one: {seen}"
+    );
+}
+
 #[tokio::test]
 async fn logout_cookie_session_revokes_and_clears_cookie() {
     let (app, token) = setup().await;
@@ -4519,6 +4636,24 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     // The shell, not a client-side stand-in for it.
     assert!(html.contains(r#"action="/logout""#));
     assert!(html.contains("statusbar"));
+    // The status badge ships hidden. It used to be a hardcoded ONLINE, which
+    // said the server was up on a page the server could no longer answer for —
+    // without a client there is nothing to sense liveness with, so it shows
+    // nothing at all rather than something untrue.
+    assert!(
+        html.contains("<server-status"),
+        "the status bar is missing its indicator element"
+    );
+    let badge = html
+        .split("<server-status")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        badge.contains("hidden"),
+        "the status indicator must ship hidden, got: <server-status{badge}>"
+    );
 }
 
 /// The render half of the `<datalist>` contract — the API tests prove the save

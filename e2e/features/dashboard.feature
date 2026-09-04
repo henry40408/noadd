@@ -22,6 +22,13 @@ Feature: Dashboard and statistics
     And I see the "Database Size" metric
     And I see the "Total Logs" metric
 
+  Scenario: The status bar reports the server as reachable
+    # It reads ONLINE because the event stream connected, not because the
+    # markup said so — the hardcoded badge this replaced could not tell the
+    # difference between a live appliance and one that died after rendering.
+    Given I am on the "Dashboard" tab
+    Then the status bar reports the server is online
+
   Scenario: Live mode can be paused and resumed on the dashboard
     Given I am on the "Dashboard" tab
     Then live updates are active

@@ -165,6 +165,13 @@ body::after {
   content: '●'; margin-right: 6px;
   animation: blink 1.6s steps(2, start) infinite;
 }
+/* Reconnecting is not yet bad news, so it stays dim rather than red; the dot
+   keeps blinking because something is still being attempted. */
+.statusbar .live.connecting { color: var(--text-dim); text-shadow: none; }
+/* Offline holds a steady dot on purpose: the blink reads as activity, and
+   there is none. */
+.statusbar .live.offline { color: var(--red); text-shadow: none; }
+.statusbar .live.offline::before { animation: none; }
 .statusbar .right { margin-left: auto; }
 
 .fnbar { display: none; }

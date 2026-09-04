@@ -133,9 +133,13 @@ async fn main() -> anyhow::Result<()> {
     let cache = DnsCache::with_capacity_bytes(DNS_CACHE_CAPACITY_BYTES);
 
     let (log_events, _) = tokio::sync::broadcast::channel(256);
+    // Small buffer on purpose: a tick carries the whole state, so a client that
+    // falls behind wants the newest one, not a backlog of stale ones.
+    let events = Arc::new(noadd::admin::events::EventHub::new(8));
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger = logger.with_event_sender(log_events.clone());
     let logger_handle = tokio::spawn(logger.run());
+    let events_handle = tokio::spawn(noadd::admin::events::run(db.clone(), events.clone()));
 
     let ip_rate_limiter = Arc::new(IpRateLimiter::new(
         args.rate_limit_qps,
@@ -265,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         forwarder: forwarder.clone(),
         handler: handler.clone(),
         log_events: log_events.clone(),
+        events: events.clone(),
         server_info,
         cookie_secure: noadd::config::resolve_cookie_secure(args.cookie_secure, tls_enabled),
         list_manager: list_manager.clone(),
@@ -569,6 +574,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(event = "shutdown.started", "shutting down");
     udp_handle.abort();
     tcp_handle.abort();
+    // Loops forever and holds a `Database` clone, so it is aborted rather than
+    // awaited: `db.close()` below cannot checkpoint the WAL while it is alive.
+    events_handle.abort();
     drop(handler); // drops log_tx
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), logger_handle).await;
     db.close().await; // checkpoint WAL and close connections so -wal/-shm are removed

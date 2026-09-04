@@ -66,6 +66,12 @@ pub async fn run() -> Result<Vec<String>> {
                 // than sitting there doing nothing.
                 page.testid("live-toggle").expect_hidden().await?;
 
+                // Same for the status indicator, and for a sharper reason: it
+                // used to be a hardcoded ONLINE, which claimed the server was
+                // up on a page that had no way of knowing. With no client to
+                // hold the event stream open it shows nothing instead.
+                page.testid("server-status").expect_hidden().await?;
+
                 // Nothing has been queried, so the page explains what to do
                 // about it — and hides the chart card rather than drawing an
                 // empty axis, which is why the "drawn in the browser" note is

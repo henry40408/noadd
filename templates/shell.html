@@ -46,7 +46,8 @@
           <div id="page-content">{% block page %}{% endblock %}</div>
         </main>
         <footer class="statusbar">
-          <span class="live">ONLINE</span>
+          {# Ships hidden: without a client there is no way to sense the server, and a badge that cannot sense it must not claim it is up. #}
+          <server-status class="live" data-testid="server-status" hidden>ONLINE</server-status>
           <span>noadd {{ shell.version }}</span>
           <span class="right">{{ shell.host }}</span>
         </footer>
