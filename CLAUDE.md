@@ -39,7 +39,7 @@ A local **Chrome or Chromium is a prerequisite**: `WebDriver::managed` downloads
 
 Gherkin features in `e2e/features/` — unchanged by the port, `cucumber` reads the same files — with steps in `e2e/tests/e2e/steps.rs`. Which instance a feature runs against is the tag it already carried (`@app`, `@auth`, `@onboarding`); `tests/e2e/main.rs` starts one server per tag and a `before` hook picks by it.
 
-Destructive scenarios (password changes) and anything needing its own login rate-limit budget get a self-contained file in `e2e/tests/specs/` with dedicated ports — see `settings_autosave.rs`. Those files run concurrently, capped at `available_parallelism` and four; cases *within* a file run in the order they are written, which several depend on.
+Destructive scenarios (password changes), anything needing its own login rate-limit budget, and anything needing the appliance to *answer* something while a browser watches (`logs_live_tail.rs`, which sends a real DNS query to prove the tail streams) get a self-contained file in `e2e/tests/specs/` with dedicated ports — see `settings_autosave.rs`. Those files run concurrently, capped at `available_parallelism` and four; cases *within* a file run in the order they are written, which several depend on.
 
 Two Playwright conveniences are rebuilt in `e2e/src/`, and are the first place to look when an assertion behaves oddly:
 
@@ -114,6 +114,8 @@ The query log adds the conventions for **filtering and paging**:
 - **An empty table means two things and says which**: the empty-log guide when nothing is filtered, "No logs found" when something is.
 - **Clearing answers on an unfiltered first page** whatever view it came from — every filter now matches nothing, and "No logs found" would read as the filter breaking.
 - ⚠️ **A GET form and a POST form cannot be the same form, and forms cannot nest.** Clear All stays on the filters row via `form="clear-logs-form"`, pointing at an empty POST form after it. `app.js` must bind the confirmation to *that* form, not to `closest('form')`.
+- **The live tail is a subscription, not a connection.** It rides the shell's stream (see *The event stream*), so the page owns no `EventSource` of its own; `_prependRow` still drops what arrives while the tail is off, which is why the listener is registered once for the page's life rather than added and removed with the toggle.
+- ⚠️ **This toggle keeps its label.** It carries its state in a `paused` class, unlike the dashboard's, which rewrites its own text — a test asserting on `"PAUSED"` here passes against nothing.
 - The relative times are the one thing deliberately **not** matched between the two halves: the server renders `"3 minutes ago"` and the client's ticker replaces it with the browser's locale via `Intl.RelativeTimeFormat` (`"3 min. ago"`). The server cannot know the locale, and the alternative is shipping no time at all without scripting.
 
 Dashboard adds the conventions for a page that is **all readings and no controls**:
@@ -144,9 +146,11 @@ Account adds the conventions for **actions that need a password proof**:
 
 `GET /api/events` (`stream_events` in `src/admin/api.rs`, hub in `src/admin/events.rs`) is the admin UI's **one** push channel, and `serverEvents` in `app.js` is the single `EventSource` behind it.
 
-- **One connection per page, not one per feature.** The status indicator is in the shell and therefore on every page, so a stream per consumer would hold two or three per tab. Nothing here configures HTTP/2, so a browser talking plain HTTP gets six connections per origin before ordinary navigation queues behind them. `/api/logs/stream` is still separate and is the obvious next thing to fold in.
+- **One connection per page, not one per feature.** The status indicator is in the shell and therefore on every page, so a stream per consumer would hold two or three per tab. Nothing here configures HTTP/2, so a browser talking plain HTTP gets six connections per origin before ordinary navigation queues behind them. Every push the UI takes rides this one connection — there is no second stream, and adding a fourth event name is how a new one arrives.
 - **`ping` every tick, always.** It is the status indicator's heartbeat and has to be a real event: SSE keep-alive comments never surface to `EventSource`, so a socket that died silently would look exactly like an idle one. The client flips to OFFLINE after three missed ticks — silence, not an `error` event, is what a dead server actually looks like from the browser.
 - **`stats` only when asked** (`?stats=1`, which only the dashboard sends). An idle settings page holding the stream open must not cost five aggregate queries a tick. A `StatsGuard` drops the claim when the connection does, which is the normal way an SSE connection ends.
+- **`log` only when asked** (`?logs=1`), and the query log's tail ships *off*, so unlike `stats` it cannot be decided when the connection opens. `serverEvents.setLogs()` re-opens the one connection with the subscription added rather than starting a second, and the swap is deliberately not reported as a drop — the indicator is on the other end and would blink OFFLINE at an operator who only clicked a toggle.
+- **A closed source retires its own arm** rather than ending the connection (`next_broadcast`): the heartbeat and the tail are independent, and taking the stream down with one of them would blank an indicator that can still report. The `Arc<EventHub>` is held by the pump for the connection's life for the same reason — without it the router's can be the last, and a stream that asked for no stats watches its tick source close the moment the handler returns.
 - **The snapshot is computed once per tick and shared**, not once per client — the ticker is O(1) in connected dashboards, where the polling it replaced was O(n).
 - **A `stats=1` client gets a snapshot as the stream opens**, not on the first tick, so the server-rendered numbers are never up to ten seconds out of step with the first push.
 - **Nothing ticks while nobody is connected.** `run()` skips the whole cycle on `connection_count() == 0`.

@@ -3804,11 +3804,12 @@ async fn delete_operator_succeeds_and_missing_returns_404() {
 async fn test_logs_stream_sse_delivers_published_entry() {
     let (app, token, _cache, events) = build_app("http://127.0.0.1:1/filters.json", true).await;
 
-    // Open the authenticated SSE stream. The handler subscribes to the
-    // broadcast channel while producing the response, so a publish after
-    // oneshot() returns is guaranteed to be delivered to this subscriber.
+    // The tail rides the shared stream now, so it is `?logs=1` rather than an
+    // endpoint of its own. The handler subscribes to the broadcast channel
+    // while producing the response, so a publish after oneshot() returns is
+    // guaranteed to be delivered to this subscriber.
     let req = Request::builder()
-        .uri("/api/logs/stream")
+        .uri("/api/events?logs=1")
         .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
@@ -3861,6 +3862,56 @@ async fn test_logs_stream_sse_delivers_published_entry() {
     assert!(
         found,
         "SSE stream did not deliver the published entry; got: {seen}"
+    );
+    // Named, not the default event: an unnamed one reaches `onmessage` and
+    // never the `log` listener the page registers.
+    assert!(
+        seen.contains("event: log"),
+        "the entry did not arrive as a `log` event; got: {seen}"
+    );
+}
+
+/// Every page holds this stream open for the status indicator. A tail that is
+/// switched off — the state the query log ships in — must not be handed every
+/// query the appliance answers.
+#[tokio::test]
+async fn event_stream_sends_no_logs_when_they_are_not_asked_for() {
+    let (app, token, _cache, events) = build_app("http://127.0.0.1:1/filters.json", true).await;
+
+    let req = Request::builder()
+        .uri("/api/events")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let entry = QueryLogEntry {
+        timestamp: 1234,
+        domain: "unwanted.example.com".to_string(),
+        query_type: "A".to_string(),
+        client_ip: "10.0.0.9".to_string(),
+        blocked: false,
+        cached: false,
+        response_ms: 5,
+        upstream: Some("1.1.1.1:53".to_string()),
+        doh_token: None,
+        result: None,
+        authenticated_data: false,
+    };
+    let _ = events.send(Arc::new(entry));
+
+    let mut stream = resp.into_body().into_data_stream();
+    let mut seen = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(chunk) = stream.next().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+    })
+    .await;
+    assert!(
+        !seen.contains("unwanted.example.com"),
+        "a stream that did not ask for logs received one: {seen}"
     );
 }
 

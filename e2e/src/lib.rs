@@ -53,6 +53,9 @@ pub mod ports {
     pub const STATS_NO_JS: (u16, u16) = (14109, 15109);
     /// The dashboard, settings and account with scripting off.
     pub const PAGES_NO_JS: (u16, u16) = (14110, 15110);
+    /// The query log's live tail, which needs the appliance to answer a real
+    /// query while a browser watches.
+    pub const LOGS_LIVE_TAIL: (u16, u16) = (14111, 15111);
 
     /// The screenshot pipeline, which is not part of a test run.
     pub const SCREENSHOTS: (u16, u16) = (14150, 15150);
