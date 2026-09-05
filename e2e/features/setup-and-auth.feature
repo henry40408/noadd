@@ -58,15 +58,17 @@ Feature: First-run setup and authentication
     Then I land on the dashboard
 
   Scenario: The next-step banner can be dismissed and stays dismissed
-    # On a fresh install the dashboard shows a banner telling the admin how to
-    # point a device at noadd. This instance never serves DNS queries, so the
-    # banner here can only be cleared by an explicit dismissal, and that choice
-    # must survive a reload.
+    # On a fresh install every page but the dashboard carries a banner telling
+    # the admin how to point a device at noadd; the dashboard says it in its own
+    # empty state instead. This instance never serves DNS queries, so the banner
+    # here can only be cleared by an explicit dismissal, and that choice must
+    # survive a reload.
     Given the admin password has been set to "correct horse battery staple"
     When I open the admin UI
     And I sign in with the password "correct horse battery staple"
     Then I land on the dashboard
-    And I see the next-step banner explaining how to point a device at noadd
+    When I go to the "Settings" tab
+    Then I see the next-step banner explaining how to point a device at noadd
     When I dismiss the next-step banner
     Then the next-step banner is no longer shown
     And reloading the admin UI does not show the next-step banner again

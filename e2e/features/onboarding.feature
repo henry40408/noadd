@@ -26,7 +26,9 @@ Feature: New-install onboarding guidance
     Then I see onboarding guidance explaining that no DNS queries have been logged yet
 
   Scenario: The next-step banner is shown on a fresh install
-    When I go to the "Dashboard" tab
+    # Anywhere but the dashboard, which makes the same point at more length in
+    # its own empty state — one page carrying both reads as two notices.
+    When I go to the "Settings" tab
     Then I see the next-step banner explaining how to point a device at noadd
 
   Scenario: Filters warns when every list is disabled
@@ -39,7 +41,9 @@ Feature: New-install onboarding guidance
     And the warning offers a way to enable a recommended list
 
   Scenario: The next-step banner disappears once noadd serves a real query
-    Given I am on the "Dashboard" tab
+    # It goes on the heartbeat the page already receives, so this proves the
+    # push arrives — there is nothing polling for it any more.
+    Given I am on the "Settings" tab
     And I see the next-step banner explaining how to point a device at noadd
     When noadd resolves a real DNS query
     Then the next-step banner is no longer shown

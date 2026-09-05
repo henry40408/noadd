@@ -207,5 +207,34 @@ pub async fn run() -> Result<Vec<String>> {
         )
         .await;
 
+    // Last, deliberately: dismissing is stored server-side, so this case takes
+    // the notice away from the instance for good.
+    suite
+        .case(
+            "the onboarding notice is rendered, and dismissing it is a form post",
+            async |_browser, page| {
+                open(page, &session, "/account").await?;
+
+                // It used to be drawn by `app.js` after three fetches, so with
+                // scripting off there was nothing here at all.
+                page.testid("next-step-banner").expect_visible().await?;
+                page.testid("next-step-banner-addr")
+                    .expect_text_contains(":")
+                    .await?;
+
+                page.testid("next-step-banner-dismiss").click().await?;
+
+                // The `next` field carries where it was dismissed from, so the
+                // operator lands back on the page rather than the dashboard.
+                page.expect_url_ends_with("/account").await?;
+                page.testid("next-step-banner").expect_count(0).await?;
+
+                // And it stays dismissed, because the choice is stored.
+                page.goto("/settings").await?;
+                page.testid("next-step-banner").expect_count(0).await
+            },
+        )
+        .await;
+
     Ok(suite.finish())
 }

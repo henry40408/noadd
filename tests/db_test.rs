@@ -75,6 +75,35 @@ async fn session_log_salt_is_persisted() {
     assert!(stored.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+/// What the onboarding notice asks before it offers to explain how to point a
+/// device at the appliance: has this machine ever answered anything?
+#[tokio::test]
+async fn has_any_query_logs_reports_whether_the_appliance_has_served_traffic() {
+    let db = test_db().await;
+    assert!(
+        !db.has_any_query_logs().await.unwrap(),
+        "a fresh appliance has served nothing"
+    );
+
+    db.insert_query_logs(&[QueryLogEntry {
+        timestamp: 1_000_000,
+        domain: "example.com".to_string(),
+        query_type: "A".to_string(),
+        client_ip: "192.168.1.1".to_string(),
+        blocked: false,
+        cached: false,
+        upstream: None,
+        doh_token: None,
+        result: None,
+        response_ms: 5,
+        authenticated_data: false,
+    }])
+    .await
+    .unwrap();
+
+    assert!(db.has_any_query_logs().await.unwrap());
+}
+
 #[tokio::test]
 async fn test_insert_and_query_logs() {
     let db = test_db().await;

@@ -19,12 +19,17 @@ pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 /// an idle layer and an absolute layer exist — not a specific figure.
 ///
 /// This window measures time since the last *request* this device made, not
-/// time since a human last looked at the screen — a conventional
-/// simplification for a server-side idle timeout, but narrower than it
-/// sounds in practice: the admin SPA polls `/api/filter/rebuild-status`
-/// every 2s and the dashboard every 10s while a tab is open, and both trips
-/// refresh `last_seen` via `validate_session`, so this layer only actually
-/// expires sessions whose browser tab was closed (or whose machine slept).
+/// time since a human last looked at the screen — the conventional
+/// simplification for a server-side idle timeout, and here it means what it
+/// says. The admin UI used to poll (`/api/filter/rebuild-status` every 2s, the
+/// dashboard every 10s), and every one of those trips refreshed `last_seen`
+/// through `validate_session`, so in practice only a closed tab ever expired.
+/// Both polls are gone: what an open tab holds now is one `GET /api/events`,
+/// whose session is validated when it is established and not again for as long
+/// as it stays up. A tab left open past this window therefore does expire, and
+/// the next navigation — or the `EventSource`'s next reconnect — lands on
+/// `/login`. That is the layer doing its job rather than a regression, but it
+/// is a real change in what an operator sees.
 ///
 /// `last_seen` is only flushed to disk every 60s (see `flush_last_seen`), so a
 /// value reloaded after a restart can lag reality by up to that long. Against

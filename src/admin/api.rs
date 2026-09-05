@@ -216,6 +216,10 @@ pub fn admin_router(state: AppState) -> Router {
             "/filters/rules/{id}/delete",
             post(crate::admin::pages::filters_rule_delete_submit),
         )
+        .route(
+            "/onboarding/dismiss",
+            post(crate::admin::pages::onboarding_dismiss_submit),
+        )
         .route("/filters/registry", get(crate::admin::pages::registry_page))
         .route(
             "/filters/registry/add",
@@ -4034,7 +4038,9 @@ async fn next_broadcast<T: Clone>(
 ///
 /// - `ping` on every tick, the status indicator's heartbeat. It has to be a
 ///   real event because SSE keep-alive comments never reach `EventSource`,
-///   leaving a silently-dead socket indistinguishable from an idle one.
+///   leaving a silently-dead socket indistinguishable from an idle one. It
+///   carries `traffic`, whether the appliance has ever answered a query, which
+///   is the onboarding notice's cue to take itself down.
 /// - `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
 /// - `log` carrying a [`QueryLogEntry`] per answered query when `?logs=1`.
 ///   Published before the logger's DB flush, so the tail is real-time.
@@ -4141,7 +4147,11 @@ async fn stream_events(
 
                     if let Ok(event) = Event::default()
                         .event("ping")
-                        .json_data(serde_json::json!({ "seq": tick.seq, "at": tick.at }))
+                        .json_data(serde_json::json!({
+                            "seq": tick.seq,
+                            "at": tick.at,
+                            "traffic": tick.traffic,
+                        }))
                         && tx.send(Ok(event)).await.is_err()
                     {
                         break;

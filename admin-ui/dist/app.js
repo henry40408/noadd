@@ -176,9 +176,15 @@ const serverEvents = {
       this._setStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
     });
 
-    es.addEventListener('ping', () => {
+    // The heartbeat is the status indicator's, but it carries state too — the
+    // appliance's first answered query rides it — so it is dispatched like the
+    // rest rather than being consumed here.
+    es.addEventListener('ping', (e) => {
       this._setStatus('online');
       this._armWatchdog();
+      let data;
+      try { data = JSON.parse(e.data); } catch (_) { return; }
+      this._emit('ping', data);
     });
 
     for (const type of ['stats', 'log', 'rebuild']) {
@@ -644,81 +650,36 @@ class RebuildBanner extends LiveElement {
 }
 customElements.define('rebuild-banner', RebuildBanner);
 
-// On a fresh install, tells the admin how to point a device's DNS at noadd
-// and shows the server's DNS address. Auto-hides once a real DNS query has
-// been served (polls /api/stats/summary every 3s). Can be dismissed; the
-// dismissal persists server-side via PUT /api/settings.
+// On a fresh install, tells the operator how to point a device's DNS at noadd.
+//
+// The server decides whether this appears at all — it knows the dismissal, the
+// DNS address and whether any query has ever been answered — so the markup
+// arrives rendered and there is nothing to fetch. Two things are left for a
+// client: taking the notice down the moment traffic starts, off the heartbeat's
+// `traffic` flag, and dismissing without a page load. Without JavaScript the
+// form posts and the operator lands back on the same page.
 class NextStepBanner extends LiveElement {
   connectedCallback() {
-    this.timer = null;
-    this.dnsAddr = '';
-    this.innerHTML = '';   // render nothing until init decides
-    this.init();
-  }
-  async init() {
-    // 1) Respect a prior dismissal — if dismissed, never show or poll.
-    let settings;
-    try {
-      settings = await api.get('/api/settings');
-    } catch (e) {
-      return;
-    }
-    if (settings && settings.onboarding_banner_dismissed === 'true') {
-      return;
-    }
-    // 2) Resolve the DNS address to display: location.hostname + the port
-    //    parsed from server-info's dns_addr (e.g. "0.0.0.0:53" -> "53").
-    try {
-      const info = await api.get('/api/server-info');
-      const raw = (info && info.dns_addr) || '';
-      const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : raw;
-      this.dnsAddr = `${window.location.hostname}:${port}`;
-    } catch (e) {
-      return;
-    }
-    // 3) If a query was already served, stay hidden; otherwise show + poll.
-    if (await this.hasQueries()) {
-      return;
-    }
-    // Three awaits back; the banner may have been swapped out in the meantime,
-    // and a timer started now would never be torn down.
-    if (!this.isConnected) return;
-    this.show();
-    this.timer = this.interval(() => this.poll(), 3000);
-  }
-  async hasQueries() {
-    try {
-      const s = await api.get('/api/stats/summary');
-      return ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
-    } catch (e) {
-      return false;
-    }
-  }
-  async poll() {
-    if (await this.hasQueries()) {
-      if (this.timer) { clearInterval(this.timer); this.timer = null; }
-      this.innerHTML = '';
-    }
-  }
-  show() {
-    this.innerHTML = html`
-      <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
-        <span class="icon">${icons.dashboard}</span>
-        <span class="text">
-          <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${this.dnsAddr}</strong>.</span>
-        </span>
-        <button class="btn" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
-      </div>`;
-    const dismiss = this.querySelector('[data-testid="next-step-banner-dismiss"]');
-    dismiss.onclick = () => this.dismiss();
-  }
-  async dismiss() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.innerHTML = '';
-    try {
-      await api.put('/api/settings', { onboarding_banner_dismissed: 'true' });
-    } catch (e) {
-      // best-effort; UI already hidden for this session
+    if (!this.firstElementChild) return;   // the server decided not to show it
+    this.track(serverEvents.on('ping', tick => {
+      if (tick && tick.traffic) this.innerHTML = '';
+    }));
+    const form = this.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', e => {
+        e.preventDefault();
+        this.innerHTML = '';
+        // The same form post a browser would make — `api` speaks JSON and the
+        // route takes a form — with the redirect left unfollowed, since the
+        // page it would fetch is the one already on screen. Best-effort: a
+        // failure only means the notice is offered again on the next load.
+        fetch(form.action, {
+          method: 'POST',
+          credentials: 'same-origin',
+          redirect: 'manual',
+          body: new URLSearchParams(new FormData(form)),
+        }).catch(() => {});
+      });
     }
   }
 }

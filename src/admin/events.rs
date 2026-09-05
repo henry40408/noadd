@@ -22,7 +22,7 @@
 //! The snapshot is computed once per tick and shared, not once per connection.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -63,6 +63,11 @@ pub struct DashboardSnapshot {
 pub struct Tick {
     pub seq: u64,
     pub at: i64,
+    /// Whether the appliance has ever answered a query. Rides the heartbeat
+    /// rather than taking an event name of its own: it is a state bit, not
+    /// something that happened, and the onboarding notice it hides is the only
+    /// thing that reads it.
+    pub traffic: bool,
     pub snapshot: Option<Arc<DashboardSnapshot>>,
 }
 
@@ -71,6 +76,11 @@ pub struct Tick {
 pub struct EventHub {
     tx: broadcast::Sender<Arc<Tick>>,
     stats_subscribers: AtomicUsize,
+    /// Latches on the first query this appliance is seen to have answered, and
+    /// never clears. The onboarding notice it hides is about a machine that has
+    /// never served traffic, and a machine that has served some is not that
+    /// machine again — so once the answer is yes, nothing needs to ask again.
+    traffic_seen: AtomicBool,
 }
 
 impl EventHub {
@@ -79,6 +89,7 @@ impl EventHub {
         Self {
             tx,
             stats_subscribers: AtomicUsize::new(0),
+            traffic_seen: AtomicBool::new(false),
         }
     }
 
@@ -89,6 +100,18 @@ impl EventHub {
     /// Number of live SSE connections, stats-wanting or not.
     pub fn connection_count(&self) -> usize {
         self.tx.receiver_count()
+    }
+
+    /// Has the appliance answered a query, as far as anything has looked?
+    pub fn has_traffic(&self) -> bool {
+        self.traffic_seen.load(Ordering::Relaxed)
+    }
+
+    /// Records that it has. Callable from anywhere that happens to learn it —
+    /// the ticker probes for it, and a page render that reads the same fact
+    /// keeps the latch warm on an appliance nobody is watching.
+    pub fn note_traffic(&self) {
+        self.traffic_seen.store(true, Ordering::Relaxed);
     }
 
     pub fn wants_stats(&self) -> bool {
@@ -163,6 +186,21 @@ pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration
         seq = seq.wrapping_add(1);
         let now = crate::now_unix();
 
+        // Asked only while the answer can still be no. The latch is one-way, so
+        // an appliance that has served traffic pays for this once and a fresh
+        // one pays a single `EXISTS` per tick until its first query lands.
+        if !hub.has_traffic() {
+            match db.has_any_query_logs().await {
+                Ok(true) => hub.note_traffic(),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    event = "events.traffic_probe_failed",
+                    error = %e,
+                    "failed to check whether the appliance has served any queries"
+                ),
+            }
+        }
+
         let snapshot = if hub.wants_stats() {
             match compute_snapshot(&db, now).await {
                 Ok(snap) => Some(Arc::new(snap)),
@@ -185,6 +223,7 @@ pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration
         hub.send(Tick {
             seq,
             at: now,
+            traffic: hub.has_traffic(),
             snapshot,
         });
     }
@@ -324,6 +363,7 @@ mod tests {
         hub.send(Tick {
             seq: 7,
             at: 1234,
+            traffic: false,
             snapshot: None,
         });
 

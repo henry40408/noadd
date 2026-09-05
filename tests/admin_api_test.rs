@@ -4435,6 +4435,127 @@ async fn a_page_request_without_a_session_is_redirected_to_sign_in() {
     );
 }
 
+/// The rendered HTML of a page, for the assertions that are about markup the
+/// server decided to emit.
+async fn page_body(app: &axum::Router, uri: &str, token: &str) -> String {
+    let req = Request::builder()
+        .uri(uri)
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The onboarding notice is decided by the server: the dismissal, the DNS
+/// address and whether anything has ever been answered are all facts it holds,
+/// so the markup arrives rendered instead of being fetched in three calls.
+#[tokio::test]
+async fn the_onboarding_notice_is_rendered_on_a_fresh_appliance() {
+    let (app, token) = setup().await;
+    let body = page_body(&app, "/settings", &token).await;
+    assert!(
+        body.contains(r#"data-testid="next-step-banner""#),
+        "a fresh appliance should be told how to point a device at it"
+    );
+    // Its one control is a real form, so it works without a client.
+    assert!(body.contains(r#"action="/onboarding/dismiss""#));
+    assert!(body.contains(r#"name="next" value="/settings""#));
+}
+
+/// The dashboard makes this point at length in its own empty state. Two
+/// notices on one page read as two different messages.
+#[tokio::test]
+async fn the_onboarding_notice_stays_off_the_dashboard() {
+    let (app, token) = setup().await;
+    let body = page_body(&app, "/", &token).await;
+    assert!(
+        !body.contains(r#"data-testid="next-step-banner""#),
+        "the dashboard's own empty state already says this"
+    );
+    assert!(
+        body.contains(r#"data-testid="dashboard-empty-state""#),
+        "and it should still be the one saying it"
+    );
+}
+
+/// What used to take a poll every three seconds: once a query has been
+/// answered, the notice is not rendered again.
+#[tokio::test]
+async fn the_onboarding_notice_goes_away_once_a_query_has_been_answered() {
+    let (app, token, _cache, _events, db, _sessions, _limiter) =
+        build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
+    db.insert_query_logs(&[QueryLogEntry {
+        timestamp: 1_000_000,
+        domain: "example.com".to_string(),
+        query_type: "A".to_string(),
+        client_ip: "192.168.1.1".to_string(),
+        blocked: false,
+        cached: false,
+        upstream: None,
+        doh_token: None,
+        result: None,
+        response_ms: 5,
+        authenticated_data: false,
+    }])
+    .await
+    .unwrap();
+
+    let body = page_body(&app, "/settings", &token).await;
+    assert!(!body.contains(r#"data-testid="next-step-banner""#));
+}
+
+/// Dismissing is a form post, and it returns the operator to the page they
+/// dismissed it from rather than to the dashboard.
+#[tokio::test]
+async fn dismissing_the_onboarding_notice_persists_and_returns_to_the_page() {
+    let (app, token) = setup().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/onboarding/dismiss")
+        .header("cookie", format!("session={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("next=/logs"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/logs")
+    );
+
+    let body = page_body(&app, "/settings", &token).await;
+    assert!(
+        !body.contains(r#"data-testid="next-step-banner""#),
+        "the dismissal did not stick"
+    );
+}
+
+/// The same `safe_next` every other form on these pages is validated by: a
+/// `next` that points off-origin is a redirect an attacker chose.
+#[tokio::test]
+async fn dismissing_the_onboarding_notice_refuses_an_off_origin_return() {
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/onboarding/dismiss")
+        .header("cookie", format!("session={token}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("next=https://evil.example/"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/")
+    );
+}
+
 /// Before any operator exists every page routes to the wizard, not to a sign-in
 /// form nobody could satisfy.
 #[tokio::test]

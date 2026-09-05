@@ -783,6 +783,28 @@ impl Database {
         Ok(rows)
     }
 
+    /// Has this appliance ever logged a query?
+    ///
+    /// `EXISTS` rather than a count or a windowed sum: the only caller asks
+    /// whether the machine has ever served traffic — to decide whether to tell
+    /// an operator how to point a device at it — and that question stops at the
+    /// first row. A count would read every one of them on a busy appliance to
+    /// answer something a single row settles.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot be run.
+    pub async fn has_any_query_logs(&self) -> Result<bool, DbError> {
+        let exists = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM query_logs)")?;
+                stmt.query_row([], |row| row.get::<_, i64>(0))
+            })
+            .await?;
+        Ok(exists != 0)
+    }
+
     pub async fn count_logs(
         &self,
         search: Option<&str>,
