@@ -41,7 +41,8 @@ const NAV: &[(&str, &str)] = &[
 const INJECTED_NAME: &str = r#"q" onmouseover="window.__xss=1"#;
 const INJECTED_URL: &str = "https://example.com/e2e-attr-injection.txt";
 
-/// How long the two filter-rebuild polls wait.
+/// How long the two filter-rebuild waits allow — one reading the event stream
+/// for a settled `rebuild`, one still re-running a domain check.
 ///
 /// The `expect.poll` calls these replace allowed ten seconds, under a runner
 /// that drove one browser at a time. A rebuild is the one thing in this suite
@@ -685,18 +686,8 @@ async fn rebuild_settled(world: &mut NoaddWorld) -> StepResult {
         .as_deref()
         .context("this instance has no session to ask with")?;
     let api = world.api()?;
-    let deadline = Instant::now() + REBUILD_TIMEOUT;
-    loop {
-        if !api.rebuilding(session).await? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(
-                anyhow!("a filter rebuild was still running after {REBUILD_TIMEOUT:?}").into(),
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    api.wait_until_rebuilt(session, REBUILD_TIMEOUT).await?;
+    Ok(())
 }
 
 #[when(expr = "I run a domain test for {string}")]

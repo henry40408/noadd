@@ -42,7 +42,21 @@
           {%- endif %}
           <div id="notice-host"></div>
           <rebuild-banner></rebuild-banner>
-          <next-step-banner></next-step-banner>
+          {%- if shell.show_next_step %}
+          {# Rendered here rather than fetched: the three reads app.js used to make to decide this are three the server already has. #}
+          <next-step-banner>
+            <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
+              <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+              <span class="text">
+                <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">{{ shell.next_step_addr }}</strong>.</span>
+              </span>
+              <form method="post" action="/onboarding/dismiss" style="margin-left:auto">
+                <input type="hidden" name="next" value="{{ shell.current_path }}">
+                <button class="btn" type="submit" data-testid="next-step-banner-dismiss" title="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+              </form>
+            </div>
+          </next-step-banner>
+          {%- endif %}
           <div id="page-content">{% block page %}{% endblock %}</div>
         </main>
         <footer class="statusbar">

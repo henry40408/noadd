@@ -176,12 +176,18 @@ const serverEvents = {
       this._setStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
     });
 
-    es.addEventListener('ping', () => {
+    // The heartbeat is the status indicator's, but it carries state too — the
+    // appliance's first answered query rides it — so it is dispatched like the
+    // rest rather than being consumed here.
+    es.addEventListener('ping', (e) => {
       this._setStatus('online');
       this._armWatchdog();
+      let data;
+      try { data = JSON.parse(e.data); } catch (_) { return; }
+      this._emit('ping', data);
     });
 
-    for (const type of ['stats', 'log']) {
+    for (const type of ['stats', 'log', 'rebuild']) {
       es.addEventListener(type, (e) => {
         this._setStatus('online');
         this._armWatchdog();
@@ -559,33 +565,36 @@ class AccountPage extends HTMLElement {
 }
 customElements.define('account-page', AccountPage);
 
-// Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
-// the filter engine is rebuilding, plus a brief success flash on completion.
+// A slim strip while the filter engine is rebuilding, plus a brief success
+// flash on completion. Both edges arrive as `rebuild` events on the shared
+// stream, and every connection is handed the current state as it opens, so a
+// page loaded mid-rebuild shows the strip without waiting for an edge.
+//
+// It deliberately does not call serverEvents.start(): this element upgrades
+// before <server-status> in the footer does, and the connection's query string
+// is fixed when it opens — opening it from here would settle `stats=1` as
+// false and leave the dashboard without its snapshots.
 class RebuildBanner extends LiveElement {
   connectedCallback() {
     this.prev = null;         // last observed rebuilding flag
     this.doneTimer = null;    // timer handle for the post-rebuild flash
+    this.elapsedTimer = null; // ticks the "Ns elapsed" meter while rebuilding
     this.render('', '');
-    this.interval(() => this.tick(), 2000);
     // doneTimer is re-armed on every completed rebuild, so it is cleared by
     // reading whatever handle is current at teardown rather than registering
-    // one entry per arming.
+    // one entry per arming. The elapsed ticker is re-armed the same way.
     this.track(() => { if (this.doneTimer) clearTimeout(this.doneTimer); });
-    this.tick();
+    this.track(() => this._stopElapsed());
+    this.track(serverEvents.on('rebuild', body => this.apply(body)));
   }
-  async tick() {
-    let body;
-    try {
-      body = await api.get('/api/filter/rebuild-status');
-    } catch (e) {
-      return;
-    }
+  apply(body) {
     const rebuilding = !!body.rebuilding;
     if (rebuilding) {
       if (this.doneTimer) { clearTimeout(this.doneTimer); this.doneTimer = null; }
-      const elapsed = body.started_at ? Math.max(0, Math.floor(Date.now()/1000) - body.started_at) : 0;
-      this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
+      this._startElapsed(body.started_at);
+      this._renderElapsed();
     } else if (this.prev === true) {
+      this._stopElapsed();
       const meta = body.last_duration_ms
         ? `Completed in ${(body.last_duration_ms / 1000).toFixed(1)}s`
         : 'Completed';
@@ -596,10 +605,29 @@ class RebuildBanner extends LiveElement {
         this.render('', '', '');
       }, 3000);
     } else {
-      // Steady idle — hide unless we're still showing the success flash.
+      // Steady idle — hide unless we're still showing the success flash. This
+      // is also the opening event on an appliance that is not rebuilding, which
+      // is why it must not be mistaken for a completion.
+      this._stopElapsed();
       if (!this.doneTimer) this.render('', '', '');
     }
     this.prev = rebuilding;
+  }
+  // The meter used to advance because the poll recomputed it; with a push
+  // there is no second message until the rebuild ends, so the element counts
+  // for itself. One second rather than the old two: the number is a duration
+  // an operator is watching tick, and a stalled one reads as a stalled server.
+  _startElapsed(startedAt) {
+    this.startedAt = startedAt || 0;
+    if (this.elapsedTimer) return;
+    this.elapsedTimer = setInterval(() => this._renderElapsed(), 1000);
+  }
+  _stopElapsed() {
+    if (this.elapsedTimer) { clearInterval(this.elapsedTimer); this.elapsedTimer = null; }
+  }
+  _renderElapsed() {
+    const elapsed = this.startedAt ? Math.max(0, Math.floor(Date.now()/1000) - this.startedAt) : 0;
+    this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
   }
   render(state, label, meta) {
     if (!state) {
@@ -622,81 +650,36 @@ class RebuildBanner extends LiveElement {
 }
 customElements.define('rebuild-banner', RebuildBanner);
 
-// On a fresh install, tells the admin how to point a device's DNS at noadd
-// and shows the server's DNS address. Auto-hides once a real DNS query has
-// been served (polls /api/stats/summary every 3s). Can be dismissed; the
-// dismissal persists server-side via PUT /api/settings.
+// On a fresh install, tells the operator how to point a device's DNS at noadd.
+//
+// The server decides whether this appears at all — it knows the dismissal, the
+// DNS address and whether any query has ever been answered — so the markup
+// arrives rendered and there is nothing to fetch. Two things are left for a
+// client: taking the notice down the moment traffic starts, off the heartbeat's
+// `traffic` flag, and dismissing without a page load. Without JavaScript the
+// form posts and the operator lands back on the same page.
 class NextStepBanner extends LiveElement {
   connectedCallback() {
-    this.timer = null;
-    this.dnsAddr = '';
-    this.innerHTML = '';   // render nothing until init decides
-    this.init();
-  }
-  async init() {
-    // 1) Respect a prior dismissal — if dismissed, never show or poll.
-    let settings;
-    try {
-      settings = await api.get('/api/settings');
-    } catch (e) {
-      return;
-    }
-    if (settings && settings.onboarding_banner_dismissed === 'true') {
-      return;
-    }
-    // 2) Resolve the DNS address to display: location.hostname + the port
-    //    parsed from server-info's dns_addr (e.g. "0.0.0.0:53" -> "53").
-    try {
-      const info = await api.get('/api/server-info');
-      const raw = (info && info.dns_addr) || '';
-      const port = raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : raw;
-      this.dnsAddr = `${window.location.hostname}:${port}`;
-    } catch (e) {
-      return;
-    }
-    // 3) If a query was already served, stay hidden; otherwise show + poll.
-    if (await this.hasQueries()) {
-      return;
-    }
-    // Three awaits back; the banner may have been swapped out in the meantime,
-    // and a timer started now would never be torn down.
-    if (!this.isConnected) return;
-    this.show();
-    this.timer = this.interval(() => this.poll(), 3000);
-  }
-  async hasQueries() {
-    try {
-      const s = await api.get('/api/stats/summary');
-      return ((s.total_today || 0) + (s.total_7d || 0) + (s.total_30d || 0)) > 0;
-    } catch (e) {
-      return false;
-    }
-  }
-  async poll() {
-    if (await this.hasQueries()) {
-      if (this.timer) { clearInterval(this.timer); this.timer = null; }
-      this.innerHTML = '';
-    }
-  }
-  show() {
-    this.innerHTML = html`
-      <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
-        <span class="icon">${icons.dashboard}</span>
-        <span class="text">
-          <span class="label">Point a device's DNS at noadd to start blocking — set its DNS server to <strong data-testid="next-step-banner-addr">${this.dnsAddr}</strong>.</span>
-        </span>
-        <button class="btn" data-testid="next-step-banner-dismiss" title="Dismiss" style="margin-left:auto">${icons.close}</button>
-      </div>`;
-    const dismiss = this.querySelector('[data-testid="next-step-banner-dismiss"]');
-    dismiss.onclick = () => this.dismiss();
-  }
-  async dismiss() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.innerHTML = '';
-    try {
-      await api.put('/api/settings', { onboarding_banner_dismissed: 'true' });
-    } catch (e) {
-      // best-effort; UI already hidden for this session
+    if (!this.firstElementChild) return;   // the server decided not to show it
+    this.track(serverEvents.on('ping', tick => {
+      if (tick && tick.traffic) this.innerHTML = '';
+    }));
+    const form = this.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', e => {
+        e.preventDefault();
+        this.innerHTML = '';
+        // The same form post a browser would make — `api` speaks JSON and the
+        // route takes a form — with the redirect left unfollowed, since the
+        // page it would fetch is the one already on screen. Best-effort: a
+        // failure only means the notice is offered again on the next load.
+        fetch(form.action, {
+          method: 'POST',
+          credentials: 'same-origin',
+          redirect: 'manual',
+          body: new URLSearchParams(new FormData(form)),
+        }).catch(() => {});
+      });
     }
   }
 }

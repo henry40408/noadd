@@ -171,6 +171,12 @@ pub struct ShellData {
     sessions_revoked: bool,
     /// Read by the query log: the history was emptied.
     logs_cleared: bool,
+    /// Whether to show the onboarding notice: an appliance that has never
+    /// answered a query, whose operator has not dismissed the notice, on a page
+    /// that is not the dashboard.
+    show_next_step: bool,
+    /// Where to point a device, for that notice. Empty when it is not shown.
+    next_step_addr: String,
 }
 
 impl ShellData {
@@ -178,8 +184,13 @@ impl ShellData {
     ///
     /// Returns the jar that clears it alongside, because reading a flash
     /// without clearing it is the bug this mechanism exists to prevent.
-    fn build(uri: &Uri, headers: &HeaderMap, jar: CookieJar) -> (Self, CookieJar) {
-        Self::build_for(uri.path(), headers, jar)
+    async fn build(
+        state: &AppState,
+        uri: &Uri,
+        headers: &HeaderMap,
+        jar: CookieJar,
+    ) -> (Self, CookieJar) {
+        Self::build_for(state, uri.path(), headers, jar).await
     }
 
     /// The same, for a response whose page is known regardless of the path the
@@ -188,8 +199,14 @@ impl ShellData {
     /// A rejected `POST /account/operators` re-renders the account page, and
     /// the navigation has to say `/account` — taking it from the request URI
     /// would leave nothing active on a page the operator is looking straight at.
-    fn build_for(path: &str, headers: &HeaderMap, jar: CookieJar) -> (Self, CookieJar) {
+    async fn build_for(
+        state: &AppState,
+        path: &str,
+        headers: &HeaderMap,
+        jar: CookieJar,
+    ) -> (Self, CookieJar) {
         let (flash, jar) = take_flash(jar);
+        let next_step_addr = next_step_target(state, path, headers).await;
         (
             Self {
                 version: env!("GIT_VERSION"),
@@ -205,10 +222,45 @@ impl ShellData {
                 account_saved: flash == Some(Flash::AccountSaved),
                 sessions_revoked: flash == Some(Flash::SessionsRevoked),
                 logs_cleared: flash == Some(Flash::LogsCleared),
+                show_next_step: next_step_addr.is_some(),
+                next_step_addr: next_step_addr.unwrap_or_default(),
             },
             jar,
         )
     }
+}
+
+/// Where to tell an operator to point a device, or `None` when the shell should
+/// not be saying so at all.
+///
+/// The tests are ordered by what they cost. An appliance that has answered a
+/// query is past this notice, and the hub's latch settles that without touching
+/// the database on every page of every running install; only a machine that
+/// still looks fresh pays for the two reads behind the rest.
+async fn next_step_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<String> {
+    // The dashboard makes this point at length in its own empty state, and one
+    // page carrying both reads as two different notices.
+    if path == "/" || state.events.has_traffic() {
+        return None;
+    }
+    match state.db.has_any_query_logs().await {
+        Ok(true) => {
+            // Learned here rather than on the ticker's next pass, so the reads
+            // above stop happening from now on.
+            state.events.note_traffic();
+            return None;
+        }
+        Ok(false) => {}
+        // A failed read hides the notice. It is an aside, and one shown to an
+        // operator whose appliance is already working is worse than one briefly
+        // missing from a fresh install.
+        Err(_) => return None,
+    }
+    let dismissed = state.db.get_setting("onboarding_banner_dismissed").await;
+    if matches!(dismissed, Ok(Some(value)) if value == "true") {
+        return None;
+    }
+    Some(dns_target(headers, &state.server_info.dns_addr))
 }
 
 /// The settings page.
@@ -1114,7 +1166,7 @@ pub async fn logs_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let (q, action, query_type, token) = query.applied();
     let page = query
         .page
@@ -1372,7 +1424,7 @@ pub async fn dashboard_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let now = crate::now_unix();
 
     // The same five reads `app.js` makes on its poll, in one request. A failure
@@ -1597,7 +1649,7 @@ pub async fn stats_page(
 ) -> impl IntoResponse {
     use crate::admin::stats;
 
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let now = crate::now_unix();
     // An unrecognised range falls back to the default rather than refusing the
     // page. This one is a link an operator can edit, and every window the page
@@ -1985,7 +2037,7 @@ pub async fn account_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let view = AccountView {
         password_changed: shell.password_changed,
         confirm_operator_id: query
@@ -2023,7 +2075,7 @@ pub async fn account_password_submit(
     Form(form): Form<PasswordForm>,
 ) -> Response {
     let reject = async |status: StatusCode, message: String, jar: CookieJar| {
-        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
         let view = AccountView {
             error: Some(message),
             ..AccountView::default()
@@ -2167,7 +2219,7 @@ pub async fn account_operator_add_submit(
     // a password field with its value in the markup would put it in the page
     // source, the browser's cache and any proxy along the way.
     let reject = async |status: StatusCode, message: String, jar: CookieJar| {
-        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
         let view = AccountView {
             operator_username: form.username.clone(),
             operator_error: message,
@@ -2235,7 +2287,7 @@ pub async fn account_operator_delete_submit(
 ) -> Response {
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
     let reject = async |status: StatusCode, message: String, jar: CookieJar| {
-        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
         let view = AccountView {
             confirm_operator_id: id,
             confirm_operator_error: message,
@@ -2335,6 +2387,38 @@ pub async fn account_sessions_revoke_others_submit(
 }
 
 #[derive(Deserialize)]
+pub struct DismissNextStepForm {
+    /// The page the notice was dismissed from, so the operator lands back on
+    /// it. Validated by `safe_next` like every other one on these pages.
+    next: String,
+}
+
+/// `POST /onboarding/dismiss`.
+///
+/// The notice is server-rendered, so it exists without JavaScript and its one
+/// control has to work without it too. The dismissal is the same stored setting
+/// the JSON API writes, so a browser and an API caller still turn off the same
+/// thing.
+pub async fn onboarding_dismiss_submit(
+    _user: SsrUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DismissNextStepForm>,
+) -> Response {
+    // Failing to record it hides the notice for this response and offers it
+    // again on the next: an aside the operator has to dismiss twice beats a
+    // 500 over one.
+    let _ = state
+        .db
+        .set_setting("onboarding_banner_dismissed", "true")
+        .await;
+    // No flash: the operator asked for one less thing on the page, and
+    // answering with another notice is not that.
+    let target = safe_next(&form.next).unwrap_or("/");
+    (jar, Redirect::to(target)).into_response()
+}
+
+#[derive(Deserialize)]
 pub struct CreateApiKeyForm {
     name: String,
     /// `YYYY-MM-DD` from a date input, or empty for a key that never expires.
@@ -2359,7 +2443,7 @@ pub async fn account_api_key_create_submit(
 ) -> Response {
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
     let reject = async |status: StatusCode, message: String, jar: CookieJar| {
-        let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+        let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
         let view = AccountView {
             api_key_name: form.name.clone(),
             api_key_expires: form.expires.clone(),
@@ -2386,7 +2470,7 @@ pub async fn account_api_key_create_submit(
 
     match issue_api_key(&state, auth.user_id, &form.name, expires_at).await {
         Ok(created) => {
-            let (shell, jar) = ShellData::build_for("/account", &headers, jar);
+            let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
             let view = AccountView {
                 new_key_name: created.name,
                 new_key_token: created.token,
@@ -2541,7 +2625,7 @@ pub async fn settings_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let saved = shell.settings_saved;
     let values = current_settings(&state).await;
     (
@@ -2626,7 +2710,7 @@ pub async fn settings_submit(
             // Re-render with what was submitted, not what is stored: the whole
             // point is that the seven fields the operator got right survive the
             // one they did not.
-            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
             (
                 status,
                 jar,
@@ -2822,7 +2906,7 @@ pub async fn filters_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let (shell, jar) = ShellData::build(&uri, &headers, jar);
+    let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let edit_id = query
         .edit
         .as_deref()
@@ -2886,7 +2970,7 @@ pub async fn filters_list_add_submit(
         }
         Err(err) => {
             let (status, field, message) = list_error_parts(err);
-            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
             let view = FiltersView {
                 list_name: form.name,
                 list_url: form.url,
@@ -2939,7 +3023,7 @@ pub async fn filters_list_edit_submit(
         }
         Err(err) => {
             let (status, _field, message) = list_error_parts(err);
-            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
             let view = FiltersView {
                 edit_id: id,
                 edit_name: form.name,
@@ -3068,7 +3152,7 @@ pub async fn filters_rule_add_submit(
                     "Could not save — check the server log".to_string(),
                 ),
             };
-            let (shell, jar) = ShellData::build(&uri, &headers, jar);
+            let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
             let view = FiltersView {
                 rule_text: form.rule,
                 rule_error: message,
@@ -3340,7 +3424,7 @@ pub async fn registry_page(
 ) -> impl IntoResponse {
     // The registry is a view of the filters page's subject, and it is reached
     // from there, so the navigation keeps marking Filters.
-    let (shell, jar) = ShellData::build_for("/filters", &headers, jar);
+    let (shell, jar) = ShellData::build_for(&state, "/filters", &headers, jar).await;
     (
         jar,
         build_registry(&state, &query, shell, 0, Vec::new()).await,
@@ -3439,7 +3523,7 @@ pub async fn registry_add_submit(
         }
     };
 
-    let (shell, jar) = ShellData::build_for("/filters", &headers, jar);
+    let (shell, jar) = ShellData::build_for(&state, "/filters", &headers, jar).await;
     match outcome {
         Ok(()) => filters_saved(jar, Flash::FiltersSaved),
         Err((added, failures)) => (
