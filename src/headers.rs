@@ -21,7 +21,7 @@ const NO_STORE: HeaderValue =
 /// data. Almost everything else — every `/api/*` JSON body, the mobileconfig
 /// plist, and the 401/403 rejections emitted by extractors and the CSRF guard
 /// — currently sets nothing and therefore gets `no-store`. The one exception
-/// is `GET /api/logs/stream`: axum's `Sse` response sets its own
+/// is `GET /api/events`: axum's `Sse` response sets its own
 /// `Cache-Control: no-cache`, so the `contains_key` guard skips it and it
 /// lands on `no-cache` instead. That is acceptable because an SSE body is a
 /// stream of events, not a cacheable representation, so there is nothing for

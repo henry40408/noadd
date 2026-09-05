@@ -1,10 +1,10 @@
-//! The runner for the eight tests that were never Gherkin.
+//! The runner for the nine tests that were never Gherkin.
 //!
 //! `harness = false`, for the same reason the Cucumber runner uses it: every
 //! file here owns a noadd instance that has to be started, sometimes seeded
 //! between two boots, and stopped around its cases. A `#[test]` function has
 //! nowhere to keep that — a `static` holding the server never drops, so the
-//! process would exit leaving eight orphans holding ports.
+//! process would exit leaving nine orphans holding ports.
 //!
 //! Files run concurrently up to a small cap; cases *within* a file run in the
 //! order they are written, as they did under `workers: 1`. Every file has its
@@ -15,6 +15,7 @@
 mod account_sensitive_actions;
 mod chart_touch;
 mod filters_no_js;
+mod logs_live_tail;
 mod logs_no_js;
 mod pages_no_js;
 mod password_change_session_list;
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
     spawn_spec!(set, permits, account_sensitive_actions);
     spawn_spec!(set, permits, chart_touch);
     spawn_spec!(set, permits, filters_no_js);
+    spawn_spec!(set, permits, logs_live_tail);
     spawn_spec!(set, permits, logs_no_js);
     spawn_spec!(set, permits, pages_no_js);
     spawn_spec!(set, permits, password_change_session_list);

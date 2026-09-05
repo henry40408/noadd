@@ -23,10 +23,19 @@ use crate::browser::{WAIT_INTERVAL, WAIT_TIMEOUT};
 /// expired — that is the difference between "the row count never reached 2" and
 /// a message you have to reproduce by hand to understand.
 ///
+/// An error from `probe` is "not yet", the same as a value that does not match
+/// — matching [`eventually`], which always read them that way. Reading an
+/// element is two round trips (find it, then ask it for the value), and on a
+/// page that re-draws itself from server pushes the node can be replaced
+/// between them: `Element is stale` is the ordinary state of a live page, not
+/// a verdict. Treating it as fatal made every such assertion a race against
+/// the next push, which is how a dashboard poll interval ended up deciding
+/// whether a test passed.
+///
 /// # Errors
 ///
-/// Fails when `probe` errors, or when the value has still not matched by
-/// [`WAIT_TIMEOUT`].
+/// Fails when the value has still not matched by [`WAIT_TIMEOUT`], reporting
+/// the last value seen or, if `probe` never returned one, its last error.
 pub async fn eventually_eq<T, E, F, Fut>(what: &str, expected: E, mut probe: F) -> Result<()>
 where
     T: Debug,
@@ -35,16 +44,35 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let deadline = Instant::now() + WAIT_TIMEOUT;
-    let mut last = probe().await?;
+    let mut last: Option<T> = None;
+    let mut last_error: Option<String> = None;
+
     loop {
-        if expected == last {
-            return Ok(());
+        match probe().await {
+            Ok(value) => {
+                if expected == value {
+                    return Ok(());
+                }
+                last = Some(value);
+            }
+            Err(e) => last_error = Some(e.to_string()),
         }
+
         if Instant::now() >= deadline {
-            bail!("{what}: expected {expected:?}, last saw {last:?} after {WAIT_TIMEOUT:?}");
+            match (last, last_error) {
+                (Some(value), _) => bail!(
+                    "{what}: expected {expected:?}, last saw {value:?} after {WAIT_TIMEOUT:?}"
+                ),
+                (None, Some(error)) => bail!(
+                    "{what}: expected {expected:?}, never read a value after {WAIT_TIMEOUT:?} (last error: {error})"
+                ),
+                (None, None) => bail!(
+                    "{what}: expected {expected:?}, never read a value after {WAIT_TIMEOUT:?}"
+                ),
+            };
         }
+
         tokio::time::sleep(WAIT_INTERVAL).await;
-        last = probe().await?;
     }
 }
 

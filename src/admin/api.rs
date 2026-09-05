@@ -19,8 +19,6 @@ use axum_extra::extract::cookie::Cookie;
 use include_dir::{Dir, File, include_dir};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
 use utoipa::OpenApi as _;
 use utoipa_scalar::Scalar;
 
@@ -316,7 +314,6 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/stats/v2/top-domains", get(get_stats_v2_top_domains))
         .route("/api/stats/v2/top-clients", get(get_stats_v2_top_clients))
         .route("/api/logs", get(get_logs).delete(delete_logs))
-        .route("/api/logs/stream", get(stream_logs))
         .route("/api/events", get(stream_events))
         // No auth: the token in the URL is the credential.
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
@@ -4007,52 +4004,62 @@ async fn get_logs(
     })))
 }
 
-/// Live tail of DNS query logs via Server-Sent Events.
-///
-/// Each newly-logged query is pushed as a JSON `QueryLogEntry` (identical
-/// shape to `GET /api/logs` rows). Auth is via the same `AuthedUser`
-/// extractor as the rest of the API; browsers send the `session` cookie on
-/// the `EventSource` connection automatically. Events are broadcast before the
-/// logger's DB flush, so the tail is real-time. A slow client that lags past
-/// the broadcast buffer simply skips the missed entries (the tail resumes).
-async fn stream_logs(
-    State(state): State<AppState>,
-    _auth: AuthedUser,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.log_events.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
-        Ok(entry) => Event::default().json_data(&*entry).ok().map(Ok),
-        // Lagged: client fell behind the buffer — skip missed entries.
-        Err(_) => None,
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
 /// Query for [`stream_events`].
 #[derive(Deserialize)]
 pub struct EventStreamQuery {
     /// Ask for `stats` events as well as the heartbeat. Only the dashboard
     /// does; every other page holds the same stream open for the status
     /// indicator alone, and computing a snapshot for it would be waste.
-    ///
-    /// Read as a string rather than a `bool` because `serde_urlencoded` only
-    /// accepts `true`/`false` for one, and `?stats=1` — what anyone writes by
-    /// hand — would 400 with nothing to explain why.
     pub stats: Option<String>,
+    /// Ask for `log` events: one per query as it is answered. Only the query
+    /// log's live tail does, and only while the operator has it switched on —
+    /// a busy appliance answers far more queries than a paused tail should be
+    /// made to carry.
+    pub logs: Option<String>,
 }
 
 impl EventStreamQuery {
     fn wants_stats(&self) -> bool {
-        matches!(self.stats.as_deref(), Some("1" | "true"))
+        flag(self.stats.as_deref())
+    }
+
+    fn wants_logs(&self) -> bool {
+        flag(self.logs.as_deref())
     }
 }
 
-/// The admin UI's one push channel.
+/// `serde_urlencoded` only accepts `true`/`false` for a `bool`, so `?stats=1`
+/// — what anyone writes by hand — would 400 with nothing to explain why.
+fn flag(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true"))
+}
+
+/// One arm of the pump's `select!`: a receive that never completes when the
+/// source is absent — either because this connection never asked for it, or
+/// because it closed and retired. That is what keeps an arm out of the way
+/// without a guard expression duplicating the `Option` check, and it is
+/// cancel-safe because the receiver's state lives in the `Option`, not in the
+/// future `select!` drops.
+async fn next_broadcast<T: Clone>(
+    source: &mut Option<tokio::sync::broadcast::Receiver<T>>,
+) -> Result<T, tokio::sync::broadcast::error::RecvError> {
+    match source {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The admin UI's one push channel — every push the UI takes rides this
+/// connection, so a tab holds one whatever page it is on.
 ///
-/// Emits `ping` on every tick — the status indicator's heartbeat, which has to
-/// be a real event because SSE keep-alive comments never reach `EventSource`,
-/// leaving a silently-dead socket indistinguishable from an idle one — and
-/// `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
+/// Three event names:
+///
+/// - `ping` on every tick, the status indicator's heartbeat. It has to be a
+///   real event because SSE keep-alive comments never reach `EventSource`,
+///   leaving a silently-dead socket indistinguishable from an idle one.
+/// - `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
+/// - `log` carrying a [`QueryLogEntry`] per answered query when `?logs=1`.
+///   Published before the logger's DB flush, so the tail is real-time.
 ///
 /// A client asking for stats gets one snapshot immediately rather than waiting
 /// out the first tick: the page is server-rendered with real numbers already,
@@ -4065,7 +4072,11 @@ async fn stream_events(
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let wants_stats = query.wants_stats();
     let hub = state.events.clone();
-    let mut ticks = hub.subscribe();
+    let mut ticks = Some(hub.subscribe());
+    // Subscribed only when asked for. A receiver nobody reads still makes the
+    // sender do the work of filling it, which on a busy appliance is every
+    // answered query, for every open tab.
+    let mut logs = query.wants_logs().then(|| state.log_events.subscribe());
 
     // Dropping this is what tells the ticker to stop computing snapshots once
     // the last dashboard goes away, so it is moved into the pump task and
@@ -4096,6 +4107,10 @@ async fn stream_events(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
     tokio::spawn(async move {
         let _guard = guard;
+        // Held for the life of the connection. Without it the last `Arc` can be
+        // the router's, and a stream that asked for no stats would watch its
+        // tick source close the moment the handler returned.
+        let _hub = hub;
 
         if let Some(event) = initial
             && tx.send(Ok(event)).await.is_err()
@@ -4103,29 +4118,60 @@ async fn stream_events(
             return;
         }
 
-        loop {
-            let tick = match ticks.recv().await {
-                Ok(tick) => tick,
-                // Lagged: this client fell behind the buffer. The next tick is
-                // ten seconds away and carries the whole state, so there is
-                // nothing to replay.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
+        // A closed source retires its own arm rather than ending the
+        // connection: the tail and the heartbeat are independent, and taking
+        // the stream down with one of them would blank the status indicator
+        // over something it can still report on.
+        while ticks.is_some() || logs.is_some() {
+            tokio::select! {
+                received = next_broadcast(&mut ticks) => {
+                    let tick = match received {
+                        Ok(tick) => tick,
+                        // Lagged: this client fell behind the buffer. The next
+                        // tick is ten seconds away and carries the whole
+                        // state, so there is nothing to replay.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            ticks = None;
+                            continue;
+                        }
+                    };
 
-            if let Ok(event) = Event::default()
-                .event("ping")
-                .json_data(serde_json::json!({ "seq": tick.seq, "at": tick.at }))
-                && tx.send(Ok(event)).await.is_err()
-            {
-                break;
-            }
+                    if let Ok(event) = Event::default()
+                        .event("ping")
+                        .json_data(serde_json::json!({ "seq": tick.seq, "at": tick.at }))
+                        && tx.send(Ok(event)).await.is_err()
+                    {
+                        break;
+                    }
 
-            if let Some(snapshot) = tick.snapshot.as_ref()
-                && let Ok(event) = Event::default().event("stats").json_data(&**snapshot)
-                && tx.send(Ok(event)).await.is_err()
-            {
-                break;
+                    if let Some(snapshot) = tick.snapshot.as_ref()
+                        && let Ok(event) = Event::default().event("stats").json_data(&**snapshot)
+                        && tx.send(Ok(event)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+
+                received = next_broadcast(&mut logs) => {
+                    let entry = match received {
+                        Ok(entry) => entry,
+                        // Lagged: a tail that fell behind skips what it missed
+                        // rather than replaying a burst the operator has
+                        // already scrolled past.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            logs = None;
+                            continue;
+                        }
+                    };
+
+                    if let Ok(event) = Event::default().event("log").json_data(&*entry)
+                        && tx.send(Ok(event)).await.is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
     });

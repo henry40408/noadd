@@ -141,13 +141,15 @@ pub async fn compute_snapshot(db: &Database, now: i64) -> Result<DashboardSnapsh
     })
 }
 
-/// Drive the stream: one tick every [`TICK_INTERVAL_SECS`] for as long as
-/// anyone is listening.
+/// Drive the stream: one tick every `interval` for as long as anyone is
+/// listening. Production passes [`TICK_INTERVAL_SECS`]; the interval is a
+/// parameter so a test can run the real loop in milliseconds rather than
+/// mock the clock.
 ///
 /// Nothing is computed and nothing is sent while no connection is open, so an
 /// appliance nobody is looking at does no work for this at all.
-pub async fn run(db: Database, hub: Arc<EventHub>) {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
+pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration) {
+    let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut seq: u64 = 0;
 
@@ -192,6 +194,13 @@ pub async fn run(db: Database, hub: Arc<EventHub>) {
 mod tests {
     use super::*;
 
+    async fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        // Persist the tempdir (no Drop cleanup) so the file outlives it.
+        let path = dir.keep().join("events.db");
+        Database::open(path.to_str().unwrap()).await.unwrap()
+    }
+
     #[test]
     fn a_hub_with_no_connections_reports_none() {
         let hub = Arc::new(EventHub::new(8));
@@ -217,6 +226,92 @@ mod tests {
             );
         }
         assert!(!hub.wants_stats());
+    }
+
+    /// A tick every few milliseconds, so the real loop is exercised without a
+    /// mocked clock.
+    const FAST: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// Long enough for several `FAST` ticks, short enough that a hang fails the
+    /// test rather than the suite.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    async fn next_tick(rx: &mut broadcast::Receiver<Arc<Tick>>) -> Arc<Tick> {
+        tokio::time::timeout(WAIT, rx.recv())
+            .await
+            .expect("no tick arrived")
+            .unwrap()
+    }
+
+    /// The whole cycle is skipped while nobody is connected, so an appliance
+    /// nobody is looking at does no work for this at all.
+    #[tokio::test]
+    async fn the_ticker_does_nothing_while_nobody_is_connected() {
+        let db = test_db().await;
+        let hub = Arc::new(EventHub::new(8));
+        let task = tokio::spawn(run(db, hub.clone(), FAST));
+
+        // Let several intervals pass with no subscriber, then join. The first
+        // tick this receiver sees being seq 1 is what proves none of them ran.
+        tokio::time::sleep(FAST * 5).await;
+        let mut rx = hub.subscribe();
+
+        let tick = next_tick(&mut rx).await;
+        assert_eq!(
+            tick.seq, 1,
+            "ticks were numbered while no one was connected, so the cycle ran anyway"
+        );
+
+        task.abort();
+    }
+
+    /// A connection that did not ask for stats must not make the appliance run
+    /// five aggregate queries every tick.
+    #[tokio::test]
+    async fn a_tick_carries_a_snapshot_only_when_one_was_asked_for() {
+        let db = test_db().await;
+        let hub = Arc::new(EventHub::new(64));
+        let task = tokio::spawn(run(db, hub.clone(), FAST));
+
+        let mut rx = hub.subscribe();
+        assert!(
+            next_tick(&mut rx).await.snapshot.is_none(),
+            "a stats-free connection was sent a snapshot"
+        );
+
+        let guard = hub.stats_guard();
+        // The tick in flight when the guard was taken may already have been
+        // built without one, so this waits for the first that reflects it.
+        let got_snapshot = tokio::time::timeout(WAIT, async {
+            loop {
+                if next_tick(&mut rx).await.snapshot.is_some() {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            got_snapshot,
+            "a connection holding a stats guard was never sent one"
+        );
+
+        drop(guard);
+        let stopped = tokio::time::timeout(WAIT, async {
+            loop {
+                if next_tick(&mut rx).await.snapshot.is_none() {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            stopped,
+            "snapshots kept being computed after the last dashboard left"
+        );
+
+        task.abort();
     }
 
     #[tokio::test]

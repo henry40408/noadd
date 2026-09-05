@@ -127,6 +127,7 @@ class LiveElement extends HTMLElement {
 const serverEvents = {
   _es: null,
   _wantStats: false,
+  _wantLogs: false,
   _listeners: new Map(),
   _statusListeners: new Set(),
   _status: 'connecting',
@@ -138,31 +139,67 @@ const serverEvents = {
   start(wantStats) {
     if (wantStats) this._wantStats = true;
     if (this._es) return;
-    const qs = this._wantStats ? '?stats=1' : '';
-    this._es = new EventSource(`/api/events${qs}`);
+    this._open();
+  },
 
-    this._es.addEventListener('open', () => this._setStatus('online'));
+  // The query log's tail ships off, so `logs=1` cannot be decided when the
+  // connection opens the way `stats=1` can. Turning it on re-opens the one
+  // connection rather than adding a second: the whole point of this object is
+  // that a tab holds exactly one.
+  //
+  // The swap is deliberate, so it must not be reported as a drop — the status
+  // indicator is on the other end of this same connection and would blink
+  // OFFLINE at an operator who only clicked a toggle.
+  setLogs(wantLogs) {
+    if (this._wantLogs === wantLogs) return;
+    this._wantLogs = wantLogs;
+    if (!this._es) { this._open(); return; }
+    this._close();
+    this._open();
+  },
+
+  _open() {
+    const params = [];
+    if (this._wantStats) params.push('stats=1');
+    if (this._wantLogs) params.push('logs=1');
+    const qs = params.length ? `?${params.join('&')}` : '';
+    const es = new EventSource(`/api/events${qs}`);
+    this._es = es;
+
+    es.addEventListener('open', () => this._setStatus('online'));
     // EventSource reconnects on its own, so this is a report rather than a
     // recovery: readyState CLOSED means it gave up (an auth failure, say) and
-    // nothing further will arrive.
-    this._es.addEventListener('error', () => {
-      this._setStatus(this._es && this._es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
+    // nothing further will arrive. A stale connection's error must not speak
+    // for the current one, hence the identity check.
+    es.addEventListener('error', () => {
+      if (this._es !== es) return;
+      this._setStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
     });
 
-    this._es.addEventListener('ping', () => {
+    es.addEventListener('ping', () => {
       this._setStatus('online');
       this._armWatchdog();
     });
 
-    this._es.addEventListener('stats', (e) => {
-      this._setStatus('online');
-      this._armWatchdog();
-      let data;
-      try { data = JSON.parse(e.data); } catch (_) { return; }
-      this._emit('stats', data);
-    });
+    for (const type of ['stats', 'log']) {
+      es.addEventListener(type, (e) => {
+        this._setStatus('online');
+        this._armWatchdog();
+        let data;
+        try { data = JSON.parse(e.data); } catch (_) { return; }
+        this._emit(type, data);
+      });
+    }
 
     this._armWatchdog();
+  },
+
+  _close() {
+    if (!this._es) return;
+    const es = this._es;
+    // Cleared first so the close cannot be reported as the server going away.
+    this._es = null;
+    es.close();
   },
 
   // A TCP connection can die without the browser noticing, and SSE keep-alive
@@ -1438,7 +1475,6 @@ class LogsPage extends LiveElement {
     this.tokenFilter = '';
     this.typeFilter = '';
     this._live = false;
-    this._es = null;
     this._timeTimer = null;
   }
 
@@ -1485,8 +1521,13 @@ class LogsPage extends LiveElement {
       if (!confirm('Delete all query logs?')) e.preventDefault();
     };
     this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
-    // Both the stream and the ticker are toggled on and off during the page's
-    // life, so they register single teardowns that defer to their own stoppers.
+    // The tail rides the shell's connection now, so what is toggled is the
+    // server-side subscription, not a socket this page owns. The listener is
+    // registered once for the page's life — `_prependRow` already drops
+    // anything that arrives while the tail is off.
+    this.track(serverEvents.on('log', (entry) => this._prependRow(entry)));
+    // Both the subscription and the ticker are toggled during the page's life,
+    // so they register single teardowns that defer to their own stoppers.
     this.track(() => { this._stopLive(); this._stopTimeTicker(); });
     // The rows on screen came from the server; bind their actions where they
     // are instead of re-fetching a page that is already correct.
@@ -1546,16 +1587,11 @@ class LogsPage extends LiveElement {
   }
 
   _startLive() {
-    this._stopLive();
-    this._es = new EventSource('/api/logs/stream');
-    this._es.onmessage = (e) => {
-      try { this._prependRow(JSON.parse(e.data)); } catch (_) {}
-    };
-    // EventSource auto-reconnects on error; nothing to do here.
+    serverEvents.setLogs(true);
   }
 
   _stopLive() {
-    if (this._es) { this._es.close(); this._es = null; }
+    serverEvents.setLogs(false);
   }
 
   _togglePagination(show) {

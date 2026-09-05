@@ -139,7 +139,11 @@ async fn main() -> anyhow::Result<()> {
     let (logger, log_tx) = QueryLogger::new(db.clone(), 500, 1);
     let logger = logger.with_event_sender(log_events.clone());
     let logger_handle = tokio::spawn(logger.run());
-    let events_handle = tokio::spawn(noadd::admin::events::run(db.clone(), events.clone()));
+    let events_handle = tokio::spawn(noadd::admin::events::run(
+        db.clone(),
+        events.clone(),
+        std::time::Duration::from_secs(noadd::admin::events::TICK_INTERVAL_SECS),
+    ));
 
     let ip_rate_limiter = Arc::new(IpRateLimiter::new(
         args.rate_limit_qps,
