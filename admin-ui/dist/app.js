@@ -181,7 +181,7 @@ const serverEvents = {
       this._armWatchdog();
     });
 
-    for (const type of ['stats', 'log']) {
+    for (const type of ['stats', 'log', 'rebuild']) {
       es.addEventListener(type, (e) => {
         this._setStatus('online');
         this._armWatchdog();
@@ -559,33 +559,36 @@ class AccountPage extends HTMLElement {
 }
 customElements.define('account-page', AccountPage);
 
-// Polls /api/filter/rebuild-status every 2s and surfaces a slim strip while
-// the filter engine is rebuilding, plus a brief success flash on completion.
+// A slim strip while the filter engine is rebuilding, plus a brief success
+// flash on completion. Both edges arrive as `rebuild` events on the shared
+// stream, and every connection is handed the current state as it opens, so a
+// page loaded mid-rebuild shows the strip without waiting for an edge.
+//
+// It deliberately does not call serverEvents.start(): this element upgrades
+// before <server-status> in the footer does, and the connection's query string
+// is fixed when it opens — opening it from here would settle `stats=1` as
+// false and leave the dashboard without its snapshots.
 class RebuildBanner extends LiveElement {
   connectedCallback() {
     this.prev = null;         // last observed rebuilding flag
     this.doneTimer = null;    // timer handle for the post-rebuild flash
+    this.elapsedTimer = null; // ticks the "Ns elapsed" meter while rebuilding
     this.render('', '');
-    this.interval(() => this.tick(), 2000);
     // doneTimer is re-armed on every completed rebuild, so it is cleared by
     // reading whatever handle is current at teardown rather than registering
-    // one entry per arming.
+    // one entry per arming. The elapsed ticker is re-armed the same way.
     this.track(() => { if (this.doneTimer) clearTimeout(this.doneTimer); });
-    this.tick();
+    this.track(() => this._stopElapsed());
+    this.track(serverEvents.on('rebuild', body => this.apply(body)));
   }
-  async tick() {
-    let body;
-    try {
-      body = await api.get('/api/filter/rebuild-status');
-    } catch (e) {
-      return;
-    }
+  apply(body) {
     const rebuilding = !!body.rebuilding;
     if (rebuilding) {
       if (this.doneTimer) { clearTimeout(this.doneTimer); this.doneTimer = null; }
-      const elapsed = body.started_at ? Math.max(0, Math.floor(Date.now()/1000) - body.started_at) : 0;
-      this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
+      this._startElapsed(body.started_at);
+      this._renderElapsed();
     } else if (this.prev === true) {
+      this._stopElapsed();
       const meta = body.last_duration_ms
         ? `Completed in ${(body.last_duration_ms / 1000).toFixed(1)}s`
         : 'Completed';
@@ -596,10 +599,29 @@ class RebuildBanner extends LiveElement {
         this.render('', '', '');
       }, 3000);
     } else {
-      // Steady idle — hide unless we're still showing the success flash.
+      // Steady idle — hide unless we're still showing the success flash. This
+      // is also the opening event on an appliance that is not rebuilding, which
+      // is why it must not be mistaken for a completion.
+      this._stopElapsed();
       if (!this.doneTimer) this.render('', '', '');
     }
     this.prev = rebuilding;
+  }
+  // The meter used to advance because the poll recomputed it; with a push
+  // there is no second message until the rebuild ends, so the element counts
+  // for itself. One second rather than the old two: the number is a duration
+  // an operator is watching tick, and a stalled one reads as a stalled server.
+  _startElapsed(startedAt) {
+    this.startedAt = startedAt || 0;
+    if (this.elapsedTimer) return;
+    this.elapsedTimer = setInterval(() => this._renderElapsed(), 1000);
+  }
+  _stopElapsed() {
+    if (this.elapsedTimer) { clearInterval(this.elapsedTimer); this.elapsedTimer = null; }
+  }
+  _renderElapsed() {
+    const elapsed = this.startedAt ? Math.max(0, Math.floor(Date.now()/1000) - this.startedAt) : 0;
+    this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
   }
   render(state, label, meta) {
     if (!state) {

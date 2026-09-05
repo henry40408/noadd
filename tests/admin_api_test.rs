@@ -194,47 +194,74 @@ fn input_value<'a>(html: &'a str, id: &str) -> Option<&'a str> {
     Some(&rest[..rest.find('"')?])
 }
 
-#[tokio::test]
-async fn rebuild_status_unauthenticated_returns_401() {
-    let (app, _token) = setup().await;
-    let req = Request::builder()
-        .uri("/api/filter/rebuild-status")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+/// Splits `buf` into whole SSE frames, leaving any partial one behind.
+///
+/// A frame can straddle two chunks, so a test that inspects one has to
+/// reassemble before it parses.
+fn drain_sse_frames(buf: &mut String) -> Vec<String> {
+    let mut frames = Vec::new();
+    while let Some(end) = buf.find("\n\n") {
+        frames.push(buf.drain(..end + 2).collect());
+    }
+    frames
 }
 
-async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
-    use std::time::Duration;
-    for _ in 0..100 {
-        let req = Request::builder()
-            .uri("/api/filter/rebuild-status")
-            .header("cookie", format!("session={token}"))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let rebuilding = body
-            .get("rebuilding")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        // started_at >= before proves *this* rebuild began, and !rebuilding
-        // that it finished — the pair the endpoint still reports since
-        // last_completed_at was dropped as unread by any consumer.
-        let started_at = body
-            .get("started_at")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
-        if !rebuilding && started_at >= before {
-            return;
+/// The JSON of a frame carrying event `name`, if that is what this frame is.
+fn sse_event_data(frame: &str, name: &str) -> Option<serde_json::Value> {
+    let mut matched = false;
+    let mut data = None;
+    for line in frame.lines() {
+        if let Some(event) = line.strip_prefix("event:") {
+            matched = event.trim() == name;
+        } else if let Some(payload) = line.strip_prefix("data:") {
+            data = serde_json::from_str(payload.trim()).ok();
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("rebuild did not complete within 2s");
+    matched.then_some(data).flatten()
+}
+
+/// Waits for the rebuild that began at or after `before` to finish.
+///
+/// The state is published on the event stream and nowhere else, so this reads
+/// one. What makes that safe for a caller arriving after the fact is the
+/// opening `rebuild` event every connection is handed: a rebuild that finished
+/// while this test was asserting on the response body is reported as settled
+/// straight away, rather than being waited on for an edge that has passed.
+async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
+    let req = Request::builder()
+        .uri("/api/events")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut stream = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    let settled = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            for frame in drain_sse_frames(&mut buf) {
+                let Some(body) = sse_event_data(&frame, "rebuild") else {
+                    continue;
+                };
+                // started_at >= before proves *this* rebuild began, and
+                // !rebuilding that it finished.
+                let rebuilding = body["rebuilding"].as_bool().unwrap_or(false);
+                let started_at = body["started_at"].as_i64().unwrap_or(0);
+                if !rebuilding && started_at >= before {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .expect("timed out waiting for the rebuild to settle");
+    assert!(
+        settled,
+        "the event stream closed before the rebuild settled"
+    );
 }
 
 #[tokio::test]
@@ -408,36 +435,99 @@ async fn registry_filters_returns_cached_data() {
     assert_eq!(body["groups"][0]["groupName"], "General");
 }
 
+/// The stream is the only place rebuild state is published, so it has to
+/// answer "what is happening right now" as well as "what changed" — otherwise
+/// a page loaded while a rebuild ran would show nothing until the next one,
+/// and a client that connected just after one finished would wait forever.
 #[tokio::test]
-async fn rebuild_status_initial_is_idle() {
+async fn event_stream_opens_with_the_current_rebuild_state() {
     let (app, token) = setup().await;
     let req = Request::builder()
-        .uri("/api/filter/rebuild-status")
+        .uri("/api/events")
         .header("cookie", format!("session={token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        body.get("rebuilding").and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        body.get("started_at").and_then(serde_json::Value::as_i64),
-        Some(0)
-    );
+
+    let mut stream = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    let opening = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            for frame in drain_sse_frames(&mut buf) {
+                if let Some(body) = sse_event_data(&frame, "rebuild") {
+                    return Some(body);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .expect("timed out waiting for the opening rebuild event")
+    .expect("the stream closed without an opening rebuild event");
+
+    // An appliance that has never rebuilt still says so, rather than staying
+    // silent until something happens.
+    assert_eq!(opening["rebuilding"].as_bool(), Some(false));
+    assert_eq!(opening["started_at"].as_i64(), Some(0));
+    assert_eq!(opening["last_duration_ms"].as_u64(), Some(0));
     assert!(
-        body.get("last_completed_at").is_none(),
+        opening.get("last_completed_at").is_none(),
         "last_completed_at was dropped: no consumer read it"
     );
+}
+
+/// A rebuild is an edge, not a reading: it can start and finish between two
+/// ticks of any clock, so both ends are published as they happen.
+#[tokio::test]
+async fn event_stream_reports_both_edges_of_a_rebuild() {
+    let (app, token) = setup().await;
+    let req = Request::builder()
+        .uri("/api/events")
+        .header("cookie", format!("session={token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut stream = resp.into_body().into_data_stream();
+
+    // The handler subscribes while producing the response, so a rebuild
+    // triggered after oneshot() returns cannot be missed.
+    let resp = app
+        .oneshot(authed(
+            "POST",
+            "/api/rules",
+            &token,
+            Some(r#"{"rule":"||edges.example.com^"}"#),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let mut buf = String::new();
+    let mut flags = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            for frame in drain_sse_frames(&mut buf) {
+                if let Some(body) = sse_event_data(&frame, "rebuild") {
+                    flags.push(body["rebuilding"].as_bool().unwrap_or(false));
+                }
+            }
+            // The opening state, then the two edges.
+            if flags.len() >= 3 {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out; rebuild events so far: {flags:?}"));
+
     assert_eq!(
-        body.get("last_duration_ms")
-            .and_then(serde_json::Value::as_u64),
-        Some(0)
+        flags,
+        vec![false, true, false],
+        "expected the opening idle state, then a rebuild starting and finishing"
     );
 }
 

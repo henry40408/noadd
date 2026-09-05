@@ -9,6 +9,8 @@
 //! which is what makes these POSTs work without a token — the same reason
 //! `page.request.post` worked before.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -127,24 +129,72 @@ impl Api {
         self.login(ADMIN_USERNAME, ADMIN_PASSWORD).await
     }
 
-    /// Is a filter rebuild still in flight?
+    /// Blocks until no filter rebuild is in flight.
+    ///
+    /// The appliance publishes rebuild state only on `GET /api/events`, so this
+    /// reads the stream rather than polling a status endpoint. What makes that
+    /// safe for a caller that may have arrived late is the opening `rebuild`
+    /// event every connection is handed: a rebuild that finished before this
+    /// call is reported as settled immediately, instead of leaving it waiting
+    /// for an edge that has already passed.
     ///
     /// # Errors
     ///
-    /// Fails when the endpoint is unreachable or answers something other than
-    /// the expected JSON.
-    pub async fn rebuilding(&self, session: &str) -> Result<bool> {
-        let res = self
+    /// Fails when the stream is unreachable, closes early, or does not report a
+    /// settled rebuild within `timeout`.
+    pub async fn wait_until_rebuilt(&self, session: &str, timeout: Duration) -> Result<()> {
+        tokio::time::timeout(timeout, self.read_until_rebuilt(session))
+            .await
+            .with_context(|| {
+                format!("no settled `rebuild` event on /api/events within {timeout:?}")
+            })?
+    }
+
+    async fn read_until_rebuilt(&self, session: &str) -> Result<()> {
+        let mut res = self
             .client
-            .get(format!("{}/api/filter/rebuild-status", self.base))
+            .get(format!("{}/api/events", self.base))
             .header(
                 reqwest::header::COOKIE,
                 format!("{SESSION_COOKIE}={session}"),
             )
             .send()
             .await
-            .context("GET /api/filter/rebuild-status")?;
-        let body: Value = res.json().await?;
-        Ok(body["rebuilding"].as_bool().unwrap_or(false))
+            .context("GET /api/events")?;
+        if !res.status().is_success() {
+            bail!("GET /api/events answered {}", res.status());
+        }
+
+        // Frames are separated by a blank line and can split across chunks, so
+        // they are reassembled here rather than parsed a chunk at a time.
+        let mut buf = String::new();
+        while let Some(chunk) = res.chunk().await.context("reading /api/events")? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = buf.find("\n\n") {
+                let frame = buf[..end].to_string();
+                buf.drain(..end + 2);
+                if rebuild_settled(&frame) {
+                    return Ok(());
+                }
+            }
+        }
+        bail!("/api/events closed before reporting a settled rebuild")
     }
+}
+
+/// Is this SSE frame a `rebuild` event saying nothing is in flight?
+fn rebuild_settled(frame: &str) -> bool {
+    let mut is_rebuild = false;
+    let mut settled = false;
+    for line in frame.lines() {
+        if let Some(name) = line.strip_prefix("event:") {
+            is_rebuild = name.trim() == "rebuild";
+        } else if let Some(data) = line.strip_prefix("data:") {
+            settled = serde_json::from_str::<Value>(data.trim())
+                .ok()
+                .and_then(|v| v["rebuilding"].as_bool())
+                .is_some_and(|rebuilding| !rebuilding);
+        }
+    }
+    is_rebuild && settled
 }

@@ -284,7 +284,6 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/rules", get(get_rules).post(add_rule))
         .route("/api/rules/{id}", delete(delete_rule))
         .route("/api/filter/check", post(filter_check))
-        .route("/api/filter/rebuild-status", get(get_rebuild_status))
         .route("/api/registry/filters", get(get_registry_filters))
         .route("/api/upstream/health", get(upstream_health))
         .route("/api/upstream/latency", get(upstream_latency))
@@ -2969,27 +2968,6 @@ async fn trigger_list_update(
     }))
 }
 
-#[derive(Serialize)]
-struct RebuildStatusResponse {
-    rebuilding: bool,
-    started_at: i64,
-    last_duration_ms: u64,
-}
-
-async fn get_rebuild_status(
-    State(state): State<AppState>,
-    _auth: AuthedUser,
-) -> Result<Json<RebuildStatusResponse>, StatusCode> {
-    let s = state.rebuild.state();
-    Ok(Json(RebuildStatusResponse {
-        rebuilding: s.rebuilding.load(std::sync::atomic::Ordering::Relaxed),
-        started_at: s.started_at.load(std::sync::atomic::Ordering::Relaxed),
-        last_duration_ms: s
-            .last_duration_ms
-            .load(std::sync::atomic::Ordering::Relaxed),
-    }))
-}
-
 #[derive(Deserialize)]
 pub struct BatchAddRequest {
     pub items: Vec<BatchAddItem>,
@@ -4052,7 +4030,7 @@ async fn next_broadcast<T: Clone>(
 /// The admin UI's one push channel — every push the UI takes rides this
 /// connection, so a tab holds one whatever page it is on.
 ///
-/// Three event names:
+/// Four event names:
 ///
 /// - `ping` on every tick, the status indicator's heartbeat. It has to be a
 ///   real event because SSE keep-alive comments never reach `EventSource`,
@@ -4060,11 +4038,22 @@ async fn next_broadcast<T: Clone>(
 /// - `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
 /// - `log` carrying a [`QueryLogEntry`] per answered query when `?logs=1`.
 ///   Published before the logger's DB flush, so the tail is real-time.
+/// - `rebuild` carrying a [`crate::filter::rebuild::RebuildStatus`] on both edges of every filter
+///   rebuild. Unasked-for, like `ping`: the banner it feeds lives in the shell
+///   and is therefore on every page.
 ///
-/// A client asking for stats gets one snapshot immediately rather than waiting
-/// out the first tick: the page is server-rendered with real numbers already,
-/// and up to ten seconds of divergence between that markup and the first push
-/// would read as a stale dashboard that suddenly jumps.
+/// Two openers, sent before the stream settles into pushing changes:
+///
+/// - A client asking for stats gets one snapshot immediately rather than
+///   waiting out the first tick: the page is server-rendered with real numbers
+///   already, and up to ten seconds of divergence between that markup and the
+///   first push would read as a stale dashboard that suddenly jumps.
+/// - Every client gets one `rebuild`, idle or not. This stream is the only
+///   place the rebuild state is published, so it has to be able to answer
+///   "what is happening right now" rather than only "what changed since you
+///   connected" — a rebuild that finished a moment before the connection
+///   opened would otherwise leave the client waiting for an edge that has
+///   already passed.
 async fn stream_events(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -4077,28 +4066,41 @@ async fn stream_events(
     // sender do the work of filling it, which on a busy appliance is every
     // answered query, for every open tab.
     let mut logs = query.wants_logs().then(|| state.log_events.subscribe());
+    // Unconditional, unlike the two above: a rebuild publishes twice and only
+    // when one runs, so the cost of carrying it on a connection that never
+    // sees one is nothing.
+    let mut rebuilds = Some(state.rebuild.subscribe());
+    // Kept for the pump, which answers a lagged subscriber with the live state
+    // instead of the messages it missed.
+    let rebuild = state.rebuild.clone();
 
     // Dropping this is what tells the ticker to stop computing snapshots once
     // the last dashboard goes away, so it is moved into the pump task and
     // lives exactly as long as the connection.
     let guard = wants_stats.then(|| hub.stats_guard());
 
-    let initial = if wants_stats {
+    let mut initial = Vec::new();
+    if let Ok(event) = Event::default()
+        .event("rebuild")
+        .json_data(rebuild.status())
+    {
+        initial.push(event);
+    }
+    if wants_stats {
         match events::compute_snapshot(&state.db, crate::now_unix()).await {
-            Ok(snap) => Event::default().event("stats").json_data(&snap).ok(),
-            Err(e) => {
-                tracing::warn!(
-                    event = "events.snapshot_failed",
-                    stage = "initial",
-                    error = %e,
-                    "failed to compute the opening dashboard snapshot"
-                );
-                None
+            Ok(snap) => {
+                if let Ok(event) = Event::default().event("stats").json_data(&snap) {
+                    initial.push(event);
+                }
             }
+            Err(e) => tracing::warn!(
+                event = "events.snapshot_failed",
+                stage = "initial",
+                error = %e,
+                "failed to compute the opening dashboard snapshot"
+            ),
         }
-    } else {
-        None
-    };
+    }
 
     // A tick becomes one or two events, which no single stream combinator
     // expresses; pumping into a channel says it plainly instead. The client
@@ -4112,17 +4114,17 @@ async fn stream_events(
         // tick source close the moment the handler returned.
         let _hub = hub;
 
-        if let Some(event) = initial
-            && tx.send(Ok(event)).await.is_err()
-        {
-            return;
+        for event in initial {
+            if tx.send(Ok(event)).await.is_err() {
+                return;
+            }
         }
 
         // A closed source retires its own arm rather than ending the
         // connection: the tail and the heartbeat are independent, and taking
         // the stream down with one of them would blank the status indicator
         // over something it can still report on.
-        while ticks.is_some() || logs.is_some() {
+        while ticks.is_some() || logs.is_some() || rebuilds.is_some() {
             tokio::select! {
                 received = next_broadcast(&mut ticks) => {
                     let tick = match received {
@@ -4167,6 +4169,30 @@ async fn stream_events(
                     };
 
                     if let Ok(event) = Event::default().event("log").json_data(&*entry)
+                        && tx.send(Ok(event)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+
+                received = next_broadcast(&mut rebuilds) => {
+                    let status = match received {
+                        Ok(status) => status,
+                        // Lagged: unlike a tick, a rebuild edge never comes
+                        // round again, and the one worth missing least is the
+                        // completion — skipping it leaves a banner spinning
+                        // over a rebuild that has finished. The live state
+                        // answers the question the missed messages would have.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            rebuild.status()
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            rebuilds = None;
+                            continue;
+                        }
+                    };
+
+                    if let Ok(event) = Event::default().event("rebuild").json_data(status)
                         && tx.send(Ok(event)).await.is_err()
                     {
                         break;
