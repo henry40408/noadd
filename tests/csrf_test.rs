@@ -245,7 +245,10 @@ async fn rejection_records_the_classification_inputs() {
         "expected a csrf.rejected event, got: {text}"
     );
     for field in [
-        r#""reason":"cross_site""#,
+        // The fallback branch decided this one, and says so: a browser that
+        // never sent `Sec-Fetch-Site` is as likely a proxy rewriting `Host`
+        // as it is an attack, and the two want different fixes.
+        r#""reason":"origin_mismatch""#,
         r#""method":"POST""#,
         r#""path":"/api/auth/logout""#,
         r#""origin":"https://evil.test""#,
@@ -257,6 +260,39 @@ async fn rejection_records_the_classification_inputs() {
     ] {
         assert!(text.contains(field), "missing {field} in: {text}");
     }
+}
+
+/// The other branch of the classification, recorded under its own `reason`.
+/// A browser that stated the request was cross-site is an attempted CSRF; the
+/// `origin_mismatch` above is not necessarily one. The event that cannot tell
+/// them apart is the one an operator has to guess at.
+#[tokio::test]
+async fn a_browser_stated_cross_site_rejection_is_logged_under_its_own_reason() {
+    let app = build_app().await;
+    let logs = CapturedLogs::new();
+    let guard = logs.install();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header("sec-fetch-site", "cross-site")
+        .header("origin", "https://evil.test")
+        .header("host", "app.test")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    drop(guard);
+
+    let text = logs.text();
+    assert!(
+        text.contains(r#""reason":"cross_site""#),
+        "expected reason=cross_site, got: {text}"
+    );
+    assert!(
+        text.contains(r#""sec_fetch_site":"cross-site""#),
+        "expected the header that decided it, got: {text}"
+    );
 }
 
 /// The anti-spam lock. `csrf_origin_guard` sits on every unsafe-method admin
