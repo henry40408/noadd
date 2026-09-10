@@ -295,6 +295,63 @@ async fn a_browser_stated_cross_site_rejection_is_logged_under_its_own_reason() 
     );
 }
 
+/// The gap `SameSite=Lax` cannot close, and the one this guard exists for.
+///
+/// `SameSite` is scoped to the registrable domain, not the origin, so a page
+/// on a sibling subdomain is *same-site* and its POST carries the session
+/// cookie. A browser labels exactly that request `Sec-Fetch-Site: same-site` —
+/// so treating the header as a blanket allow hands the attacker the one case
+/// the guard was added to refuse. `same-site` is a statement about the
+/// registrable domain, never about the origin, and the `Origin` still has to
+/// agree with `Host`.
+#[tokio::test]
+async fn a_same_site_post_from_a_sibling_subdomain_is_refused() {
+    let app = build_app().await;
+    let logs = CapturedLogs::new();
+    let guard = logs.install();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header("sec-fetch-site", "same-site")
+        .header("origin", "https://evil.app.test")
+        .header("host", "app.test")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    drop(guard);
+
+    assert!(
+        logs.text().contains(r#""reason":"same_site_cross_origin""#),
+        "expected reason=same_site_cross_origin, got: {}",
+        logs.text()
+    );
+}
+
+/// The other half: `same-site` whose `Origin` *does* agree with `Host` is the
+/// appliance's own page and must still work. Refusing `same-site` outright
+/// would be simpler and would break a legitimate caller.
+#[tokio::test]
+async fn a_same_site_post_from_the_matching_origin_still_passes() {
+    let app = build_app().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/logout")
+        .header("sec-fetch-site", "same-site")
+        .header("origin", "https://app.test")
+        .header("host", "app.test")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the guard must not refuse the appliance's own origin"
+    );
+}
+
 /// The anti-spam lock. `csrf_origin_guard` sits on every unsafe-method admin
 /// request, so anything it logs on the *pass-through* path is written once
 /// per state-changing call for the life of the deployment. A request it
