@@ -62,7 +62,7 @@ Two Playwright conveniences are rebuilt in `e2e/src/`, and are the first place t
 
 **Routing and authentication are server-side.** `src/admin/pages.rs` renders the browser-facing HTML from `templates/` (askama, compile-time). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing any HTML, redirecting to `/login?next=…` or `/setup` when there is none. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is ordinary links with full page loads; there is no client-side router.
 
-Sign-in and setup need **no CSRF token** — `src/admin/csrf.rs` is a header-based origin guard covering every unsafe method on the router, so a cross-origin form post is refused before it reaches a handler.
+Sign-in and setup need **no CSRF token** — tower-http's `CsrfLayer` (wired in `admin_router`; documented, and its rejections logged, in `src/admin/csrf.rs`) is a header-based origin guard covering every unsafe method on the router, so a cross-origin form post is refused before it reaches a handler.
 
 Password sign-in lives in **one** place, `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, the constant Argon2 cost, the lockout and the audit events are all in there — do not grow a second path.
 

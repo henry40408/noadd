@@ -328,9 +328,11 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/docs", get(scalar_docs))
         .fallback(serve_static)
         .with_state(state)
-        .layer(axum::middleware::from_fn(
-            crate::admin::csrf::csrf_origin_guard,
-        ))
+        .layer(tower_http::csrf::CsrfLayer::new())
+        // Directly outside the guard: it reads the `ProtectionError` the guard
+        // attaches to its 403, the only way to log a rejection alongside the
+        // request it rejected.
+        .layer(axum::middleware::from_fn(crate::admin::csrf::log_rejection))
         .layer(axum::middleware::from_fn(crate::headers::no_store))
         .layer(axum::middleware::from_fn(crate::headers::security_headers))
 }

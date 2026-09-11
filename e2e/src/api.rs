@@ -4,7 +4,7 @@
 //! that create the operator account, mint a second session, or ask whether a
 //! filter rebuild has settled are ordinary requests, not things a user does.
 //!
-//! The CSRF guard (`src/admin/csrf.rs`) classifies a request with neither
+//! The CSRF guard (`CsrfLayer`, see `src/admin/csrf.rs`) classifies a request with neither
 //! `Sec-Fetch-Site` nor `Origin` as a non-browser caller and lets it through,
 //! which is what makes these POSTs work without a token — the same reason
 //! `page.request.post` worked before.

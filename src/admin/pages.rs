@@ -17,7 +17,8 @@
 //! Sign-in and setup need no CSRF token. The origin guard
 //! ([`crate::admin::csrf`]) is header-based and already covers every unsafe
 //! method on this router: a form posted from another origin arrives as
-//! `Sec-Fetch-Site: cross-site` and is refused before it reaches a handler.
+//! `Sec-Fetch-Site: cross-site` or `same-site` and is refused before it
+//! reaches a handler.
 
 use askama::Template;
 use askama_web::WebTemplate;
