@@ -334,6 +334,39 @@ pub async fn compute_highlights(
     })
 }
 
+/// Everything the Statistics page reads out of `query_logs` for its window, in
+/// the fewest scans the indexes allow.
+///
+/// The page used to ask for the four readings separately — a query-type
+/// breakdown, an outcome breakdown, a latency summary, a unique-domain count —
+/// alongside the top-domain list, and every one of them re-scanned an index
+/// another had just walked. Two of them share
+/// [`crate::db::Database::range_metrics_since`] and two share
+/// [`crate::db::Database::domain_stats_since`], which is three index scans
+/// instead of six.
+pub struct RangeStats {
+    pub metrics: crate::db::RangeMetrics,
+    pub domains: crate::db::DomainStats,
+}
+
+pub async fn compute_range_stats(
+    db: &Database,
+    now: i64,
+    range: StatsRange,
+    top_n: i64,
+) -> Result<RangeStats, DbError> {
+    let (window_secs, bucket_secs) = range.window();
+    let since = now - window_secs;
+    // The page renders no timeline — the chart is the client's — so the bucket
+    // width only bounds how many rows the outcome fold reads. Passing the
+    // range's own keeps it to one statement shared with the API endpoint.
+    let (metrics, domains) = tokio::try_join!(
+        db.range_metrics_since(since, bucket_secs, 0),
+        db.domain_stats_since(since, top_n),
+    )?;
+    Ok(RangeStats { metrics, domains })
+}
+
 pub async fn compute_top_domains_ranged(
     db: &Database,
     now: i64,

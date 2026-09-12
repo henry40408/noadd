@@ -1,6 +1,11 @@
 //! Parallel-load wall time of the statistics page's 7 endpoints against a
 //! realistic DB. Manual-only — gated by `#[ignore]`.
 //!
+//! Wall time answers how well the read pool overlaps these queries on *this*
+//! machine. It does not answer what they cost, because this machine has an
+//! SSD and the appliance has an SD card — `stats_page_miss_bench` counts the
+//! pages, and is the one to believe when the two disagree.
+//!
 //!   BENCH_DB=/tmp/noadd-bench.db cargo nextest run --release \
 //!     --no-capture --run-ignored only `stats_parallel_bench`
 //!

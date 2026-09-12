@@ -245,15 +245,27 @@ Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noa
 | `timestamp` | the time-window filter every stats query starts with |
 | `(domain, timestamp)` | top domains, unique domains |
 | `(client_ip, doh_token, timestamp)` | top clients |
-| `(timestamp, blocked, cached, response_ms, query_type)` | timeline, query-type breakdown, latency histogram |
+| `(timestamp, blocked, cached, response_ms, query_type, has_result)` | timeline, query-type breakdown, latency histogram, outcome breakdown |
 
 The first two composites put the grouped columns first and `timestamp` last, which is what makes them covering for a `GROUP BY … WHERE timestamp >= ?` shape — the aggregation reads the index alone instead of scanning the window and building a temp b-tree over it. Top clients went from 143 ms to 20 ms on a 447 k-row database that way.
 
 The last one inverts that order because its queries do not group by a column at all; they filter on `timestamp` and then read a few narrow values. Carrying those values in the index avoids a row lookup into a table whose rows average ~84 bytes of strings (`domain`, `client_ip`, `upstream`, `result`) that none of those queries want: timeline 78 → 60 ms, query-type 75 → 62 ms, latency 60 → 45 ms.
 
+`has_result` is a VIRTUAL generated column — `result IS NOT NULL AND result != ''` — which occupies no table space and exists so the outcome breakdown can classify a query without reading one. It is the last column of the metrics index, and the query that needs it carries an `INDEXED BY`: with `timestamp` alone also matching the range the planner picks that smaller index and pays a rowid lookup per row, which is the whole table. An index on the bare expression rather than a named column was tried first and the planner would not treat it as covering.
+
 Indexes are not free here. On that same 103 MiB database `dbstat` attributes 20 MiB to `(domain, timestamp)`, 18 MiB to `(client_ip, doh_token, timestamp)`, 9 MiB to the metrics index and 7 MiB to `timestamp` — the two composites added for statistics cost about a quarter of the file. Measuring an index by the file-size delta of `CREATE INDEX` understates it whenever the database is carrying a freelist, since the new pages come out of that first; `dbstat` reports the real figure.
 
-`outcome_breakdown_since` is deliberately left uncovered. It tests `result` for emptiness, and both carrying that column in an index and indexing the emptiness expression measured *slower* than the plain table lookup while costing ~10% more file size.
+### Measuring these queries
+
+Index work here is measured in **page misses** — `SQLITE_DBSTATUS_CACHE_MISS`, the 4 KiB database pages SQLite has to fetch from the file — and not in milliseconds. Development happens on an SSD and the appliance runs off an SD card, where the same page count costs orders of magnitude more; a query that reads the whole table can look free on one machine and take seconds on the other. `tests/stats_page_miss_bench.rs` reports the figure against a real database and `tests/stats_page_miss_test.rs` asserts the properties behind it; `tests/stats_parallel_bench.rs` is the wall-clock companion, and is the one to distrust when the two disagree.
+
+That distinction is not hypothetical. `outcome_breakdown_since` was left uncovered through version 11 because carrying `result` in an index measured *slower* on wall clock — but the plain table lookup it was compared against read 12 173 pages to the covered form's 2 157, or the entire 10 784-page table of a 370 k-row database. On an SSD with a warm OS page cache that difference does not show up in a duration.
+
+`Database::read_page_cache_stats` and `Database::reset_read_page_accounting` are the instrumentation. The latter turns `mmap_size` off before measuring: pages the pager takes from a memory mapping never pass through its cache, so a connection running with the configured 256 MiB mapping reports almost no misses however much of the file it reads. The appliance still fetches those pages, as faults against the SD card rather than `read()` calls, so the count with mmap off is the count either way.
+
+### One scan per index, not one per reading
+
+The Statistics page's five readings were four foldings of the metrics index over one window and two foldings of `(domain, timestamp)` over the same one, asked as six separate statements. Each re-walked an index another had just finished with, and the read pool round-robins them across connections holding 2 MiB of page cache each, so nothing was ever warm for the next. `range_metrics_since` groups at `(bucket, blocked, cached, has_result)` and `(query_type, response_ms)` — two statements the timeline, both breakdowns and the latency histogram are derived from — and `domain_stats_since` returns the top list and the distinct count from one materialized CTE. The single-purpose functions `/api/stats/*` calls are folds over the same statements, so there is one SQL spelling per fact. Rendering a 7-day window on that 370 k-row database went from 29 274 page misses (114 MiB) to 13 291 (52 MiB).
 
 Every index migration runs `ANALYZE`. A new index alone is not always enough — the planner keeps its old plan until `sqlite_stat1` is refreshed — and the hourly `PRAGMA optimize` lets those statistics drift a long way in the meantime.
 

@@ -1661,18 +1661,16 @@ pub async fn stats_page(
         .and_then(stats::StatsRange::parse)
         .unwrap_or(stats::StatsRange::Days7);
 
-    // Five independent reads; running them together keeps the page at one
-    // round trip to the database rather than five in sequence.
-    let (highlights, breakdowns, domains, clients, health) = tokio::join!(
-        stats::compute_highlights(&state.db, now, range),
-        stats::compute_breakdowns(&state.db, now, range),
-        stats::compute_top_domains_ranged(&state.db, now, range, STATS_TOP_N),
+    // Three independent reads; running them together keeps the page at one
+    // round trip to the database rather than three in sequence.
+    let (range_stats, clients, health) = tokio::join!(
+        stats::compute_range_stats(&state.db, now, range, STATS_TOP_N),
         stats::compute_top_clients_ranged(&state.db, now, range, STATS_TOP_N),
         stats::compute_db_health(&state.db, now),
     );
 
-    let highlights = highlights.ok();
-    let latency = highlights.as_ref().map(|h| &h.latency);
+    let range_stats = range_stats.ok();
+    let latency = range_stats.as_ref().map(|s| &s.metrics.latency);
     // A resolver that has answered nothing has no percentiles to report, and a
     // zero would read as an impossibly fast one.
     let has_latency = latency.is_some_and(|l| l.sample_count > 0);
@@ -1688,7 +1686,7 @@ pub async fn stats_page(
             class,
         )
     };
-    let unique_domains = highlights.as_ref().map_or(0, |h| h.unique_domains);
+    let unique_domains = range_stats.as_ref().map_or(0, |s| s.domains.unique);
     let highlight_cards = vec![
         StatCardView {
             title: thousands(unique_domains),
@@ -1707,17 +1705,21 @@ pub async fn stats_page(
         latency_card("Latency p99", latency.map_or(0, |l| l.p99_ms), "text-red"),
     ];
 
-    let (query_types, outcomes) = breakdowns
-        .map(|b| (bar_rows(b.query_types), bar_rows(b.outcomes)))
+    let (query_types, outcomes, top_domains) = range_stats
+        .map(|s| {
+            (
+                bar_rows(s.metrics.query_types),
+                bar_rows(s.metrics.outcomes),
+                bar_rows(
+                    s.domains
+                        .top
+                        .into_iter()
+                        .map(|d| (d.domain, d.count))
+                        .collect(),
+                ),
+            )
+        })
         .unwrap_or_default();
-
-    let top_domains = bar_rows(
-        domains
-            .unwrap_or_default()
-            .into_iter()
-            .map(|d| (d.domain, d.count))
-            .collect(),
-    );
     // A client that came in over `DoH` is named by both, the way the client
     // draws it — the IP alone would collapse every token behind one proxy.
     let top_clients = bar_rows(
