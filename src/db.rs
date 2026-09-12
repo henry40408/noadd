@@ -230,6 +230,15 @@ pub struct TimelineMultiPoint {
     pub cached: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct MetricsBucket {
+    pub timestamp: i64,
+    pub blocked: bool,
+    pub cached: bool,
+    pub has_result: bool,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeatmapCell {
     pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
@@ -1995,6 +2004,18 @@ impl Database {
         bucket_secs: i64,
         tz_offset_secs: i64,
     ) -> Result<Vec<TimelineMultiPoint>, DbError> {
+        let buckets = self
+            .metrics_by_bucket_since(since, bucket_secs, tz_offset_secs)
+            .await?;
+        Ok(timeline_from_buckets(&buckets))
+    }
+
+    async fn metrics_by_bucket_since(
+        &self,
+        since: i64,
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Result<Vec<MetricsBucket>, DbError> {
         let since_ms = since * 1000;
         let bucket_ms = bucket_secs * 1000;
         let offset_ms = tz_offset_secs * 1000;
@@ -2003,21 +2024,20 @@ impl Database {
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, \
-                            COUNT(*), \
-                            COALESCE(SUM(blocked), 0), \
-                            COALESCE(SUM(cached), 0) \
-                     FROM query_logs \
+                            blocked, cached, has_result, COUNT(*) \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
                      WHERE timestamp >= ?2 \
-                     GROUP BY bucket \
+                     GROUP BY bucket, blocked, cached, has_result \
                      ORDER BY bucket",
                 )?;
                 let rows = stmt
                     .query_map(params![bucket_ms, since_ms, offset_ms], |row| {
-                        Ok(TimelineMultiPoint {
-                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
-                            total: row.get(1)?,
-                            blocked: row.get(2)?,
-                            cached: row.get(3)?,
+                        Ok(MetricsBucket {
+                            timestamp: row.get::<_, i64>(0)? / 1000,
+                            blocked: row.get::<_, i64>(1)? != 0,
+                            cached: row.get::<_, i64>(2)? != 0,
+                            has_result: row.get::<_, i64>(3)? != 0,
+                            count: row.get(4)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -2105,33 +2125,8 @@ impl Database {
     }
 
     pub async fn outcome_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
-        let since_ms = since * 1000;
-        let result = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT \
-                        CASE \
-                            WHEN blocked = 1 THEN 'Blocked' \
-                            WHEN cached = 1 THEN 'Cached' \
-                            WHEN result IS NOT NULL AND result != '' THEN 'Resolved' \
-                            ELSE 'Empty' \
-                        END AS outcome, \
-                        COUNT(*) AS cnt \
-                     FROM query_logs \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY outcome \
-                     ORDER BY cnt DESC",
-                )?;
-                let rows = stmt
-                    .query_map(params![since_ms], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
-        Ok(result)
+        let buckets = self.metrics_by_bucket_since(since, 86_400, 0).await?;
+        Ok(outcomes_from_buckets(&buckets))
     }
 
     pub async fn unique_domains_since(&self, since: i64) -> Result<i64, DbError> {
@@ -2265,6 +2260,60 @@ impl Database {
 ///
 /// Percentile semantics match the SQL version: `p_k` is the value at rank
 /// `max(1, floor(total * k))` when rows are sorted ascending by `response_ms`.
+fn timeline_from_buckets(buckets: &[MetricsBucket]) -> Vec<TimelineMultiPoint> {
+    let mut out: Vec<TimelineMultiPoint> = Vec::new();
+    for b in buckets {
+        let point = match out.last_mut() {
+            Some(p) if p.timestamp == b.timestamp => p,
+            _ => {
+                out.push(TimelineMultiPoint {
+                    timestamp: b.timestamp,
+                    total: 0,
+                    blocked: 0,
+                    cached: 0,
+                });
+                out.last_mut().expect("just pushed")
+            }
+        };
+        point.total += b.count;
+        if b.blocked {
+            point.blocked += b.count;
+        }
+        if b.cached {
+            point.cached += b.count;
+        }
+    }
+    out
+}
+
+fn outcomes_from_buckets(buckets: &[MetricsBucket]) -> Vec<(String, i64)> {
+    let (mut blocked, mut cached, mut resolved, mut empty) = (0i64, 0i64, 0i64, 0i64);
+    for b in buckets {
+        let slot = if b.blocked {
+            &mut blocked
+        } else if b.cached {
+            &mut cached
+        } else if b.has_result {
+            &mut resolved
+        } else {
+            &mut empty
+        };
+        *slot += b.count;
+    }
+    let mut rows: Vec<(String, i64)> = [
+        ("Blocked", blocked),
+        ("Cached", cached),
+        ("Resolved", resolved),
+        ("Empty", empty),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(name, n)| (name.to_string(), n))
+    .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+    rows
+}
+
 fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     let total: i64 = hist.iter().map(|(_, c)| *c).sum();
     if total == 0 {
