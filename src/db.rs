@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -194,7 +195,7 @@ pub struct CustomRuleRow {
     pub rule_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TopDomain {
     pub domain: String,
     pub count: i64,
@@ -218,7 +219,7 @@ pub struct TimelinePoint {
     pub blocked: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TimelineMultiPoint {
     /// Start of the bucket, in **Unix seconds** — the same unit as
     /// [`TimelinePoint::timestamp`]. The underlying `query_logs.timestamp`
@@ -230,6 +231,48 @@ pub struct TimelineMultiPoint {
     pub cached: i64,
 }
 
+/// One grain of [`Database::metrics_by_bucket_since`]: how many queries fell in
+/// a time bucket carrying a given outcome classification. Both the timeline and
+/// the outcome breakdown are foldings of these.
+#[derive(Debug, Clone)]
+pub struct MetricsBucket {
+    /// Start of the bucket, in **Unix seconds** — the same unit as
+    /// [`TimelineMultiPoint::timestamp`].
+    pub timestamp: i64,
+    pub blocked: bool,
+    pub cached: bool,
+    /// Whether `result` held an answer. Carried by `idx_query_logs_ts_metrics`
+    /// as a generated column so classifying an outcome never reads the table.
+    pub has_result: bool,
+    pub count: i64,
+}
+
+/// The four Statistics readings that come off `idx_query_logs_ts_metrics`,
+/// answered together by [`Database::range_metrics_since`].
+#[derive(Debug, Clone)]
+pub struct RangeMetrics {
+    pub timeline: Vec<TimelineMultiPoint>,
+    pub outcomes: Vec<(String, i64)>,
+    pub query_types: Vec<(String, i64)>,
+    pub latency: LatencySummary,
+}
+
+/// Pager counters for the read pool — see
+/// [`Database::read_page_cache_stats`].
+#[derive(Debug, Clone, Copy)]
+pub struct PageCacheStats {
+    pub hits: i64,
+    pub misses: i64,
+}
+
+/// The busiest domains in a window alongside how many distinct ones it held —
+/// see [`Database::domain_stats_since`] for why they travel together.
+#[derive(Debug, Clone)]
+pub struct DomainStats {
+    pub unique: i64,
+    pub top: Vec<TopDomain>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeatmapCell {
     pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
@@ -237,7 +280,7 @@ pub struct HeatmapCell {
     pub count: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LatencySummary {
     pub sample_count: i64,
     /// Percentiles only. A mean was dropped as superseded by p50, and a max as
@@ -360,6 +403,72 @@ impl Database {
         self.read_pool.pick()
     }
 
+    /// Pages the read pool has had to fetch from the database file, summed
+    /// across its connections, and the pages it answered from its own cache.
+    ///
+    /// This is `SQLITE_DBSTATUS_CACHE_MISS`, a running count of pager-level
+    /// reads. It is the unit `tests/stats_page_miss_bench.rs` reports, and it
+    /// is deliberately not a duration: the appliance runs off an SD card and
+    /// development runs off an SSD, so the same query costs wildly different
+    /// wall time on each while fetching exactly the same pages. Counting pages
+    /// compares across both. The counter is unaffected by `mmap_size` —
+    /// memory-mapped reads are counted the same as `read()` ones.
+    pub async fn read_page_cache_stats(&self) -> Result<PageCacheStats, DbError> {
+        let mut total = PageCacheStats { hits: 0, misses: 0 };
+        for conn in &self.read_pool.conns {
+            let stats = conn
+                .call(|conn| {
+                    let read = |op: std::ffi::c_int| {
+                        let (mut current, mut high) = (0, 0);
+                        // SAFETY: `handle()` is live for the closure's body, and
+                        // both out-params are valid for the call's duration.
+                        #[allow(unsafe_code, reason = "no safe wrapper for sqlite3_db_status")]
+                        unsafe {
+                            rusqlite::ffi::sqlite3_db_status(
+                                conn.handle(),
+                                op,
+                                &raw mut current,
+                                &raw mut high,
+                                0,
+                            );
+                        }
+                        i64::from(current)
+                    };
+                    Ok(PageCacheStats {
+                        hits: read(rusqlite::ffi::SQLITE_DBSTATUS_CACHE_HIT),
+                        misses: read(rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS),
+                    })
+                })
+                .await?;
+            total.hits += stats.hits;
+            total.misses += stats.misses;
+        }
+        Ok(total)
+    }
+
+    /// Put the read pool in the state [`Self::read_page_cache_stats`] can
+    /// account for, and drop what it has cached so the next query is measured
+    /// cold. The running counters are untouched — callers take a delta around
+    /// the query they care about.
+    ///
+    /// Turning `mmap_size` off is what makes the counter usable: pages the
+    /// pager takes from a memory mapping never pass through its cache, so a
+    /// connection running with the configured 256 MiB mapping reports almost no
+    /// misses however much of the file it reads. The appliance still fetches
+    /// those pages — as page faults against the SD card rather than `read()`
+    /// calls — so the count with mmap off is the count either way; only the
+    /// accounting differs.
+    pub async fn reset_read_page_accounting(&self) -> Result<(), DbError> {
+        for conn in &self.read_pool.conns {
+            conn.call(|conn| {
+                conn.execute_batch("PRAGMA mmap_size = 0; PRAGMA shrink_memory;")?;
+                Ok(())
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Flush the WAL back into the main database file and close every
     /// connection so `SQLite` can remove the `-wal`/`-shm` sidecar files.
     ///
@@ -418,11 +527,16 @@ impl Database {
                         upstream TEXT,
                         doh_token TEXT,
                         result TEXT,
-                        authenticated_data INTEGER NOT NULL DEFAULT 0
+                        authenticated_data INTEGER NOT NULL DEFAULT 0,
+                        has_result INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);
+                    -- Without has_result: a database predating version 12 has
+                    -- no such column until that migration adds it, and this
+                    -- batch runs first. Migration 12 rebuilds the index with it
+                    -- for fresh and legacy databases alike.
                     CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics ON query_logs(timestamp, blocked, cached, response_ms, query_type);
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
@@ -631,10 +745,6 @@ impl Database {
             // 78 -> 60 ms, query_type 75 -> 62 ms, latency 60 -> 45 ms, for
             // ~9 MiB of index against a 103 MiB database.
             //
-            // `outcome_breakdown_since` deliberately stays uncovered: it tests
-            // `result` for emptiness, and both carrying that column and
-            // indexing the emptiness expression measured *slower* than the
-            // plain table lookup while costing ~10% more file size.
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
                  ON query_logs(timestamp, blocked, cached, response_ms, query_type);
@@ -642,7 +752,38 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 11;
+        if version < 12 {
+            // Version 11 left `outcome_breakdown_since` uncovered on the
+            // strength of a wall-clock measurement, which on an SSD hides what
+            // the query actually costs: classifying an outcome needs `result`
+            // tested for emptiness, so every matching row took a rowid lookup
+            // into the table. Counted in pages fetched from the file
+            // (`SQLITE_DBSTATUS_CACHE_MISS`, the unit `stats_page_miss_bench`
+            // reports) that is the whole 10 784-page table on a 370 k-row
+            // database — 12 173 pages against 2 157 for the same answer read
+            // out of the index. On the SD card these appliances run from,
+            // those 40 MiB are the page's single largest cost.
+            //
+            // The emptiness test rides the index as a VIRTUAL generated
+            // column, which occupies no table space and added 65 pages (3%) to
+            // the index. An index on the bare expression was tried first and
+            // the planner would not treat it as covering; a named column it
+            // does.
+            add_column_if_missing(
+                conn,
+                "query_logs",
+                "has_result",
+                "INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL",
+            )?;
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
+                 CREATE INDEX idx_query_logs_ts_metrics \
+                 ON query_logs(timestamp, blocked, cached, response_ms, query_type, has_result);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 12;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1891,25 +2032,48 @@ impl Database {
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopDomain>, DbError> {
+        Ok(self.domain_stats_since(since, limit).await?.top)
+    }
+
+    /// The busiest domains in the window and how many distinct ones there were,
+    /// from one pass over `idx_query_logs_domain_ts`.
+    ///
+    /// Asked separately these are two statements — `GROUP BY domain ORDER BY
+    /// cnt DESC LIMIT n` and `COUNT(DISTINCT domain)` — that group the same
+    /// rows the same way and each scan the whole index, because the index is
+    /// ordered `(domain, timestamp)` and a timestamp range cannot restrict it.
+    /// The CTE is materialized once and read twice, which is 3 977 page misses
+    /// instead of 7 954 on a 370 k-row database.
+    ///
+    /// `unique` is 0 when the window is empty, which is also when `top` is: the
+    /// count rides on the rows, so there is nothing to report either way.
+    pub async fn domain_stats_since(&self, since: i64, limit: i64) -> Result<DomainStats, DbError> {
         let since_ms = since * 1000;
-        let rows = self
+        let stats = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT domain, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY domain ORDER BY cnt DESC LIMIT ?2",
+                    "WITH d AS (                         SELECT domain, COUNT(*) AS cnt                         FROM query_logs                         WHERE timestamp >= ?1                         GROUP BY domain                      )                      SELECT (SELECT COUNT(*) FROM d), domain, cnt                      FROM d ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
                     .query_map(params![since_ms, limit], |row| {
-                        Ok(TopDomain {
-                            domain: row.get(0)?,
-                            count: row.get(1)?,
-                        })
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            TopDomain {
+                                domain: row.get(1)?,
+                                count: row.get(2)?,
+                            },
+                        ))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+                let unique = rows.first().map_or(0, |(n, _)| *n);
+                Ok(DomainStats {
+                    unique,
+                    top: rows.into_iter().map(|(_, d)| d).collect(),
+                })
             })
             .await?;
-        Ok(rows)
+        Ok(stats)
     }
 
     pub async fn top_clients_since(
@@ -1979,6 +2143,54 @@ impl Database {
         bucket_secs: i64,
         tz_offset_secs: i64,
     ) -> Result<Vec<TimelineMultiPoint>, DbError> {
+        let buckets = self
+            .metrics_by_bucket_since(since, bucket_secs, tz_offset_secs)
+            .await?;
+        Ok(timeline_from_buckets(&buckets))
+    }
+
+    /// The Statistics page's whole `idx_query_logs_ts_metrics` workload in the
+    /// two scans it actually needs, rather than the four it used to take.
+    ///
+    /// The timeline, the outcome breakdown, the query-type breakdown and the
+    /// latency histogram are four foldings of the same window of the same
+    /// index. Asked one statement each, `SQLite` reads that index end to end
+    /// four times — and the read pool round-robins them onto four connections
+    /// with 2 MiB of page cache each, so nothing is warm for the next one.
+    /// Grouping at a grain fine enough to derive all four collapses that to
+    /// two scans: 4 314 pages instead of 18 449 on a 370 k-row database.
+    pub async fn range_metrics_since(
+        &self,
+        since: i64, // unix seconds
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Result<RangeMetrics, DbError> {
+        let (buckets, distribution) = tokio::try_join!(
+            self.metrics_by_bucket_since(since, bucket_secs, tz_offset_secs),
+            self.metrics_distribution_since(since),
+        )?;
+        Ok(RangeMetrics {
+            timeline: timeline_from_buckets(&buckets),
+            outcomes: outcomes_from_buckets(&buckets),
+            query_types: query_types_from_distribution(&distribution),
+            latency: latency_from_distribution(&distribution),
+        })
+    }
+
+    /// Query counts by time bucket and outcome class. Every column is carried
+    /// by `idx_query_logs_ts_metrics`, so the scan never looks a row up.
+    ///
+    /// `INDEXED BY` because the planner will not choose it on its own: with
+    /// `idx_query_logs_timestamp` also matching the range it picks that one —
+    /// it is the smaller index — and then pays a rowid lookup per row to reach
+    /// `has_result`. Measured on a 370 k-row database that is 12 173 page
+    /// misses against 2 157 for the identical answer.
+    async fn metrics_by_bucket_since(
+        &self,
+        since: i64, // unix seconds
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Result<Vec<MetricsBucket>, DbError> {
         let since_ms = since * 1000;
         let bucket_ms = bucket_secs * 1000;
         let offset_ms = tz_offset_secs * 1000;
@@ -1987,21 +2199,20 @@ impl Database {
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, \
-                            COUNT(*), \
-                            COALESCE(SUM(blocked), 0), \
-                            COALESCE(SUM(cached), 0) \
-                     FROM query_logs \
+                            blocked, cached, has_result, COUNT(*) \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
                      WHERE timestamp >= ?2 \
-                     GROUP BY bucket \
+                     GROUP BY bucket, blocked, cached, has_result \
                      ORDER BY bucket",
                 )?;
                 let rows = stmt
                     .query_map(params![bucket_ms, since_ms, offset_ms], |row| {
-                        Ok(TimelineMultiPoint {
+                        Ok(MetricsBucket {
                             timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
-                            total: row.get(1)?,
-                            blocked: row.get(2)?,
-                            cached: row.get(3)?,
+                            blocked: row.get::<_, i64>(1)? != 0,
+                            cached: row.get::<_, i64>(2)? != 0,
+                            has_result: row.get::<_, i64>(3)? != 0,
+                            count: row.get(4)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -2009,6 +2220,39 @@ impl Database {
             })
             .await?;
         Ok(result)
+    }
+
+    /// Query counts by type and response time — the grain the query-type
+    /// breakdown and the latency histogram share. Both columns sit in
+    /// `idx_query_logs_ts_metrics` and the planner reaches for it unaided here,
+    /// because no other index carries `query_type` at all.
+    async fn metrics_distribution_since(
+        &self,
+        since: i64, // unix seconds
+    ) -> Result<Vec<(String, i64, i64)>, DbError> {
+        let since_ms = since * 1000;
+        let rows = self
+            .reader()
+            .call(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT query_type, response_ms, COUNT(*) \
+                     FROM query_logs \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY query_type, response_ms",
+                )?;
+                let rows = stmt
+                    .query_map(params![since_ms], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
     }
 
     /// Bucket queries by weekday and hour-of-day in the viewer's local calendar,
@@ -2066,103 +2310,33 @@ impl Database {
         &self,
         since: i64,
     ) -> Result<Vec<(String, i64)>, DbError> {
-        let since_ms = since * 1000;
-        let result = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT query_type, COUNT(*) AS cnt \
-                     FROM query_logs \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY query_type \
-                     ORDER BY cnt DESC",
-                )?;
-                let rows = stmt
-                    .query_map(params![since_ms], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
-        Ok(result)
+        let rows = self.metrics_distribution_since(since).await?;
+        Ok(query_types_from_distribution(&rows))
     }
 
+    /// The bucket width is immaterial to the answer — the outcome counts are
+    /// summed across every bucket — so this asks for daily ones purely to keep
+    /// the row count down while sharing [`Self::metrics_by_bucket_since`]'s
+    /// single statement with the timeline.
     pub async fn outcome_breakdown_since(&self, since: i64) -> Result<Vec<(String, i64)>, DbError> {
-        let since_ms = since * 1000;
-        let result = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT \
-                        CASE \
-                            WHEN blocked = 1 THEN 'Blocked' \
-                            WHEN cached = 1 THEN 'Cached' \
-                            WHEN result IS NOT NULL AND result != '' THEN 'Resolved' \
-                            ELSE 'Empty' \
-                        END AS outcome, \
-                        COUNT(*) AS cnt \
-                     FROM query_logs \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY outcome \
-                     ORDER BY cnt DESC",
-                )?;
-                let rows = stmt
-                    .query_map(params![since_ms], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
-        Ok(result)
+        let buckets = self.metrics_by_bucket_since(since, 86_400, 0).await?;
+        Ok(outcomes_from_buckets(&buckets))
     }
 
     pub async fn unique_domains_since(&self, since: i64) -> Result<i64, DbError> {
-        let since_ms = since * 1000;
-        let count = self
-            .reader()
-            .call(move |conn| {
-                let n: i64 = conn.query_row(
-                    "SELECT COUNT(DISTINCT domain) FROM query_logs WHERE timestamp >= ?1",
-                    params![since_ms],
-                    |row| row.get(0),
-                )?;
-                Ok(n)
-            })
-            .await?;
-        Ok(count)
+        Ok(self.domain_stats_since(since, 1).await?.unique)
     }
 
+    /// Percentiles over `response_ms`, derived in Rust from the histogram
+    /// [`Self::metrics_distribution_since`] returns.
+    ///
+    /// The first implementation ran a window function
+    /// (`ROW_NUMBER() OVER (ORDER BY response_ms)`), which forced `SQLite` to
+    /// sort every matching row. A histogram is exact here because `response_ms`
+    /// is integer milliseconds, and it costs one aggregate over the range.
     pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
-        let since_ms = since * 1000;
-        // The previous implementation ran a single window-function query
-        // (`ROW_NUMBER() OVER (ORDER BY response_ms)`) which forced SQLite to
-        // sort every matching row — ~150 ms for a 30-day window on a 196 k-row
-        // DB. Instead, pull the response_ms histogram (response_ms → count,
-        // ascending) and derive count/avg/max/p50/p95/p99 in Rust. The
-        // histogram is exact because response_ms is integer milliseconds,
-        // and SQLite needs only one hash-aggregate over the timestamp range
-        // (~40 ms in the same workload).
-        let hist: Vec<(i64, i64)> = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT response_ms, COUNT(*) FROM query_logs \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY response_ms \
-                     ORDER BY response_ms",
-                )?;
-                let rows = stmt
-                    .query_map(params![since_ms], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
-
-        Ok(latency_summary_from_histogram(&hist))
+        let rows = self.metrics_distribution_since(since).await?;
+        Ok(latency_from_distribution(&rows))
     }
 
     /// On-disk storage breakdown for the Database Health card. Both figures come
@@ -2249,6 +2423,91 @@ impl Database {
 ///
 /// Percentile semantics match the SQL version: `p_k` is the value at rank
 /// `max(1, floor(total * k))` when rows are sorted ascending by `response_ms`.
+/// Sum each bucket's classifications back into one point per bucket. Input is
+/// ordered by bucket, so the output is too.
+fn timeline_from_buckets(buckets: &[MetricsBucket]) -> Vec<TimelineMultiPoint> {
+    let mut out: Vec<TimelineMultiPoint> = Vec::new();
+    for b in buckets {
+        let point = match out.last_mut() {
+            Some(p) if p.timestamp == b.timestamp => p,
+            _ => {
+                out.push(TimelineMultiPoint {
+                    timestamp: b.timestamp,
+                    total: 0,
+                    blocked: 0,
+                    cached: 0,
+                });
+                out.last_mut().expect("just pushed")
+            }
+        };
+        point.total += b.count;
+        if b.blocked {
+            point.blocked += b.count;
+        }
+        if b.cached {
+            point.cached += b.count;
+        }
+    }
+    out
+}
+
+/// Classify each bucket and total across the whole window. The precedence —
+/// blocked, then cached, then whether an answer came back — is the one the
+/// query log's Verdict column shows, so a row cannot be counted twice.
+fn outcomes_from_buckets(buckets: &[MetricsBucket]) -> Vec<(String, i64)> {
+    let (mut blocked, mut cached, mut resolved, mut empty) = (0i64, 0i64, 0i64, 0i64);
+    for b in buckets {
+        let slot = if b.blocked {
+            &mut blocked
+        } else if b.cached {
+            &mut cached
+        } else if b.has_result {
+            &mut resolved
+        } else {
+            &mut empty
+        };
+        *slot += b.count;
+    }
+    let mut rows: Vec<(String, i64)> = [
+        ("Blocked", blocked),
+        ("Cached", cached),
+        ("Resolved", resolved),
+        ("Empty", empty),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(name, n)| (name.to_string(), n))
+    .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+    rows
+}
+
+/// Counts per query type, busiest first — the same order the single-purpose
+/// `GROUP BY query_type ORDER BY cnt DESC` returned.
+fn query_types_from_distribution(rows: &[(String, i64, i64)]) -> Vec<(String, i64)> {
+    let mut totals: HashMap<&str, i64> = HashMap::new();
+    for (qtype, _, count) in rows {
+        *totals.entry(qtype.as_str()).or_default() += count;
+    }
+    let mut out: Vec<(String, i64)> = totals
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r.1));
+    out
+}
+
+/// Collapse the (`query_type`, `response_ms`) grain down to the ascending
+/// `response_ms` histogram the percentiles are read off.
+fn latency_from_distribution(rows: &[(String, i64, i64)]) -> LatencySummary {
+    let mut hist: BTreeMap<i64, i64> = BTreeMap::new();
+    for (_, ms, count) in rows {
+        *hist.entry(*ms).or_default() += count;
+    }
+    let hist: Vec<(i64, i64)> = hist.into_iter().collect();
+    latency_summary_from_histogram(&hist)
+}
+
 fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     let total: i64 = hist.iter().map(|(_, c)| *c).sum();
     if total == 0 {
@@ -2287,8 +2546,13 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
 /// Add a column to `table` if it doesn't already exist.
 ///
 /// `SQLite` doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
-/// probe `pragma_table_info` first. The `table` argument is interpolated into
+/// probe the table's columns first. The `table` argument is interpolated into
 /// the SQL — only call this from migration code with trusted table names.
+///
+/// `pragma_table_xinfo` rather than `pragma_table_info`, because the latter
+/// omits generated columns: a fresh database, whose `CREATE TABLE` already
+/// declared `query_logs.has_result`, would be told the column was missing and
+/// fail the migration on `duplicate column name`.
 fn add_column_if_missing(
     conn: &rusqlite::Connection,
     table: &str,
@@ -2297,7 +2561,7 @@ fn add_column_if_missing(
 ) -> Result<(), rusqlite::Error> {
     let exists: bool = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            &format!("SELECT COUNT(*) FROM pragma_table_xinfo('{table}') WHERE name = ?1"),
             params![column],
             |row| row.get::<_, i64>(0),
         )
@@ -2771,6 +3035,75 @@ mod tests {
             indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
             "metrics index should be created by migration: {indexes:?}"
         );
+    }
+
+    /// The metrics index has to end up carrying `has_result` whichever way the
+    /// database arrived at version 12 — created fresh, or migrated from a
+    /// version whose `query_logs` had no such column.
+    #[tokio::test]
+    async fn migration_v12_puts_the_outcome_flag_in_the_metrics_index() {
+        async fn metrics_index_columns(db: &Database) -> Vec<String> {
+            db.reader()
+                .call(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT name FROM pragma_index_info('idx_query_logs_ts_metrics')",
+                    )?;
+                    let names = stmt
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, tokio_rusqlite::Error>(names)
+                })
+                .await
+                .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // A v11 database: the metrics index exists, without the outcome flag.
+        let legacy = dir.path().join("v11.db");
+        let legacy_str = legacy.to_str().unwrap().to_string();
+        {
+            let conn = rusqlite::Connection::open(&legacy_str).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    response_ms INTEGER NOT NULL DEFAULT 0,
+                    upstream TEXT,
+                    doh_token TEXT,
+                    result TEXT,
+                    authenticated_data INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
+                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+                CREATE INDEX idx_query_logs_client_ts
+                    ON query_logs(client_ip, doh_token, timestamp);
+                CREATE INDEX idx_query_logs_ts_metrics
+                    ON query_logs(timestamp, blocked, cached, response_ms, query_type);
+                PRAGMA user_version = 11;",
+            )
+            .unwrap();
+        }
+        let migrated = Database::open(&legacy_str).await.unwrap();
+
+        let fresh_path = dir.path().join("fresh.db");
+        let fresh = Database::open(fresh_path.to_str().unwrap()).await.unwrap();
+
+        for (label, db) in [("migrated", &migrated), ("fresh", &fresh)] {
+            let columns = metrics_index_columns(db).await;
+            assert!(
+                columns.iter().any(|c| c == "has_result"),
+                "{label} database's metrics index lacks has_result: {columns:?}"
+            );
+            // Reachable through the query that depends on it — the index could
+            // carry the column and still be the wrong one for `INDEXED BY`.
+            assert!(db.outcome_breakdown_since(0).await.is_ok());
+        }
     }
 
     #[tokio::test]

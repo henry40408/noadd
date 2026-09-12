@@ -503,3 +503,114 @@ async fn both_timeline_types_report_bucket_starts_in_the_same_unit() {
         assert_eq!(a.blocked, b.blocked);
     }
 }
+
+#[tokio::test]
+async fn range_metrics_agrees_with_the_single_purpose_queries() {
+    let db = test_db().await;
+    let entries = vec![
+        entry(600, "A", false, false, Some("1.1.1.1")),
+        entry(610, "A", true, false, None),
+        entry(620, "AAAA", false, true, Some("2606::1")),
+        entry(700, "HTTPS", false, false, None),
+        entry(710, "A", false, false, Some("")),
+        entry(720, "AAAA", false, false, Some("2606::2")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let combined = db.range_metrics_since(0, 60, 0).await.unwrap();
+
+    assert_eq!(
+        combined.timeline,
+        db.timeline_multi_since(0, 60, 0).await.unwrap()
+    );
+    assert_eq!(combined.latency, db.latency_summary_since(0).await.unwrap());
+    assert_eq!(
+        sorted(combined.query_types),
+        sorted(db.query_type_breakdown_since(0).await.unwrap())
+    );
+    assert_eq!(
+        sorted(combined.outcomes),
+        sorted(db.outcome_breakdown_since(0).await.unwrap())
+    );
+}
+
+/// An empty `result` is not an answer, the same way a NULL one is not — the
+/// classification the index carries has to draw the line where the `CASE` it
+/// replaced drew it.
+#[tokio::test]
+async fn an_empty_result_counts_as_empty_not_resolved() {
+    let db = test_db().await;
+    let entries = vec![
+        entry(600, "A", false, false, Some("")),
+        entry(610, "A", false, false, None),
+        entry(620, "A", false, false, Some("1.1.1.1")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let outcomes: std::collections::HashMap<String, i64> = db
+        .outcome_breakdown_since(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(outcomes.get("Empty"), Some(&2));
+    assert_eq!(outcomes.get("Resolved"), Some(&1));
+}
+
+/// Blocked wins over cached, and cached over whether an answer came back, so a
+/// query is counted exactly once however many of those are true at the time.
+#[tokio::test]
+async fn outcome_precedence_counts_each_query_once() {
+    let db = test_db().await;
+    let entries = vec![
+        entry(600, "A", true, true, Some("1.1.1.1")),
+        entry(610, "A", false, true, Some("1.1.1.1")),
+    ];
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let outcomes = db.outcome_breakdown_since(0).await.unwrap();
+    assert_eq!(outcomes.iter().map(|(_, n)| n).sum::<i64>(), 2);
+    let by_name: std::collections::HashMap<String, i64> = outcomes.into_iter().collect();
+    assert_eq!(by_name.get("Blocked"), Some(&1));
+    assert_eq!(by_name.get("Cached"), Some(&1));
+}
+
+#[tokio::test]
+async fn domain_stats_reports_the_top_list_and_the_distinct_count_together() {
+    let db = test_db().await;
+    let mut entries = Vec::new();
+    for (i, domain) in ["a.test", "b.test", "c.test"].iter().enumerate() {
+        for n in 0..=i {
+            let mut e = entry(600 + n as i64, "A", false, false, Some("1.1.1.1"));
+            e.domain = (*domain).to_string();
+            entries.push(e);
+        }
+    }
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let stats = db.domain_stats_since(0, 2).await.unwrap();
+    assert_eq!(
+        stats.unique, 3,
+        "counts every distinct domain, not just the top ones"
+    );
+    assert_eq!(stats.top.len(), 2, "the limit applies to the list only");
+    assert_eq!(stats.top[0].domain, "c.test");
+    assert_eq!(stats.top[0].count, 3);
+
+    // The delegating callers must see exactly what they saw as separate queries.
+    assert_eq!(db.unique_domains_since(0).await.unwrap(), 3);
+    assert_eq!(db.top_domains_since(0, 2).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn domain_stats_on_an_empty_window_reports_nothing() {
+    let db = test_db().await;
+    let stats = db.domain_stats_since(0, 5).await.unwrap();
+    assert_eq!(stats.unique, 0);
+    assert!(stats.top.is_empty());
+}
+
+fn sorted(mut rows: Vec<(String, i64)>) -> Vec<(String, i64)> {
+    rows.sort();
+    rows
+}
