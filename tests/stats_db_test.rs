@@ -505,7 +505,7 @@ async fn both_timeline_types_report_bucket_starts_in_the_same_unit() {
 }
 
 #[tokio::test]
-async fn range_metrics_agrees_with_the_single_purpose_queries() {
+async fn window_metrics_agrees_with_the_single_purpose_queries() {
     let db = test_db().await;
     let entries = vec![
         entry(600, "A", false, false, Some("1.1.1.1")),
@@ -517,12 +517,8 @@ async fn range_metrics_agrees_with_the_single_purpose_queries() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let combined = db.range_metrics_since(0, 60, 0).await.unwrap();
+    let combined = db.window_metrics_since(0).await.unwrap();
 
-    assert_eq!(
-        combined.timeline,
-        db.timeline_multi_since(0, 60, 0).await.unwrap()
-    );
     assert_eq!(combined.latency, db.latency_summary_since(0).await.unwrap());
     assert_eq!(
         sorted(combined.query_types),

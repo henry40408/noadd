@@ -975,3 +975,58 @@ async fn test_filter_list_url_fetches_one_row_by_id() {
         "an unknown id must not fall through to another row"
     );
 }
+
+/// `total_log_count` is a counter now rather than a `COUNT(*)`, so every path
+/// that changes how many rows `query_logs` holds has to move it. One that does
+/// not leaves the Database Health card reporting a total the table stopped
+/// holding, and nothing else would notice.
+#[tokio::test]
+async fn the_log_count_follows_every_write_that_changes_it() {
+    fn log(timestamp: i64) -> QueryLogEntry {
+        QueryLogEntry {
+            timestamp,
+            domain: "example.com".to_string(),
+            query_type: "A".to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: false,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+            authenticated_data: false,
+        }
+    }
+
+    // The counter and a real count of the same rows, which must never differ.
+    async fn assert_holds(db: &Database, expected: i64) {
+        assert_eq!(db.total_log_count().await.unwrap(), expected);
+        assert_eq!(
+            db.count_logs(None, None, None, None).await.unwrap(),
+            expected
+        );
+    }
+
+    let db = test_db().await;
+    assert_holds(&db, 0).await;
+
+    db.insert_query_logs(&[log(1_000_000), log(1_500_000), log(3_000_000)])
+        .await
+        .unwrap();
+    assert_holds(&db, 3).await;
+
+    db.insert_query_logs(&[log(4_000_000)]).await.unwrap();
+    assert_holds(&db, 4).await;
+
+    // Seconds in, milliseconds stored: this drops the two before 2 000 s.
+    let pruned = db.prune_logs_before(2_000).await.unwrap();
+    assert_eq!(pruned, 2);
+    assert_holds(&db, 2).await;
+
+    // A prune that matches nothing must not move it either.
+    assert_eq!(db.prune_logs_before(2_000).await.unwrap(), 0);
+    assert_holds(&db, 2).await;
+
+    db.delete_all_logs().await.unwrap();
+    assert_holds(&db, 0).await;
+}

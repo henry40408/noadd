@@ -301,13 +301,12 @@ pub async fn compute_breakdowns(
 ) -> Result<Breakdowns, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    let (query_types, outcomes) = tokio::try_join!(
-        db.query_type_breakdown_since(since),
-        db.outcome_breakdown_since(since),
-    )?;
+    // Both breakdowns fold out of one statement; asking for them separately is
+    // two scans of the index that answers either.
+    let metrics = db.window_metrics_since(since).await?;
     Ok(Breakdowns {
-        query_types,
-        outcomes,
+        query_types: metrics.query_types,
+        outcomes: metrics.outcomes,
     })
 }
 
@@ -337,15 +336,15 @@ pub async fn compute_highlights(
 /// Everything the Statistics page reads out of `query_logs` for its window, in
 /// the fewest scans the indexes allow.
 ///
-/// The page used to ask for the four readings separately — a query-type
-/// breakdown, an outcome breakdown, a latency summary, a unique-domain count —
-/// alongside the top-domain list, and every one of them re-scanned an index
-/// another had just walked. Two of them share
-/// [`crate::db::Database::range_metrics_since`] and two share
-/// [`crate::db::Database::domain_stats_since`], which is three index scans
+/// The page used to ask for the five readings separately — a query-type
+/// breakdown, an outcome breakdown, a latency summary, a unique-domain count,
+/// a top-domain list — and every one of them re-scanned an index another had
+/// just walked. Three of them share
+/// [`crate::db::Database::window_metrics_since`] and two share
+/// [`crate::db::Database::domain_stats_since`], which is two index scans
 /// instead of six.
 pub struct RangeStats {
-    pub metrics: crate::db::RangeMetrics,
+    pub metrics: crate::db::WindowMetrics,
     pub domains: crate::db::DomainStats,
 }
 
@@ -355,13 +354,10 @@ pub async fn compute_range_stats(
     range: StatsRange,
     top_n: i64,
 ) -> Result<RangeStats, DbError> {
-    let (window_secs, bucket_secs) = range.window();
+    let (window_secs, _) = range.window();
     let since = now - window_secs;
-    // The page renders no timeline — the chart is the client's — so the bucket
-    // width only bounds how many rows the outcome fold reads. Passing the
-    // range's own keeps it to one statement shared with the API endpoint.
     let (metrics, domains) = tokio::try_join!(
-        db.range_metrics_since(since, bucket_secs, 0),
+        db.window_metrics_since(since),
         db.domain_stats_since(since, top_n),
     )?;
     Ok(RangeStats { metrics, domains })
