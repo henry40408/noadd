@@ -230,6 +230,12 @@ pub struct TimelineMultiPoint {
     pub cached: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DomainStats {
+    pub unique: i64,
+    pub top: Vec<TopDomain>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeatmapCell {
     pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
@@ -1907,25 +1913,43 @@ impl Database {
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopDomain>, DbError> {
+        Ok(self.domain_stats_since(since, limit).await?.top)
+    }
+
+    pub async fn domain_stats_since(&self, since: i64, limit: i64) -> Result<DomainStats, DbError> {
         let since_ms = since * 1000;
-        let rows = self
+        let stats = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT domain, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY domain ORDER BY cnt DESC LIMIT ?2",
+                    "WITH d AS ( \
+                        SELECT domain, COUNT(*) AS cnt \
+                        FROM query_logs \
+                        WHERE timestamp >= ?1 \
+                        GROUP BY domain \
+                     ) \
+                     SELECT (SELECT COUNT(*) FROM d), domain, cnt \
+                     FROM d ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
                     .query_map(params![since_ms, limit], |row| {
-                        Ok(TopDomain {
-                            domain: row.get(0)?,
-                            count: row.get(1)?,
-                        })
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            TopDomain {
+                                domain: row.get(1)?,
+                                count: row.get(2)?,
+                            },
+                        ))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+                let unique = rows.first().map_or(0, |(n, _)| *n);
+                Ok(DomainStats {
+                    unique,
+                    top: rows.into_iter().map(|(_, d)| d).collect(),
+                })
             })
             .await?;
-        Ok(rows)
+        Ok(stats)
     }
 
     pub async fn top_clients_since(
@@ -2135,19 +2159,7 @@ impl Database {
     }
 
     pub async fn unique_domains_since(&self, since: i64) -> Result<i64, DbError> {
-        let since_ms = since * 1000;
-        let count = self
-            .reader()
-            .call(move |conn| {
-                let n: i64 = conn.query_row(
-                    "SELECT COUNT(DISTINCT domain) FROM query_logs WHERE timestamp >= ?1",
-                    params![since_ms],
-                    |row| row.get(0),
-                )?;
-                Ok(n)
-            })
-            .await?;
-        Ok(count)
+        Ok(self.domain_stats_since(since, 1).await?.unique)
     }
 
     pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
