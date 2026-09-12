@@ -418,7 +418,8 @@ impl Database {
                         upstream TEXT,
                         doh_token TEXT,
                         result TEXT,
-                        authenticated_data INTEGER NOT NULL DEFAULT 0
+                        authenticated_data INTEGER NOT NULL DEFAULT 0,
+                        has_result INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
@@ -642,7 +643,22 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 11;
+        if version < 12 {
+            add_column_if_missing(
+                conn,
+                "query_logs",
+                "has_result",
+                "INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL",
+            )?;
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
+                 CREATE INDEX idx_query_logs_ts_metrics \
+                 ON query_logs(timestamp, blocked, cached, response_ms, query_type, has_result);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 12;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -2297,7 +2313,7 @@ fn add_column_if_missing(
 ) -> Result<(), rusqlite::Error> {
     let exists: bool = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            &format!("SELECT COUNT(*) FROM pragma_table_xinfo('{table}') WHERE name = ?1"),
             params![column],
             |row| row.get::<_, i64>(0),
         )
