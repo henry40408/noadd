@@ -677,6 +677,7 @@ class NextStepBanner extends LiveElement {
           method: 'POST',
           credentials: 'same-origin',
           redirect: 'manual',
+          keepalive: true,
           body: new URLSearchParams(new FormData(form)),
         }).catch(() => {});
       });
