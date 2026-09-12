@@ -302,6 +302,11 @@ pub struct LatencySummary {
     pub p99_ms: i64,
 }
 
+/// `settings` key holding the `query_logs` row count. Not an operator-facing
+/// setting — nothing enumerates this table, so it is simply the one row-shaped
+/// place a counter can live without a table of its own.
+const QUERY_LOG_COUNT_KEY: &str = "query_log_count";
+
 /// Default rusqlite cache is 16 statements; the read connection alone has
 /// ~20 distinct hot SQL strings (settings, stats, filter, token lookup),
 /// so anything below ~32 starts evicting on every admin poll.
@@ -795,7 +800,23 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 12;
+        if version < 13 {
+            // `SELECT COUNT(*)` has no shortcut in `SQLite`: it walks the
+            // smallest index end to end, 1 386 pages on a 370 k-row database,
+            // and the Database Health card asks for it on every Statistics
+            // page load. The count lives in `settings` from here, seeded once
+            // and then moved by the three statements that change it.
+            //
+            // `WHERE true` is what lets an upsert follow a SELECT — without it
+            // the parser reads `ON CONFLICT` as part of the SELECT.
+            conn.execute_batch(
+                "INSERT INTO settings (key, value) \
+                 SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 13;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -875,6 +896,7 @@ impl Database {
                         ])?;
                     }
                 }
+                bump_log_count(&tx, entries.len() as i64)?;
                 tx.commit()?;
                 Ok(())
             })
@@ -995,7 +1017,10 @@ impl Database {
     pub async fn delete_all_logs(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
-                conn.execute("DELETE FROM query_logs", [])?;
+                let tx = conn.transaction()?;
+                tx.execute("DELETE FROM query_logs", [])?;
+                set_log_count(&tx, 0)?;
+                tx.commit()?;
                 Ok(())
             })
             .await?;
@@ -1008,10 +1033,13 @@ impl Database {
         let count = self
             .conn
             .call(move |conn| {
-                let deleted = conn.execute(
+                let tx = conn.transaction()?;
+                let deleted = tx.execute(
                     "DELETE FROM query_logs WHERE timestamp < ?1",
                     params![timestamp_ms],
                 )?;
+                bump_log_count(&tx, -(deleted as i64))?;
+                tx.commit()?;
                 Ok(deleted as u64)
             })
             .await?;
@@ -2382,10 +2410,29 @@ impl Database {
         Ok(stats)
     }
 
+    /// How many rows `query_logs` holds, read from the counter the write paths
+    /// maintain rather than counted.
+    ///
+    /// `SELECT COUNT(*)` has no shortcut in `SQLite` — it walks the smallest
+    /// index end to end, 1 386 pages on a 370 k-row database — and the Database
+    /// Health card asks for it on every Statistics page load, for a number it
+    /// prints and two of its estimates divide by. The counter is one row of
+    /// `settings`, written inside the same transaction as every insert, prune
+    /// and clear, so it cannot report a total the table does not hold.
+    ///
+    /// A database with no counter row counts, which is what the migration
+    /// seeded it from.
     pub async fn total_log_count(&self) -> Result<i64, DbError> {
         let result = self
             .reader()
             .call(|conn| {
+                let stored: Option<String> = conn
+                    .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+                    .query_row(params![QUERY_LOG_COUNT_KEY], |row| row.get(0))
+                    .optional()?;
+                if let Some(count) = stored.and_then(|v| v.parse::<i64>().ok()) {
+                    return Ok(count);
+                }
                 let count: i64 =
                     conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))?;
                 Ok(count)
@@ -2558,6 +2605,23 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
         p95_ms: pick(rank_for(0.95)),
         p99_ms: pick(rank_for(0.99)),
     }
+}
+
+/// Move the maintained `query_logs` row count by `delta`. Takes the connection
+/// the write is on so it lands in that write's transaction: a counter updated
+/// beside its table rather than inside it is a counter that can disagree.
+fn bump_log_count(conn: &rusqlite::Connection, delta: i64) -> rusqlite::Result<()> {
+    conn.prepare_cached("UPDATE settings SET value = CAST(value AS INTEGER) + ?1 WHERE key = ?2")?
+        .execute(params![delta, QUERY_LOG_COUNT_KEY])?;
+    Ok(())
+}
+
+/// Set the maintained `query_logs` row count outright, for the write that
+/// leaves a known number of rows behind rather than a known change.
+fn set_log_count(conn: &rusqlite::Connection, count: i64) -> rusqlite::Result<()> {
+    conn.prepare_cached("UPDATE settings SET value = ?1 WHERE key = ?2")?
+        .execute(params![count, QUERY_LOG_COUNT_KEY])?;
+    Ok(())
 }
 
 /// Add a column to `table` if it doesn't already exist.
@@ -3121,6 +3185,61 @@ mod tests {
             // carry the column and still be the wrong one for `INDEXED BY`.
             assert!(db.outcome_breakdown_since(0).await.is_ok());
         }
+    }
+
+    /// The counter has to arrive holding what the table already holds. A
+    /// database that upgrades with a million rows in it and a counter seeded at
+    /// zero would report zero for as long as it kept those rows, and the
+    /// fallback in `total_log_count` would never fire to correct it — the row
+    /// exists, it is just wrong.
+    #[tokio::test]
+    async fn migration_v13_seeds_the_log_count_from_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v12.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let entries: Vec<QueryLogEntry> = (0..3)
+            .map(|i| QueryLogEntry {
+                timestamp: 1_000_000 + i,
+                domain: "example.com".to_string(),
+                query_type: "A".to_string(),
+                client_ip: "10.0.0.1".to_string(),
+                blocked: false,
+                cached: false,
+                upstream: None,
+                doh_token: None,
+                result: None,
+                response_ms: 1,
+                authenticated_data: false,
+            })
+            .collect();
+        {
+            let db = Database::open(&path_str).await.unwrap();
+            db.insert_query_logs(&entries).await.unwrap();
+            db.close().await;
+        }
+
+        // Wind it back to version 12: the rows stay, the counter does not.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "DELETE FROM settings WHERE key = 'query_log_count';
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        }
+
+        let migrated = Database::open(&path_str).await.unwrap();
+        assert_eq!(
+            migrated
+                .get_setting(QUERY_LOG_COUNT_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("3"),
+            "the migration did not seed the counter"
+        );
+        assert_eq!(migrated.total_log_count().await.unwrap(), 3);
     }
 
     #[tokio::test]

@@ -184,3 +184,25 @@ async fn the_heatmap_reads_the_narrowest_index_that_covers_it() {
          it is no longer on idx_query_logs_timestamp"
     );
 }
+
+/// The Database Health card's row count is read from one row of `settings`,
+/// not counted. `SELECT COUNT(*)` has no shortcut in SQLite: it walks the
+/// smallest index end to end, for a number the page prints and two of its
+/// estimates divide by.
+#[tokio::test]
+async fn the_total_log_count_is_read_rather_than_counted() {
+    let db = seeded_db().await;
+
+    let read = page_misses(&db, || db.total_log_count()).await;
+    let counted = page_misses(&db, || db.count_logs(None, None, None, None)).await;
+
+    assert!(
+        counted > 0,
+        "counting read no pages at all — the measurement is not working"
+    );
+    assert!(
+        read * 4 < counted,
+        "the total read {read} pages and counting the same rows read {counted} — \
+         is total_log_count back on COUNT(*)?"
+    );
+}
