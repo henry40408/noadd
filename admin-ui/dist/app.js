@@ -673,10 +673,17 @@ class NextStepBanner extends LiveElement {
         // route takes a form — with the redirect left unfollowed, since the
         // page it would fetch is the one already on screen. Best-effort: a
         // failure only means the notice is offered again on the next load.
+        //
+        // `keepalive` because the notice is gone from the DOM before the post
+        // is answered, so the operator is free to click a nav link in the same
+        // breath — and a navigation cancels an ordinary in-flight fetch, which
+        // loses the dismissal and brings the notice back on the page they land
+        // on. This is the flag that lets the request outlive the document.
         fetch(form.action, {
           method: 'POST',
           credentials: 'same-origin',
           redirect: 'manual',
+          keepalive: true,
           body: new URLSearchParams(new FormData(form)),
         }).catch(() => {});
       });
