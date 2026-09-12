@@ -137,3 +137,50 @@ async fn the_shared_scans_answer_what_the_separate_ones_did() {
     assert_eq!(combined.domains.unique, highlights.unique_domains);
     assert_eq!(combined.domains.top, top);
 }
+
+/// The outcome breakdown, the query-type breakdown and the latency percentiles
+/// are three foldings of one statement. Asked together they must cost one scan
+/// of `idx_query_logs_ts_metrics`, not one each — which is what a page whose
+/// numbers were re-split across statements would pay.
+#[tokio::test]
+async fn the_window_readings_are_one_scan_between_them() {
+    let db = seeded_db().await;
+
+    let together = page_misses(&db, || db.window_metrics_since(0)).await;
+    let separate = page_misses(&db, || db.outcome_breakdown_since(0)).await
+        + page_misses(&db, || db.query_type_breakdown_since(0)).await
+        + page_misses(&db, || db.latency_summary_since(0)).await;
+
+    assert!(
+        together > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        together * 2 <= separate,
+        "the three window readings cost {together} pages together and {separate} \
+         apart; one scan answering all three should be about a third of that — \
+         has the page gone back to a statement per reading?"
+    );
+}
+
+/// The heatmap reads `timestamp` and nothing else, so it belongs on the
+/// smallest index that carries it. `idx_query_logs_ts_metrics` also covers it
+/// and the planner will take it unaided, paying for four columns the query
+/// never looks at.
+#[tokio::test]
+async fn the_heatmap_reads_the_narrowest_index_that_covers_it() {
+    let db = seeded_db().await;
+
+    let heatmap = page_misses(&db, || db.hourly_heatmap_since(0, 0)).await;
+    let metrics_scan = page_misses(&db, || db.timeline_multi_since(0, 3600, 0)).await;
+
+    assert!(
+        heatmap > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        heatmap < metrics_scan,
+        "the heatmap read {heatmap} pages and a metrics scan {metrics_scan} — \
+         it is no longer on idx_query_logs_timestamp"
+    );
+}
