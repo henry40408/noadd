@@ -268,6 +268,23 @@ The HTTP listener must not be reachable except through the proxy: a client that
 can reach noadd (or the proxy) directly, bypassing Cloudflare, can send these
 headers itself.
 
+## The `Host` header behind a reverse proxy
+
+Have the proxy forward `Host` exactly as the browser sent it, port included.
+Current browsers are unaffected either way — they send `Sec-Fetch-Site`, which
+the CSRF guard decides on alone — but for one that does not (Safari before
+16.4) the guard checks that `Origin` matches `Host`, host and port both. A
+proxy that rewrites `Host` gets those users' sign-ins and saves refused with
+`403`, logged as `csrf.rejected` with `reason` `origin_mismatch`. On nginx, whose
+default is the upstream's own name and whose `$host` drops the port, that
+means:
+
+```nginx
+proxy_set_header Host $http_host;
+```
+
+Caddy and Traefik forward `Host` unchanged by default.
+
 ## Publishing DoH without publishing the admin UI
 
 One HTTP listener (`--http-addr`) serves both DoH and the admin UI. There is

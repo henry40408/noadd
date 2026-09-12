@@ -1,11 +1,12 @@
 //! Integration coverage for the first-line CSRF origin guard layered on the
 //! admin router (`src/admin/csrf.rs`). The guard runs before any handler or
 //! `AuthedUser` extraction, so most of these assert on status alone — a
-//! provably cross-site unsafe-method request is short-circuited with 403,
+//! provably cross-origin unsafe-method request is short-circuited with 403,
 //! while same-origin and header-less (CLI/bearer) requests reach their
-//! handler.
+//! handler. The classification is `tower_http::csrf`'s and tested upstream;
+//! what is pinned here is the behaviour this appliance relies on.
 //!
-//! The last two assert on the `csrf.rejected` audit event instead: a bodyless
+//! The ones that capture logs assert on the `csrf.rejected` audit event: a bodyless
 //! 403 that leaves no trace is indistinguishable from every other 403 this
 //! appliance can return, which is the whole reason the event exists.
 
@@ -329,33 +330,143 @@ async fn a_same_site_post_from_a_sibling_subdomain_is_refused() {
     );
 }
 
-/// The other half: `same-site` whose `Origin` *does* agree with `Host` is the
-/// appliance's own page and must still work. Refusing `same-site` outright
-/// would be simpler and would break a legitimate caller.
+/// `same-site` is refused even when the `Origin` agrees with `Host`.
+///
+/// A browser posting from the appliance's own origin says `same-origin`, so a
+/// `same-site` request whose `Origin` looks like this host was sent from
+/// somewhere the browser knows is a *different* origin. Behind a proxy that
+/// forwards `Host` without its port, that is another service on the same host
+/// posting to this one — the attack itself, which an `Origin`/`Host` comparison
+/// can no longer see.
 #[tokio::test]
-async fn a_same_site_post_from_the_matching_origin_still_passes() {
-    let app = build_app().await;
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/auth/logout")
-        .header("sec-fetch-site", "same-site")
-        .header("origin", "https://app.test")
-        .header("host", "app.test")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_ne!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "the guard must not refuse the appliance's own origin"
-    );
+async fn a_same_site_post_is_refused_even_when_its_origin_matches_host() {
+    let resp = post_with(&[
+        ("sec-fetch-site", "same-site"),
+        ("origin", "https://app.test"),
+        ("host", "app.test"),
+    ])
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// The anti-spam lock. `csrf_origin_guard` sits on every unsafe-method admin
-/// request, so anything it logs on the *pass-through* path is written once
-/// per state-changing call for the life of the deployment. A request it
-/// allows must leave it silent.
+/// POST `/api/auth/logout` through a fresh router carrying `headers`.
+async fn post_with(headers: &[(&str, &str)]) -> axum::response::Response {
+    let mut req = Request::builder().method("POST").uri("/api/auth/logout");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    build_app()
+        .await
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// With no `Sec-Fetch-Site` — a browser too old to send it — the guard falls
+/// back to comparing the `Origin`'s full authority, port included, with the
+/// request's own.
+#[tokio::test]
+async fn the_origin_fallback_rejects_an_authority_that_differs_from_host() {
+    for (origin, host, why) in [
+        (
+            "http://app.test:9000",
+            "app.test:8080",
+            "another port on the same host is another origin, and cookies \
+             ignore ports, so it would arrive carrying the session",
+        ),
+        (
+            "https://app.test:8443",
+            "app.test",
+            "a proxy that forwards Host without the port the browser used \
+             cannot be told apart from the case above",
+        ),
+        (
+            "http://[::1]:9000",
+            "[::1]:8080",
+            "an IPv6 literal is compared the same way",
+        ),
+        (
+            "https://other.app.test",
+            "app.test",
+            "a sibling subdomain is another origin",
+        ),
+    ] {
+        let resp = post_with(&[("origin", origin), ("host", host)]).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Origin {origin} / Host {host} must be rejected: {why}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_origin_fallback_passes_an_authority_that_matches_host() {
+    for (origin, host) in [
+        ("http://app.test:8080", "app.test:8080"),
+        ("http://[::1]:8080", "[::1]:8080"),
+        // A TLS-terminating proxy: the browser's `https://` Origin meets a
+        // scheme-less Host, and the comparison ignores scheme.
+        ("https://app.test", "app.test"),
+    ] {
+        let resp = post_with(&[("origin", origin), ("host", host)]).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Origin {origin} / Host {host} must reach the handler"
+        );
+    }
+}
+
+/// Every `reason` the event can carry, each produced by the request shape it
+/// names. The layer itself only distinguishes "the browser said so" from "the
+/// `Origin` fallback failed"; the finer split is what an operator acts on.
+#[tokio::test]
+async fn each_rejection_is_logged_under_the_reason_that_decided_it() {
+    for (headers, reason) in [
+        (&[("sec-fetch-site", "cross-site")][..], "cross_site"),
+        (
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://evil.app.test"),
+                ("host", "app.test"),
+            ][..],
+            "same_site_cross_origin",
+        ),
+        // A browser that said `same-site` is a browser, so a missing Origin
+        // cannot be read as the non-browser client the header-less case is.
+        (
+            &[("sec-fetch-site", "same-site")][..],
+            "same_site_cross_origin",
+        ),
+        (
+            &[("origin", "null"), ("host", "app.test")][..],
+            "opaque_origin",
+        ),
+        (
+            &[("origin", "https://evil.test"), ("host", "app.test")][..],
+            "origin_mismatch",
+        ),
+    ] {
+        let logs = CapturedLogs::new();
+        let guard = logs.install();
+        let resp = post_with(headers).await;
+        drop(guard);
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{headers:?}");
+        let expected = format!(r#""reason":"{reason}""#);
+        assert!(
+            logs.text().contains(&expected),
+            "{headers:?} must be logged as {reason}, got: {}",
+            logs.text()
+        );
+    }
+}
+
+/// The anti-spam lock. `log_rejection` sits on every admin request, so
+/// anything it logs on the *pass-through* path is written once per call for
+/// the life of the deployment. A request the guard allows must leave it
+/// silent.
 #[tokio::test]
 async fn a_request_the_guard_allows_logs_nothing() {
     let app = build_app().await;
