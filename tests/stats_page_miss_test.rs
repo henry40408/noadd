@@ -29,7 +29,9 @@ async fn seeded_db() -> Database {
             client_ip: format!("10.0.0.{}", i % 20),
             blocked: i % 7 == 0,
             cached: i % 5 == 0,
-            upstream: None,
+            // About half forwarded, as on a real resolver: blocked and cached
+            // answers never reach an upstream.
+            upstream: (i % 2 == 0).then(|| format!("tls://1.1.1.{}:853", i % 4)),
             doh_token: None,
             result: if i % 11 == 0 {
                 None
@@ -191,6 +193,52 @@ async fn the_page_and_its_charts_are_one_metrics_scan() {
         scan * 2 < replaced,
         "the page's scan read {scan} pages and the statements it replaced {replaced} — \
          are the charts back on a scan of their own?"
+    );
+}
+
+/// The dashboard's summary asks every tick for totals, blocks, cache hits and
+/// mean latency over three windows. Every one of those is a column of
+/// `idx_query_logs_ts_metrics`, so together they cost one scan of it — not the
+/// two that asking the blocked counts and the cache figures separately paid.
+#[tokio::test]
+async fn the_dashboard_summary_is_one_metrics_scan() {
+    let db = seeded_db().await;
+    let now = ROWS; // seconds; the seed runs from 0 to ROWS
+
+    let summary = page_misses(&db, || stats::compute_summary(&db, now)).await;
+    let one_scan = page_misses(&db, || db.window_metrics_since(0)).await;
+
+    assert!(
+        one_scan > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        summary <= one_scan + one_scan / 10,
+        "the summary read {summary} pages where one scan of the metrics index \
+         reads {one_scan} — has it gone back to a statement per figure?"
+    );
+}
+
+/// The top upstreams read `upstream` and `response_ms`, which no index carried,
+/// so every forwarded query in the window was a rowid lookup into the table —
+/// on every dashboard tick. A partial index over the forwarded rows answers it
+/// alone.
+#[tokio::test]
+async fn the_top_upstreams_never_read_the_log_table() {
+    let db = seeded_db().await;
+    let storage = db.db_storage_stats().await.unwrap();
+    let db_pages = storage.main_bytes / 4096;
+
+    let misses = page_misses(&db, || db.top_upstreams_since(0, 10)).await;
+
+    assert!(
+        misses > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        misses * 4 < db_pages,
+        "top upstreams read {misses} of the database's {db_pages} pages; that \
+         is the table, not an index — is idx_query_logs_ts_upstream missing?"
     );
 }
 

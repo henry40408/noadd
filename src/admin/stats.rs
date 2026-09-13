@@ -68,15 +68,8 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     let since_1m = now - 60;
 
     let queries_1m = db.count_queries_since(since_1m).await?;
-    let ((total_today, blocked_today), (total_7d, blocked_7d), (total_30d, blocked_30d)) = db
-        .count_queries_multi_since(since_today, since_7d, since_30d)
-        .await?;
-    let (
-        (cache_hits_today, allowed_total_today, avg_response_ms_today),
-        (cache_hits_7d, allowed_total_7d, avg_response_ms_7d),
-        (cache_hits_30d, allowed_total_30d, avg_response_ms_30d),
-    ) = db
-        .cache_stats_multi_since(since_today, since_7d, since_30d)
+    let [today, d7, d30] = db
+        .summary_multi_since(since_today, since_7d, since_30d)
         .await?;
 
     let ratio = |blocked: i64, total: i64| -> f64 {
@@ -95,21 +88,21 @@ pub async fn compute_summary(db: &Database, now: i64) -> Result<Summary, DbError
     };
 
     Ok(Summary {
-        total_today,
-        blocked_today,
-        total_7d,
-        blocked_7d,
-        total_30d,
-        blocked_30d,
-        block_ratio_today: ratio(blocked_today, total_today),
-        block_ratio_7d: ratio(blocked_7d, total_7d),
-        block_ratio_30d: ratio(blocked_30d, total_30d),
-        cache_hit_rate_today: hit_rate(cache_hits_today, allowed_total_today),
-        cache_hit_rate_7d: hit_rate(cache_hits_7d, allowed_total_7d),
-        cache_hit_rate_30d: hit_rate(cache_hits_30d, allowed_total_30d),
-        avg_response_ms_today,
-        avg_response_ms_7d,
-        avg_response_ms_30d,
+        total_today: today.total,
+        blocked_today: today.blocked,
+        total_7d: d7.total,
+        blocked_7d: d7.blocked,
+        total_30d: d30.total,
+        blocked_30d: d30.blocked,
+        block_ratio_today: ratio(today.blocked, today.total),
+        block_ratio_7d: ratio(d7.blocked, d7.total),
+        block_ratio_30d: ratio(d30.blocked, d30.total),
+        cache_hit_rate_today: hit_rate(today.cache_hits, today.allowed),
+        cache_hit_rate_7d: hit_rate(d7.cache_hits, d7.allowed),
+        cache_hit_rate_30d: hit_rate(d30.cache_hits, d30.allowed),
+        avg_response_ms_today: today.avg_response_ms,
+        avg_response_ms_7d: d7.avg_response_ms,
+        avg_response_ms_30d: d30.avg_response_ms,
         queries_1m,
     })
 }

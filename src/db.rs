@@ -269,6 +269,19 @@ pub struct WindowMetrics {
     pub latency: LatencySummary,
 }
 
+/// One window of the dashboard summary — see [`Database::summary_multi_since`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowSummary {
+    pub total: i64,
+    pub blocked: i64,
+    /// Queries that were not blocked; the denominator of the cache hit rate.
+    pub allowed: i64,
+    /// Cache hits among the allowed queries.
+    pub cache_hits: i64,
+    /// Mean response time of the allowed queries, 0 when there were none.
+    pub avg_response_ms: f64,
+}
+
 /// Width of one [`QuarterSeries`] slot, in seconds.
 pub const QUARTER_SECS: i64 = 900;
 
@@ -590,6 +603,7 @@ impl Database {
                     -- batch runs first. Migration 12 rebuilds the index with it
                     -- for fresh and legacy databases alike.
                     CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics ON query_logs(timestamp, blocked, cached, response_ms, query_type);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -851,7 +865,30 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 13;
+        if version < 14 {
+            // The dashboard's top upstreams read `upstream` and `response_ms`,
+            // which no index carried, so every tick paid a rowid lookup into the
+            // table per forwarded query in the last 24 hours: 1 608 pages on a
+            // 370 k-row database, against 211 read out of this index.
+            //
+            // Partial, because blocked and cached answers never reach an
+            // upstream — 56% of that table's rows are NULL here, and the query
+            // excludes them anyway. Timestamp first, because the logger appends
+            // at the newest end: an upstream-first index spreads each batch
+            // across one insertion point per upstream, and measured 65 pages
+            // written per 500-row batch against 56 for this one and 53 with no
+            // index at all.
+            //
+            // The schema batch above already creates it on every open; this
+            // step exists for the `ANALYZE`, like every other index migration.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream \
+                 ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 14;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -2011,90 +2048,61 @@ impl Database {
         Ok(result)
     }
 
-    /// Returns ((total, blocked), (total, blocked), (total, blocked)) for today / 7d / 30d in one scan.
-    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest window as `since_30d`.
-    pub async fn count_queries_multi_since(
+    /// The dashboard summary's figures for three nested windows, in one scan of
+    /// `idx_query_logs_ts_metrics`.
+    ///
+    /// Totals and blocks came from one statement and cache hits and latency
+    /// from another, each walking the same 30 days of the same index — on every
+    /// dashboard tick, 4 304 pages on a 370 k-row database where 2 152 answer
+    /// both. The allowed-only figures take their filter into the `CASE` rather
+    /// than the `WHERE`, so one pass serves both halves.
+    ///
+    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest
+    /// window as `since_30d`.
+    pub async fn summary_multi_since(
         &self,
         since_today: i64,
         since_7d: i64,
         since_30d: i64,
-    ) -> Result<((i64, i64), (i64, i64), (i64, i64)), DbError> {
+    ) -> Result<[WindowSummary; 3], DbError> {
         let today_ms = since_today * 1000;
         let d7_ms = since_7d * 1000;
         let d30_ms = since_30d * 1000;
         let result = self
             .reader()
             .call(move |conn| {
+                // `INDEXED BY` for the reason `metrics_by_bucket_since` gives.
                 let mut stmt = conn.prepare_cached(
                     "SELECT
                     COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked END), 0),
+                    COUNT(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN response_ms END), 0),
                     COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN blocked ELSE 0 END), 0),
-                    COUNT(CASE WHEN timestamp >= ?3 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN blocked ELSE 0 END), 0)
-                 FROM query_logs
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN blocked END), 0),
+                    COUNT(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN response_ms END), 0),
+                    COUNT(*),
+                    COALESCE(SUM(blocked), 0),
+                    COUNT(CASE WHEN blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN blocked = 0 THEN response_ms END), 0)
+                 FROM query_logs INDEXED BY idx_query_logs_ts_metrics
                  WHERE timestamp >= ?3",
                 )?;
                 let row = stmt.query_row(params![today_ms, d7_ms, d30_ms], |row| {
-                    Ok((
-                        (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?),
-                        (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?),
-                        (row.get::<_, i64>(4)?, row.get::<_, i64>(5)?),
-                    ))
-                })?;
-                Ok(row)
-            })
-            .await?;
-        Ok(result)
-    }
-
-    /// Returns ((`cache_hits`, `allowed_total`, `avg_response_ms`), ...) for today / 7d / 30d in one scan.
-    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest window as `since_30d`.
-    pub async fn cache_stats_multi_since(
-        &self,
-        since_today: i64,
-        since_7d: i64,
-        since_30d: i64,
-    ) -> Result<((i64, i64, f64), (i64, i64, f64), (i64, i64, f64)), DbError> {
-        let today_ms = since_today * 1000;
-        let d7_ms = since_7d * 1000;
-        let d30_ms = since_30d * 1000;
-        let result = self
-            .reader()
-            .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT
-                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN cached END), 0),
-                    COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
-                    COALESCE(AVG(CASE WHEN timestamp >= ?1 THEN response_ms END), 0),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN cached END), 0),
-                    COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
-                    COALESCE(AVG(CASE WHEN timestamp >= ?2 THEN response_ms END), 0),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN cached END), 0),
-                    COUNT(CASE WHEN timestamp >= ?3 THEN 1 END),
-                    COALESCE(AVG(CASE WHEN timestamp >= ?3 THEN response_ms END), 0)
-                 FROM query_logs
-                 WHERE timestamp >= ?3 AND blocked = 0",
-                )?;
-                let row = stmt.query_row(params![today_ms, d7_ms, d30_ms], |row| {
-                    Ok((
-                        (
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, f64>(2)?,
-                        ),
-                        (
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
-                            row.get::<_, f64>(5)?,
-                        ),
-                        (
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, i64>(7)?,
-                            row.get::<_, f64>(8)?,
-                        ),
-                    ))
+                    let window = |at: usize| -> rusqlite::Result<WindowSummary> {
+                        Ok(WindowSummary {
+                            total: row.get(at)?,
+                            blocked: row.get(at + 1)?,
+                            allowed: row.get(at + 2)?,
+                            cache_hits: row.get(at + 3)?,
+                            avg_response_ms: row.get(at + 4)?,
+                        })
+                    };
+                    Ok([window(0)?, window(5)?, window(10)?])
                 })?;
                 Ok(row)
             })
@@ -2187,8 +2195,15 @@ impl Database {
         let rows = self
             .reader()
             .call(move |conn| {
+                // `INDEXED BY` so a drift in the planner's statistics cannot send
+                // this back to `idx_query_logs_timestamp` and a lookup per row.
+                // The `upstream IS NOT NULL` term is what lets the partial index
+                // answer at all.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms FROM query_logs WHERE timestamp >= ?1 AND upstream IS NOT NULL GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
+                    "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_upstream \
+                     WHERE timestamp >= ?1 AND upstream IS NOT NULL \
+                     GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
                 )?;
                 let rows = stmt
                     .query_map(params![since_ms, limit], |row| {
@@ -3398,6 +3413,57 @@ mod tests {
             "the migration did not seed the counter"
         );
         assert_eq!(migrated.total_log_count().await.unwrap(), 3);
+    }
+
+    /// A database from before version 14 has to come out of `open` holding the
+    /// upstream index, because `top_upstreams_since` names it with `INDEXED BY`
+    /// and a statement naming a missing index does not prepare at all — the
+    /// dashboard would lose its upstream list rather than merely run slower.
+    #[tokio::test]
+    async fn migration_v14_adds_the_upstream_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v13.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let entries: Vec<QueryLogEntry> = (0..4)
+            .map(|i| QueryLogEntry {
+                timestamp: 1_000_000 + i,
+                domain: "example.com".to_string(),
+                query_type: "A".to_string(),
+                client_ip: "10.0.0.1".to_string(),
+                blocked: false,
+                cached: false,
+                upstream: (i != 0).then(|| "tls://1.1.1.1:853".to_string()),
+                doh_token: None,
+                result: None,
+                response_ms: 10 * i,
+                authenticated_data: false,
+            })
+            .collect();
+        {
+            let db = Database::open(&path_str).await.unwrap();
+            db.insert_query_logs(&entries).await.unwrap();
+            db.close().await;
+        }
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_query_logs_ts_upstream;
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+        }
+
+        let migrated = Database::open(&path_str).await.unwrap();
+        let indexes = query_log_index_names(&migrated).await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_query_logs_ts_upstream"),
+            "upstream index should exist after migrating: {indexes:?}"
+        );
+        let top = migrated.top_upstreams_since(0, 10).await.unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].count, 3, "the unforwarded row is not an upstream's");
+        assert!((top[0].avg_ms - 20.0).abs() < 1e-9);
     }
 
     #[tokio::test]

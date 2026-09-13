@@ -238,20 +238,23 @@ Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noa
 | `sessions` | Active admin sessions (token, user_id, ip, user agent, timestamps) |
 | `api_keys` | Programmatic API keys (BLAKE2b hash, owning user_id, `ON DELETE CASCADE`) |
 
-`query_logs` carries four indexes, all of them shaped by the statistics queries:
+`query_logs` carries five indexes, all of them shaped by the statistics queries:
 
 | Index | Serves |
 | --- | --- |
 | `timestamp` | the time-window filter every stats query starts with |
 | `(domain, timestamp)` | top domains, unique domains |
 | `(client_ip, doh_token, timestamp)` | top clients |
-| `(timestamp, blocked, cached, response_ms, query_type, has_result)` | timeline, query-type breakdown, latency histogram, outcome breakdown |
+| `(timestamp, blocked, cached, response_ms, query_type, has_result)` | timeline, query-type breakdown, latency histogram, outcome breakdown, the dashboard summary |
+| `(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL` | top upstreams |
 
 The first two composites put the grouped columns first and `timestamp` last, which is what makes them covering for a `GROUP BY … WHERE timestamp >= ?` shape — the aggregation reads the index alone instead of scanning the window and building a temp b-tree over it. Top clients went from 143 ms to 20 ms on a 447 k-row database that way.
 
 The last one inverts that order because its queries do not group by a column at all; they filter on `timestamp` and then read a few narrow values. Carrying those values in the index avoids a row lookup into a table whose rows average ~84 bytes of strings (`domain`, `client_ip`, `upstream`, `result`) that none of those queries want: timeline 78 → 60 ms, query-type 75 → 62 ms, latency 60 → 45 ms.
 
 `has_result` is a VIRTUAL generated column — `result IS NOT NULL AND result != ''` — which occupies no table space and exists so the outcome breakdown can classify a query without reading one. It is the last column of the metrics index, and the query that needs it carries an `INDEXED BY`: with `timestamp` alone also matching the range the planner picks that smaller index and pays a rowid lookup per row, which is the whole table. An index on the bare expression rather than a named column was tried first and the planner would not treat it as covering.
+
+The upstream index is partial because blocked and cached answers never reach an upstream, so more than half the rows have nothing to put in it (56% on a 370 k-row database), and its only query excludes them anyway. It is timestamp-first for the writer's sake rather than the reader's: both orders answer the dashboard's 24-hour top upstreams in about 200 pages against 1 608 through `timestamp` and a rowid lookup per row, but the logger appends at the newest end, and an upstream-first index spreads every batch across one insertion point per upstream — 65 pages written per 500-row batch against 56, where no index at all writes 53. It is 5.7 MiB on that database.
 
 Indexes are not free here. On that same 103 MiB database `dbstat` attributes 20 MiB to `(domain, timestamp)`, 18 MiB to `(client_ip, doh_token, timestamp)`, 9 MiB to the metrics index and 7 MiB to `timestamp` — the two composites added for statistics cost about a quarter of the file. Measuring an index by the file-size delta of `CREATE INDEX` understates it whenever the database is carrying a freelist, since the new pages come out of that first; `dbstat` reports the real figure.
 
@@ -273,7 +276,9 @@ The charts did still pay for scans of their own after that: the browser fetched 
 
 The Database Health card's row count is the one reading that is not a scan of anything. `SELECT COUNT(*)` has no shortcut in SQLite — it walks the smallest index end to end, 1 386 pages on that database, for a number the card prints and two of its estimates divide by — so the count lives in `settings` under `query_log_count`, seeded by the version-13 migration and moved by the three statements that change how many rows `query_logs` holds: the logger's insert batch, the hourly prune, and Clear All. Each moves it inside its own transaction, which is what makes the counter unable to disagree with the table; `total_log_count` falls back to counting when the row is missing, which is the state the migration seeds it out of. The card went from 1 398 pages to 14.
 
-`INDEXED BY` appears on every statement that reads this index, in both directions. The two that need `blocked`, `cached` or `has_result` name `idx_query_logs_ts_metrics` because the planner otherwise takes the smaller `idx_query_logs_timestamp` and pays a rowid lookup per row; the heatmap, which reads `timestamp` and nothing else, names `idx_query_logs_timestamp` for the opposite reason — left alone the planner took the metrics index and read 2 153 pages where 1 386 answer it.
+The dashboard pays for its readings every 10 seconds rather than once a visit, which makes a scan it repeats the most expensive kind. Its summary asked two statements for totals and blocks, then cache hits and latency, over the same 30 days of the metrics index; `summary_multi_since` moves the allowed-only filter from the `WHERE` into each `CASE` and answers both from one scan, 2 152 pages a tick instead of 4 304. With the upstream index, a tick on that database dropped from 8 304 page misses to 4 755.
+
+`INDEXED BY` appears on every statement that reads this index, in both directions. The ones that need `blocked`, `cached` or `has_result` name `idx_query_logs_ts_metrics` because the planner otherwise takes the smaller `idx_query_logs_timestamp` and pays a rowid lookup per row; top upstreams names its partial index so drifting statistics cannot send it back to that lookup; the heatmap, which reads `timestamp` and nothing else, names `idx_query_logs_timestamp` for the opposite reason — left alone the planner took the metrics index and read 2 153 pages where 1 386 answer it.
 
 Every index migration runs `ANALYZE`. A new index alone is not always enough — the planner keeps its old plan until `sqlite_stat1` is refreshed — and the hourly `PRAGMA optimize` lets those statistics drift a long way in the meantime.
 
