@@ -1103,6 +1103,12 @@ impl Database {
                     token.as_deref(),
                     query_type.as_deref(),
                 );
+                // Nothing narrowed the count, so it is the table's row count,
+                // which the write paths maintain. Counting it walks the smallest
+                // index end to end on every load of an unfiltered query log.
+                if param_values.is_empty() {
+                    return read_log_count(conn);
+                }
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
                     .iter()
@@ -2654,25 +2660,12 @@ impl Database {
     /// prints and two of its estimates divide by. The counter is one row of
     /// `settings`, written inside the same transaction as every insert, prune
     /// and clear, so it cannot report a total the table does not hold.
+    /// [`Self::count_logs`] reads the same counter when no filter is applied.
     ///
     /// A database with no counter row counts, which is what the migration
     /// seeded it from.
     pub async fn total_log_count(&self) -> Result<i64, DbError> {
-        let result = self
-            .reader()
-            .call(|conn| {
-                let stored: Option<String> = conn
-                    .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
-                    .query_row(params![QUERY_LOG_COUNT_KEY], |row| row.get(0))
-                    .optional()?;
-                if let Some(count) = stored.and_then(|v| v.parse::<i64>().ok()) {
-                    return Ok(count);
-                }
-                let count: i64 =
-                    conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))?;
-                Ok(count)
-            })
-            .await?;
+        let result = self.reader().call(|conn| read_log_count(conn)).await?;
         Ok(result)
     }
 
@@ -2883,6 +2876,19 @@ fn set_log_count(conn: &rusqlite::Connection, count: i64) -> rusqlite::Result<()
     conn.prepare_cached("UPDATE settings SET value = ?1 WHERE key = ?2")?
         .execute(params![count, QUERY_LOG_COUNT_KEY])?;
     Ok(())
+}
+
+/// The maintained `query_logs` row count, counted instead only when the
+/// counter row is missing or unreadable.
+fn read_log_count(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    let stored: Option<String> = conn
+        .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+        .query_row(params![QUERY_LOG_COUNT_KEY], |row| row.get(0))
+        .optional()?;
+    if let Some(count) = stored.and_then(|v| v.parse::<i64>().ok()) {
+        return Ok(count);
+    }
+    conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))
 }
 
 /// Add a column to `table` if it doesn't already exist.

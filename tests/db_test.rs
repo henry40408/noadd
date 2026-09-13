@@ -976,9 +976,10 @@ async fn test_filter_list_url_fetches_one_row_by_id() {
     );
 }
 
-/// `total_log_count` is a counter now rather than a `COUNT(*)`, so every path
-/// that changes how many rows `query_logs` holds has to move it. One that does
-/// not leaves the Database Health card reporting a total the table stopped
+/// `total_log_count` is a counter now rather than a `COUNT(*)`, and so is an
+/// unfiltered `count_logs`, so every path that changes how many rows
+/// `query_logs` holds has to move it. One that does not leaves the Database
+/// Health card and the query log's pager reporting a total the table stopped
 /// holding, and nothing else would notice.
 #[tokio::test]
 async fn the_log_count_follows_every_write_that_changes_it() {
@@ -998,11 +999,21 @@ async fn the_log_count_follows_every_write_that_changes_it() {
         }
     }
 
-    // The counter and a real count of the same rows, which must never differ.
+    // Every reader of the counter, against the rows themselves, which must
+    // never differ.
     async fn assert_holds(db: &Database, expected: i64) {
+        let rows = db
+            .query_logs(i64::MAX, 0, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len() as i64, expected);
         assert_eq!(db.total_log_count().await.unwrap(), expected);
         assert_eq!(
             db.count_logs(None, None, None, None).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            db.count_logs(Some("  "), None, None, None).await.unwrap(),
             expected
         );
     }

@@ -300,7 +300,8 @@ async fn the_total_log_count_is_read_rather_than_counted() {
     let db = seeded_db().await;
 
     let read = page_misses(&db, || db.total_log_count()).await;
-    let counted = page_misses(&db, || db.count_logs(None, None, None, None)).await;
+    // `*` matches every domain, so this is the same total arrived at by counting.
+    let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
 
     assert!(
         counted > 0,
@@ -311,4 +312,30 @@ async fn the_total_log_count_is_read_rather_than_counted() {
         "the total read {read} pages and counting the same rows read {counted} — \
          is total_log_count back on COUNT(*)?"
     );
+}
+
+/// The query log's pager asks for its total on every load, and with no filter
+/// applied that total is the table's row count — the number the write paths
+/// already maintain. Counting it walks the smallest index end to end, which on
+/// an unfiltered first page is nearly the whole cost of the load.
+#[tokio::test]
+async fn the_unfiltered_query_log_count_is_read_rather_than_counted() {
+    let db = seeded_db().await;
+
+    let unfiltered = page_misses(&db, || db.count_logs(None, None, None, None)).await;
+    // A blank search box is no filter at all, so it must take the same path.
+    let blank = page_misses(&db, || db.count_logs(Some("  "), None, None, None)).await;
+    let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+
+    assert!(
+        counted > 0,
+        "counting read no pages at all — the measurement is not working"
+    );
+    for (label, read) in [("no filter", unfiltered), ("blank search", blank)] {
+        assert!(
+            read * 4 < counted,
+            "{label} read {read} pages and counting the same rows read {counted} — \
+             is count_logs counting when nothing narrows it?"
+        );
+    }
 }
