@@ -29,6 +29,13 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a SIGTERM gets before the process is killed outright.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
+/// Brings the maintained `query_logs` row count back in line after a seed —
+/// see [`Server::seed`]. An upsert, because the counter row is only there once
+/// noadd has migrated this database.
+const RECOUNT_LOGS: &str = "INSERT INTO settings (key, value) \
+     SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value;\n";
+
 /// A noadd instance: its ports, its database, and the process serving them.
 #[derive(Debug)]
 pub struct Server {
@@ -127,6 +134,11 @@ impl Server {
     /// traffic and rewrite settings noadd reads at boot, so they are written
     /// between the two starts rather than underneath a live server.
     ///
+    /// Rows written here bypass the write paths that maintain `query_logs`'
+    /// row count in `settings`, so the count is recomputed after every seed;
+    /// otherwise the query log's pager and the Database Health card report the
+    /// total from before the fixture.
+    ///
     /// # Errors
     ///
     /// Fails when `sqlite3` is missing or exits non-zero.
@@ -150,7 +162,7 @@ impl Server {
             .stdin
             .as_mut()
             .context("sqlite3 stdin")?
-            .write_all(sql.as_bytes())
+            .write_all(format!("{sql}\n{RECOUNT_LOGS}").as_bytes())
             .await?;
         drop(child.stdin.take());
         let status = child.wait().await?;
