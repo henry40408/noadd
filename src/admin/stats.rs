@@ -153,6 +153,18 @@ pub async fn compute_top_clients(
     db.top_clients_since(since, limit).await
 }
 
+/// The dashboard's two 24-hour lists from the one scan that answers both —
+/// what it shows every tick, where asking [`compute_top_domains`] and
+/// [`compute_top_clients`] separately would read two indexes.
+pub async fn compute_top_domains_and_clients(
+    db: &Database,
+    now: i64,
+    limit: i64,
+) -> Result<(Vec<TopDomain>, Vec<TopClient>), DbError> {
+    let lists = db.traffic_lists_since(now - 86400, limit).await?;
+    Ok((lists.domains.top, lists.clients))
+}
+
 pub async fn compute_top_upstreams(
     db: &Database,
     now: i64,
@@ -343,15 +355,17 @@ pub async fn compute_highlights(
 /// a top-domain list — and every one of them re-scanned an index another had
 /// just walked. Three of them share
 /// [`crate::db::Database::stats_scan_since`] and two share
-/// [`crate::db::Database::domain_stats_since`], which is two index scans
+/// [`crate::db::Database::traffic_lists_since`], which is two index scans
 /// instead of six.
 ///
 /// The charts ride the first of those scans as `series`, rather than being
-/// fetched by the browser afterwards at the cost of two more.
+/// fetched by the browser afterwards at the cost of two more, and the top
+/// clients ride the second rather than scanning an index of their own.
 pub struct RangeStats {
     pub metrics: crate::db::WindowMetrics,
     pub series: crate::db::QuarterSeries,
     pub domains: crate::db::DomainStats,
+    pub clients: Vec<TopClient>,
 }
 
 pub async fn compute_range_stats(
@@ -362,14 +376,15 @@ pub async fn compute_range_stats(
 ) -> Result<RangeStats, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    let (scan, domains) = tokio::try_join!(
+    let (scan, lists) = tokio::try_join!(
         db.stats_scan_since(since, now - HEATMAP_WINDOW_SECS),
-        db.domain_stats_since(since, top_n),
+        db.traffic_lists_since(since, top_n),
     )?;
     Ok(RangeStats {
         metrics: scan.metrics,
         series: scan.series,
-        domains,
+        domains: lists.domains,
+        clients: lists.clients,
     })
 }
 

@@ -1442,12 +1442,10 @@ pub async fn dashboard_page(
         .unwrap_or_default();
     // Ten rows each, which is what the page shows — the API's larger default is
     // for callers who want to do their own slicing.
-    let domains = crate::admin::stats::compute_top_domains(&state.db, now, 10)
-        .await
-        .unwrap_or_default();
-    let clients = crate::admin::stats::compute_top_clients(&state.db, now, 10)
-        .await
-        .unwrap_or_default();
+    let (domains, clients) =
+        crate::admin::stats::compute_top_domains_and_clients(&state.db, now, 10)
+            .await
+            .unwrap_or_default();
     let upstreams = crate::admin::stats::compute_top_upstreams(&state.db, now, 10)
         .await
         .unwrap_or_default();
@@ -1667,11 +1665,10 @@ pub async fn stats_page(
         .and_then(stats::StatsRange::parse)
         .unwrap_or(stats::StatsRange::Days7);
 
-    // Three independent reads; running them together keeps the page at one
-    // round trip to the database rather than three in sequence.
-    let (range_stats, clients, health) = tokio::join!(
+    // Two independent reads; running them together keeps the page at one
+    // round trip to the database rather than two in sequence.
+    let (range_stats, health) = tokio::join!(
         stats::compute_range_stats(&state.db, now, range, STATS_TOP_N),
-        stats::compute_top_clients_ranged(&state.db, now, range, STATS_TOP_N),
         stats::compute_db_health(&state.db, now),
     );
 
@@ -1719,7 +1716,7 @@ pub async fn stats_page(
     )
     .expect("a series of integers always serializes");
 
-    let (query_types, outcomes, top_domains) = range_stats
+    let (query_types, outcomes, top_domains, top_clients) = range_stats
         .map(|s| {
             (
                 bar_rows(s.metrics.query_types),
@@ -1731,24 +1728,26 @@ pub async fn stats_page(
                         .map(|d| (d.domain, d.count))
                         .collect(),
                 ),
+                // A client that came in over `DoH` is named by both, the way the
+                // client draws it — the IP alone would collapse every token
+                // behind one proxy.
+                bar_rows(
+                    s.clients
+                        .into_iter()
+                        .map(|c| {
+                            let label = match c.doh_token {
+                                Some(token) if !token.is_empty() => {
+                                    format!("{} · {token}", c.client_ip)
+                                }
+                                _ => c.client_ip,
+                            };
+                            (label, c.count)
+                        })
+                        .collect(),
+                ),
             )
         })
         .unwrap_or_default();
-    // A client that came in over `DoH` is named by both, the way the client
-    // draws it — the IP alone would collapse every token behind one proxy.
-    let top_clients = bar_rows(
-        clients
-            .unwrap_or_default()
-            .into_iter()
-            .map(|c| {
-                let label = match c.doh_token {
-                    Some(token) if !token.is_empty() => format!("{} · {token}", c.client_ip),
-                    _ => c.client_ip,
-                };
-                (label, c.count)
-            })
-            .collect(),
-    );
 
     let health_cards = health.map(build_health_cards).unwrap_or_default();
 
