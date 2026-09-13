@@ -18,7 +18,7 @@
 
 use noadd::admin::stats::{
     self, StatsRange, compute_db_health, compute_heatmap, compute_range_stats,
-    compute_stats_timeline, compute_top_clients_ranged,
+    compute_stats_timeline,
 };
 use noadd::db::Database;
 use noadd::now_unix;
@@ -64,12 +64,8 @@ async fn stats_page_miss_bench() {
     // Exactly what `stats_page` reads, in the order the template consumes it.
     let mut rows: Vec<(&str, i64)> = Vec::new();
     rows.push((
-        "range_stats (breakdowns+latency+charts+domains)",
+        "range_stats (all readings, charts, both lists)",
         page_misses(&db, || compute_range_stats(&db, now, range, TOP_N)).await,
-    ));
-    rows.push((
-        "top_clients",
-        page_misses(&db, || compute_top_clients_ranged(&db, now, range, TOP_N)).await,
     ));
     rows.push((
         "db_health",
@@ -103,9 +99,16 @@ async fn stats_page_miss_bench() {
             page_misses(&db, || stats::compute_highlights(&db, now, range)).await,
         ),
         (
-            "  top_domains alone",
+            "  top_domains alone (domain index)",
             page_misses(&db, || {
                 stats::compute_top_domains_ranged(&db, now, range, TOP_N)
+            })
+            .await,
+        ),
+        (
+            "  both lists alone",
+            page_misses(&db, || {
+                stats::compute_top_clients_ranged(&db, now, range, TOP_N)
             })
             .await,
         ),

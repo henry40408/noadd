@@ -333,6 +333,14 @@ pub struct DomainStats {
     pub top: Vec<TopDomain>,
 }
 
+/// Who asked for what in a window: the busiest domains with the distinct count,
+/// and the busiest clients — see [`Database::traffic_lists_since`].
+#[derive(Debug, Clone)]
+pub struct TrafficLists {
+    pub domains: DomainStats,
+    pub clients: Vec<TopClient>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeatmapCell {
     pub weekday: i64, // 0 = Sunday, 6 = Saturday (matches strftime('%w'))
@@ -597,7 +605,7 @@ impl Database {
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                    CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client ON query_logs(timestamp, domain, client_ip, doh_token);
                     -- Without has_result: a database predating version 12 has
                     -- no such column until that migration adds it, and this
                     -- batch runs first. Migration 12 rebuilds the index with it
@@ -888,7 +896,29 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 14;
+        if version < 15 {
+            // Top domains and top clients are asked together — once by the
+            // Statistics page, once per dashboard tick — and read two indexes
+            // for it: `(domain, timestamp)` and `(client_ip, doh_token,
+            // timestamp)`, each group-first so neither could be restricted by
+            // the window. On a 370 k-row database that was 7 589 pages for a
+            // window covering the table and 2 389 for the dashboard's 24 hours.
+            // One timestamp-first index carrying both answers both lists from
+            // one scan: 5 769 and 747.
+            //
+            // It replaces the client index, which served nothing else. The
+            // domain index stays: the query log's domain search seeks it by
+            // prefix, and without it a search for a prefix nobody queried read
+            // the whole table — 12 170 pages against 3.
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_query_logs_client_ts;
+                 CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client \
+                 ON query_logs(timestamp, domain, client_ip, doh_token);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 15;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -2136,7 +2166,7 @@ impl Database {
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "WITH d AS (                         SELECT domain, COUNT(*) AS cnt                         FROM query_logs                         WHERE timestamp >= ?1                         GROUP BY domain                      )                      SELECT (SELECT COUNT(*) FROM d), domain, cnt                      FROM d ORDER BY cnt DESC LIMIT ?2",
+                    "WITH d AS (                         SELECT domain, COUNT(*) AS cnt                         FROM query_logs                         WHERE timestamp >= ?1                         GROUP BY domain                      )                      SELECT (SELECT COUNT(*) FROM d), domain, cnt                      FROM d ORDER BY cnt DESC, domain LIMIT ?2",
                 )?;
                 let rows = stmt
                     .query_map(params![since_ms, limit], |row| {
@@ -2159,31 +2189,89 @@ impl Database {
         Ok(stats)
     }
 
+    /// A fold over [`Self::traffic_lists_since`], whose index is the only one
+    /// carrying the client columns.
     pub async fn top_clients_since(
         &self,
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopClient>, DbError> {
+        Ok(self.traffic_lists_since(since, limit).await?.clients)
+    }
+
+    /// The busiest domains, how many distinct ones there were, and the busiest
+    /// clients, from one scan of `idx_query_logs_ts_domain_client`.
+    ///
+    /// The Statistics page and every dashboard tick want both lists, and used
+    /// to read two indexes for them. Grouped at `(domain, client_ip,
+    /// doh_token)`, one statement carries both: the rows are one per pairing a
+    /// window actually held, which on a home network is a few thousand, and
+    /// both lists are folded out of them here. The index is timestamp-first,
+    /// so a short window reads a short stretch of it.
+    ///
+    /// Ties in either list break by name, the same way
+    /// [`Self::domain_stats_since`] breaks them, so the two spellings of top
+    /// domains agree row for row.
+    pub async fn traffic_lists_since(
+        &self,
+        since: i64,
+        limit: i64,
+    ) -> Result<TrafficLists, DbError> {
         let since_ms = since * 1000;
-        let rows = self
+        let limit = usize::try_from(limit).unwrap_or(0);
+        let lists = self
             .reader()
             .call(move |conn| {
+                // `INDEXED BY` because `idx_query_logs_timestamp` also matches
+                // the range and is smaller; taking it would be a rowid lookup
+                // per row.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT client_ip, doh_token, COUNT(*) as cnt FROM query_logs WHERE timestamp >= ?1 GROUP BY client_ip, doh_token ORDER BY cnt DESC LIMIT ?2",
+                    "SELECT domain, client_ip, doh_token, COUNT(*) \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_domain_client \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY domain, client_ip, doh_token",
                 )?;
-                let rows = stmt
-                    .query_map(params![since_ms, limit], |row| {
-                        Ok(TopClient {
-                            client_ip: row.get(0)?,
-                            doh_token: row.get(1)?,
-                            count: row.get(2)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+                let mut domains: HashMap<String, i64> = HashMap::new();
+                let mut clients: HashMap<(String, Option<String>), i64> = HashMap::new();
+                let mut rows = stmt.query(params![since_ms])?;
+                while let Some(row) = rows.next()? {
+                    let count: i64 = row.get(3)?;
+                    *domains.entry(row.get(0)?).or_default() += count;
+                    *clients.entry((row.get(1)?, row.get(2)?)).or_default() += count;
+                }
+                Ok((domains, clients))
             })
             .await?;
-        Ok(rows)
+        let (domains, clients) = lists;
+
+        let unique = i64::try_from(domains.len()).unwrap_or(i64::MAX);
+        let mut top: Vec<TopDomain> = domains
+            .into_iter()
+            .map(|(domain, count)| TopDomain { domain, count })
+            .collect();
+        top.sort_unstable_by(|a, b| b.count.cmp(&a.count).then_with(|| a.domain.cmp(&b.domain)));
+        top.truncate(limit);
+
+        let mut clients: Vec<TopClient> = clients
+            .into_iter()
+            .map(|((client_ip, doh_token), count)| TopClient {
+                client_ip,
+                doh_token,
+                count,
+            })
+            .collect();
+        clients.sort_unstable_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.client_ip.cmp(&b.client_ip))
+                .then_with(|| a.doh_token.cmp(&b.doh_token))
+        });
+        clients.truncate(limit);
+
+        Ok(TrafficLists {
+            domains: DomainStats { unique, top },
+            clients,
+        })
     }
 
     pub async fn top_upstreams_since(
@@ -3174,15 +3262,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_schema_has_client_index() {
+    async fn fresh_schema_has_the_domain_client_index_and_not_the_client_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("noadd.sqlite3");
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
 
         let indexes = query_log_index_names(&db).await;
         assert!(
-            indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
-            "(client_ip, doh_token, timestamp) index should exist: {indexes:?}"
+            indexes
+                .iter()
+                .any(|n| n == "idx_query_logs_ts_domain_client"),
+            "(timestamp, domain, client_ip, doh_token) index should exist: {indexes:?}"
+        );
+        assert!(
+            !indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
+            "the client index it replaced should not: {indexes:?}"
         );
     }
 
@@ -3466,8 +3560,11 @@ mod tests {
         assert!((top[0].avg_ms - 20.0).abs() < 1e-9);
     }
 
+    /// Version 10 added the client index and version 15 replaced it, so a
+    /// database from before either has to come out holding the replacement and
+    /// nothing of the index in between.
     #[tokio::test]
-    async fn migration_v10_adds_client_index() {
+    async fn a_v9_database_migrates_to_the_domain_client_index() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v9.db");
         let path_str = path.to_str().unwrap().to_string();
@@ -3501,16 +3598,22 @@ mod tests {
 
         let indexes = query_log_index_names(&db).await;
         assert!(
-            indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
-            "client index should be created by migration: {indexes:?}"
+            indexes
+                .iter()
+                .any(|n| n == "idx_query_logs_ts_domain_client"),
+            "domain/client index should be created by migration: {indexes:?}"
+        );
+        assert!(
+            !indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
+            "the client index should be gone after migration: {indexes:?}"
         );
     }
 
-    /// The index only pays off if the planner actually picks it — the
-    /// version-5 migration's comment records that a new index alone was not
-    /// enough there. Assert the plan, not just the index's existence.
+    /// `INDEXED BY` fixes which index the lists read, but not whether that
+    /// index answers them alone. Assert the plan is covering, which is what
+    /// keeps a table lookup per row out of every dashboard tick.
     #[tokio::test]
-    async fn top_clients_query_uses_the_client_index() {
+    async fn the_traffic_lists_are_covered_by_their_index() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.db");
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
@@ -3538,13 +3641,15 @@ mod tests {
             .conn
             .call(|conn| {
                 conn.execute_batch("ANALYZE;")?;
+                // The statement `traffic_lists_since` prepares, verbatim.
                 let mut stmt = conn.prepare(
-                    "EXPLAIN QUERY PLAN SELECT client_ip, doh_token, COUNT(*) c \
-                     FROM query_logs WHERE timestamp >= ?1 \
-                     GROUP BY client_ip, doh_token ORDER BY c DESC LIMIT ?2",
+                    "EXPLAIN QUERY PLAN SELECT domain, client_ip, doh_token, COUNT(*) \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_domain_client \
+                     WHERE timestamp >= ?1 \
+                     GROUP BY domain, client_ip, doh_token",
                 )?;
                 let rows = stmt
-                    .query_map(params![0_i64, 10_i64], |row| row.get::<_, String>(3))?
+                    .query_map(params![0_i64], |row| row.get::<_, String>(3))?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
             })
@@ -3552,8 +3657,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            plan.contains("idx_query_logs_client_ts"),
-            "top-clients query should be served by the client index, got: {plan}"
+            plan.contains("COVERING INDEX idx_query_logs_ts_domain_client"),
+            "the traffic lists should read their index alone, got: {plan}"
         );
     }
 

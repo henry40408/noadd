@@ -601,6 +601,70 @@ async fn domain_stats_on_an_empty_window_reports_nothing() {
     assert!(stats.top.is_empty());
 }
 
+/// Both lists come out of one grouping of `(domain, client_ip, doh_token)`, so
+/// the folds have to put back what the grouping split: a domain queried by
+/// several clients is one domain, and a client over `DoH` is a different
+/// client from the same IP over plain DNS. Counts are chosen to tie, so the
+/// order ties break in is asserted too.
+#[tokio::test]
+async fn traffic_lists_answer_what_the_separate_lists_did() {
+    let db = test_db().await;
+    let since = 10_000;
+    let mut entries = Vec::new();
+    for i in 0..600_i64 {
+        let mut e = entry(since + i, "A", false, false, Some("1.1.1.1"));
+        e.domain = format!("d{}.test", i % 7);
+        e.client_ip = format!("10.0.0.{}", i % 5);
+        e.doh_token = (i % 3 == 0).then(|| "phone".to_string());
+        entries.push(e);
+    }
+    // Before the window: counted by nothing.
+    let mut early = entry(since - 1, "A", false, false, Some("1.1.1.1"));
+    early.domain = "d0.test".into();
+    early.client_ip = "10.0.0.9".into();
+    entries.push(early);
+    db.insert_query_logs(&entries).await.unwrap();
+
+    let lists = db.traffic_lists_since(since, 4).await.unwrap();
+
+    let domains = db.domain_stats_since(since, 4).await.unwrap();
+    assert_eq!(lists.domains.unique, domains.unique);
+    assert_eq!(lists.domains.unique, 7);
+    assert_eq!(lists.domains.top, domains.top, "the two spellings disagree");
+
+    let mut expected: std::collections::HashMap<(String, Option<String>), i64> =
+        std::collections::HashMap::new();
+    for e in entries.iter().filter(|e| e.timestamp >= since * 1000) {
+        *expected
+            .entry((e.client_ip.clone(), e.doh_token.clone()))
+            .or_default() += 1;
+    }
+    let mut expected: Vec<_> = expected.into_iter().collect();
+    expected.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    expected.truncate(4);
+    let got: Vec<_> = lists
+        .clients
+        .iter()
+        .map(|c| ((c.client_ip.clone(), c.doh_token.clone()), c.count))
+        .collect();
+    assert_eq!(got, expected);
+    assert!(
+        got.iter().all(|((ip, _), _)| ip != "10.0.0.9"),
+        "a query from before the window was counted"
+    );
+
+    assert_eq!(db.top_clients_since(since, 4).await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn traffic_lists_on_an_empty_window_report_nothing() {
+    let db = test_db().await;
+    let lists = db.traffic_lists_since(0, 5).await.unwrap();
+    assert_eq!(lists.domains.unique, 0);
+    assert!(lists.domains.top.is_empty());
+    assert!(lists.clients.is_empty());
+}
+
 fn sorted(mut rows: Vec<(String, i64)>) -> Vec<(String, i64)> {
     rows.sort();
     rows

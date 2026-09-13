@@ -98,6 +98,10 @@ async fn the_page_reads_less_than_its_readings_do_separately() {
         + page_misses(&db, || {
             stats::compute_top_domains_ranged(&db, now, range, 15)
         })
+        .await
+        + page_misses(&db, || {
+            stats::compute_top_clients_ranged(&db, now, range, 15)
+        })
         .await;
 
     assert!(
@@ -239,6 +243,29 @@ async fn the_top_upstreams_never_read_the_log_table() {
         misses * 4 < db_pages,
         "top upstreams read {misses} of the database's {db_pages} pages; that \
          is the table, not an index — is idx_query_logs_ts_upstream missing?"
+    );
+}
+
+/// The domain and client lists read an index that starts with `timestamp`, so a
+/// short window — the dashboard's 24 hours against a week of retention — reads
+/// a short stretch of it. The group-first indexes they replaced could not be
+/// restricted by the window at all, and read most of themselves whatever it was.
+#[tokio::test]
+async fn a_short_window_reads_a_short_stretch_of_the_traffic_lists() {
+    let db = seeded_db().await;
+
+    let whole = page_misses(&db, || db.traffic_lists_since(0, 15)).await;
+    // The last tenth of the seed.
+    let tail = page_misses(&db, || db.traffic_lists_since(ROWS - ROWS / 10, 15)).await;
+
+    assert!(
+        tail > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        tail * 4 < whole,
+        "a tenth of the window read {tail} pages against {whole} for all of it — \
+         is the index still timestamp-first, and still named by INDEXED BY?"
     );
 }
 

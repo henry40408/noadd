@@ -147,11 +147,10 @@ impl Drop for StatsGuard {
 
 /// Read everything the dashboard shows, in the shapes `app.js` renders.
 pub async fn compute_snapshot(db: &Database, now: i64) -> Result<DashboardSnapshot, DbError> {
-    let (summary, timeline, top_domains, top_clients, top_upstreams) = tokio::try_join!(
+    let (summary, timeline, (top_domains, top_clients), top_upstreams) = tokio::try_join!(
         stats::compute_summary(db, now),
         stats::compute_timeline(db, now, TIMELINE_HOURS),
-        stats::compute_top_domains(db, now, TOP_N),
-        stats::compute_top_clients(db, now, TOP_N),
+        stats::compute_top_domains_and_clients(db, now, TOP_N),
         stats::compute_top_upstreams(db, now, TOP_N),
     )?;
 
