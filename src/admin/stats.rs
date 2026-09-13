@@ -233,6 +233,12 @@ impl StatsRange {
         }
     }
 
+    /// Width of one timeline bucket, in seconds. The page hands this to the
+    /// browser alongside the series it folds, so the bucket is chosen once.
+    pub fn bucket_secs(self) -> i64 {
+        self.window().1
+    }
+
     /// (`since_seconds_offset`, `bucket_secs`)
     fn window(self) -> (i64, i64) {
         match self {
@@ -285,12 +291,15 @@ pub async fn compute_stats_timeline(
         .await
 }
 
+/// The heatmap's window, whatever range the page is showing.
+pub const HEATMAP_WINDOW_SECS: i64 = 30 * 86400;
+
 pub async fn compute_heatmap(
     db: &Database,
     now: i64,
     tz_offset_secs: i64,
 ) -> Result<Vec<HeatmapCell>, DbError> {
-    db.hourly_heatmap_since(now - 30 * 86400, tz_offset_secs)
+    db.hourly_heatmap_since(now - HEATMAP_WINDOW_SECS, tz_offset_secs)
         .await
 }
 
@@ -340,11 +349,15 @@ pub async fn compute_highlights(
 /// breakdown, an outcome breakdown, a latency summary, a unique-domain count,
 /// a top-domain list — and every one of them re-scanned an index another had
 /// just walked. Three of them share
-/// [`crate::db::Database::window_metrics_since`] and two share
+/// [`crate::db::Database::stats_scan_since`] and two share
 /// [`crate::db::Database::domain_stats_since`], which is two index scans
 /// instead of six.
+///
+/// The charts ride the first of those scans as `series`, rather than being
+/// fetched by the browser afterwards at the cost of two more.
 pub struct RangeStats {
     pub metrics: crate::db::WindowMetrics,
+    pub series: crate::db::QuarterSeries,
     pub domains: crate::db::DomainStats,
 }
 
@@ -356,11 +369,15 @@ pub async fn compute_range_stats(
 ) -> Result<RangeStats, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    let (metrics, domains) = tokio::try_join!(
-        db.window_metrics_since(since),
+    let (scan, domains) = tokio::try_join!(
+        db.stats_scan_since(since, now - HEATMAP_WINDOW_SECS),
         db.domain_stats_since(since, top_n),
     )?;
-    Ok(RangeStats { metrics, domains })
+    Ok(RangeStats {
+        metrics: scan.metrics,
+        series: scan.series,
+        domains,
+    })
 }
 
 pub async fn compute_top_domains_ranged(

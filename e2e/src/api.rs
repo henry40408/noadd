@@ -129,6 +129,31 @@ impl Api {
         self.login(ADMIN_USERNAME, ADMIN_PASSWORD).await
     }
 
+    /// `GET` a JSON endpoint as the operator `session` belongs to.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the instance is unreachable, answers a non-success status, or
+    /// answers something other than JSON.
+    pub async fn get_json(&self, session: &str, path: &str) -> Result<Value> {
+        let res = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session}"),
+            )
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        anyhow::ensure!(
+            res.status().is_success(),
+            "GET {path} answered {}",
+            res.status()
+        );
+        Ok(res.json().await?)
+    }
+
     /// Blocks until no filter rebuild is in flight.
     ///
     /// The appliance publishes rebuild state only on `GET /api/events`, so this

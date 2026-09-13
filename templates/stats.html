@@ -1,13 +1,14 @@
 {#
   The statistics page.
 
-  The split here is the one the data draws for itself. `tz_offset` reaches
-  exactly two computations — `compute_stats_timeline` and `compute_heatmap` —
-  and those two feed exactly the three charts below. A calendar-aligned bucket
-  needs the viewer's UTC offset, which arrives with the browser rather than with
-  the request, and the charts were already the documented exception to this UI
-  working without JavaScript. So the charts say they are drawn in the browser,
-  and `app.js` fetches them with the offset.
+  The split here is the one the data draws for itself. Only the three charts
+  below need a calendar, and a calendar-aligned bucket needs the viewer's UTC
+  offset, which arrives with the browser rather than with the request; the
+  charts were already the documented exception to this UI working without
+  JavaScript. So the charts say they are drawn in the browser, and their data
+  is already here: `data-series` holds quarter-hour counts on UTC boundaries,
+  taken from the same scan as the breakdowns, which `app.js` folds into the
+  viewer's hours and days. No second request, and no second scan.
 
   Everything else is a plain `now - range` window with no calendar in it: the
   highlights, both breakdowns, both ranged lists and the health grid are
@@ -22,7 +23,7 @@
 {%- import "_macros.html" as macros -%}
 
 {% block page %}
-      <stats-page>
+      <stats-page data-series="{{ series_json }}" data-bucket-secs="{{ bucket_secs }}">
       <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
         <div><h2>Statistics</h2><p>Long-term traffic patterns</p></div>
         {# Links, not buttons: the range is a server-side window, so it lives in the URL. #}

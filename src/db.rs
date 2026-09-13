@@ -269,6 +269,41 @@ pub struct WindowMetrics {
     pub latency: LatencySummary,
 }
 
+/// Width of one [`QuarterSeries`] slot, in seconds.
+pub const QUARTER_SECS: i64 = 900;
+
+/// Query counts per quarter hour on UTC-epoch boundaries, dense from the first
+/// quarter that held a query to the last.
+///
+/// This is what lets the Statistics page draw its calendar-aligned charts
+/// without a scan of their own. A viewer's UTC offset is a whole number of
+/// quarter hours in every zone in use, so every quarter lies wholly inside one
+/// of that viewer's local hours, and the browser can fold these into its own
+/// hours and days exactly — the server never needs to know the offset.
+/// `timelineFromQuarters` and `heatmapFromQuarters` in `app.js` are those
+/// folds, and answer what [`Database::timeline_multi_since`] and
+/// [`Database::hourly_heatmap_since`] answer for API callers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct QuarterSeries {
+    /// Start of the first quarter, in Unix seconds. 0 when there are none.
+    pub start: i64,
+    /// Queries in the page's range window, by quarter.
+    pub total: Vec<i64>,
+    pub blocked: Vec<i64>,
+    pub cached: Vec<i64>,
+    /// Queries in the heatmap's window, by quarter. That window is not the
+    /// range's, so a quarter can count here and not in `total`, or the reverse.
+    pub heatmap: Vec<i64>,
+}
+
+/// Everything the Statistics page reads off `idx_query_logs_ts_metrics`, from
+/// the one scan [`Database::stats_scan_since`] makes.
+#[derive(Debug, Clone)]
+pub struct StatsScan {
+    pub metrics: WindowMetrics,
+    pub series: QuarterSeries,
+}
+
 /// Pager counters for the read pool — see
 /// [`Database::read_page_cache_stats`].
 #[derive(Debug, Clone, Copy)]
@@ -2213,6 +2248,103 @@ impl Database {
         })
     }
 
+    /// The Statistics page's window readings and its charts' series, in one
+    /// scan of `idx_query_logs_ts_metrics`.
+    ///
+    /// The page used to pay for that index three times: once here for the
+    /// breakdowns and the latency histogram, once more for the timeline the
+    /// browser fetched with its UTC offset, and `idx_query_logs_timestamp` for
+    /// the heatmap on top — 5 690 pages on a 370 k-row database where 2 152
+    /// answer all of it. The charts come out of the same rows as a
+    /// [`QuarterSeries`], which the browser folds into its own calendar.
+    ///
+    /// The scan starts at the earlier of the two windows; `range_since` bounds
+    /// the metrics and the timeline, `heatmap_since` the heatmap, each exactly.
+    ///
+    /// Rows are folded here rather than grouped in SQL. A `GROUP BY` at a grain
+    /// carrying both the quarter and `response_ms` approaches one group per
+    /// row, which is a temp b-tree the size of the window held in memory on the
+    /// appliance; the folds below hold one entry per distinct value instead.
+    pub async fn stats_scan_since(
+        &self,
+        range_since: i64,   // unix seconds
+        heatmap_since: i64, // unix seconds
+    ) -> Result<StatsScan, DbError> {
+        let range_ms = range_since * 1000;
+        let heatmap_ms = heatmap_since * 1000;
+        let quarter_ms = QUARTER_SECS * 1000;
+        let scan = self
+            .reader()
+            .call(move |conn| {
+                // `INDEXED BY` for the reason `metrics_window_since` gives.
+                let mut stmt = conn.prepare_cached(
+                    "SELECT timestamp, blocked, cached, has_result, query_type, response_ms \
+                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
+                     WHERE timestamp >= ?1",
+                )?;
+                // Keyed by query type first so a row that repeats a type — nearly
+                // all of them — is looked up by `&str` without allocating.
+                // (blocked, cached, has_result, response_ms) → count
+                type Grains = HashMap<(bool, bool, bool, i64), i64>;
+                let mut grains: HashMap<String, Grains> = HashMap::new();
+                // quarter index → [total, blocked, cached, heatmap]
+                let mut quarters: BTreeMap<i64, [i64; 4]> = BTreeMap::new();
+                let mut rows = stmt.query(params![range_ms.min(heatmap_ms)])?;
+                while let Some(row) = rows.next()? {
+                    let ts: i64 = row.get(0)?;
+                    let blocked = row.get::<_, i64>(1)? != 0;
+                    let cached = row.get::<_, i64>(2)? != 0;
+                    let slot = quarters.entry(ts.div_euclid(quarter_ms)).or_default();
+                    if ts >= heatmap_ms {
+                        slot[3] += 1;
+                    }
+                    if ts < range_ms {
+                        continue;
+                    }
+                    slot[0] += 1;
+                    slot[1] += i64::from(blocked);
+                    slot[2] += i64::from(cached);
+
+                    let has_result = row.get::<_, i64>(3)? != 0;
+                    let query_type = row.get_ref(4)?.as_str()?;
+                    let key = (blocked, cached, has_result, row.get::<_, i64>(5)?);
+                    if let Some(by_grain) = grains.get_mut(query_type) {
+                        *by_grain.entry(key).or_default() += 1;
+                    } else {
+                        grains.insert(query_type.to_owned(), HashMap::from([(key, 1)]));
+                    }
+                }
+
+                let window: Vec<WindowMetricsRow> = grains
+                    .into_iter()
+                    .flat_map(|(query_type, by_grain)| {
+                        by_grain.into_iter().map(
+                            move |((blocked, cached, has_result, response_ms), count)| {
+                                WindowMetricsRow {
+                                    blocked,
+                                    cached,
+                                    has_result,
+                                    query_type: query_type.clone(),
+                                    response_ms,
+                                    count,
+                                }
+                            },
+                        )
+                    })
+                    .collect();
+                Ok(StatsScan {
+                    metrics: WindowMetrics {
+                        outcomes: outcomes_from_window(&window),
+                        query_types: query_types_from_window(&window),
+                        latency: latency_from_window(&window),
+                    },
+                    series: series_from_quarters(&quarters),
+                })
+            })
+            .await?;
+        Ok(scan)
+    }
+
     /// Query counts by time bucket. Every column is carried by
     /// `idx_query_logs_ts_metrics`, so the scan never looks a row up.
     ///
@@ -2513,6 +2645,32 @@ fn timeline_from_buckets(buckets: &[MetricsBucket]) -> Vec<TimelineMultiPoint> {
         }
     }
     out
+}
+
+/// Lay sparse quarter counts out densely, so the page ships four arrays of
+/// integers rather than an object per quarter.
+fn series_from_quarters(quarters: &BTreeMap<i64, [i64; 4]>) -> QuarterSeries {
+    let (Some((&first, _)), Some((&last, _))) =
+        (quarters.first_key_value(), quarters.last_key_value())
+    else {
+        return QuarterSeries::default();
+    };
+    let len = usize::try_from(last - first + 1).expect("quarters are ordered");
+    let mut series = QuarterSeries {
+        start: first * QUARTER_SECS,
+        total: vec![0; len],
+        blocked: vec![0; len],
+        cached: vec![0; len],
+        heatmap: vec![0; len],
+    };
+    for (&quarter, &[total, blocked, cached, heatmap]) in quarters {
+        let i = usize::try_from(quarter - first).expect("quarters are ordered");
+        series.total[i] = total;
+        series.blocked[i] = blocked;
+        series.cached[i] = cached;
+        series.heatmap[i] = heatmap;
+    }
+    series
 }
 
 /// Classify each grain and total across the whole window. The precedence —

@@ -64,7 +64,7 @@ async fn stats_page_miss_bench() {
     // Exactly what `stats_page` reads, in the order the template consumes it.
     let mut rows: Vec<(&str, i64)> = Vec::new();
     rows.push((
-        "range_stats (breakdowns+latency+domains)",
+        "range_stats (breakdowns+latency+charts+domains)",
         page_misses(&db, || compute_range_stats(&db, now, range, TOP_N)).await,
     ));
     rows.push((
@@ -78,15 +78,16 @@ async fn stats_page_miss_bench() {
 
     let page_total: i64 = rows.iter().map(|(_, n)| *n).sum();
 
-    // The two charts the client fetches after the page lands. Not part of the
-    // first response, but the same visit pays for them.
+    // The API's chart endpoints. The page no longer calls them — its charts are
+    // folded from `range_stats` in the browser — so these are what a visit used
+    // to add on top, and what an API caller still pays.
     let charts: Vec<(&str, i64)> = vec![
         (
-            "timeline (client fetch)",
+            "  timeline (API only)",
             page_misses(&db, || compute_stats_timeline(&db, now, range, 0)).await,
         ),
         (
-            "heatmap (client fetch)",
+            "  heatmap (API only)",
             page_misses(&db, || compute_heatmap(&db, now, 0)).await,
         ),
     ];
@@ -118,7 +119,7 @@ async fn stats_page_miss_bench() {
     }
     eprintln!(
         "  {:<42} {page_total:>9}  {:>9.1}",
-        "PAGE TOTAL (first response)",
+        "PAGE TOTAL (whole visit)",
         mib(page_total)
     );
     eprintln!(

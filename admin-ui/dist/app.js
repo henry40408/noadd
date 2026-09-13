@@ -343,10 +343,56 @@ function formatTime(ts) {
 }
 
 // Browser's east-positive UTC offset in minutes (e.g. 480 for UTC+8), for the
-// stats endpoints that align buckets to the viewer's local calendar rather than
-// UTC-epoch boundaries. getTimezoneOffset() is UTC-minus-local, hence the sign flip.
+// statistics charts that align buckets to the viewer's local calendar rather than
+// UTC-epoch boundaries — the same unit the stats API's `tz_offset` takes.
+// getTimezoneOffset() is UTC-minus-local, hence the sign flip.
 function tzOffsetMinutes() {
   return -new Date().getTimezoneOffset();
+}
+
+// The statistics page ships its charts as quarter-hour counts on UTC boundaries
+// (QuarterSeries in src/db.rs) and these fold them into the viewer's calendar.
+// They must answer exactly what timeline_multi_since and hourly_heatmap_since
+// answer the API for the same offset, and e2e/tests/specs/stats_charts.rs holds
+// them to it. Exact because every offset in use is a whole number of quarter
+// hours, so no quarter straddles a local hour.
+const QUARTER_SECS = 900;
+
+function timelineFromQuarters(series, bucketSecs, offsetMinutes) {
+  const off = offsetMinutes * 60;
+  const out = [];
+  series.total.forEach((total, i) => {
+    // The server's GROUP BY has no row for an empty bucket, so neither does this.
+    if (!total) return;
+    const ts = series.start + i * QUARTER_SECS;
+    const bucket = Math.floor((ts + off) / bucketSecs) * bucketSecs - off;
+    let point = out[out.length - 1];
+    if (!point || point.timestamp !== bucket) {
+      point = { timestamp: bucket, total: 0, blocked: 0, cached: 0 };
+      out.push(point);
+    }
+    point.total += total;
+    point.blocked += series.blocked[i];
+    point.cached += series.cached[i];
+  });
+  return out;
+}
+
+function heatmapFromQuarters(series, offsetMinutes) {
+  const off = offsetMinutes * 60;
+  const cells = new Map();
+  series.heatmap.forEach((count, i) => {
+    if (!count) return;
+    const local = series.start + i * QUARTER_SECS + off;
+    // Unix day 0 was a Thursday; weekday counts from Sunday = 0.
+    const weekday = (Math.floor(local / 86400) + 4) % 7;
+    const hour = Math.floor((local % 86400) / 3600);
+    const key = weekday * 24 + hour;
+    const cell = cells.get(key);
+    if (cell) cell.count += count;
+    else cells.set(key, { weekday, hour, count });
+  });
+  return [...cells.entries()].sort((a, b) => a[0] - b[0]).map(([, cell]) => cell);
 }
 
 // Tooltip label for the statistics Nd timeline / rate charts. Date for day
@@ -1222,8 +1268,7 @@ class StatsPage extends HTMLElement {
     const raw = new URLSearchParams(location.search).get('range');
     this._range = ['7d', '30d', '90d'].includes(raw) ? raw : '7d';
     this._localizeDates();
-    this._fetchTimeline();
-    this._fetchHeatmap();
+    this._drawCharts();
   }
 
   // The one cell the server could only write in UTC. Same division as the query
@@ -1236,23 +1281,17 @@ class StatsPage extends HTMLElement {
     });
   }
 
-  async _fetchTimeline() {
+  // The series came with the page, from the scan that answered the breakdowns;
+  // only the viewer's calendar is added here. Without it the hour-of-day rows
+  // and the bucket boundaries would sit on UTC.
+  _drawCharts() {
     try {
-      // Pass the viewer's UTC offset so the server aligns timeline buckets to
-      // their local calendar (local midnight / hour), not UTC-epoch boundaries.
-      const tzOffset = tzOffsetMinutes();
-      const timeline = await api.get(`/api/stats/v2/timeline?range=${this._range}&tz_offset=${tzOffset}`);
+      const series = JSON.parse(this.dataset.series);
+      const offset = tzOffsetMinutes();
+      const timeline = timelineFromQuarters(series, Number(this.dataset.bucketSecs), offset);
       this._renderTimeline(timeline);
       this._renderRateTrend(timeline);
-    } catch (e) { console.error(e); }
-  }
-
-  async _fetchHeatmap() {
-    try {
-      // Same local-calendar alignment as the timeline: without it the
-      // hour-of-day rows are shifted by the viewer's UTC offset.
-      const data = await api.get(`/api/stats/v2/heatmap?tz_offset=${tzOffsetMinutes()}`);
-      this._renderHeatmap(data);
+      this._renderHeatmap(heatmapFromQuarters(series, offset));
     } catch (e) { console.error(e); }
   }
 

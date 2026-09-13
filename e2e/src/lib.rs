@@ -56,6 +56,8 @@ pub mod ports {
     /// The query log's live tail, which needs the appliance to answer a real
     /// query while a browser watches.
     pub const LOGS_LIVE_TAIL: (u16, u16) = (14111, 15111);
+    /// The statistics charts' browser-side folds against the API.
+    pub const STATS_CHARTS: (u16, u16) = (14112, 15112);
 
     /// The screenshot pipeline, which is not part of a test run.
     pub const SCREENSHOTS: (u16, u16) = (14150, 15150);

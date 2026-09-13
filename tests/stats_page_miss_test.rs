@@ -163,6 +163,37 @@ async fn the_window_readings_are_one_scan_between_them() {
     );
 }
 
+/// The charts ride the scan that answers the breakdowns. Before, the browser
+/// fetched the timeline and the heatmap after the page landed, which walked
+/// the metrics index a second time and the timestamp index on top — so the
+/// page's readings and its charts together must cost what the readings alone
+/// did, and less than the three statements they replaced.
+#[tokio::test]
+async fn the_page_and_its_charts_are_one_metrics_scan() {
+    let db = seeded_db().await;
+
+    let scan = page_misses(&db, || db.stats_scan_since(0, 0)).await;
+    let window = page_misses(&db, || db.window_metrics_since(0)).await;
+    let replaced = window
+        + page_misses(&db, || db.timeline_multi_since(0, 3600, 0)).await
+        + page_misses(&db, || db.hourly_heatmap_since(0, 0)).await;
+
+    assert!(
+        window > 0,
+        "no pages were read at all — the measurement is not working"
+    );
+    assert!(
+        scan <= window + window / 10,
+        "the page's scan read {scan} pages against {window} for the window readings \
+         alone — is it off idx_query_logs_ts_metrics, or reading the table?"
+    );
+    assert!(
+        scan * 2 < replaced,
+        "the page's scan read {scan} pages and the statements it replaced {replaced} — \
+         are the charts back on a scan of their own?"
+    );
+}
+
 /// The heatmap reads `timestamp` and nothing else, so it belongs on the
 /// smallest index that carries it. `idx_query_logs_ts_metrics` also covers it
 /// and the planner will take it unaided, paying for four columns the query
