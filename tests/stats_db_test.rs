@@ -1,4 +1,4 @@
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, QUARTER_SECS, QuarterSeries, QueryLogEntry, TimelineMultiPoint};
 use tempfile::tempdir;
 
 async fn test_db() -> Database {
@@ -609,4 +609,168 @@ async fn domain_stats_on_an_empty_window_reports_nothing() {
 fn sorted(mut rows: Vec<(String, i64)>) -> Vec<(String, i64)> {
     rows.sort();
     rows
+}
+
+/// A mixed stream of queries spread over several days at an interval that is
+/// not a whole number of minutes, so rows land at every offset inside a
+/// quarter hour and on both sides of every boundary the tests below draw.
+fn spread_entries() -> Vec<QueryLogEntry> {
+    let start = 1_704_067_200; // 2024-01-01 00:00:00 UTC, a Monday
+    (0..900_i64)
+        .map(|i| {
+            let mut e = entry(
+                start + i * 437,
+                ["A", "AAAA", "HTTPS"][usize::try_from(i % 3).unwrap()],
+                i % 7 == 0,
+                i % 5 == 0,
+                if i % 11 == 0 { None } else { Some("1.1.1.1") },
+            );
+            e.timestamp += i % 1000; // milliseconds off the whole second
+            e.response_ms = (i * 13) % 90;
+            e
+        })
+        .collect()
+}
+
+/// The browser's folds, restated. The series has to carry enough to answer
+/// what the API answers for any offset in use; `app.js` holds the JavaScript
+/// spelling of these to the API directly, in `e2e/tests/specs/stats_charts.rs`.
+fn fold_timeline(series: &QuarterSeries, bucket: i64, offset: i64) -> Vec<TimelineMultiPoint> {
+    let mut out: Vec<TimelineMultiPoint> = Vec::new();
+    for (i, &total) in series.total.iter().enumerate() {
+        if total == 0 {
+            continue;
+        }
+        let ts = series.start + i as i64 * QUARTER_SECS;
+        let at = (ts + offset).div_euclid(bucket) * bucket - offset;
+        if out.last().is_none_or(|p| p.timestamp != at) {
+            out.push(TimelineMultiPoint {
+                timestamp: at,
+                total: 0,
+                blocked: 0,
+                cached: 0,
+            });
+        }
+        let point = out.last_mut().unwrap();
+        point.total += total;
+        point.blocked += series.blocked[i];
+        point.cached += series.cached[i];
+    }
+    out
+}
+
+fn fold_heatmap(
+    series: &QuarterSeries,
+    offset: i64,
+) -> std::collections::BTreeMap<(i64, i64), i64> {
+    let mut cells = std::collections::BTreeMap::new();
+    for (i, &count) in series.heatmap.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let local = series.start + i as i64 * QUARTER_SECS + offset;
+        let weekday = (local.div_euclid(86400) + 4).rem_euclid(7);
+        let hour = local.rem_euclid(86400) / 3600;
+        *cells.entry((weekday, hour)).or_default() += count;
+    }
+    cells
+}
+
+/// The page's one scan replaces three statements, and has to answer what each
+/// of them did: the window readings exactly, and — once folded into a viewer's
+/// calendar — the timeline and the heatmap the API computes with that viewer's
+/// offset. The offsets include the half- and three-quarter-hour zones (India,
+/// Nepal, the Marquesas), which are the ones a coarser grain would get wrong.
+#[tokio::test]
+async fn the_stats_scan_answers_what_the_separate_queries_do() {
+    let db = test_db().await;
+    db.insert_query_logs(&spread_entries()).await.unwrap();
+
+    // Neither window starts on a quarter hour, so the quarters they cut through
+    // hold rows on both sides of the line.
+    let range_since = 1_704_067_200 + 86_400 + 1_234;
+    let heatmap_since = 1_704_067_200 + 40_000;
+    let scan = db
+        .stats_scan_since(range_since, heatmap_since)
+        .await
+        .unwrap();
+
+    let window = db.window_metrics_since(range_since).await.unwrap();
+    assert_eq!(scan.metrics.latency, window.latency);
+    assert_eq!(sorted(scan.metrics.query_types), sorted(window.query_types));
+    assert_eq!(sorted(scan.metrics.outcomes), sorted(window.outcomes));
+
+    for offset_minutes in [0_i64, 480, -300, 330, 345, -570, 840, -720] {
+        let offset = offset_minutes * 60;
+        for bucket in [3600, 6 * 3600, 86400] {
+            assert_eq!(
+                fold_timeline(&scan.series, bucket, offset),
+                db.timeline_multi_since(range_since, bucket, offset)
+                    .await
+                    .unwrap(),
+                "timeline, offset {offset_minutes} min, bucket {bucket} s"
+            );
+        }
+        let expected: std::collections::BTreeMap<(i64, i64), i64> = db
+            .hourly_heatmap_since(heatmap_since, offset)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| ((c.weekday, c.hour), c.count))
+            .collect();
+        assert_eq!(
+            fold_heatmap(&scan.series, offset),
+            expected,
+            "heatmap, offset {offset_minutes} min"
+        );
+    }
+}
+
+/// Each window keeps its own edge to the millisecond, including inside the
+/// quarter both edges share, and the series starts at the first quarter that
+/// held anything rather than at either window's start.
+#[tokio::test]
+async fn the_stats_scan_draws_each_window_to_the_millisecond() {
+    let db = test_db().await;
+    let range_since = 1_704_067_200 + 450; // mid-quarter
+    let at_ms = |ms: i64| {
+        let mut e = entry(0, "A", false, false, Some("1.1.1.1"));
+        e.timestamp = ms;
+        e
+    };
+    let edge = range_since * 1000;
+    db.insert_query_logs(&[
+        at_ms(edge - 1),           // heatmap only
+        at_ms(edge),               // both
+        at_ms(edge + 2 * 900_000), // both, two quarters on
+    ])
+    .await
+    .unwrap();
+
+    let scan = db
+        .stats_scan_since(range_since, range_since - 60)
+        .await
+        .unwrap();
+    assert_eq!(scan.series.start, 1_704_067_200);
+    assert_eq!(scan.series.total, vec![1, 0, 1]);
+    assert_eq!(scan.series.heatmap, vec![2, 0, 1]);
+    assert_eq!(scan.metrics.latency.sample_count, 2);
+
+    // Swap which window is wider: the row a millisecond before the edge is now
+    // outside the heatmap's window and inside the range.
+    let scan = db
+        .stats_scan_since(range_since - 60, range_since)
+        .await
+        .unwrap();
+    assert_eq!(scan.series.total, vec![2, 0, 1]);
+    assert_eq!(scan.series.heatmap, vec![1, 0, 1]);
+}
+
+#[tokio::test]
+async fn the_stats_scan_of_an_empty_window_reports_nothing() {
+    let db = test_db().await;
+    let scan = db.stats_scan_since(0, 0).await.unwrap();
+    assert_eq!(scan.series, QuarterSeries::default());
+    assert_eq!(scan.metrics.latency.sample_count, 0);
+    assert!(scan.metrics.outcomes.is_empty());
 }

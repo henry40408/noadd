@@ -6701,7 +6701,27 @@ async fn the_stats_page_renders_its_readings() {
 
     let html = stats_html(&app, &token, "").await;
 
-    assert!(html.contains("<stats-page>"), "the body was not wrapped");
+    assert!(html.contains("<stats-page "), "the body was not wrapped");
+    // The charts' series rides the page, so the browser makes no request for
+    // it: every query counted once for the timeline and once for the heatmap.
+    let series: serde_json::Value = {
+        let start = html.find(r#"data-series=""#).expect("no data-series") + 13;
+        let end = start + html[start..].find('"').unwrap();
+        serde_json::from_str(&html[start..end].replace("&#34;", "\"")).unwrap()
+    };
+    let sum = |key: &str| {
+        series[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_i64().unwrap())
+            .sum::<i64>()
+    };
+    assert_eq!((sum("total"), sum("blocked"), sum("heatmap")), (4, 3, 4));
+    assert!(
+        html.contains(r#"data-bucket-secs="3600""#),
+        "the 7d range's bucket was not handed to the browser"
+    );
     // Two distinct domains were queried.
     assert!(
         html.contains(r#"<div class="stat-label">Unique Domains</div><div class="stat-value accent" title="2">2</div>"#),

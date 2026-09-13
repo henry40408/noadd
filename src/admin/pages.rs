@@ -566,13 +566,15 @@ pub struct RangeOptionView {
 /// One row of the range switcher's aria-current bookkeeping plus the four
 /// tables and two grids that make up the statistics page.
 ///
-/// The split down this page is the one the data itself draws. `tz_offset`
-/// reaches exactly two of the computations — `compute_stats_timeline` and
-/// `compute_heatmap` — and those two feed exactly the three charts, which were
+/// The split down this page is the one the data itself draws. Only the three
+/// charts need a calendar, and a calendar needs the viewer's UTC offset, which
+/// arrives with the browser rather than with the request; the charts were
 /// already the documented exception to this UI working without JavaScript.
-/// Everything else here is a window of `now - range` with no calendar in it, so
-/// it renders on the server and never moves again: `app.js` fetches the charts
-/// with the viewer's offset and leaves the rest of the page alone.
+/// So the server ships them as `series` — quarter-hour counts on UTC
+/// boundaries, taken from the same scan as the breakdowns — and `app.js` folds
+/// those into the viewer's hours and days. Everything else here is a window of
+/// `now - range` with no calendar in it, so it renders on the server and never
+/// moves again.
 ///
 /// That is also why the range switcher is three links rather than three
 /// buttons. The range picks the server's window, so it belongs in the URL,
@@ -585,6 +587,10 @@ pub struct StatsTemplate {
     /// `"7d"` / `"30d"` / `"90d"`, for the card titles.
     range: &'static str,
     ranges: Vec<RangeOptionView>,
+    /// A [`crate::db::QuarterSeries`] as JSON, for the charts to fold.
+    series_json: String,
+    /// The timeline's bucket width for this range, in seconds.
+    bucket_secs: i64,
 
     highlights: Vec<StatCardView>,
     query_types: Vec<BarRowView>,
@@ -1705,6 +1711,14 @@ pub async fn stats_page(
         latency_card("Latency p99", latency.map_or(0, |l| l.p99_ms), "text-red"),
     ];
 
+    let series_json = serde_json::to_string(
+        &range_stats
+            .as_ref()
+            .map(|s| s.series.clone())
+            .unwrap_or_default(),
+    )
+    .expect("a series of integers always serializes");
+
     let (query_types, outcomes, top_domains) = range_stats
         .map(|s| {
             (
@@ -1752,6 +1766,8 @@ pub async fn stats_page(
             shell,
             range: range.label(),
             ranges,
+            series_json,
+            bucket_secs: range.bucket_secs(),
             highlights: highlight_cards,
             query_types,
             outcomes,
