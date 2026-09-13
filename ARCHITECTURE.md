@@ -237,6 +237,7 @@ Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noa
 | `users` | Operator accounts (username, Argon2 password hash) |
 | `sessions` | Active admin sessions (token, user_id, ip, user agent, timestamps) |
 | `api_keys` | Programmatic API keys (BLAKE2b hash, owning user_id, `ON DELETE CASCADE`) |
+| `query_stats_quarter`, `query_stats_{domain,client,upstream,metrics}_hour` | Rollups of `query_logs`: counts per quarter hour or hour and grouping key — see *Rollups* below |
 
 `query_logs` carries five indexes, all of them shaped by the statistics queries:
 
@@ -259,6 +260,18 @@ The metrics index is timestamp-first because its queries do not group by a colum
 The upstream index is partial because blocked and cached answers never reach an upstream, so more than half the rows have nothing to put in it (56% on a 370 k-row database), and its only query excludes them anyway. It is timestamp-first for the writer's sake rather than the reader's: both orders answer the dashboard's 24-hour top upstreams in about 200 pages against 1 608 through `timestamp` and a rowid lookup per row, but the logger appends at the newest end, and an upstream-first index spreads every batch across one insertion point per upstream — 65 pages written per 500-row batch against 56, where no index at all writes 53. It is 5.7 MiB on that database.
 
 Indexes are not free here. On that same 103 MiB database `dbstat` attributes 20 MiB to `(domain, timestamp)`, 18 MiB to `(client_ip, doh_token, timestamp)`, 9 MiB to the metrics index and 7 MiB to `timestamp` — the two composites added for statistics cost about a quarter of the file. (Those are the figures from before version 15 replaced the client index.) Measuring an index by the file-size delta of `CREATE INDEX` understates it whenever the database is carrying a freelist, since the new pages come out of that first; `dbstat` reports the real figure.
+
+### Rollups
+
+Every index above is still read one entry per logged query. With the default seven-day retention the Statistics page's windows, and the dashboard's 30-day summary, span the whole table, so no index choice can take those readings below the size of the index they read — 9 475 pages for the summary on a 1.48 M-row database, every dashboard tick. Version 16 adds five rollup tables in which one row stands for every query sharing a key within a unit of time: `query_stats_quarter` (blocked, cached; count and summed response time per quarter hour), and per hour `query_stats_domain_hour`, `query_stats_client_hour`, `query_stats_upstream_hour` (count and summed response time) and `query_stats_metrics_hour` (the grain the outcome, query-type and latency folds read). They are `WITHOUT ROWID`, with the unit first in the key, so a window is one range and the newest unit is where every write lands. On that database they total 3 631 pages of a 111 282-page file.
+
+The quarter hour is there because it is the finest bucket any chart draws and the unit every UTC offset in use is a whole number of; nothing else needs finer than the hour. `doh_token` is stored as `''` for plain DNS, since a key column cannot hold `NULL`.
+
+**The rollups must always equal a recount of `query_logs`**, because a reader folding them answers for the table. Inserts keep them there through an `AFTER INSERT` trigger (`query_logs_maintain_stats`) rather than through the logger, so rows that reach the table any other way — the e2e fixtures write theirs with the `sqlite3` CLI — are counted too. Replaying the same 1.48 M queries in the logger's 500-row batches, the trigger writes 886 480 pages against 885 858 for one grouped upsert per batch and 846 079 with no rollups at all.
+
+Deletes are not a trigger. A `DELETE` trigger would unwind a prune row by row and turn off SQLite's truncate optimisation for Clear All, so both do it in their own transaction instead: Clear All empties the five tables, and `prune_logs_before` calls `unwind_stats_rollups` before its delete. That drops whole units before the cutoff and, for the one quarter and one hour the cutoff falls inside, recounts the rows about to go and subtracts them — so the prune keeps its exact cutoff rather than rounding retention to the hour. Pruning a day from that database writes 5 151 pages and misses 13 971, against 5 020 and 12 282 without rollups. `rollups_follow_every_write_that_changes_query_logs` (`src/db.rs`) is the guard: it compares every table with its recount after batches, a direct SQL insert, prunes inside and on a unit boundary, and Clear All.
+
+Version 16 fills the rollups from the rows already logged, which on that database reads 101 420 pages and writes 3 714. The fill replaces rather than adds, so a migration interrupted before `user_version` moved is safe to run again. Nothing reads the rollups yet; the dashboard and the Statistics page move onto them in later changes.
 
 ### Measuring these queries
 

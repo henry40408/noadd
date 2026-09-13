@@ -363,6 +363,129 @@ pub struct LatencySummary {
 /// place a counter can live without a table of its own.
 const QUERY_LOG_COUNT_KEY: &str = "query_log_count";
 
+/// Width of one `query_stats_quarter` row, in milliseconds.
+const ROLLUP_QUARTER_MS: i64 = QUARTER_SECS * 1000;
+
+/// Width of one row of the hourly rollups, in milliseconds.
+const ROLLUP_HOUR_MS: i64 = 3_600_000;
+
+/// Pre-aggregated counts of `query_logs`, one table per grain a reader folds.
+///
+/// Every statistic the dashboard and the Statistics page show is a count, a
+/// sum or a histogram over a time window, and answering one from the table
+/// reads an index entry per logged query: with the default retention the
+/// window is the whole table, so no index can narrow it. A rollup row stands
+/// for every query that shares its key within its unit of time, so the same
+/// window reads a few thousand rows instead of a few million.
+///
+/// The grains are the coarsest that still answer every reader exactly. The
+/// quarter hour is the finest bucket any chart draws and the unit every UTC
+/// offset in use is a whole number of; lists and histograms need no finer than
+/// the hour. `doh_token` is stored as `''` for plain DNS because a primary key
+/// column cannot hold `NULL`, and `has_result` is spelled out rather than read
+/// from the generated column so the trigger does not depend on migration 12.
+///
+/// Inserts are kept here by a trigger rather than by the logger, so rows that
+/// reach the table any other way — the e2e fixtures write theirs with the
+/// `sqlite3` CLI — are counted too. Measured by replaying 1.48 M logged
+/// queries in the logger's 500-row batches, the trigger writes the same pages
+/// as one grouped upsert per batch (886 480 against 885 858). Deletes are not a
+/// trigger: a `DELETE` trigger would cost a row-by-row unwind on every prune
+/// and switch off `SQLite`'s truncate optimisation for Clear All, so
+/// [`unwind_stats_rollups`] does it in the statement's own transaction.
+const STATS_ROLLUP_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS query_stats_quarter (
+        quarter INTEGER NOT NULL,
+        blocked INTEGER NOT NULL,
+        cached INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        sum_ms INTEGER NOT NULL,
+        PRIMARY KEY (quarter, blocked, cached)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS query_stats_domain_hour (
+        hour INTEGER NOT NULL,
+        domain TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (hour, domain)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS query_stats_client_hour (
+        hour INTEGER NOT NULL,
+        client_ip TEXT NOT NULL,
+        doh_token TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (hour, client_ip, doh_token)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS query_stats_upstream_hour (
+        hour INTEGER NOT NULL,
+        upstream TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        sum_ms INTEGER NOT NULL,
+        PRIMARY KEY (hour, upstream)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS query_stats_metrics_hour (
+        hour INTEGER NOT NULL,
+        blocked INTEGER NOT NULL,
+        cached INTEGER NOT NULL,
+        has_result INTEGER NOT NULL,
+        query_type TEXT NOT NULL,
+        response_ms INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (hour, blocked, cached, has_result, query_type, response_ms)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER IF NOT EXISTS query_logs_maintain_stats AFTER INSERT ON query_logs BEGIN
+        INSERT INTO query_stats_quarter (quarter, blocked, cached, count, sum_ms)
+            VALUES (NEW.timestamp / 900000, NEW.blocked, NEW.cached, 1, NEW.response_ms)
+            ON CONFLICT DO UPDATE SET count = count + 1, sum_ms = sum_ms + excluded.sum_ms;
+        INSERT INTO query_stats_domain_hour (hour, domain, count)
+            VALUES (NEW.timestamp / 3600000, NEW.domain, 1)
+            ON CONFLICT DO UPDATE SET count = count + 1;
+        INSERT INTO query_stats_client_hour (hour, client_ip, doh_token, count)
+            VALUES (NEW.timestamp / 3600000, NEW.client_ip, COALESCE(NEW.doh_token, ''), 1)
+            ON CONFLICT DO UPDATE SET count = count + 1;
+        INSERT INTO query_stats_upstream_hour (hour, upstream, count, sum_ms)
+            SELECT NEW.timestamp / 3600000, NEW.upstream, 1, NEW.response_ms
+            WHERE NEW.upstream IS NOT NULL
+            ON CONFLICT DO UPDATE SET count = count + 1, sum_ms = sum_ms + excluded.sum_ms;
+        INSERT INTO query_stats_metrics_hour
+            (hour, blocked, cached, has_result, query_type, response_ms, count)
+            VALUES (NEW.timestamp / 3600000, NEW.blocked, NEW.cached,
+                    NEW.result IS NOT NULL AND NEW.result != '',
+                    NEW.query_type, NEW.response_ms, 1)
+            ON CONFLICT DO UPDATE SET count = count + 1;
+    END;
+";
+
+/// Fills the rollups from what `query_logs` already holds. An upsert that
+/// replaces rather than adds, so a migration interrupted after this ran and
+/// before `user_version` moved can run it again without doubling anything.
+///
+/// `WHERE true` is what lets an upsert follow a `SELECT` — without it the
+/// parser reads `ON CONFLICT` as part of the `SELECT`.
+const STATS_ROLLUP_BACKFILL: &str = "
+    INSERT INTO query_stats_quarter (quarter, blocked, cached, count, sum_ms)
+        SELECT timestamp / 900000, blocked, cached, COUNT(*), SUM(response_ms)
+        FROM query_logs WHERE true GROUP BY 1, 2, 3
+        ON CONFLICT DO UPDATE SET count = excluded.count, sum_ms = excluded.sum_ms;
+    INSERT INTO query_stats_domain_hour (hour, domain, count)
+        SELECT timestamp / 3600000, domain, COUNT(*)
+        FROM query_logs WHERE true GROUP BY 1, 2
+        ON CONFLICT DO UPDATE SET count = excluded.count;
+    INSERT INTO query_stats_client_hour (hour, client_ip, doh_token, count)
+        SELECT timestamp / 3600000, client_ip, COALESCE(doh_token, ''), COUNT(*)
+        FROM query_logs WHERE true GROUP BY 1, 2, 3
+        ON CONFLICT DO UPDATE SET count = excluded.count;
+    INSERT INTO query_stats_upstream_hour (hour, upstream, count, sum_ms)
+        SELECT timestamp / 3600000, upstream, COUNT(*), SUM(response_ms)
+        FROM query_logs WHERE upstream IS NOT NULL GROUP BY 1, 2
+        ON CONFLICT DO UPDATE SET count = excluded.count, sum_ms = excluded.sum_ms;
+    INSERT INTO query_stats_metrics_hour
+        (hour, blocked, cached, has_result, query_type, response_ms, count)
+        SELECT timestamp / 3600000, blocked, cached, result IS NOT NULL AND result != '',
+               query_type, response_ms, COUNT(*)
+        FROM query_logs WHERE true GROUP BY 1, 2, 3, 4, 5, 6
+        ON CONFLICT DO UPDATE SET count = excluded.count;
+";
+
 /// Default rusqlite cache is 16 statements; the read connection alone has
 /// ~20 distinct hot SQL strings (settings, stats, filter, token lookup),
 /// so anything below ~32 starts evicting on every admin poll.
@@ -918,7 +1041,16 @@ impl Database {
             )?;
         }
 
-        const LATEST_VERSION: i64 = 15;
+        if version < 16 {
+            // The rollups the dashboard and the Statistics page will fold
+            // instead of scanning the table; see `STATS_ROLLUP_SCHEMA`. Filled
+            // from the rows already logged, which on a 1.48 M-row database
+            // read 101 420 pages and wrote 3 714.
+            conn.execute_batch(STATS_ROLLUP_SCHEMA)?;
+            conn.execute_batch(STATS_ROLLUP_BACKFILL)?;
+        }
+
+        const LATEST_VERSION: i64 = 16;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1127,6 +1259,13 @@ impl Database {
             .call(|conn| {
                 let tx = conn.transaction()?;
                 tx.execute("DELETE FROM query_logs", [])?;
+                tx.execute_batch(
+                    "DELETE FROM query_stats_quarter;
+                     DELETE FROM query_stats_domain_hour;
+                     DELETE FROM query_stats_client_hour;
+                     DELETE FROM query_stats_upstream_hour;
+                     DELETE FROM query_stats_metrics_hour;",
+                )?;
                 set_log_count(&tx, 0)?;
                 tx.commit()?;
                 Ok(())
@@ -1142,6 +1281,7 @@ impl Database {
             .conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
+                unwind_stats_rollups(&tx, timestamp_ms)?;
                 let deleted = tx.execute(
                     "DELETE FROM query_logs WHERE timestamp < ?1",
                     params![timestamp_ms],
@@ -2878,6 +3018,74 @@ fn set_log_count(conn: &rusqlite::Connection, count: i64) -> rusqlite::Result<()
     Ok(())
 }
 
+/// Take out of the rollups every row `DELETE FROM query_logs WHERE timestamp <
+/// cutoff_ms` is about to remove. Must run before that delete, in its
+/// transaction.
+///
+/// Whole units before the cutoff are dropped. The unit the cutoff falls inside
+/// loses only the rows before it, which are recounted from the table and
+/// subtracted — so the prune keeps its exact cutoff and the rollups still agree
+/// with the table afterwards, instead of either rounding the retention to the
+/// hour or keeping counts for rows that are gone. That recount reads at most one
+/// quarter's and one hour's worth of rows.
+fn unwind_stats_rollups(conn: &rusqlite::Connection, cutoff_ms: i64) -> rusqlite::Result<()> {
+    let quarter_start = cutoff_ms.div_euclid(ROLLUP_QUARTER_MS) * ROLLUP_QUARTER_MS;
+    let hour_start = cutoff_ms.div_euclid(ROLLUP_HOUR_MS) * ROLLUP_HOUR_MS;
+
+    conn.prepare_cached(
+        "INSERT INTO query_stats_quarter (quarter, blocked, cached, count, sum_ms)
+             SELECT timestamp / 900000, blocked, cached, -COUNT(*), -SUM(response_ms)
+             FROM query_logs WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY 1, 2, 3
+             ON CONFLICT DO UPDATE SET count = count + excluded.count,
+                                       sum_ms = sum_ms + excluded.sum_ms",
+    )?
+    .execute(params![quarter_start, cutoff_ms])?;
+    conn.prepare_cached(
+        "DELETE FROM query_stats_quarter WHERE quarter < ?1 OR (quarter = ?1 AND count = 0)",
+    )?
+    .execute(params![quarter_start / ROLLUP_QUARTER_MS])?;
+
+    for sql in [
+        "INSERT INTO query_stats_domain_hour (hour, domain, count)
+             SELECT timestamp / 3600000, domain, -COUNT(*)
+             FROM query_logs WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY 1, 2
+             ON CONFLICT DO UPDATE SET count = count + excluded.count",
+        "INSERT INTO query_stats_client_hour (hour, client_ip, doh_token, count)
+             SELECT timestamp / 3600000, client_ip, COALESCE(doh_token, ''), -COUNT(*)
+             FROM query_logs WHERE timestamp >= ?1 AND timestamp < ?2 GROUP BY 1, 2, 3
+             ON CONFLICT DO UPDATE SET count = count + excluded.count",
+        "INSERT INTO query_stats_upstream_hour (hour, upstream, count, sum_ms)
+             SELECT timestamp / 3600000, upstream, -COUNT(*), -SUM(response_ms)
+             FROM query_logs
+             WHERE timestamp >= ?1 AND timestamp < ?2 AND upstream IS NOT NULL GROUP BY 1, 2
+             ON CONFLICT DO UPDATE SET count = count + excluded.count,
+                                       sum_ms = sum_ms + excluded.sum_ms",
+        "INSERT INTO query_stats_metrics_hour
+             (hour, blocked, cached, has_result, query_type, response_ms, count)
+             SELECT timestamp / 3600000, blocked, cached, result IS NOT NULL AND result != '',
+                    query_type, response_ms, -COUNT(*)
+             FROM query_logs WHERE timestamp >= ?1 AND timestamp < ?2
+             GROUP BY 1, 2, 3, 4, 5, 6
+             ON CONFLICT DO UPDATE SET count = count + excluded.count",
+    ] {
+        conn.prepare_cached(sql)?
+            .execute(params![hour_start, cutoff_ms])?;
+    }
+    let hour = hour_start / ROLLUP_HOUR_MS;
+    for table in [
+        "query_stats_domain_hour",
+        "query_stats_client_hour",
+        "query_stats_upstream_hour",
+        "query_stats_metrics_hour",
+    ] {
+        conn.prepare_cached(&format!(
+            "DELETE FROM {table} WHERE hour < ?1 OR (hour = ?1 AND count = 0)"
+        ))?
+        .execute(params![hour])?;
+    }
+    Ok(())
+}
+
 /// The maintained `query_logs` row count, counted instead only when the
 /// counter row is missing or unreadable.
 fn read_log_count(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
@@ -3761,5 +3969,210 @@ mod tests {
             10,
             "data should remain queryable after maintenance"
         );
+    }
+
+    /// Each rollup, the same grouping recounted from `query_logs`, and the
+    /// ordering that makes the two comparable row for row.
+    const ROLLUP_RECOUNTS: &[(&str, &str, &str)] = &[
+        (
+            "query_stats_quarter",
+            "SELECT quarter, blocked, cached, count, sum_ms FROM query_stats_quarter",
+            "SELECT timestamp / 900000, blocked, cached, COUNT(*), SUM(response_ms) \
+             FROM query_logs GROUP BY 1, 2, 3",
+        ),
+        (
+            "query_stats_domain_hour",
+            "SELECT hour, domain, count FROM query_stats_domain_hour",
+            "SELECT timestamp / 3600000, domain, COUNT(*) FROM query_logs GROUP BY 1, 2",
+        ),
+        (
+            "query_stats_client_hour",
+            "SELECT hour, client_ip, doh_token, count FROM query_stats_client_hour",
+            "SELECT timestamp / 3600000, client_ip, COALESCE(doh_token, ''), COUNT(*) \
+             FROM query_logs GROUP BY 1, 2, 3",
+        ),
+        (
+            "query_stats_upstream_hour",
+            "SELECT hour, upstream, count, sum_ms FROM query_stats_upstream_hour",
+            "SELECT timestamp / 3600000, upstream, COUNT(*), SUM(response_ms) \
+             FROM query_logs WHERE upstream IS NOT NULL GROUP BY 1, 2",
+        ),
+        (
+            "query_stats_metrics_hour",
+            "SELECT hour, blocked, cached, has_result, query_type, response_ms, count \
+             FROM query_stats_metrics_hour",
+            "SELECT timestamp / 3600000, blocked, cached, (result IS NOT NULL AND result != ''), \
+             query_type, response_ms, COUNT(*) FROM query_logs GROUP BY 1, 2, 3, 4, 5, 6",
+        ),
+    ];
+
+    /// Every row of `sql`, rendered and sorted, so two spellings of the same
+    /// grouping compare equal regardless of the order either returns.
+    fn rendered_rows(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let columns = stmt.column_count();
+        let mut rows: Vec<String> = stmt
+            .query_map([], |row| {
+                Ok((0..columns)
+                    .map(|i| format!("{:?}", row.get_ref(i).unwrap()))
+                    .collect::<Vec<_>>()
+                    .join("|"))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.sort();
+        rows
+    }
+
+    /// Asserts every rollup holds exactly what recounting `query_logs` gives.
+    fn assert_rollups_match(path: &str, step: &str) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        for (table, rollup, recount) in ROLLUP_RECOUNTS {
+            assert_eq!(
+                rendered_rows(&conn, rollup),
+                rendered_rows(&conn, recount),
+                "{table} disagrees with query_logs after {step}"
+            );
+        }
+    }
+
+    fn rollup_entry(timestamp: i64, i: i64) -> QueryLogEntry {
+        QueryLogEntry {
+            timestamp,
+            domain: format!("host{}.example.com", i % 3),
+            query_type: if i % 2 == 0 { "A" } else { "AAAA" }.to_string(),
+            client_ip: format!("10.0.0.{}", i % 2),
+            blocked: i % 4 == 0,
+            cached: i % 5 == 0,
+            upstream: (i % 3 != 0).then(|| format!("udp://9.9.9.{}:53", i % 2)),
+            doh_token: (i % 2 == 0).then(|| "phone".to_string()),
+            // All three shapes `has_result` distinguishes: none, empty, an answer.
+            result: match i % 3 {
+                0 => None,
+                1 => Some(String::new()),
+                _ => Some("1.2.3.4".to_string()),
+            },
+            response_ms: 1 + i % 7,
+            authenticated_data: false,
+        }
+    }
+
+    /// The rollups are only as good as their agreement with `query_logs`: a
+    /// reader that folds them answers for the table, so every write that changes
+    /// the table has to change them identically — including a prune whose
+    /// cutoff falls inside a quarter and an hour, which leaves those units half
+    /// deleted, and rows written straight into the table as the e2e fixtures do.
+    #[tokio::test]
+    async fn rollups_follow_every_write_that_changes_query_logs() {
+        const HOUR: i64 = 3_600_000;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollups.db");
+        let path_str = path.to_str().unwrap().to_string();
+        let db = Database::open(&path_str).await.unwrap();
+
+        // Straddles quarter and hour boundaries on both sides.
+        let offsets = [
+            0,
+            899_999,
+            900_000,
+            1_000_000,
+            2_700_001,
+            HOUR - 1,
+            HOUR + 5,
+            2 * HOUR + 30_000,
+        ];
+        let first: Vec<QueryLogEntry> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, off)| rollup_entry(10 * HOUR + off, i as i64))
+            .collect();
+        db.insert_query_logs(&first).await.unwrap();
+        assert_rollups_match(&path_str, "the first batch");
+
+        // Same units again, so every rollup row has to accumulate, not replace.
+        let second: Vec<QueryLogEntry> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, off)| rollup_entry(10 * HOUR + off + 1, i as i64 + 1))
+            .collect();
+        db.insert_query_logs(&second).await.unwrap();
+        assert_rollups_match(&path_str, "a batch into the same units");
+
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(&format!(
+                "INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, \
+                 cached, response_ms, upstream, doh_token, result, authenticated_data) VALUES \
+                 ({}, 'host0.example.com', 'A', '10.0.0.9', 0, 1, 40, NULL, NULL, '9.9.9.9', 0);",
+                10 * HOUR + 1_200_000
+            ))
+            .unwrap();
+        }
+        assert_rollups_match(&path_str, "a row written straight into the table");
+
+        // Inside the second quarter of hour 10: both units are cut in half.
+        let cutoff_ms = 10 * HOUR + 1_000_000;
+        let pruned = db.prune_logs_before(cutoff_ms / 1000).await.unwrap();
+        assert!(pruned > 0, "the prune has to remove something to test");
+        assert_rollups_match(&path_str, "a prune inside a quarter and an hour");
+
+        assert_eq!(db.prune_logs_before(cutoff_ms / 1000).await.unwrap(), 0);
+        assert_rollups_match(&path_str, "a prune that matched nothing");
+
+        // On an hour boundary: whole units go, none is left partial.
+        db.prune_logs_before(11 * HOUR / 1000).await.unwrap();
+        assert_rollups_match(&path_str, "a prune on an hour boundary");
+
+        db.delete_all_logs().await.unwrap();
+        assert_rollups_match(&path_str, "clearing the log");
+
+        db.insert_query_logs(&first).await.unwrap();
+        assert_rollups_match(&path_str, "a batch after clearing");
+    }
+
+    /// A database from before version 16 has to come out of `open` with its
+    /// rollups already holding what its table holds, and with the trigger that
+    /// keeps them there — a reader folding an empty rollup would report no
+    /// traffic for the whole retention window.
+    #[tokio::test]
+    async fn migration_v16_backfills_the_rollups() {
+        const HOUR: i64 = 3_600_000;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v15.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let entries: Vec<QueryLogEntry> = (0..24)
+            .map(|i| rollup_entry(20 * HOUR + i * 700_000, i))
+            .collect();
+        {
+            let db = Database::open(&path_str).await.unwrap();
+            db.insert_query_logs(&entries).await.unwrap();
+            db.close().await;
+        }
+
+        // Wind it back to version 15: the rows stay, the rollups do not.
+        {
+            let conn = rusqlite::Connection::open(&path_str).unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER query_logs_maintain_stats;
+                 DROP TABLE query_stats_quarter;
+                 DROP TABLE query_stats_domain_hour;
+                 DROP TABLE query_stats_client_hour;
+                 DROP TABLE query_stats_upstream_hour;
+                 DROP TABLE query_stats_metrics_hour;
+                 PRAGMA user_version = 15;",
+            )
+            .unwrap();
+        }
+
+        let migrated = Database::open(&path_str).await.unwrap();
+        assert_rollups_match(&path_str, "the migration");
+
+        migrated
+            .insert_query_logs(&[rollup_entry(21 * HOUR + 5, 99)])
+            .await
+            .unwrap();
+        assert_rollups_match(&path_str, "an insert into the migrated database");
     }
 }
