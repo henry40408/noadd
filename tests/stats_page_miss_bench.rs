@@ -14,7 +14,9 @@
 //!
 //! Each reading is taken with the read pool's page cache dropped first, so the
 //! number is what a cold appliance pays. `BENCH_RANGE` picks the window
-//! (`7d`, `30d`, `90d`; default `30d`).
+//! (`7d`, `30d`, `90d`; default `30d`). `BENCH_NOW` (unix seconds) pins the
+//! clock the window ends at, so an old copy can still be measured over the
+//! traffic it holds.
 
 use noadd::admin::stats::{
     self, StatsRange, compute_db_health, compute_heatmap, compute_range_stats,
@@ -54,7 +56,9 @@ async fn stats_page_miss_bench() {
     );
 
     let db = Database::open(&db_path).await.unwrap();
-    let now = now_unix();
+    let now = std::env::var("BENCH_NOW").ok().map_or_else(now_unix, |v| {
+        v.parse::<i64>().expect("BENCH_NOW must be unix seconds")
+    });
     let page_size = db.db_storage_stats().await.unwrap();
     eprintln!(
         "stats_page_miss_bench: db={db_path} range={} ",
