@@ -369,6 +369,17 @@ const ROLLUP_QUARTER_MS: i64 = QUARTER_SECS * 1000;
 /// Width of one row of the hourly rollups, in milliseconds.
 const ROLLUP_HOUR_MS: i64 = 3_600_000;
 
+/// The first rollup unit wholly inside a window that starts at `since_ms`.
+///
+/// A reader takes that unit and every later one from the rollup, and
+/// `[since_ms, first * unit_ms)` — the rest of the unit the window starts
+/// inside, empty when it starts on a boundary — from `query_logs`. Nothing is
+/// needed at the other end: the rollups are written in the same transaction as
+/// the rows, so even the unit still filling up is complete.
+fn first_whole_unit(since_ms: i64, unit_ms: i64) -> i64 {
+    since_ms.div_euclid(unit_ms) + i64::from(since_ms.rem_euclid(unit_ms) != 0)
+}
+
 /// Pre-aggregated counts of `query_logs`, one table per grain a reader folds.
 ///
 /// Every statistic the dashboard and the Statistics page show is a count, a
@@ -2224,14 +2235,17 @@ impl Database {
         Ok(result)
     }
 
-    /// The dashboard summary's figures for three nested windows, in one scan of
-    /// `idx_query_logs_ts_metrics`.
+    /// The dashboard summary's figures for three nested windows, folded out of
+    /// `query_stats_quarter`.
     ///
-    /// Totals and blocks came from one statement and cache hits and latency
-    /// from another, each walking the same 30 days of the same index — on every
-    /// dashboard tick, 4 304 pages on a 370 k-row database where 2 152 answer
-    /// both. The allowed-only figures take their filter into the `CASE` rather
-    /// than the `WHERE`, so one pass serves both halves.
+    /// Each window reads its whole quarters from the rollup and, from the table,
+    /// only the part of a quarter it starts inside — see `STATS_ROLLUP_SCHEMA`.
+    /// Answered from the table this was one scan of 30 days of
+    /// `idx_query_logs_ts_metrics` on every dashboard tick: 9 480 pages on a
+    /// 1.48 M-row database, because under the default retention those 30 days
+    /// are the whole table. The three windows are told apart by which arm a row
+    /// came from — a table row belongs to the one window whose partial quarter
+    /// it fills, and the wider windows count that quarter through the rollup.
     ///
     /// All `since_*` values are in epoch seconds. Caller MUST pass the widest
     /// window as `since_30d`.
@@ -2244,31 +2258,64 @@ impl Database {
         let today_ms = since_today * 1000;
         let d7_ms = since_7d * 1000;
         let d30_ms = since_30d * 1000;
+        let quarters = [today_ms, d7_ms, d30_ms].map(|ms| first_whole_unit(ms, ROLLUP_QUARTER_MS));
         let result = self
             .reader()
             .call(move |conn| {
-                // `INDEXED BY` for the reason `metrics_by_bucket_since` gives.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT
-                    COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked END), 0),
-                    COUNT(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN cached END), 0),
-                    COALESCE(AVG(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN response_ms END), 0),
-                    COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN blocked END), 0),
-                    COUNT(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN cached END), 0),
-                    COALESCE(AVG(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN response_ms END), 0),
-                    COUNT(*),
-                    COALESCE(SUM(blocked), 0),
-                    COUNT(CASE WHEN blocked = 0 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN blocked = 0 THEN cached END), 0),
-                    COALESCE(AVG(CASE WHEN blocked = 0 THEN response_ms END), 0)
-                 FROM query_logs INDEXED BY idx_query_logs_ts_metrics
-                 WHERE timestamp >= ?3",
+                    "WITH p AS (
+                        SELECT 'r' AS kind, quarter AS k, blocked, cached, count AS n, sum_ms AS ms
+                            FROM query_stats_quarter WHERE quarter >= ?6
+                        UNION ALL
+                        SELECT 'h1', 0, blocked, cached, 1, response_ms
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?1 AND timestamp < ?4 * 900000
+                        UNION ALL
+                        SELECT 'h7', 0, blocked, cached, 1, response_ms
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?2 AND timestamp < ?5 * 900000
+                        UNION ALL
+                        SELECT 'h30', 0, blocked, cached, 1, response_ms
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?3 AND timestamp < ?6 * 900000
+                    ),
+                    w AS (
+                        SELECT (kind = 'h1' OR (kind = 'r' AND k >= ?4)) AS in1,
+                               (kind = 'h7' OR (kind = 'r' AND k >= ?5)) AS in7,
+                               (kind = 'h30' OR kind = 'r') AS in30,
+                               blocked, cached, n, ms
+                        FROM p
+                    )
+                    SELECT
+                    COALESCE(SUM(CASE WHEN in1 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in1 THEN n * blocked END), 0),
+                    COALESCE(SUM(CASE WHEN in1 AND blocked = 0 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in1 AND blocked = 0 THEN n * cached END), 0),
+                    COALESCE(CAST(SUM(CASE WHEN in1 AND blocked = 0 THEN ms END) AS REAL)
+                             / SUM(CASE WHEN in1 AND blocked = 0 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in7 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in7 THEN n * blocked END), 0),
+                    COALESCE(SUM(CASE WHEN in7 AND blocked = 0 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in7 AND blocked = 0 THEN n * cached END), 0),
+                    COALESCE(CAST(SUM(CASE WHEN in7 AND blocked = 0 THEN ms END) AS REAL)
+                             / SUM(CASE WHEN in7 AND blocked = 0 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in30 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in30 THEN n * blocked END), 0),
+                    COALESCE(SUM(CASE WHEN in30 AND blocked = 0 THEN n END), 0),
+                    COALESCE(SUM(CASE WHEN in30 AND blocked = 0 THEN n * cached END), 0),
+                    COALESCE(CAST(SUM(CASE WHEN in30 AND blocked = 0 THEN ms END) AS REAL)
+                             / SUM(CASE WHEN in30 AND blocked = 0 THEN n END), 0)
+                    FROM w",
                 )?;
-                let row = stmt.query_row(params![today_ms, d7_ms, d30_ms], |row| {
+                let args = params![
+                    today_ms,
+                    d7_ms,
+                    d30_ms,
+                    quarters[0],
+                    quarters[1],
+                    quarters[2]
+                ];
+                let row = stmt.query_row(args, |row| {
                     let window = |at: usize| -> rusqlite::Result<WindowSummary> {
                         Ok(WindowSummary {
                             total: row.get(at)?,
@@ -2295,27 +2342,38 @@ impl Database {
     }
 
     /// The busiest domains in the window and how many distinct ones there were,
-    /// from one pass over `idx_query_logs_domain_ts`.
+    /// folded out of `query_stats_domain_hour`.
     ///
-    /// Asked separately these are two statements — `GROUP BY domain ORDER BY
-    /// cnt DESC LIMIT n` and `COUNT(DISTINCT domain)` — that group the same
-    /// rows the same way and each scan the whole index, because the index is
-    /// ordered `(domain, timestamp)` and a timestamp range cannot restrict it.
-    /// The CTE is materialized once and read twice, which is 3 977 page misses
-    /// instead of 7 954 on a 370 k-row database.
+    /// Whole hours come from the rollup and the part of an hour the window
+    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table
+    /// alone this read `idx_query_logs_domain_ts`, which a timestamp range
+    /// cannot restrict because the domain comes first: 6 192 pages for the
+    /// week of domain suggestions on a 1.48 M-row database. The CTE is
+    /// materialized once and read twice, so the count and the list share one
+    /// grouping.
     ///
     /// `unique` is 0 when the window is empty, which is also when `top` is: the
     /// count rides on the rows, so there is nothing to report either way.
     pub async fn domain_stats_since(&self, since: i64, limit: i64) -> Result<DomainStats, DbError> {
         let since_ms = since * 1000;
+        let hour = first_whole_unit(since_ms, ROLLUP_HOUR_MS);
         let stats = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "WITH d AS (                         SELECT domain, COUNT(*) AS cnt                         FROM query_logs                         WHERE timestamp >= ?1                         GROUP BY domain                      )                      SELECT (SELECT COUNT(*) FROM d), domain, cnt                      FROM d ORDER BY cnt DESC, domain LIMIT ?2",
+                    "WITH d AS (
+                        SELECT domain, SUM(n) AS cnt FROM (
+                            SELECT domain, count AS n FROM query_stats_domain_hour WHERE hour >= ?2
+                            UNION ALL
+                            SELECT domain, 1 FROM query_logs INDEXED BY idx_query_logs_timestamp
+                                WHERE timestamp >= ?1 AND timestamp < ?2 * 3600000
+                        ) GROUP BY domain
+                    )
+                    SELECT (SELECT COUNT(*) FROM d), domain, cnt
+                    FROM d ORDER BY cnt DESC, domain LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(params![since_ms, limit], |row| {
+                    .query_map(params![since_ms, hour, limit], |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
                             TopDomain {
@@ -2335,8 +2393,7 @@ impl Database {
         Ok(stats)
     }
 
-    /// A fold over [`Self::traffic_lists_since`], whose index is the only one
-    /// carrying the client columns.
+    /// A fold over [`Self::traffic_lists_since`].
     pub async fn top_clients_since(
         &self,
         since: i64,
@@ -2346,14 +2403,16 @@ impl Database {
     }
 
     /// The busiest domains, how many distinct ones there were, and the busiest
-    /// clients, from one scan of `idx_query_logs_ts_domain_client`.
+    /// clients, folded out of `query_stats_domain_hour` and
+    /// `query_stats_client_hour`.
     ///
-    /// The Statistics page and every dashboard tick want both lists, and used
-    /// to read two indexes for them. Grouped at `(domain, client_ip,
-    /// doh_token)`, one statement carries both: the rows are one per pairing a
-    /// window actually held, which on a home network is a few thousand, and
-    /// both lists are folded out of them here. The index is timestamp-first,
-    /// so a short window reads a short stretch of it.
+    /// The Statistics page and every dashboard tick want both lists. Whole
+    /// hours come from the rollups and the part of an hour the window starts
+    /// inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table alone
+    /// this was a scan of `idx_query_logs_ts_domain_client` as long as the
+    /// window: 22 394 pages for the Statistics page's 30 days on a 1.48 M-row
+    /// database. Both lists are one statement so they read one snapshot; the
+    /// first column says which list a row belongs to.
     ///
     /// Ties in either list break by name, the same way
     /// [`Self::domain_stats_since`] breaks them, so the two spellings of top
@@ -2364,26 +2423,40 @@ impl Database {
         limit: i64,
     ) -> Result<TrafficLists, DbError> {
         let since_ms = since * 1000;
+        let hour = first_whole_unit(since_ms, ROLLUP_HOUR_MS);
         let limit = usize::try_from(limit).unwrap_or(0);
         let lists = self
             .reader()
             .call(move |conn| {
-                // `INDEXED BY` because `idx_query_logs_timestamp` also matches
-                // the range and is smaller; taking it would be a rowid lookup
-                // per row.
+                // The rollup stores plain DNS's missing token as '', which a
+                // real token never is, so `NULLIF` restores the `NULL`.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT domain, client_ip, doh_token, COUNT(*) \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_domain_client \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY domain, client_ip, doh_token",
+                    "SELECT 0, domain, NULL, SUM(n) FROM (
+                        SELECT domain, count AS n FROM query_stats_domain_hour WHERE hour >= ?2
+                        UNION ALL
+                        SELECT domain, 1 FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?1 AND timestamp < ?2 * 3600000
+                    ) GROUP BY domain
+                    UNION ALL
+                    SELECT 1, client_ip, NULLIF(token, ''), SUM(n) FROM (
+                        SELECT client_ip, doh_token AS token, count AS n
+                            FROM query_stats_client_hour WHERE hour >= ?2
+                        UNION ALL
+                        SELECT client_ip, COALESCE(doh_token, ''), 1
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?1 AND timestamp < ?2 * 3600000
+                    ) GROUP BY client_ip, token",
                 )?;
                 let mut domains: HashMap<String, i64> = HashMap::new();
                 let mut clients: HashMap<(String, Option<String>), i64> = HashMap::new();
-                let mut rows = stmt.query(params![since_ms])?;
+                let mut rows = stmt.query(params![since_ms, hour])?;
                 while let Some(row) = rows.next()? {
                     let count: i64 = row.get(3)?;
-                    *domains.entry(row.get(0)?).or_default() += count;
-                    *clients.entry((row.get(1)?, row.get(2)?)).or_default() += count;
+                    if row.get::<_, i64>(0)? == 0 {
+                        domains.insert(row.get(1)?, count);
+                    } else {
+                        clients.insert((row.get(1)?, row.get(2)?), count);
+                    }
                 }
                 Ok((domains, clients))
             })
@@ -2420,27 +2493,36 @@ impl Database {
         })
     }
 
+    /// The busiest upstreams in the window with their mean response time,
+    /// folded out of `query_stats_upstream_hour`.
+    ///
+    /// Whole hours come from the rollup and the part of an hour the window
+    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. The mean is the
+    /// summed response time over the count, which is exactly what `AVG` over the
+    /// same integer rows returns. Ties break by name, as the other lists do.
     pub async fn top_upstreams_since(
         &self,
         since: i64,
         limit: i64,
     ) -> Result<Vec<TopUpstream>, DbError> {
         let since_ms = since * 1000;
+        let hour = first_whole_unit(since_ms, ROLLUP_HOUR_MS);
         let rows = self
             .reader()
             .call(move |conn| {
-                // `INDEXED BY` so a drift in the planner's statistics cannot send
-                // this back to `idx_query_logs_timestamp` and a lookup per row.
-                // The `upstream IS NOT NULL` term is what lets the partial index
-                // answer at all.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT upstream, COUNT(*) as cnt, AVG(response_ms) as avg_ms \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_upstream \
-                     WHERE timestamp >= ?1 AND upstream IS NOT NULL \
-                     GROUP BY upstream ORDER BY cnt DESC LIMIT ?2",
+                    "SELECT upstream, SUM(n) AS cnt, CAST(SUM(ms) AS REAL) / SUM(n) AS avg_ms FROM (
+                        SELECT upstream, count AS n, sum_ms AS ms
+                            FROM query_stats_upstream_hour WHERE hour >= ?2
+                        UNION ALL
+                        SELECT upstream, 1, response_ms
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?1 AND timestamp < ?2 * 3600000
+                              AND upstream IS NOT NULL
+                    ) GROUP BY upstream ORDER BY cnt DESC, upstream LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(params![since_ms, limit], |row| {
+                    .query_map(params![since_ms, hour, limit], |row| {
                         Ok(TopUpstream {
                             upstream: row.get(0)?,
                             count: row.get(1)?,
@@ -2819,25 +2901,47 @@ impl Database {
         since: i64, // unix seconds
         bucket_secs: i64,
     ) -> Result<Vec<TimelinePoint>, DbError> {
+        let since_ms = since * 1000;
+        let bucket_ms = bucket_secs * 1000;
+        let quarter = first_whole_unit(since_ms, ROLLUP_QUARTER_MS);
         let rows = self
             .reader()
             .call(move |conn| {
-                let since_ms = since * 1000;
-                let bucket_ms = bucket_secs * 1000;
-                let mut stmt = conn.prepare_cached(
-                    "SELECT (timestamp / ?1) * ?1 as bucket, COUNT(*) as total, COALESCE(SUM(blocked), 0) as blocked FROM query_logs WHERE timestamp >= ?2 GROUP BY bucket ORDER BY bucket",
-                )?;
-                let since = since_ms;
-                let bucket_secs = bucket_ms;
-                let rows = stmt
-                    .query_map(params![bucket_secs, since], |row| {
-                        Ok(TimelinePoint {
-                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
-                            total: row.get(1)?,
-                            blocked: row.get(2)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                // A bucket that is a whole number of quarters is a sum of
+                // `query_stats_quarter` rows, plus the table for the quarter the
+                // window starts inside. A finer bucket only happens while the
+                // log is younger than a few hours, when the table is small
+                // enough to count directly.
+                let point = |row: &rusqlite::Row<'_>| {
+                    Ok(TimelinePoint {
+                        timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
+                        total: row.get(1)?,
+                        blocked: row.get(2)?,
+                    })
+                };
+                let rows = if bucket_ms % ROLLUP_QUARTER_MS == 0 {
+                    conn.prepare_cached(
+                        "SELECT bucket, SUM(total), SUM(blocked) FROM (
+                            SELECT (quarter * 900000 / ?1) * ?1 AS bucket,
+                                   count AS total, blocked * count AS blocked
+                                FROM query_stats_quarter WHERE quarter >= ?3
+                            UNION ALL
+                            SELECT (timestamp / ?1) * ?1, 1, blocked
+                                FROM query_logs INDEXED BY idx_query_logs_timestamp
+                                WHERE timestamp >= ?2 AND timestamp < ?3 * 900000
+                        ) GROUP BY bucket ORDER BY bucket",
+                    )?
+                    .query_map(params![bucket_ms, since_ms, quarter], point)?
+                    .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    conn.prepare_cached(
+                        "SELECT (timestamp / ?1) * ?1 as bucket, COUNT(*) as total, \
+                         COALESCE(SUM(blocked), 0) as blocked FROM query_logs \
+                         WHERE timestamp >= ?2 GROUP BY bucket ORDER BY bucket",
+                    )?
+                    .query_map(params![bucket_ms, since_ms], point)?
+                    .collect::<Result<Vec<_>, _>>()?
+                };
                 Ok(rows)
             })
             .await?;
@@ -3820,59 +3924,6 @@ mod tests {
         assert!(
             !indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
             "the client index should be gone after migration: {indexes:?}"
-        );
-    }
-
-    /// `INDEXED BY` fixes which index the lists read, but not whether that
-    /// index answers them alone. Assert the plan is covering, which is what
-    /// keeps a table lookup per row out of every dashboard tick.
-    #[tokio::test]
-    async fn the_traffic_lists_are_covered_by_their_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("plan.db");
-        let db = Database::open(path.to_str().unwrap()).await.unwrap();
-
-        let logs: Vec<QueryLogEntry> = (0..500)
-            .map(|i| QueryLogEntry {
-                timestamp: 1_000_000 + i,
-                domain: format!("d{}.example", i % 50),
-                query_type: "A".into(),
-                client_ip: format!("10.0.0.{}", i % 25),
-                blocked: false,
-                cached: false,
-                response_ms: i % 7,
-                upstream: None,
-                doh_token: None,
-                result: None,
-                authenticated_data: false,
-            })
-            .collect();
-        db.insert_query_logs(&logs).await.unwrap();
-
-        // The writer, not `reader()`: ANALYZE writes sqlite_stat1, and the read
-        // pool is opened SQLITE_OPEN_READ_ONLY.
-        let plan = db
-            .conn
-            .call(|conn| {
-                conn.execute_batch("ANALYZE;")?;
-                // The statement `traffic_lists_since` prepares, verbatim.
-                let mut stmt = conn.prepare(
-                    "EXPLAIN QUERY PLAN SELECT domain, client_ip, doh_token, COUNT(*) \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_domain_client \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY domain, client_ip, doh_token",
-                )?;
-                let rows = stmt
-                    .query_map(params![0_i64], |row| row.get::<_, String>(3))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
-            })
-            .await
-            .unwrap();
-
-        assert!(
-            plan.contains("COVERING INDEX idx_query_logs_ts_domain_client"),
-            "the traffic lists should read their index alone, got: {plan}"
         );
     }
 

@@ -833,3 +833,224 @@ async fn the_stats_scan_of_an_empty_window_reports_nothing() {
     assert_eq!(scan.metrics.latency.sample_count, 0);
     assert!(scan.metrics.outcomes.is_empty());
 }
+
+const HOUR_MS: i64 = 3_600_000;
+
+/// Three days of traffic starting 1 234 ms past an hour, one query every
+/// 86 413 ms, so rows fall on both sides of every quarter and hour boundary a
+/// window can start at. Every column a reading groups or sums varies.
+async fn recount_db() -> (Database, String) {
+    let dir = tempdir().unwrap();
+    let path = dir.keep().join("recount.db");
+    let path_str = path.to_str().unwrap().to_string();
+    let db = Database::open(&path_str).await.unwrap();
+    let start = 472_222 * HOUR_MS + 1_234;
+    let entries: Vec<QueryLogEntry> = (0..3_000_usize)
+        .map(|n| (n, i64::try_from(n).unwrap()))
+        .map(|(n, i)| QueryLogEntry {
+            timestamp: start + i * 86_413,
+            domain: format!("d{}.example", (i * 7) % 23),
+            query_type: ["A", "AAAA", "HTTPS"][n % 3].to_string(),
+            client_ip: format!("10.0.0.{}", i % 5),
+            blocked: i % 4 == 0,
+            cached: i % 3 == 0,
+            upstream: (i % 5 != 0).then(|| format!("udp://9.9.9.{}:53", i % 3)),
+            doh_token: [None, Some("phone"), Some("tablet")][n % 3].map(str::to_string),
+            result: (i % 2 == 0).then(|| "1.2.3.4".to_string()),
+            response_ms: (i * 13) % 97,
+            authenticated_data: false,
+        })
+        .collect();
+    for chunk in entries.chunks(500) {
+        db.insert_query_logs(chunk).await.unwrap();
+    }
+    (db, path_str)
+}
+
+/// Window starts, in seconds, against [`recount_db`]: before the data, on an
+/// hour, on a quarter, inside a quarter, inside an hour, and after the data.
+fn recount_sinces() -> Vec<i64> {
+    let start_s = 472_222 * 3_600;
+    vec![
+        0,
+        start_s + 5 * 3_600,
+        start_s + 7 * 3_600 + 900,
+        start_s + 20 * 3_600 + 1_000,
+        start_s + 41 * 3_600 + 2_345,
+        start_s + 100 * 3_600,
+    ]
+}
+
+/// The dashboard's readings now fold rollups and the table only where a window
+/// starts inside a unit, so the answers are checked against the statements they
+/// replaced, run on the same rows: any disagreement is a query reporting
+/// traffic the table does not hold.
+#[tokio::test]
+async fn dashboard_readings_equal_a_recount_of_the_table() {
+    let (db, path) = recount_db().await;
+    let raw = rusqlite::Connection::open(&path).unwrap();
+
+    for since in recount_sinces() {
+        let (s1, s7, s30) = (since, since - 2 * 3_600 - 17, since - 30 * 3_600 - 900);
+        let summary = db.summary_multi_since(s1, s7, s30).await.unwrap();
+        let expected: Vec<(i64, i64, i64, i64, f64)> = raw
+            .query_row(
+                "SELECT
+                    COUNT(CASE WHEN timestamp >= ?1 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN blocked END), 0),
+                    COUNT(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?1 AND blocked = 0 THEN response_ms END), 0),
+                    COUNT(CASE WHEN timestamp >= ?2 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN blocked END), 0),
+                    COUNT(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN timestamp >= ?2 AND blocked = 0 THEN response_ms END), 0),
+                    COUNT(*), COALESCE(SUM(blocked), 0), COUNT(CASE WHEN blocked = 0 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN blocked = 0 THEN cached END), 0),
+                    COALESCE(AVG(CASE WHEN blocked = 0 THEN response_ms END), 0)
+                 FROM query_logs WHERE timestamp >= ?3",
+                rusqlite::params![s1 * 1000, s7 * 1000, s30 * 1000],
+                |row| {
+                    (0..3)
+                        .map(|w| {
+                            Ok((
+                                row.get(w * 5)?,
+                                row.get(w * 5 + 1)?,
+                                row.get(w * 5 + 2)?,
+                                row.get(w * 5 + 3)?,
+                                row.get(w * 5 + 4)?,
+                            ))
+                        })
+                        .collect()
+                },
+            )
+            .unwrap();
+        let got: Vec<(i64, i64, i64, i64, f64)> = summary
+            .iter()
+            .map(|w| {
+                (
+                    w.total,
+                    w.blocked,
+                    w.allowed,
+                    w.cache_hits,
+                    w.avg_response_ms,
+                )
+            })
+            .collect();
+        assert_eq!(got, expected, "summary from {since}");
+
+        for bucket_secs in [60, 600, 1_800, 3_600] {
+            let got: Vec<(i64, i64, i64)> = db
+                .timeline_since(since, bucket_secs)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|p| (p.timestamp, p.total, p.blocked))
+                .collect();
+            let expected: Vec<(i64, i64, i64)> = raw
+                .prepare(
+                    "SELECT (timestamp / ?1) * ?1 / 1000, COUNT(*), COALESCE(SUM(blocked), 0) \
+                     FROM query_logs WHERE timestamp >= ?2 GROUP BY 1 ORDER BY 1",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![bucket_secs * 1000, since * 1000], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(got, expected, "timeline from {since} by {bucket_secs}s");
+        }
+
+        for limit in [5, 1_000] {
+            let expected_domains: Vec<(String, i64)> = raw
+                .prepare(
+                    "SELECT domain, COUNT(*) FROM query_logs WHERE timestamp >= ?1 \
+                     GROUP BY domain ORDER BY 2 DESC, domain LIMIT ?2",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![since * 1000, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let expected_unique: i64 = raw
+                .query_row(
+                    "SELECT COUNT(DISTINCT domain) FROM query_logs WHERE timestamp >= ?1",
+                    [since * 1000],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let expected_clients: Vec<(String, Option<String>, i64)> = raw
+                .prepare(
+                    "SELECT client_ip, doh_token, COUNT(*) FROM query_logs WHERE timestamp >= ?1 \
+                     GROUP BY client_ip, doh_token ORDER BY 3 DESC, client_ip, doh_token LIMIT ?2",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![since * 1000, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let expected_upstreams: Vec<(String, i64, f64)> = raw
+                .prepare(
+                    "SELECT upstream, COUNT(*), AVG(response_ms) FROM query_logs \
+                     WHERE timestamp >= ?1 AND upstream IS NOT NULL \
+                     GROUP BY upstream ORDER BY 2 DESC, upstream LIMIT ?2",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![since * 1000, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+
+            let lists = db.traffic_lists_since(since, limit).await.unwrap();
+            let domains = db.domain_stats_since(since, limit).await.unwrap();
+            let upstreams = db.top_upstreams_since(since, limit).await.unwrap();
+            let pairs = |top: &[noadd::db::TopDomain]| -> Vec<(String, i64)> {
+                top.iter().map(|d| (d.domain.clone(), d.count)).collect()
+            };
+
+            let tag = format!("from {since}, limit {limit}");
+            assert_eq!(
+                pairs(&lists.domains.top),
+                expected_domains,
+                "traffic lists' domains {tag}"
+            );
+            assert_eq!(
+                lists.domains.unique, expected_unique,
+                "traffic lists' unique {tag}"
+            );
+            assert_eq!(pairs(&domains.top), expected_domains, "domain stats {tag}");
+            // The count rides on the rows, so an empty window reports 0.
+            let unique = if expected_domains.is_empty() {
+                0
+            } else {
+                expected_unique
+            };
+            assert_eq!(domains.unique, unique, "domain stats' unique {tag}");
+            assert_eq!(
+                lists
+                    .clients
+                    .iter()
+                    .map(|c| (c.client_ip.clone(), c.doh_token.clone(), c.count))
+                    .collect::<Vec<_>>(),
+                expected_clients,
+                "traffic lists' clients {tag}"
+            );
+            assert_eq!(
+                upstreams
+                    .iter()
+                    .map(|u| (u.upstream.clone(), u.count, u.avg_ms))
+                    .collect::<Vec<_>>(),
+                expected_upstreams,
+                "top upstreams {tag}"
+            );
+        }
+    }
+}

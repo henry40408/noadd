@@ -200,73 +200,81 @@ async fn the_page_and_its_charts_are_one_metrics_scan() {
     );
 }
 
-/// The dashboard's summary asks every tick for totals, blocks, cache hits and
-/// mean latency over three windows. Every one of those is a column of
-/// `idx_query_logs_ts_metrics`, so together they cost one scan of it — not the
-/// two that asking the blocked counts and the cache figures separately paid.
-#[tokio::test]
-async fn the_dashboard_summary_is_one_metrics_scan() {
-    let db = seeded_db().await;
-    let now = ROWS; // seconds; the seed runs from 0 to ROWS
+/// Twenty thousand queries inside one hour, from fifty domains and twenty
+/// clients: the rollups hold a few hundred rows for what the table holds in
+/// twenty thousand, which is the shape a busy resolver's hour takes.
+async fn dense_db() -> Database {
+    let dir = tempdir().unwrap();
+    let path = dir.keep().join("dense.db");
+    let db = Database::open(path.to_str().unwrap()).await.unwrap();
 
-    let summary = page_misses(&db, || stats::compute_summary(&db, now)).await;
-    let one_scan = page_misses(&db, || db.window_metrics_since(0)).await;
-
-    assert!(
-        one_scan > 0,
-        "no pages were read at all — the measurement is not working"
-    );
-    assert!(
-        summary <= one_scan + one_scan / 10,
-        "the summary read {summary} pages where one scan of the metrics index \
-         reads {one_scan} — has it gone back to a statement per figure?"
-    );
+    let entries: Vec<QueryLogEntry> = (0..ROWS)
+        .map(|i| QueryLogEntry {
+            timestamp: i * 150,
+            domain: format!("host{}.example.com", i % 50),
+            query_type: if i % 3 == 0 { "AAAA" } else { "A" }.to_string(),
+            client_ip: format!("10.0.0.{}", i % 20),
+            blocked: i % 7 == 0,
+            cached: i % 5 == 0,
+            upstream: (i % 2 == 0).then(|| format!("tls://1.1.1.{}:853", i % 4)),
+            doh_token: None,
+            result: Some("x".repeat(RESULT_PADDING)),
+            response_ms: i % 50,
+            authenticated_data: false,
+        })
+        .collect();
+    for chunk in entries.chunks(2_000) {
+        db.insert_query_logs(chunk).await.unwrap();
+    }
+    db
 }
 
-/// The top upstreams read `upstream` and `response_ms`, which no index carried,
-/// so every forwarded query in the window was a rowid lookup into the table —
-/// on every dashboard tick. A partial index over the forwarded rows answers it
-/// alone.
+/// Every reading a dashboard tick makes folds the rollups, and reads the table
+/// only for the part of a unit its window starts inside — none here, because
+/// every window below starts on a unit boundary. Before the rollups each of
+/// these was a scan of an index as long as the window, and the window is the
+/// whole table under the default retention, every ten seconds.
 #[tokio::test]
-async fn the_top_upstreams_never_read_the_log_table() {
-    let db = seeded_db().await;
-    let storage = db.db_storage_stats().await.unwrap();
-    let db_pages = storage.main_bytes / 4096;
+async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
+    let db = dense_db().await;
 
-    let misses = page_misses(&db, || db.top_upstreams_since(0, 10)).await;
+    // For scale: counting with a search that matches every domain walks an
+    // index over every row, which is what each reading used to cost.
+    let scan = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let readings = [
+        (
+            "summary",
+            page_misses(&db, || db.summary_multi_since(0, 0, 0)).await,
+        ),
+        (
+            "timeline",
+            page_misses(&db, || db.timeline_since(0, 1_800)).await,
+        ),
+        (
+            "traffic lists",
+            page_misses(&db, || db.traffic_lists_since(0, 10)).await,
+        ),
+        (
+            "domain stats",
+            page_misses(&db, || db.domain_stats_since(0, 20)).await,
+        ),
+        (
+            "top upstreams",
+            page_misses(&db, || db.top_upstreams_since(0, 10)).await,
+        ),
+    ];
 
     assert!(
-        misses > 0,
-        "no pages were read at all — the measurement is not working"
+        scan > 0,
+        "the scan read no pages at all — the measurement is not working"
     );
-    assert!(
-        misses * 4 < db_pages,
-        "top upstreams read {misses} of the database's {db_pages} pages; that \
-         is the table, not an index — is idx_query_logs_ts_upstream missing?"
-    );
-}
-
-/// The domain and client lists read an index that starts with `timestamp`, so a
-/// short window — the dashboard's 24 hours against a week of retention — reads
-/// a short stretch of it. The group-first indexes they replaced could not be
-/// restricted by the window at all, and read most of themselves whatever it was.
-#[tokio::test]
-async fn a_short_window_reads_a_short_stretch_of_the_traffic_lists() {
-    let db = seeded_db().await;
-
-    let whole = page_misses(&db, || db.traffic_lists_since(0, 15)).await;
-    // The last tenth of the seed.
-    let tail = page_misses(&db, || db.traffic_lists_since(ROWS - ROWS / 10, 15)).await;
-
-    assert!(
-        tail > 0,
-        "no pages were read at all — the measurement is not working"
-    );
-    assert!(
-        tail * 4 < whole,
-        "a tenth of the window read {tail} pages against {whole} for all of it — \
-         is the index still timestamp-first, and still named by INDEXED BY?"
-    );
+    for (label, read) in readings {
+        assert!(
+            read * 10 < scan,
+            "{label} read {read} pages where a scan over every row reads {scan} — \
+             is it back on the table instead of the rollups?"
+        );
+    }
 }
 
 /// The heatmap reads `timestamp` and nothing else, so it belongs on the
