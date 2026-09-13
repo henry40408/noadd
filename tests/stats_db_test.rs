@@ -364,75 +364,70 @@ async fn compute_summary_populates_7d_and_30d_rates() {
     assert!((s.avg_response_ms_30d - 5.0).abs() < 1e-9);
 }
 
+/// One statement answers what the dashboard used to ask two for: totals and
+/// blocks over every query, cache hits and latency over the allowed ones only.
+/// The blocked rows are given a response time the allowed ones never have, so
+/// an average that let them in would show it.
 #[tokio::test]
-async fn count_queries_multi_since_matches_single_window() {
+async fn summary_multi_since_computes_each_window() {
     let db = test_db().await;
     let now: i64 = 40 * 86400;
     let one_day: i64 = 86400;
 
+    let blocked = |ts| {
+        let mut e = entry(ts, "A", true, false, Some("NXDOMAIN"));
+        e.response_ms = 900;
+        e
+    };
     let entries = vec![
-        entry(now - 100, "A", true, false, Some("NXDOMAIN")),
+        blocked(now - 100),
         entry(now - 200, "A", false, true, Some("NOERROR")),
         entry(now - 3 * one_day, "A", false, false, Some("NOERROR")),
-        entry(now - 20 * one_day, "A", true, false, Some("NXDOMAIN")),
+        blocked(now - 20 * one_day),
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let single_today = db.count_queries_since(now - one_day).await.unwrap();
-    let single_7d = db.count_queries_since(now - 7 * one_day).await.unwrap();
-    let single_30d = db.count_queries_since(now - 30 * one_day).await.unwrap();
-
-    let (today, d7, d30) = db
-        .count_queries_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
+    let [today, d7, d30] = db
+        .summary_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
         .await
         .unwrap();
 
-    // The single-window helper returns the total only, so the cross-check
-    // covers totals; the blocked halves are pinned directly below.
-    assert_eq!(today.0, single_today);
-    assert_eq!(d7.0, single_7d);
-    assert_eq!(d30.0, single_30d);
+    // The totals agree with the single-window count the 1-minute figure uses.
+    assert_eq!(
+        today.total,
+        db.count_queries_since(now - one_day).await.unwrap()
+    );
+    assert_eq!(
+        d30.total,
+        db.count_queries_since(now - 30 * one_day).await.unwrap()
+    );
 
-    // Sanity: today = (2, 1); 7d = (3, 1); 30d = (4, 2).
-    assert_eq!(today, (2, 1));
-    assert_eq!(d7, (3, 1));
-    assert_eq!(d30, (4, 2));
+    // today -> 2 queries, 1 blocked, 1 allowed and cached;
+    // 7d    -> +1 allowed, uncached;
+    // 30d   -> +1 blocked, so the allowed figures match 7d.
+    let expect = |w: noadd::db::WindowSummary, total, blocked, allowed, hits| {
+        assert_eq!(
+            (w.total, w.blocked, w.allowed, w.cache_hits),
+            (total, blocked, allowed, hits)
+        );
+        assert!(
+            (w.avg_response_ms - 5.0).abs() < 1e-9,
+            "blocked rows leaked into the average: {w:?}"
+        );
+    };
+    expect(today, 2, 1, 1, 1);
+    expect(d7, 3, 1, 2, 1);
+    expect(d30, 4, 2, 2, 1);
 }
 
 #[tokio::test]
-async fn cache_stats_multi_since_computes_each_window() {
-    // Previously cross-checked against a single-window cache_stats_since, which
-    // production never called and which has been removed. The expectations are
-    // now stated directly so the multi-window query keeps its coverage.
+async fn summary_multi_since_on_an_empty_window_reports_zeroes() {
     let db = test_db().await;
-    let now: i64 = 40 * 86400;
-    let one_day: i64 = 86400;
-
-    let entries = vec![
-        entry(now - 100, "A", true, false, Some("NXDOMAIN")),
-        entry(now - 200, "A", false, true, Some("NOERROR")),
-        entry(now - 3 * one_day, "A", false, false, Some("NOERROR")),
-        entry(now - 20 * one_day, "A", true, false, Some("NXDOMAIN")),
-    ];
-    db.insert_query_logs(&entries).await.unwrap();
-
-    let (today, d7, d30) = db
-        .cache_stats_multi_since(now - one_day, now - 7 * one_day, now - 30 * one_day)
-        .await
-        .unwrap();
-
-    // Blocked rows are excluded, so only the allowed ones count:
-    // today  -> 1 allowed, cached;              7d -> +1 allowed, uncached;
-    // 30d    -> the 20-day-old row is blocked, so identical to 7d.
-    // Every seeded row has response_ms = 5.
-    assert_eq!((today.0, today.1), (1, 1));
-    assert!((today.2 - 5.0).abs() < 1e-9);
-
-    assert_eq!((d7.0, d7.1), (1, 2));
-    assert!((d7.2 - 5.0).abs() < 1e-9);
-
-    assert_eq!((d30.0, d30.1), (1, 2));
-    assert!((d30.2 - 5.0).abs() < 1e-9);
+    let windows = db.summary_multi_since(0, 0, 0).await.unwrap();
+    for w in windows {
+        assert_eq!((w.total, w.blocked, w.allowed, w.cache_hits), (0, 0, 0, 0));
+        assert!(w.avg_response_ms.abs() < 1e-9);
+    }
 }
 
 #[tokio::test]
