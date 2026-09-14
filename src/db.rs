@@ -252,16 +252,16 @@ pub struct MetricsBucket {
 pub struct WindowMetricsRow {
     pub blocked: bool,
     pub cached: bool,
-    /// Whether `result` held an answer. Carried by `idx_query_logs_ts_metrics`
-    /// as a generated column so classifying an outcome never reads the table.
+    /// Whether `result` held an answer. Carried by `query_stats_metrics_hour`
+    /// so classifying an outcome never reads the table.
     pub has_result: bool,
     pub query_type: String,
     pub response_ms: i64,
     pub count: i64,
 }
 
-/// The three Statistics readings that come off `idx_query_logs_ts_metrics` in
-/// one scan, answered together by [`Database::window_metrics_since`].
+/// The three Statistics readings folded out of `query_stats_metrics_hour` in
+/// one statement, answered together by [`Database::window_metrics_since`].
 #[derive(Debug, Clone)]
 pub struct WindowMetrics {
     pub outcomes: Vec<(String, i64)>,
@@ -309,8 +309,8 @@ pub struct QuarterSeries {
     pub heatmap: Vec<i64>,
 }
 
-/// Everything the Statistics page reads off `idx_query_logs_ts_metrics`, from
-/// the one scan [`Database::stats_scan_since`] makes.
+/// Everything the Statistics page folds out of the quarter and metrics
+/// rollups, from the one statement [`Database::stats_scan_since`] makes.
 #[derive(Debug, Clone)]
 pub struct StatsScan {
     pub metrics: WindowMetrics,
@@ -739,13 +739,9 @@ impl Database {
                     );
                     CREATE INDEX IF NOT EXISTS idx_query_logs_timestamp ON query_logs(timestamp);
                     CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client ON query_logs(timestamp, domain, client_ip, doh_token);
-                    -- Without has_result: a database predating version 12 has
-                    -- no such column until that migration adds it, and this
-                    -- batch runs first. Migration 12 rebuilds the index with it
-                    -- for fresh and legacy databases alike.
-                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics ON query_logs(timestamp, blocked, cached, response_ms, query_type);
-                    CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_token_ts ON query_logs(doh_token, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_blocked_ts ON query_logs(blocked, timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_query_logs_type_blocked_ts ON query_logs(query_type, blocked, timestamp);
 
                     CREATE TABLE IF NOT EXISTS filter_lists (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1061,7 +1057,45 @@ impl Database {
             conn.execute_batch(STATS_ROLLUP_BACKFILL)?;
         }
 
-        const LATEST_VERSION: i64 = 16;
+        if version < 17 {
+            // Every statistic now folds the rollups, which left three indexes
+            // with no statistic to serve: the metrics, upstream and
+            // domain/client indexes were timestamp-first scans for readings
+            // that no longer scan. The query log's filters are what is left to
+            // index, and a timestamp-first index can only filter them by
+            // walking the window: a quiet token or record type walked the whole
+            // table for its first page and again for its count. Each filter
+            // gets an index that leads with what it matches instead — see
+            // `query_logs` for why the type index carries `blocked`.
+            //
+            // The blocked filter used to be answered off the metrics index
+            // without a table lookup, so dropping that index alone made its
+            // deep pages three times the cost; `(blocked, timestamp)` puts them
+            // below where they were. Replaying 1.48 M logged queries in the
+            // logger's batches, the five indexes this leaves write 957 160
+            // pages against 885 858 before, in a file of 92 224 pages against
+            // 111 291.
+            //
+            // A database from before version 17 also carries the indexes the
+            // earlier steps created on the way here, so they are dropped rather
+            // than never made. On a 1.48 M-row database the freed pages put
+            // the freelist past `VACUUM_FREELIST_RATIO`, so the first hourly
+            // maintenance after upgrading rewrites the file once.
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
+                 DROP INDEX IF EXISTS idx_query_logs_ts_upstream;
+                 DROP INDEX IF EXISTS idx_query_logs_ts_domain_client;
+                 CREATE INDEX IF NOT EXISTS idx_query_logs_token_ts \
+                 ON query_logs(doh_token, timestamp);
+                 CREATE INDEX IF NOT EXISTS idx_query_logs_blocked_ts \
+                 ON query_logs(blocked, timestamp);
+                 CREATE INDEX IF NOT EXISTS idx_query_logs_type_blocked_ts \
+                 ON query_logs(query_type, blocked, timestamp);
+                 ANALYZE;",
+            )?;
+        }
+
+        const LATEST_VERSION: i64 = 17;
         if version < LATEST_VERSION {
             conn.pragma_update(None, "user_version", LATEST_VERSION)?;
         }
@@ -1164,7 +1198,8 @@ impl Database {
         let rows = self
             .reader()
             .call(move |conn| {
-                let mut sql = "SELECT timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result, authenticated_data FROM query_logs WHERE 1=1".to_string();
+                const COLUMNS: &str = "timestamp, domain, query_type, client_ip, blocked, cached, response_ms, upstream, doh_token, result, authenticated_data";
+                let mut sql = format!("SELECT {COLUMNS} FROM query_logs WHERE 1=1");
                 let mut param_values = append_log_filters(
                     &mut sql,
                     search.as_deref(),
@@ -1172,9 +1207,54 @@ impl Database {
                     token.as_deref(),
                     query_type.as_deref(),
                 );
-                sql.push_str(" ORDER BY timestamp DESC LIMIT ? OFFSET ?");
-                param_values.push(Box::new(limit));
-                param_values.push(Box::new(offset));
+                if let (Some(qt), [_]) = (&query_type, param_values.as_slice()) {
+                    // A query type on its own reads `(query_type, blocked,
+                    // timestamp)` as two runs already in timestamp order, one
+                    // per verdict, and merges the newest of each. `blocked`
+                    // sits in the middle of that index for the blocked filter's
+                    // sake, and it is what stops a single seek from returning
+                    // rows in page order: asked as one range, the planner reads
+                    // every row of the type and sorts them. Each run only has
+                    // to reach the end of the page, so neither reads more than
+                    // `offset + limit` index entries.
+                    //
+                    // The runs carry only `id` and `timestamp`, which the index
+                    // holds, and the table is read for the page's rows alone.
+                    // Carrying every column instead looked up each row the runs
+                    // passed over: 290 pages for page 20 of a busy type on a
+                    // 1.48 M-row database, against 26.
+                    sql = format!(
+                        "SELECT {COLUMNS} FROM query_logs WHERE id IN ( \
+                         SELECT id FROM ( \
+                         SELECT id, timestamp FROM (SELECT id, timestamp FROM query_logs \
+                         INDEXED BY idx_query_logs_type_blocked_ts \
+                         WHERE query_type = ?1 AND blocked = 0 ORDER BY timestamp DESC LIMIT ?2) \
+                         UNION ALL \
+                         SELECT id, timestamp FROM (SELECT id, timestamp FROM query_logs \
+                         INDEXED BY idx_query_logs_type_blocked_ts \
+                         WHERE query_type = ?1 AND blocked = 1 ORDER BY timestamp DESC LIMIT ?2) \
+                         ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4)) \
+                         ORDER BY timestamp DESC"
+                    );
+                    // `SQLite` reads a negative `LIMIT` as none and a negative
+                    // `OFFSET` as zero, and `/api/logs` passes both through, so
+                    // the runs follow the same rules the outer page does.
+                    let run = if limit < 0 {
+                        -1
+                    } else {
+                        offset.max(0).saturating_add(limit)
+                    };
+                    param_values = vec![
+                        Box::new(qt.clone()),
+                        Box::new(run),
+                        Box::new(limit),
+                        Box::new(offset),
+                    ];
+                } else {
+                    sql.push_str(" ORDER BY timestamp DESC LIMIT ? OFFSET ?");
+                    param_values.push(Box::new(limit));
+                    param_values.push(Box::new(offset));
+                }
 
                 let params_refs: Vec<&dyn rusqlite::types::ToSql> =
                     param_values.iter().map(std::convert::AsRef::as_ref).collect();
@@ -2555,13 +2635,12 @@ impl Database {
         Ok(timeline_from_buckets(&buckets))
     }
 
-    /// Every `idx_query_logs_ts_metrics` reading the Statistics page renders,
-    /// in one scan of that index.
-    ///
     /// The outcome breakdown, the query-type breakdown and the latency
-    /// histogram are three foldings of the same window of the same index.
-    /// Asked one statement each, `SQLite` reads that index end to end three
-    /// times — and the read pool round-robins them onto four connections with
+    /// histogram, in one read of `query_stats_metrics_hour`.
+    ///
+    /// The three are foldings of the same window of the same grain. When they
+    /// were read off `idx_query_logs_ts_metrics`, asking one statement each
+    /// read that index end to end three times — and the read pool round-robins them onto four connections with
     /// 2 MiB of page cache each, so nothing is warm for the next one. The
     /// grain below is fine enough to derive all three and costs one scan:
     /// 2 157 pages instead of 6 471 on a 370 k-row database.
@@ -3663,196 +3742,144 @@ mod tests {
         );
     }
 
+    /// The `query_logs` indexes a database ends up with, whichever version it
+    /// opened at. Versions 10 to 15 each added or reshaped an index that
+    /// version 17 drops, so a legacy database carries indexes a fresh one never
+    /// keeps, and every one of them has to be gone once it opens — and the
+    /// statements that used to name them with `INDEXED BY` still have to
+    /// prepare, which is only proved by running them.
     #[tokio::test]
-    async fn fresh_schema_has_the_domain_client_index_and_not_the_client_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noadd.sqlite3");
-        let db = Database::open(path.to_str().unwrap()).await.unwrap();
-
-        let indexes = query_log_index_names(&db).await;
-        assert!(
-            indexes
-                .iter()
-                .any(|n| n == "idx_query_logs_ts_domain_client"),
-            "(timestamp, domain, client_ip, doh_token) index should exist: {indexes:?}"
+    async fn every_database_opens_to_the_same_query_log_indexes() {
+        const LEGACY_TABLE: &str = "CREATE TABLE query_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            domain TEXT NOT NULL,
+            query_type TEXT NOT NULL,
+            client_ip TEXT NOT NULL,
+            blocked INTEGER NOT NULL DEFAULT 0,
+            cached INTEGER NOT NULL DEFAULT 0,
+            response_ms INTEGER NOT NULL DEFAULT 0,
+            upstream TEXT,
+            doh_token TEXT,
+            result TEXT,
+            authenticated_data INTEGER NOT NULL DEFAULT 0
         );
-        assert!(
-            !indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
-            "the client index it replaced should not: {indexes:?}"
-        );
-    }
+        CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
+        CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);";
+        let legacy = [
+            ("v9", String::new(), 9),
+            (
+                "v10",
+                "CREATE INDEX idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);"
+                    .to_string(),
+                10,
+            ),
+            (
+                "v11",
+                "CREATE INDEX idx_query_logs_client_ts ON query_logs(client_ip, doh_token, timestamp);
+                 CREATE INDEX idx_query_logs_ts_metrics
+                     ON query_logs(timestamp, blocked, cached, response_ms, query_type);"
+                    .to_string(),
+                11,
+            ),
+        ];
 
-    #[tokio::test]
-    async fn fresh_schema_has_metrics_index() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("noadd.sqlite3");
-        let db = Database::open(path.to_str().unwrap()).await.unwrap();
-
-        let indexes = query_log_index_names(&db).await;
-        assert!(
-            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
-            "(timestamp, blocked, cached, response_ms, query_type) index should exist: {indexes:?}"
-        );
-    }
-
-    /// The metrics index only earns its disk if the planner treats it as
-    /// *covering* — a plain `SEARCH … USING INDEX` would still pay the row
-    /// lookup this index exists to avoid.
-    #[tokio::test]
-    async fn timeline_query_uses_the_metrics_index_as_covering() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("plan.db");
-        let db = Database::open(path.to_str().unwrap()).await.unwrap();
-
-        let logs: Vec<QueryLogEntry> = (0..500)
-            .map(|i| QueryLogEntry {
-                timestamp: 1_704_067_200_000 + i * 60_000,
-                domain: format!("d{}.example", i % 50),
-                query_type: if i % 3 == 0 { "AAAA" } else { "A" }.into(),
-                client_ip: format!("10.0.0.{}", i % 25),
-                blocked: i % 5 == 0,
-                cached: i % 4 == 0,
-                response_ms: i % 7,
-                upstream: None,
-                doh_token: None,
-                result: None,
-                authenticated_data: false,
-            })
-            .collect();
-        db.insert_query_logs(&logs).await.unwrap();
-
-        let plan = db
-            .conn
-            .call(|conn| {
-                conn.execute_batch("ANALYZE;")?;
-                let mut stmt = conn.prepare(
-                    "EXPLAIN QUERY PLAN \
-                     SELECT (timestamp / 3600000) * 3600000 AS b, COUNT(*), \
-                            COALESCE(SUM(blocked), 0), COALESCE(SUM(cached), 0) \
-                     FROM query_logs WHERE timestamp >= ?1 GROUP BY b",
-                )?;
-                let rows = stmt
-                    .query_map(params![0_i64], |row| row.get::<_, String>(3))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, tokio_rusqlite::Error>(rows.join(" | "))
-            })
-            .await
+        let mut databases = Vec::new();
+        for (label, indexes, version) in legacy {
+            let path = dir.path().join(format!("{label}.db"));
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "{LEGACY_TABLE}\n{indexes}\nPRAGMA user_version = {version};"
+            ))
             .unwrap();
-
-        assert!(
-            plan.contains("COVERING INDEX idx_query_logs_ts_metrics"),
-            "timeline query should be covered by the metrics index, got: {plan}"
-        );
-    }
-
-    #[tokio::test]
-    async fn migration_v11_adds_metrics_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v10.db");
-        let path_str = path.to_str().unwrap().to_string();
-
-        // A v10 database: has the client index, lacks the metrics one.
+            drop(conn);
+            databases.push((label, path));
+        }
+        // Version 16 as it shipped: every index the steps up to it created.
+        let v16 = dir.path().join("v16.db");
         {
-            let conn = rusqlite::Connection::open(&path_str).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE query_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp INTEGER NOT NULL,
-                    domain TEXT NOT NULL,
-                    query_type TEXT NOT NULL,
-                    client_ip TEXT NOT NULL,
-                    blocked INTEGER NOT NULL DEFAULT 0,
-                    cached INTEGER NOT NULL DEFAULT 0,
-                    response_ms INTEGER NOT NULL DEFAULT 0,
-                    upstream TEXT,
-                    doh_token TEXT,
-                    result TEXT,
-                    authenticated_data INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
-                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                CREATE INDEX idx_query_logs_client_ts
-                    ON query_logs(client_ip, doh_token, timestamp);
-                PRAGMA user_version = 10;",
+            let db = Database::open(v16.to_str().unwrap()).await.unwrap();
+            db.close().await;
+        }
+        rusqlite::Connection::open(&v16)
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX idx_query_logs_token_ts;
+                 DROP INDEX idx_query_logs_blocked_ts;
+                 DROP INDEX idx_query_logs_type_blocked_ts;
+                 CREATE INDEX idx_query_logs_ts_domain_client
+                     ON query_logs(timestamp, domain, client_ip, doh_token);
+                 CREATE INDEX idx_query_logs_ts_metrics
+                     ON query_logs(timestamp, blocked, cached, response_ms, query_type, has_result);
+                 CREATE INDEX idx_query_logs_ts_upstream
+                     ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
+                 PRAGMA user_version = 16;",
             )
             .unwrap();
-        }
+        databases.push(("v16", v16));
+        databases.push(("fresh", dir.path().join("fresh.db")));
 
-        let db = Database::open(&path_str).await.unwrap();
+        let expected = [
+            "idx_query_logs_blocked_ts",
+            "idx_query_logs_domain_ts",
+            "idx_query_logs_timestamp",
+            "idx_query_logs_token_ts",
+            "idx_query_logs_type_blocked_ts",
+        ];
+        for (label, path) in databases {
+            let db = Database::open(path.to_str().unwrap()).await.unwrap();
+            let mut entries: Vec<QueryLogEntry> = (0..6)
+                .map(|i| sample_entry(1_000_000 + i, "example.com"))
+                .collect();
+            entries[1].blocked = true;
+            entries[2].upstream = Some("tls://1.1.1.1:853".to_string());
+            entries[3].doh_token = Some("phone".to_string());
+            entries[4].result = Some("1.2.3.4".to_string());
+            db.insert_query_logs(&entries).await.unwrap();
 
-        let indexes = query_log_index_names(&db).await;
-        assert!(
-            indexes.iter().any(|n| n == "idx_query_logs_ts_metrics"),
-            "metrics index should be created by migration: {indexes:?}"
-        );
-    }
+            let mut indexes = query_log_index_names(&db).await;
+            indexes.retain(|n| !n.starts_with("sqlite_autoindex"));
+            indexes.sort();
+            assert_eq!(indexes, expected, "{label} database's indexes");
 
-    /// The metrics index has to end up carrying `has_result` whichever way the
-    /// database arrived at version 12 — created fresh, or migrated from a
-    /// version whose `query_logs` had no such column.
-    #[tokio::test]
-    async fn migration_v12_puts_the_outcome_flag_in_the_metrics_index() {
-        async fn metrics_index_columns(db: &Database) -> Vec<String> {
-            db.reader()
-                .call(|conn| {
-                    let mut stmt = conn.prepare(
-                        "SELECT name FROM pragma_index_info('idx_query_logs_ts_metrics')",
-                    )?;
-                    let names = stmt
-                        .query_map([], |row| row.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<_, tokio_rusqlite::Error>(names)
-                })
-                .await
-                .unwrap()
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-
-        // A v11 database: the metrics index exists, without the outcome flag.
-        let legacy = dir.path().join("v11.db");
-        let legacy_str = legacy.to_str().unwrap().to_string();
-        {
-            let conn = rusqlite::Connection::open(&legacy_str).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE query_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp INTEGER NOT NULL,
-                    domain TEXT NOT NULL,
-                    query_type TEXT NOT NULL,
-                    client_ip TEXT NOT NULL,
-                    blocked INTEGER NOT NULL DEFAULT 0,
-                    cached INTEGER NOT NULL DEFAULT 0,
-                    response_ms INTEGER NOT NULL DEFAULT 0,
-                    upstream TEXT,
-                    doh_token TEXT,
-                    result TEXT,
-                    authenticated_data INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
-                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                CREATE INDEX idx_query_logs_client_ts
-                    ON query_logs(client_ip, doh_token, timestamp);
-                CREATE INDEX idx_query_logs_ts_metrics
-                    ON query_logs(timestamp, blocked, cached, response_ms, query_type);
-                PRAGMA user_version = 11;",
-            )
-            .unwrap();
-        }
-        let migrated = Database::open(&legacy_str).await.unwrap();
-
-        let fresh_path = dir.path().join("fresh.db");
-        let fresh = Database::open(fresh_path.to_str().unwrap()).await.unwrap();
-
-        for (label, db) in [("migrated", &migrated), ("fresh", &fresh)] {
-            let columns = metrics_index_columns(db).await;
-            assert!(
-                columns.iter().any(|c| c == "has_result"),
-                "{label} database's metrics index lacks has_result: {columns:?}"
+            assert_eq!(db.summary_multi_since(0, 0, 0).await.unwrap()[2].total, 6);
+            assert_eq!(
+                db.traffic_lists_since(0, 10).await.unwrap().clients.len(),
+                2
             );
-            // Reachable through the query that depends on it — the index could
-            // carry the column and still be the wrong one for `INDEXED BY`.
-            assert!(db.outcome_breakdown_since(0).await.is_ok());
+            assert_eq!(db.top_upstreams_since(0, 10).await.unwrap().len(), 1);
+            assert_eq!(
+                db.stats_scan_since(0, 0).await.unwrap().series.total,
+                vec![6]
+            );
+            assert_eq!(db.timeline_multi_since(0, 3_600, 0).await.unwrap().len(), 1);
+            assert_eq!(db.hourly_heatmap_since(0, 0).await.unwrap().len(), 1);
+            assert_eq!(
+                db.outcome_breakdown_since(0).await.unwrap().len(),
+                3,
+                "{label}: blocked, resolved and empty"
+            );
+            assert_eq!(
+                db.query_logs(10, 0, None, None, Some("phone"), None)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                db.query_logs(10, 0, None, None, None, Some("A"))
+                    .await
+                    .unwrap()
+                    .len(),
+                6
+            );
+            assert_eq!(
+                db.count_logs(None, Some(true), None, Some("A"))
+                    .await
+                    .unwrap(),
+                1
+            );
         }
     }
 
@@ -3909,106 +3936,6 @@ mod tests {
             "the migration did not seed the counter"
         );
         assert_eq!(migrated.total_log_count().await.unwrap(), 3);
-    }
-
-    /// A database from before version 14 has to come out of `open` holding the
-    /// upstream index, because `top_upstreams_since` names it with `INDEXED BY`
-    /// and a statement naming a missing index does not prepare at all — the
-    /// dashboard would lose its upstream list rather than merely run slower.
-    #[tokio::test]
-    async fn migration_v14_adds_the_upstream_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v13.db");
-        let path_str = path.to_str().unwrap().to_string();
-
-        let entries: Vec<QueryLogEntry> = (0..4)
-            .map(|i| QueryLogEntry {
-                timestamp: 1_000_000 + i,
-                domain: "example.com".to_string(),
-                query_type: "A".to_string(),
-                client_ip: "10.0.0.1".to_string(),
-                blocked: false,
-                cached: false,
-                upstream: (i != 0).then(|| "tls://1.1.1.1:853".to_string()),
-                doh_token: None,
-                result: None,
-                response_ms: 10 * i,
-                authenticated_data: false,
-            })
-            .collect();
-        {
-            let db = Database::open(&path_str).await.unwrap();
-            db.insert_query_logs(&entries).await.unwrap();
-            db.close().await;
-        }
-        {
-            let conn = rusqlite::Connection::open(&path_str).unwrap();
-            conn.execute_batch(
-                "DROP INDEX idx_query_logs_ts_upstream;
-                 PRAGMA user_version = 13;",
-            )
-            .unwrap();
-        }
-
-        let migrated = Database::open(&path_str).await.unwrap();
-        let indexes = query_log_index_names(&migrated).await;
-        assert!(
-            indexes.iter().any(|n| n == "idx_query_logs_ts_upstream"),
-            "upstream index should exist after migrating: {indexes:?}"
-        );
-        let top = migrated.top_upstreams_since(0, 10).await.unwrap();
-        assert_eq!(top.len(), 1);
-        assert_eq!(top[0].count, 3, "the unforwarded row is not an upstream's");
-        assert!((top[0].avg_ms - 20.0).abs() < 1e-9);
-    }
-
-    /// Version 10 added the client index and version 15 replaced it, so a
-    /// database from before either has to come out holding the replacement and
-    /// nothing of the index in between.
-    #[tokio::test]
-    async fn a_v9_database_migrates_to_the_domain_client_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v9.db");
-        let path_str = path.to_str().unwrap().to_string();
-
-        // A v9 database: everything current except the client index.
-        {
-            let conn = rusqlite::Connection::open(&path_str).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE query_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp INTEGER NOT NULL,
-                    domain TEXT NOT NULL,
-                    query_type TEXT NOT NULL,
-                    client_ip TEXT NOT NULL,
-                    blocked INTEGER NOT NULL DEFAULT 0,
-                    cached INTEGER NOT NULL DEFAULT 0,
-                    response_ms INTEGER NOT NULL DEFAULT 0,
-                    upstream TEXT,
-                    doh_token TEXT,
-                    result TEXT,
-                    authenticated_data INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX idx_query_logs_timestamp ON query_logs(timestamp);
-                CREATE INDEX idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                PRAGMA user_version = 9;",
-            )
-            .unwrap();
-        }
-
-        let db = Database::open(&path_str).await.unwrap();
-
-        let indexes = query_log_index_names(&db).await;
-        assert!(
-            indexes
-                .iter()
-                .any(|n| n == "idx_query_logs_ts_domain_client"),
-            "domain/client index should be created by migration: {indexes:?}"
-        );
-        assert!(
-            !indexes.iter().any(|n| n == "idx_query_logs_client_ts"),
-            "the client index should be gone after migration: {indexes:?}"
-        );
     }
 
     #[tokio::test]

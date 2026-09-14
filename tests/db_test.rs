@@ -1041,3 +1041,72 @@ async fn the_log_count_follows_every_write_that_changes_it() {
     db.delete_all_logs().await.unwrap();
     assert_holds(&db, 0).await;
 }
+
+/// A query type on its own is answered as two runs, one per verdict, merged
+/// back into one page. The page has to be the one the plain statement returns
+/// for every page size and offset `/api/logs` accepts, including the negative
+/// ones `SQLite` reads as "no limit" and "from the start".
+#[tokio::test]
+async fn a_query_type_filter_pages_exactly_like_the_table() {
+    let dir = tempdir().unwrap();
+    let path = dir.keep().join("paging.db");
+    let path_str = path.to_str().unwrap().to_string();
+    let db = Database::open(&path_str).await.unwrap();
+
+    // Verdicts come in uneven runs, so a page often draws from only one of the
+    // two runs and the merge point moves from page to page.
+    let entries: Vec<QueryLogEntry> = (0..300_i64)
+        .map(|i| QueryLogEntry {
+            timestamp: 1_000_000 + i * 1000,
+            domain: format!("d{i}.example"),
+            query_type: if i % 3 == 0 { "AAAA" } else { "A" }.to_string(),
+            client_ip: "10.0.0.1".to_string(),
+            blocked: (i / 7) % 3 == 0 || i % 11 == 0,
+            cached: false,
+            upstream: None,
+            doh_token: None,
+            result: None,
+            response_ms: 1,
+            authenticated_data: false,
+        })
+        .collect();
+    db.insert_query_logs(&entries).await.unwrap();
+    let raw = rusqlite::Connection::open(&path_str).unwrap();
+
+    for query_type in ["A", "AAAA", "TXT"] {
+        for (limit, offset) in [
+            (10, 0),
+            (10, 40),
+            (50, 90),
+            (7, 193),
+            (50, 180),
+            (10, 1_000),
+            (0, 0),
+            (-1, 0),
+            (-1, 30),
+            (10, -5),
+        ] {
+            let expected: Vec<String> = raw
+                .prepare(
+                    "SELECT domain FROM query_logs WHERE query_type = ?1 \
+                     ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![query_type, limit, offset], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let got: Vec<String> = db
+                .query_logs(limit, offset, None, None, None, Some(query_type))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.domain)
+                .collect();
+            assert_eq!(
+                got, expected,
+                "type {query_type}, limit {limit}, offset {offset}"
+            );
+        }
+    }
+}

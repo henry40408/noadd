@@ -239,15 +239,17 @@ Everything is in a single SQLite file (`noadd.sqlite3` by default; a legacy `noa
 | `api_keys` | Programmatic API keys (BLAKE2b hash, owning user_id, `ON DELETE CASCADE`) |
 | `query_stats_quarter`, `query_stats_{domain,client,upstream,metrics}_hour` | Rollups of `query_logs`: counts per quarter hour or hour and grouping key — see *Rollups* below |
 
-`query_logs` carries five indexes, all of them shaped by the statistics queries:
+`query_logs` carries five indexes. Since version 17 every one of them serves the query log or the rollup readers' table arms; no statistic scans an index any more:
 
 | Index | Serves |
 | --- | --- |
-| `timestamp` | the time-window filter every stats query starts with |
+| `timestamp` | the rollup readers' table arms, and the query log's unfiltered and domain-contains pages |
 | `(domain, timestamp)` | the query log's domain search |
-| `(timestamp, domain, client_ip, doh_token)` | nothing since the top domain and client lists moved onto the rollups (*Rollups* below) |
-| `(timestamp, blocked, cached, response_ms, query_type, has_result)` | the Statistics page's scan, the `/api/stats/*` timeline and breakdowns, the query log's action and type filters |
-| `(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL` | nothing since top upstreams moved onto the rollups |
+| `(doh_token, timestamp)` | the query log's token filter |
+| `(blocked, timestamp)` | the query log's blocked/allowed filter |
+| `(query_type, blocked, timestamp)` | the query log's type filter, alone or with a verdict |
+
+The rest of this section is how the indexes before version 17 were chosen; *Query log filters* below is how the current ones were.
 
 `(domain, timestamp)` puts the grouped column first and `timestamp` last, which made it covering for a `GROUP BY … WHERE timestamp >= ?` shape — the aggregation reads the index alone instead of scanning the window and building a temp b-tree over it. The client index that sat beside it, `(client_ip, doh_token, timestamp)`, did the same for top clients and took them from 143 ms to 20 ms on a 447 k-row database. The cost of that order is that the window cannot restrict it: a 24-hour question skip-scans the whole index, one seek per distinct group.
 
@@ -260,6 +262,18 @@ The metrics index is timestamp-first because its queries do not group by a colum
 The upstream index is partial because blocked and cached answers never reach an upstream, so more than half the rows have nothing to put in it (56% on a 370 k-row database), and its only query excludes them anyway. It is timestamp-first for the writer's sake rather than the reader's: both orders answer the dashboard's 24-hour top upstreams in about 200 pages against 1 608 through `timestamp` and a rowid lookup per row, but the logger appends at the newest end, and an upstream-first index spreads every batch across one insertion point per upstream — 65 pages written per 500-row batch against 56, where no index at all writes 53. It is 5.7 MiB on that database.
 
 Indexes are not free here. On that same 103 MiB database `dbstat` attributes 20 MiB to `(domain, timestamp)`, 18 MiB to `(client_ip, doh_token, timestamp)`, 9 MiB to the metrics index and 7 MiB to `timestamp` — the two composites added for statistics cost about a quarter of the file. (Those are the figures from before version 15 replaced the client index.) Measuring an index by the file-size delta of `CREATE INDEX` understates it whenever the database is carrying a freelist, since the new pages come out of that first; `dbstat` reports the real figure.
+
+### Query log filters
+
+Once every statistic folded the rollups, three indexes had no statistic left to serve — `(timestamp, domain, client_ip, doh_token)`, the metrics index and the upstream index — and version 17 drops them. What was left to index was the query log's filters, which a timestamp-first index can only serve by walking the window: on a 1.48 M-row database the newest page of a quiet `DoH` token read 1 200 pages and its count 23 130, and a quiet record type 9 812 for its first page. Each filter now leads its own index with what it matches, and those readings are 28, 15 and 19 pages.
+
+`(query_type, blocked, timestamp)` carries `blocked` in the middle so the type and verdict filters together are one seek, and that is what stops a type on its own from coming back in page order — asked as one range, the planner reads every row of the type and sorts them. `query_logs` asks it as two runs instead, one per verdict, each already newest first and cut at `offset + limit`, and merges them. The runs carry `id` and `timestamp` only, which the index holds, and the table is read for the page's rows alone: carrying every column looked up each row the runs passed over, 290 pages for page 20 of a busy type against 22. Page 1 of a busy type is the one reading left above where it was, 14 pages against 12, because it now reads two runs where the metrics index read one. `a_query_type_filter_pages_exactly_like_the_table` (`tests/db_test.rs`) holds the merge to the plain statement for every page size and offset `/api/logs` accepts.
+
+`(blocked, timestamp)` exists because the metrics index was also what answered the blocked filter without a table lookup. Dropping it alone left page 20 of the blocked and allowed filters at 102 and 57 pages against 33 and 18; with the index they are 18 and 12.
+
+Across the 42 readings `logs_page_miss_bench` makes, the query log went from 368 963 page misses to 159 649 on the 1.48 M-row database and from 100 029 to 44 968 on a 370 k-row one; the dashboard and the Statistics page read exactly what they did. Replaying the 1.48 M queries in the logger's batches, the five indexes write 957 160 pages against 885 858 for the ones they replace, and the file holds 92 224 pages against 111 291. Migrating that database takes 3 s on an SSD and leaves a freelist of 25%, past `VACUUM_FREELIST_RATIO`, so the first hourly maintenance rewrites the file once — to 86 876 pages from 119 603. Measure it on the appliance before relying on either figure there.
+
+`the_query_log_filters_seek_their_indexes` (`tests/stats_page_miss_test.rs`) holds each filter to a small fraction of the file, and `every_database_opens_to_the_same_query_log_indexes` (`src/db.rs`) opens databases from versions 9, 10, 11 and 16 and a fresh one and requires the same five indexes of each, then runs every reader that once named a dropped index.
 
 ### Rollups
 
@@ -299,7 +313,7 @@ The Database Health card's row count is the one reading that is not a scan of an
 
 The dashboard pays for its readings every 10 seconds rather than once a visit, which makes a scan it repeats the most expensive kind. Its summary asked two statements for totals and blocks, then cache hits and latency, over the same 30 days of the metrics index; `summary_multi_since` moves the allowed-only filter from the `WHERE` into each `CASE` and answers both from one scan, 2 152 pages a tick instead of 4 304. With the upstream index, a tick on that database dropped from 8 304 page misses to 4 755. Those readings have since moved onto the rollups (see *Rollups*), which no longer read either index.
 
-`INDEXED BY` appears on every statement that reads this index, in both directions. The ones that needed `blocked`, `cached` or `has_result` named `idx_query_logs_ts_metrics` because the planner otherwise takes the smaller `idx_query_logs_timestamp` and pays a rowid lookup per row — none is left, every such reading having moved onto the rollups; the rollup readers' table arms name `idx_query_logs_timestamp`, where that lookup is the point — they read at most one unit of rows; the heatmap, which reads `timestamp` and nothing else, names `idx_query_logs_timestamp` for the opposite reason — left alone the planner took the metrics index and read 2 153 pages where 1 386 answer it.
+`INDEXED BY` appears on every statement that reads this index, in both directions. The ones that needed `blocked`, `cached` or `has_result` named `idx_query_logs_ts_metrics` because the planner otherwise takes the smaller `idx_query_logs_timestamp` and pays a rowid lookup per row — none is left, every such reading having moved onto the rollups, and version 17 dropped the index; the query log's type runs name `idx_query_logs_type_blocked_ts`, so each run is the seek the merge depends on; the rollup readers' table arms name `idx_query_logs_timestamp`, where that lookup is the point — they read at most one unit of rows; the heatmap, which reads `timestamp` and nothing else, names `idx_query_logs_timestamp` for the opposite reason — left alone the planner took the metrics index and read 2 153 pages where 1 386 answer it.
 
 Every index migration runs `ANALYZE`. A new index alone is not always enough — the planner keeps its old plan until `sqlite_stat1` is refreshed — and the hourly `PRAGMA optimize` lets those statistics drift a long way in the meantime.
 

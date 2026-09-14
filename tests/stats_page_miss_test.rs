@@ -333,3 +333,87 @@ async fn the_unfiltered_query_log_count_is_read_rather_than_counted() {
         );
     }
 }
+
+/// Twenty thousand queries where one in four hundred came from a quiet `DoH`
+/// token and one in four hundred asked for a quiet record type — the filters
+/// an operator reaches for to find the few rows a busy log buries.
+async fn quiet_filters_db() -> Database {
+    let dir = tempdir().unwrap();
+    let path = dir.keep().join("filters.db");
+    let db = Database::open(path.to_str().unwrap()).await.unwrap();
+
+    let entries: Vec<QueryLogEntry> = (0..ROWS)
+        .map(|i| QueryLogEntry {
+            timestamp: i * 1000,
+            domain: format!("host{}.example.com", i % 500),
+            query_type: if i % 400 == 7 { "TXT" } else { "A" }.to_string(),
+            client_ip: format!("10.0.0.{}", i % 20),
+            blocked: i % 7 == 0,
+            cached: i % 5 == 0,
+            upstream: None,
+            doh_token: (i % 400 == 3).then(|| "quiet".to_string()),
+            result: Some("x".repeat(RESULT_PADDING)),
+            response_ms: i % 50,
+            authenticated_data: false,
+        })
+        .collect();
+    for chunk in entries.chunks(2_000) {
+        db.insert_query_logs(chunk).await.unwrap();
+    }
+    db
+}
+
+/// Filtering the query log by a token, a record type or a verdict seeks an
+/// index. With nothing to seek, the newest page of a quiet token walks the
+/// table back until it has fifty rows — here, all of it — counting the matches
+/// walks all of it every time, and a deep page of blocked queries looks up
+/// every row it passes over to learn its verdict.
+#[tokio::test]
+async fn the_query_log_filters_seek_their_indexes() {
+    let db = quiet_filters_db().await;
+    let db_pages = db.db_storage_stats().await.unwrap().main_bytes / 4096;
+    let readings = [
+        (
+            "token page",
+            page_misses(&db, || {
+                db.query_logs(50, 0, None, None, Some("quiet"), None)
+            })
+            .await,
+        ),
+        (
+            "token count",
+            page_misses(&db, || db.count_logs(None, None, Some("quiet"), None)).await,
+        ),
+        (
+            "type page",
+            page_misses(&db, || db.query_logs(50, 0, None, None, None, Some("TXT"))).await,
+        ),
+        (
+            "type count",
+            page_misses(&db, || db.count_logs(None, None, None, Some("TXT"))).await,
+        ),
+        (
+            "blocked page 20",
+            page_misses(&db, || db.query_logs(50, 950, None, Some(true), None, None)).await,
+        ),
+        (
+            "type + blocked page",
+            page_misses(&db, || {
+                db.query_logs(50, 0, None, Some(false), None, Some("TXT"))
+            })
+            .await,
+        ),
+    ];
+
+    for (label, read) in readings {
+        assert!(
+            read > 0,
+            "{label} read no pages at all — the measurement is not working"
+        );
+        assert!(
+            read * 10 < db_pages,
+            "{label} read {read} of the database's {db_pages} pages — \
+             is the filter back to walking the table?"
+        );
+    }
+}
