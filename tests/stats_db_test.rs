@@ -1054,3 +1054,198 @@ async fn dashboard_readings_equal_a_recount_of_the_table() {
         }
     }
 }
+
+/// The Statistics page's scan and the API's timeline, heatmap and window
+/// readings fold rollups and the table only where a window starts inside a
+/// unit, so each is checked against a count of the table itself, for every
+/// window start and for heatmap windows before, equal to and after the range's.
+/// The offsets include half- and three-quarter-hour zones, and one — seven
+/// minutes — that no zone uses, which the readers answer from the table.
+#[tokio::test]
+async fn statistics_readings_equal_a_recount_of_the_table() {
+    let (db, path) = recount_db().await;
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let pairs = |sql: &str, since_ms: i64| -> Vec<(String, i64)> {
+        let mut rows: Vec<(String, i64)> = raw
+            .prepare(sql)
+            .unwrap()
+            .query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.sort();
+        rows
+    };
+    let per_quarter = |since_ms: i64| -> std::collections::BTreeMap<i64, [i64; 3]> {
+        raw.prepare(
+            "SELECT timestamp / 900000, COUNT(*), SUM(blocked), SUM(cached) \
+             FROM query_logs WHERE timestamp >= ?1 GROUP BY 1",
+        )
+        .unwrap()
+        .query_map([since_ms], |r| {
+            Ok((r.get(0)?, [r.get(1)?, r.get(2)?, r.get(3)?]))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+
+    for since in recount_sinces() {
+        let since_ms = since * 1000;
+        let outcomes = pairs(
+            "SELECT CASE WHEN blocked = 1 THEN 'Blocked' WHEN cached = 1 THEN 'Cached' \
+                         WHEN result IS NOT NULL AND result != '' THEN 'Resolved' \
+                         ELSE 'Empty' END, COUNT(*) \
+             FROM query_logs WHERE timestamp >= ?1 GROUP BY 1",
+            since_ms,
+        );
+        let query_types = pairs(
+            "SELECT query_type, COUNT(*) FROM query_logs WHERE timestamp >= ?1 GROUP BY 1",
+            since_ms,
+        );
+        let latencies: Vec<i64> = raw
+            .prepare("SELECT response_ms FROM query_logs WHERE timestamp >= ?1 ORDER BY 1")
+            .unwrap()
+            .query_map([since_ms], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let percentile = |p: f64| {
+            let rank = usize::try_from(((latencies.len() as f64 * p) as i64).max(1)).unwrap();
+            latencies.get(rank - 1).copied().unwrap_or(0)
+        };
+        let expected_latency = (
+            i64::try_from(latencies.len()).unwrap(),
+            percentile(0.50),
+            percentile(0.95),
+            percentile(0.99),
+        );
+        let latency =
+            |l: &noadd::db::LatencySummary| (l.sample_count, l.p50_ms, l.p95_ms, l.p99_ms);
+
+        let window = db.window_metrics_since(since).await.unwrap();
+        assert_eq!(
+            sorted(window.outcomes),
+            outcomes,
+            "window outcomes from {since}"
+        );
+        assert_eq!(
+            sorted(window.query_types),
+            query_types,
+            "window types from {since}"
+        );
+        assert_eq!(
+            latency(&window.latency),
+            expected_latency,
+            "window latency from {since}"
+        );
+
+        for heatmap_since in [since - 3 * 3_600 - 437, since, since + 3_600 + 5] {
+            let tag = format!("range from {since}, heatmap from {heatmap_since}");
+            let scan = db.stats_scan_since(since, heatmap_since).await.unwrap();
+            assert_eq!(
+                sorted(scan.metrics.outcomes),
+                outcomes,
+                "scan outcomes, {tag}"
+            );
+            assert_eq!(
+                sorted(scan.metrics.query_types),
+                query_types,
+                "scan types, {tag}"
+            );
+            assert_eq!(
+                latency(&scan.metrics.latency),
+                expected_latency,
+                "scan latency, {tag}"
+            );
+
+            let mut quarters: std::collections::BTreeMap<i64, [i64; 4]> =
+                std::collections::BTreeMap::new();
+            for (q, [total, blocked, cached]) in per_quarter(since_ms) {
+                let slot = quarters.entry(q).or_default();
+                slot[..3].copy_from_slice(&[total, blocked, cached]);
+            }
+            for (q, [total, _, _]) in per_quarter(heatmap_since * 1000) {
+                quarters.entry(q).or_default()[3] = total;
+            }
+            let mut expected = QuarterSeries::default();
+            if let (Some(&first), Some(&last)) = (quarters.keys().next(), quarters.keys().last()) {
+                let len = usize::try_from(last - first + 1).unwrap();
+                expected = QuarterSeries {
+                    start: first * QUARTER_SECS,
+                    total: vec![0; len],
+                    blocked: vec![0; len],
+                    cached: vec![0; len],
+                    heatmap: vec![0; len],
+                };
+                for (q, [total, blocked, cached, heatmap]) in quarters {
+                    let i = usize::try_from(q - first).unwrap();
+                    expected.total[i] = total;
+                    expected.blocked[i] = blocked;
+                    expected.cached[i] = cached;
+                    expected.heatmap[i] = heatmap;
+                }
+            }
+            assert_eq!(scan.series, expected, "series, {tag}");
+        }
+
+        for offset_minutes in [0_i64, 480, -300, 330, 345, -570, 7] {
+            let offset = offset_minutes * 60;
+            for bucket in [60, 900, 3_600, 6 * 3_600, 86_400] {
+                let expected: Vec<TimelineMultiPoint> = raw
+                    .prepare(
+                        "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, COUNT(*), \
+                                SUM(blocked), SUM(cached) \
+                         FROM query_logs WHERE timestamp >= ?2 GROUP BY bucket ORDER BY bucket",
+                    )
+                    .unwrap()
+                    .query_map(
+                        rusqlite::params![bucket * 1000, since_ms, offset * 1000],
+                        |r| {
+                            Ok(TimelineMultiPoint {
+                                timestamp: r.get::<_, i64>(0)? / 1000,
+                                total: r.get(1)?,
+                                blocked: r.get(2)?,
+                                cached: r.get(3)?,
+                            })
+                        },
+                    )
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                assert_eq!(
+                    db.timeline_multi_since(since, bucket, offset)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "timeline from {since}, offset {offset_minutes} min, bucket {bucket} s"
+                );
+            }
+
+            let expected: Vec<(i64, i64, i64)> = raw
+                .prepare(
+                    "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
+                            (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, COUNT(*) \
+                     FROM query_logs WHERE timestamp >= ?1 GROUP BY wday, hr ORDER BY wday, hr",
+                )
+                .unwrap()
+                .query_map(rusqlite::params![since_ms, offset], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let got: Vec<(i64, i64, i64)> = db
+                .hourly_heatmap_since(since, offset)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.weekday, c.hour, c.count))
+                .collect();
+            assert_eq!(
+                got, expected,
+                "heatmap from {since}, offset {offset_minutes} min"
+            );
+        }
+    }
+}

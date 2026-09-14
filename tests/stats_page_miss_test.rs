@@ -60,9 +60,8 @@ where
 }
 
 /// Classifying an outcome needs to know whether `result` held an answer. Read
-/// off the table that is a rowid lookup per row and so the whole file; read off
-/// `idx_query_logs_ts_metrics`, which carries the answer as a generated column,
-/// it is the index alone.
+/// off the table that is a rowid lookup per row and so the whole file;
+/// `query_stats_metrics_hour` carries the answer, so it never has to be.
 #[tokio::test]
 async fn the_outcome_breakdown_never_reads_the_log_table() {
     let db = seeded_db().await;
@@ -78,8 +77,7 @@ async fn the_outcome_breakdown_never_reads_the_log_table() {
     assert!(
         misses * 4 < db_pages,
         "outcome breakdown read {misses} of the database's {db_pages} pages; \
-         that is the table, not the metrics index — has the planner stopped \
-         honouring INDEXED BY, or has has_result left the index?"
+         that is the table — is the breakdown still folding query_stats_metrics_hour?"
     );
 }
 
@@ -145,8 +143,8 @@ async fn the_shared_scans_answer_what_the_separate_ones_did() {
 }
 
 /// The outcome breakdown, the query-type breakdown and the latency percentiles
-/// are three foldings of one statement. Asked together they must cost one scan
-/// of `idx_query_logs_ts_metrics`, not one each — which is what a page whose
+/// are three foldings of one statement. Asked together they must cost one read
+/// of `query_stats_metrics_hour`, not one each — which is what a page whose
 /// numbers were re-split across statements would pay.
 #[tokio::test]
 async fn the_window_readings_are_one_scan_between_them() {
@@ -166,37 +164,6 @@ async fn the_window_readings_are_one_scan_between_them() {
         "the three window readings cost {together} pages together and {separate} \
          apart; one scan answering all three should be about a third of that — \
          has the page gone back to a statement per reading?"
-    );
-}
-
-/// The charts ride the scan that answers the breakdowns. Before, the browser
-/// fetched the timeline and the heatmap after the page landed, which walked
-/// the metrics index a second time and the timestamp index on top — so the
-/// page's readings and its charts together must cost what the readings alone
-/// did, and less than the three statements they replaced.
-#[tokio::test]
-async fn the_page_and_its_charts_are_one_metrics_scan() {
-    let db = seeded_db().await;
-
-    let scan = page_misses(&db, || db.stats_scan_since(0, 0)).await;
-    let window = page_misses(&db, || db.window_metrics_since(0)).await;
-    let replaced = window
-        + page_misses(&db, || db.timeline_multi_since(0, 3600, 0)).await
-        + page_misses(&db, || db.hourly_heatmap_since(0, 0)).await;
-
-    assert!(
-        window > 0,
-        "no pages were read at all — the measurement is not working"
-    );
-    assert!(
-        scan <= window + window / 10,
-        "the page's scan read {scan} pages against {window} for the window readings \
-         alone — is it off idx_query_logs_ts_metrics, or reading the table?"
-    );
-    assert!(
-        scan * 2 < replaced,
-        "the page's scan read {scan} pages and the statements it replaced {replaced} — \
-         are the charts back on a scan of their own?"
     );
 }
 
@@ -277,26 +244,45 @@ async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
     }
 }
 
-/// The heatmap reads `timestamp` and nothing else, so it belongs on the
-/// smallest index that carries it. `idx_query_logs_ts_metrics` also covers it
-/// and the planner will take it unaided, paying for four columns the query
-/// never looks at.
+/// The Statistics page's scan and the API's timeline, heatmap and window
+/// readings fold the rollups too. Before, the page's scan and each of these was
+/// a walk of an index as long as the window — the whole table under the
+/// default retention.
 #[tokio::test]
-async fn the_heatmap_reads_the_narrowest_index_that_covers_it() {
-    let db = seeded_db().await;
+async fn the_statistics_readings_fold_rollups_rather_than_the_table() {
+    let db = dense_db().await;
 
-    let heatmap = page_misses(&db, || db.hourly_heatmap_since(0, 0)).await;
-    let metrics_scan = page_misses(&db, || db.timeline_multi_since(0, 3600, 0)).await;
+    let scan = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let readings = [
+        (
+            "stats scan",
+            page_misses(&db, || db.stats_scan_since(0, 0)).await,
+        ),
+        (
+            "window metrics",
+            page_misses(&db, || db.window_metrics_since(0)).await,
+        ),
+        (
+            "timeline",
+            page_misses(&db, || db.timeline_multi_since(0, 3_600, 8 * 3_600)).await,
+        ),
+        (
+            "heatmap",
+            page_misses(&db, || db.hourly_heatmap_since(0, 8 * 3_600)).await,
+        ),
+    ];
 
     assert!(
-        heatmap > 0,
-        "no pages were read at all — the measurement is not working"
+        scan > 0,
+        "the scan read no pages at all — the measurement is not working"
     );
-    assert!(
-        heatmap < metrics_scan,
-        "the heatmap read {heatmap} pages and a metrics scan {metrics_scan} — \
-         it is no longer on idx_query_logs_timestamp"
-    );
+    for (label, read) in readings {
+        assert!(
+            read * 10 < scan,
+            "{label} read {read} pages where a scan over every row reads {scan} — \
+             is it back on the table instead of the rollups?"
+        );
+    }
 }
 
 /// The Database Health card's row count is read from one row of `settings`,

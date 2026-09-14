@@ -3683,7 +3683,8 @@ async fn get_stats_top_upstreams(
 pub struct TimelineV2Query {
     pub range: Option<String>,
     /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), used
-    /// to align buckets to their local calendar. Clamped to ±14h; missing ⇒ 0
+    /// to align buckets to their local calendar. Clamped to ±14h and rounded to
+    /// the nearest 15 minutes, which every zone in use already is; missing ⇒ 0
     /// (UTC-aligned).
     pub tz_offset: Option<i64>,
 }
@@ -3712,8 +3713,13 @@ fn parse_stats_range(raw: Option<&str>) -> Result<stats::StatsRange, StatusCode>
 
 /// Resolve the viewer's UTC offset to seconds, clamped to the real-world range
 /// (±14h) so a malformed value can't shift buckets to nonsense.
+///
+/// Rounded to a quarter hour because that is the grain of
+/// `query_stats_quarter`: a quarter-aligned offset is answered from the rollup,
+/// any other would count every row in the window. No zone in use is affected.
 fn resolve_tz_offset_secs(tz_offset: Option<i64>) -> i64 {
-    tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60) * 60
+    let minutes = tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60);
+    (minutes + 7).div_euclid(15) * 15 * 60
 }
 
 async fn get_stats_v2_timeline(

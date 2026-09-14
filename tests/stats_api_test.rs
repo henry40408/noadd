@@ -18,6 +18,11 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 use tokio::sync::mpsc;
 
 async fn setup() -> (axum::Router, String) {
+    let (router, token, _db) = setup_with_db().await;
+    (router, token)
+}
+
+async fn setup_with_db() -> (axum::Router, String, Database) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
     let path = dir.keep().join("test.db");
@@ -76,7 +81,7 @@ async fn setup() -> (axum::Router, String) {
     );
 
     let router = admin_router(AppState {
-        db,
+        db: db.clone(),
         sessions,
         filter,
         cache,
@@ -102,7 +107,7 @@ async fn setup() -> (axum::Router, String) {
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
     });
-    (router, token)
+    (router, token, db)
 }
 
 #[tokio::test]
@@ -267,5 +272,74 @@ async fn stats_v2_timeline_accepts_both_parameters() {
     assert_eq!(
         get_with_auth(app, "/api/stats/v2/timeline?range=7d&tz_offset=480", &token).await,
         StatusCode::OK
+    );
+}
+
+/// The offset is rounded to the nearest quarter hour, the grain the charts'
+/// rollup is kept at. A query at ten to the hour shows it: fifteen minutes
+/// either way moves it across the hour, so an offset that is not rounded lands
+/// it in a different cell from the quarter it rounds to.
+#[tokio::test]
+async fn stats_v2_tz_offset_is_rounded_to_a_quarter_hour() {
+    let (app, token, db) = setup_with_db().await;
+    let ten_to = (noadd::now_unix() / 3600 - 2) * 3600 + 3000;
+    db.insert_query_logs(&[noadd::db::QueryLogEntry {
+        timestamp: ten_to * 1000,
+        domain: "example.com".into(),
+        query_type: "A".into(),
+        client_ip: "10.0.0.1".into(),
+        blocked: false,
+        cached: false,
+        response_ms: 3,
+        upstream: None,
+        doh_token: None,
+        result: None,
+        authenticated_data: false,
+    }])
+    .await
+    .unwrap();
+
+    let body = |offset: i64| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/stats/v2/heatmap?tz_offset={offset}"))
+                        .header("cookie", format!("session={token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+
+    assert_ne!(
+        body(480).await,
+        body(495).await,
+        "the query must straddle the hour"
+    );
+    assert_eq!(
+        body(487).await,
+        body(480).await,
+        "487 min rounds down to 480"
+    );
+    assert_eq!(body(488).await, body(495).await, "488 min rounds up to 495");
+    assert_eq!(
+        body(-487).await,
+        body(-480).await,
+        "-487 min rounds to -480"
+    );
+    assert_eq!(
+        body(-488).await,
+        body(-495).await,
+        "-488 min rounds to -495"
     );
 }

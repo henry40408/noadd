@@ -2579,23 +2579,27 @@ impl Database {
         })
     }
 
-    /// The Statistics page's window readings and its charts' series, in one
-    /// scan of `idx_query_logs_ts_metrics`.
+    /// The Statistics page's window readings and its charts' series, folded out
+    /// of `query_stats_quarter` and `query_stats_metrics_hour`.
     ///
-    /// The page used to pay for that index three times: once here for the
-    /// breakdowns and the latency histogram, once more for the timeline the
-    /// browser fetched with its UTC offset, and `idx_query_logs_timestamp` for
-    /// the heatmap on top — 5 690 pages on a 370 k-row database where 2 152
-    /// answer all of it. The charts come out of the same rows as a
-    /// [`QuarterSeries`], which the browser folds into its own calendar.
+    /// Whole units come from the rollups and the part of a unit each window
+    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table
+    /// alone this was a scan of `idx_query_logs_ts_metrics` from the earlier of
+    /// the two windows: 9 476 pages for the 30-day range on a 1.48 M-row
+    /// database, because under the default retention that is the whole table.
+    /// The charts come out of the same statement as a [`QuarterSeries`], which
+    /// the browser folds into its own calendar.
     ///
-    /// The scan starts at the earlier of the two windows; `range_since` bounds
-    /// the metrics and the timeline, `heatmap_since` the heatmap, each exactly.
+    /// `range_since` bounds the metrics and the timeline, `heatmap_since` the
+    /// heatmap, each exactly. The first column says which arm a row came from:
+    /// the two rollups, then the table rows the range starts inside (the rest of
+    /// its first hour, which also holds the rest of its first quarter), then
+    /// those the heatmap starts inside. When both windows start at the same
+    /// instant a table row arrives once per arm, and each arm counts it only for
+    /// its own window.
     ///
-    /// Rows are folded here rather than grouped in SQL. A `GROUP BY` at a grain
-    /// carrying both the quarter and `response_ms` approaches one group per
-    /// row, which is a temp b-tree the size of the window held in memory on the
-    /// appliance; the folds below hold one entry per distinct value instead.
+    /// Rows are folded here rather than grouped in SQL, so the metrics grain is
+    /// held once per distinct value rather than sorted into a temp b-tree.
     pub async fn stats_scan_since(
         &self,
         range_since: i64,   // unix seconds
@@ -2603,15 +2607,26 @@ impl Database {
     ) -> Result<StatsScan, DbError> {
         let range_ms = range_since * 1000;
         let heatmap_ms = heatmap_since * 1000;
-        let quarter_ms = QUARTER_SECS * 1000;
+        let range_quarter = first_whole_unit(range_ms, ROLLUP_QUARTER_MS);
+        let heatmap_quarter = first_whole_unit(heatmap_ms, ROLLUP_QUARTER_MS);
+        let range_hour = first_whole_unit(range_ms, ROLLUP_HOUR_MS);
         let scan = self
             .reader()
             .call(move |conn| {
-                // `INDEXED BY` for the reason `metrics_window_since` gives.
                 let mut stmt = conn.prepare_cached(
-                    "SELECT timestamp, blocked, cached, has_result, query_type, response_ms \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
-                     WHERE timestamp >= ?1",
+                    "SELECT 0, quarter, blocked, cached, NULL, NULL, NULL, count
+                        FROM query_stats_quarter WHERE quarter >= ?3
+                    UNION ALL
+                    SELECT 1, hour, blocked, cached, has_result, query_type, response_ms, count
+                        FROM query_stats_metrics_hour WHERE hour >= ?4
+                    UNION ALL
+                    SELECT 2, timestamp, blocked, cached, has_result, query_type, response_ms, 1
+                        FROM query_logs INDEXED BY idx_query_logs_timestamp
+                        WHERE timestamp >= ?1 AND timestamp < ?4 * 3600000
+                    UNION ALL
+                    SELECT 3, timestamp, blocked, cached, NULL, NULL, NULL, 1
+                        FROM query_logs INDEXED BY idx_query_logs_timestamp
+                        WHERE timestamp >= ?2 AND timestamp < ?5 * 900000",
                 )?;
                 // Keyed by query type first so a row that repeats a type — nearly
                 // all of them — is looked up by `&str` without allocating.
@@ -2620,29 +2635,60 @@ impl Database {
                 let mut grains: HashMap<String, Grains> = HashMap::new();
                 // quarter index → [total, blocked, cached, heatmap]
                 let mut quarters: BTreeMap<i64, [i64; 4]> = BTreeMap::new();
-                let mut rows = stmt.query(params![range_ms.min(heatmap_ms)])?;
+                let args = params![
+                    range_ms,
+                    heatmap_ms,
+                    range_quarter.min(heatmap_quarter),
+                    range_hour,
+                    heatmap_quarter
+                ];
+                let mut rows = stmt.query(args)?;
                 while let Some(row) = rows.next()? {
-                    let ts: i64 = row.get(0)?;
-                    let blocked = row.get::<_, i64>(1)? != 0;
-                    let cached = row.get::<_, i64>(2)? != 0;
-                    let slot = quarters.entry(ts.div_euclid(quarter_ms)).or_default();
-                    if ts >= heatmap_ms {
-                        slot[3] += 1;
+                    let arm: i64 = row.get(0)?;
+                    let at: i64 = row.get(1)?;
+                    let blocked = row.get::<_, i64>(2)? != 0;
+                    let cached = row.get::<_, i64>(3)? != 0;
+                    let count: i64 = row.get(7)?;
+                    match arm {
+                        0 => {
+                            let slot = quarters.entry(at).or_default();
+                            if at >= heatmap_quarter {
+                                slot[3] += count;
+                            }
+                            if at >= range_quarter {
+                                slot[0] += count;
+                                slot[1] += count * i64::from(blocked);
+                                slot[2] += count * i64::from(cached);
+                            }
+                            continue;
+                        }
+                        3 => {
+                            quarters
+                                .entry(at.div_euclid(ROLLUP_QUARTER_MS))
+                                .or_default()[3] += 1;
+                            continue;
+                        }
+                        // The range's table rows run to the end of its first
+                        // hour, and only the first quarter of that is not in
+                        // `query_stats_quarter`'s arm.
+                        2 if at < range_quarter * ROLLUP_QUARTER_MS => {
+                            let slot = quarters
+                                .entry(at.div_euclid(ROLLUP_QUARTER_MS))
+                                .or_default();
+                            slot[0] += 1;
+                            slot[1] += i64::from(blocked);
+                            slot[2] += i64::from(cached);
+                        }
+                        _ => {}
                     }
-                    if ts < range_ms {
-                        continue;
-                    }
-                    slot[0] += 1;
-                    slot[1] += i64::from(blocked);
-                    slot[2] += i64::from(cached);
 
-                    let has_result = row.get::<_, i64>(3)? != 0;
-                    let query_type = row.get_ref(4)?.as_str()?;
-                    let key = (blocked, cached, has_result, row.get::<_, i64>(5)?);
+                    let has_result = row.get::<_, i64>(4)? != 0;
+                    let query_type = row.get_ref(5)?.as_str()?;
+                    let key = (blocked, cached, has_result, row.get::<_, i64>(6)?);
                     if let Some(by_grain) = grains.get_mut(query_type) {
-                        *by_grain.entry(key).or_default() += 1;
+                        *by_grain.entry(key).or_default() += count;
                     } else {
-                        grains.insert(query_type.to_owned(), HashMap::from([(key, 1)]));
+                        grains.insert(query_type.to_owned(), HashMap::from([(key, count)]));
                     }
                 }
 
@@ -2676,14 +2722,14 @@ impl Database {
         Ok(scan)
     }
 
-    /// Query counts by time bucket. Every column is carried by
-    /// `idx_query_logs_ts_metrics`, so the scan never looks a row up.
+    /// Query counts by time bucket, folded out of `query_stats_quarter`.
     ///
-    /// `INDEXED BY` because the planner will not choose it on its own: with
-    /// `idx_query_logs_timestamp` also matching the range it picks that one —
-    /// it is the smaller index — and then pays a rowid lookup per row to reach
-    /// `blocked` and `cached`. Measured on a 370 k-row database that is 12 173
-    /// page misses against 2 157 for the identical answer.
+    /// A bucket and an offset that are both whole numbers of quarters put every
+    /// quarter wholly inside one bucket, so the quarter's rows can be counted
+    /// together; the table supplies the quarter the window starts inside — see
+    /// `STATS_ROLLUP_SCHEMA`. The API rounds `tz_offset` to a quarter hour for
+    /// this reason. Anything finer — a bucket under a quarter, which no range
+    /// asks for — counts the table directly.
     async fn metrics_by_bucket_since(
         &self,
         since: i64, // unix seconds
@@ -2693,27 +2739,45 @@ impl Database {
         let since_ms = since * 1000;
         let bucket_ms = bucket_secs * 1000;
         let offset_ms = tz_offset_secs * 1000;
+        let quarter = first_whole_unit(since_ms, ROLLUP_QUARTER_MS);
         let result = self
             .reader()
             .call(move |conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, \
-                            blocked, cached, COUNT(*) \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
-                     WHERE timestamp >= ?2 \
-                     GROUP BY bucket, blocked, cached \
-                     ORDER BY bucket",
-                )?;
-                let rows = stmt
-                    .query_map(params![bucket_ms, since_ms, offset_ms], |row| {
-                        Ok(MetricsBucket {
-                            timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
-                            blocked: row.get::<_, i64>(1)? != 0,
-                            cached: row.get::<_, i64>(2)? != 0,
-                            count: row.get(3)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let bucket = |row: &rusqlite::Row<'_>| {
+                    Ok(MetricsBucket {
+                        timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
+                        blocked: row.get::<_, i64>(1)? != 0,
+                        cached: row.get::<_, i64>(2)? != 0,
+                        count: row.get(3)?,
+                    })
+                };
+                let rows =
+                    if bucket_ms % ROLLUP_QUARTER_MS == 0 && offset_ms % ROLLUP_QUARTER_MS == 0 {
+                        conn.prepare_cached(
+                            "SELECT bucket, blocked, cached, SUM(n) FROM (
+                            SELECT ((quarter * 900000 + ?3) / ?1) * ?1 - ?3 AS bucket,
+                                   blocked, cached, count AS n
+                                FROM query_stats_quarter WHERE quarter >= ?4
+                            UNION ALL
+                            SELECT ((timestamp + ?3) / ?1) * ?1 - ?3, blocked, cached, 1
+                                FROM query_logs INDEXED BY idx_query_logs_timestamp
+                                WHERE timestamp >= ?2 AND timestamp < ?4 * 900000
+                        ) GROUP BY bucket, blocked, cached ORDER BY bucket",
+                        )?
+                        .query_map(params![bucket_ms, since_ms, offset_ms, quarter], bucket)?
+                        .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        conn.prepare_cached(
+                            "SELECT ((timestamp + ?3) / ?1) * ?1 - ?3 AS bucket, \
+                                blocked, cached, COUNT(*) \
+                         FROM query_logs \
+                         WHERE timestamp >= ?2 \
+                         GROUP BY bucket, blocked, cached \
+                         ORDER BY bucket",
+                        )?
+                        .query_map(params![bucket_ms, since_ms, offset_ms], bucket)?
+                        .collect::<Result<Vec<_>, _>>()?
+                    };
                 Ok(rows)
             })
             .await?;
@@ -2722,28 +2786,30 @@ impl Database {
 
     /// Query counts by outcome class, type and response time — the grain the
     /// outcome breakdown, the query-type breakdown and the latency histogram
-    /// all fold out of. Every column sits in `idx_query_logs_ts_metrics`.
-    ///
-    /// `INDEXED BY` for the same reason [`Self::metrics_by_bucket_since`] needs
-    /// it: `idx_query_logs_timestamp` also matches the range and is the smaller
-    /// index, so the planner picks that one and then pays a rowid lookup per
-    /// row to reach `has_result`.
+    /// all fold out of — from `query_stats_metrics_hour`, and from the table
+    /// for the part of an hour the window starts inside (see
+    /// `STATS_ROLLUP_SCHEMA`).
     async fn metrics_window_since(
         &self,
         since: i64, // unix seconds
     ) -> Result<Vec<WindowMetricsRow>, DbError> {
         let since_ms = since * 1000;
+        let hour = first_whole_unit(since_ms, ROLLUP_HOUR_MS);
         let rows = self
             .reader()
             .call(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT blocked, cached, has_result, query_type, response_ms, COUNT(*) \
-                     FROM query_logs INDEXED BY idx_query_logs_ts_metrics \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY blocked, cached, has_result, query_type, response_ms",
+                    "SELECT blocked, cached, has_result, query_type, response_ms, SUM(n) FROM (
+                        SELECT blocked, cached, has_result, query_type, response_ms, count AS n
+                            FROM query_stats_metrics_hour WHERE hour >= ?2
+                        UNION ALL
+                        SELECT blocked, cached, has_result, query_type, response_ms, 1
+                            FROM query_logs INDEXED BY idx_query_logs_timestamp
+                            WHERE timestamp >= ?1 AND timestamp < ?2 * 3600000
+                    ) GROUP BY blocked, cached, has_result, query_type, response_ms",
                 )?;
                 let rows = stmt
-                    .query_map(params![since_ms], |row| {
+                    .query_map(params![since_ms, hour], |row| {
                         Ok(WindowMetricsRow {
                             blocked: row.get::<_, i64>(0)? != 0,
                             cached: row.get::<_, i64>(1)? != 0,
@@ -2766,12 +2832,19 @@ impl Database {
     /// [`Self::timeline_multi_since`] applies, and carries the same DST caveat:
     /// a single offset can misplace rows recorded under the other DST phase.
     /// Pass 0 for plain UTC buckets.
+    ///
+    /// An offset that is a whole number of quarters — every zone in use, and
+    /// every offset the API passes — puts each quarter wholly inside one local
+    /// hour, so this folds `query_stats_quarter` and reads the table only for
+    /// the quarter the window starts inside (see `STATS_ROLLUP_SCHEMA`). Any
+    /// other offset counts the table directly.
     pub async fn hourly_heatmap_since(
         &self,
         since: i64, // unix seconds
         tz_offset_secs: i64,
     ) -> Result<Vec<HeatmapCell>, DbError> {
         let since_ms = since * 1000;
+        let quarter = first_whole_unit(since_ms, ROLLUP_QUARTER_MS);
         let result = self
             .reader()
             .call(move |conn| {
@@ -2781,37 +2854,48 @@ impl Database {
                 // most expensive thing the Statistics page did (155 ms, versus
                 // 61 ms for this form on a 447 k-row database).
                 //
-                // `INDEXED BY` because this reads nothing but `timestamp`,
-                // and `idx_query_logs_timestamp` is the smallest index that
-                // covers it. Left to itself the planner took
-                // `idx_query_logs_ts_metrics` — also covering, also correct,
-                // and 2 153 pages against 1 386 on a 370 k-row database purely
-                // because it carries four columns this query never reads.
-                //
                 // The `+ 4` is because Unix day 0 (1970-01-01) was a Thursday
                 // and `strftime('%w')` counts from Sunday = 0. Truncating
                 // division is only equal to flooring for non-negative inputs,
-                // which is what `timestamp / 1000 + ?2` always is here:
+                // which is what the shifted seconds always are here:
                 // timestamps come from the system clock and the offset is at
                 // most ±14 h.
-                let mut stmt = conn.prepare_cached(
-                    "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
-                            (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, \
-                            COUNT(*) \
-                     FROM query_logs INDEXED BY idx_query_logs_timestamp \
-                     WHERE timestamp >= ?1 \
-                     GROUP BY wday, hr \
-                     ORDER BY wday, hr",
-                )?;
-                let rows = stmt
-                    .query_map(params![since_ms, tz_offset_secs], |row| {
-                        Ok(HeatmapCell {
-                            weekday: row.get(0)?,
-                            hour: row.get(1)?,
-                            count: row.get(2)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let cell = |row: &rusqlite::Row<'_>| {
+                    Ok(HeatmapCell {
+                        weekday: row.get(0)?,
+                        hour: row.get(1)?,
+                        count: row.get(2)?,
+                    })
+                };
+                let rows = if tz_offset_secs % QUARTER_SECS == 0 {
+                    conn.prepare_cached(
+                        "SELECT (s / 86400 + 4) % 7 AS wday, s % 86400 / 3600 AS hr, SUM(n) FROM (
+                            SELECT quarter * 900 + ?2 AS s, count AS n
+                                FROM query_stats_quarter WHERE quarter >= ?3
+                            UNION ALL
+                            SELECT timestamp / 1000 + ?2, 1
+                                FROM query_logs INDEXED BY idx_query_logs_timestamp
+                                WHERE timestamp >= ?1 AND timestamp < ?3 * 900000
+                        ) GROUP BY wday, hr ORDER BY wday, hr",
+                    )?
+                    .query_map(params![since_ms, tz_offset_secs, quarter], cell)?
+                    .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    // `INDEXED BY` because this reads nothing but `timestamp`,
+                    // and left to itself the planner takes a wider index that
+                    // also covers it.
+                    conn.prepare_cached(
+                        "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
+                                (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, \
+                                COUNT(*) \
+                         FROM query_logs INDEXED BY idx_query_logs_timestamp \
+                         WHERE timestamp >= ?1 \
+                         GROUP BY wday, hr \
+                         ORDER BY wday, hr",
+                    )?
+                    .query_map(params![since_ms, tz_offset_secs], cell)?
+                    .collect::<Result<Vec<_>, _>>()?
+                };
                 Ok(rows)
             })
             .await?;
