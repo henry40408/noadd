@@ -11,11 +11,7 @@ version = 2
 # Deny crates with a known security advisory (RUSTSEC) or that have been yanked.
 # `ignore` holds advisory IDs we've reviewed and consciously accept.
 yanked = "deny"
-ignore = [
-    # rustls-pemfile is unmaintained (repo archived). Still pulled in
-    # transitively; no drop-in replacement wired up yet, low risk.
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 version = 2
