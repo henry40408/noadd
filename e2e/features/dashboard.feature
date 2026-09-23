@@ -11,7 +11,7 @@ Feature: Dashboard and statistics
 
   Scenario: The dashboard shows the query statistics overview
     When I go to the "Dashboard" tab
-    Then I see the "Blocked Today" summary card
+    Then I see the "Blocked 24h" summary card
     And I see the "Block Rate" summary card
     And I see the "Top Queried Domains" card
 

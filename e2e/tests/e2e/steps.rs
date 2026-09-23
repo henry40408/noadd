@@ -278,7 +278,7 @@ async fn reload_keeps_signed_in(world: &mut NoaddWorld) -> StepResult {
 #[then(expr = "I see the {string} summary card")]
 async fn see_summary_card(world: &mut NoaddWorld, name: String) -> StepResult {
     let id = match name.as_str() {
-        "Blocked Today" => "stat-blocked-today",
+        "Blocked 24h" => "stat-blocked-today",
         "Block Rate" => "stat-block-rate",
         other => return Err(anyhow!("unknown summary card: {other}").into()),
     };
