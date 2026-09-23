@@ -15,6 +15,7 @@ mod settings_autosave;
 mod stats_charts;
 mod stats_no_js;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -22,15 +23,17 @@ use noadd_e2e::browser::Browser;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-/// Schedules one spec file behind the concurrency permit.
+/// Schedules one spec file behind the concurrency permit, recording its name by
+/// task id so a file that panics can still be reported by name.
 macro_rules! spawn_spec {
-    ($set:expr, $permits:expr, $module:ident) => {{
+    ($set:expr, $names:expr, $permits:expr, $module:ident) => {{
         let permits = Arc::clone(&$permits);
-        $set.spawn(async move {
+        let handle = $set.spawn(async move {
             let _permit = permits.acquire().await;
             println!("\n=== {} ===", stringify!($module));
             $module::run().await
         });
+        $names.insert(handle.id(), stringify!($module));
     }};
 }
 
@@ -41,22 +44,28 @@ async fn main() -> Result<()> {
 
     let permits = Arc::new(Semaphore::new(noadd_e2e::max_concurrency()));
     let mut set = JoinSet::new();
-    spawn_spec!(set, permits, account_sensitive_actions);
-    spawn_spec!(set, permits, chart_touch);
-    spawn_spec!(set, permits, filters_no_js);
-    spawn_spec!(set, permits, logs_live_tail);
-    spawn_spec!(set, permits, logs_no_js);
-    spawn_spec!(set, permits, pages_no_js);
-    spawn_spec!(set, permits, password_change_session_list);
-    spawn_spec!(set, permits, settings_autosave);
-    spawn_spec!(set, permits, stats_charts);
-    spawn_spec!(set, permits, stats_no_js);
+    let mut names = HashMap::new();
+    spawn_spec!(set, names, permits, account_sensitive_actions);
+    spawn_spec!(set, names, permits, chart_touch);
+    spawn_spec!(set, names, permits, filters_no_js);
+    spawn_spec!(set, names, permits, logs_live_tail);
+    spawn_spec!(set, names, permits, logs_no_js);
+    spawn_spec!(set, names, permits, pages_no_js);
+    spawn_spec!(set, names, permits, password_change_session_list);
+    spawn_spec!(set, names, permits, settings_autosave);
+    spawn_spec!(set, names, permits, stats_charts);
+    spawn_spec!(set, names, permits, stats_no_js);
 
-    // Collect every file's failing cases before failing the process. (A file
-    // whose setup errors still aborts the run via `??`.)
+    // Every file runs to the end before the process fails: a file that errors
+    // or panics (a server that will not start, say) is one more failure, not a
+    // reason to abort the others mid-run.
     let mut failures = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        failures.extend(joined??);
+    while let Some(joined) = set.join_next_with_id().await {
+        match joined {
+            Ok((_, Ok(cases))) => failures.extend(cases),
+            Ok((id, Err(e))) => failures.push(format!("{} :: did not finish: {e:#}", names[&id])),
+            Err(e) => failures.push(format!("{} :: panicked: {e}", names[&e.id()])),
+        }
     }
 
     if failures.is_empty() {
