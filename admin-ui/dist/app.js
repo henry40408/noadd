@@ -993,8 +993,8 @@ class DashboardPage extends LiveElement {
 
     const statsEl = this.querySelector('#stats');
     statsEl.innerHTML = `
-      <div class="stat-card" data-i="0"><div class="stat-label">Queries Today</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
-      <div class="stat-card" data-i="1" data-testid="stat-blocked-today"><div class="stat-label">Blocked Today</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
+      <div class="stat-card" data-i="0"><div class="stat-label">Queries 24h</div><div class="stat-value accent" title="${formatFull(s.total_today)}">${formatNumAdaptive(s.total_today)}</div><div class="stat-sub">7d: ${formatNum(s.total_7d)} / 30d: ${formatNum(s.total_30d)}</div></div>
+      <div class="stat-card" data-i="1" data-testid="stat-blocked-today"><div class="stat-label">Blocked 24h</div><div class="stat-value red" title="${formatFull(s.blocked_today)}">${formatNumAdaptive(s.blocked_today)}</div><div class="stat-sub">7d: ${formatNum(s.blocked_7d)} / 30d: ${formatNum(s.blocked_30d)}</div></div>
       <div class="stat-card" data-i="2" data-testid="stat-block-rate"><div class="stat-label">Block Rate</div><div class="stat-value red">${ratio}%</div><div class="stat-sub">7d: ${ratio7d}% / 30d: ${ratio30d}%</div></div>
       <div class="stat-card" data-i="3"><div class="stat-label">Cache Hit Rate</div><div class="stat-value text-orange">${cacheRate}%</div><div class="stat-sub">7d: ${cacheRate7d}% / 30d: ${cacheRate30d}%</div></div>
       <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value text-orange">${avgMs}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: ${avgMs7d} ms / 30d: ${avgMs30d} ms</div></div>
