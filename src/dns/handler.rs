@@ -20,9 +20,6 @@ use crate::dns::ttl;
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 
-/// Fallback positive TTL (seconds) when no answer TTL can be read.
-const DEFAULT_TTL_SECS: u64 = 300;
-
 /// Cap (seconds) on caching a negative response (NXDOMAIN or empty `NoError`).
 /// RFC 2308 SOA-derived TTLs can be hours long, turning one transient upstream
 /// hiccup into a prolonged "host not found".
@@ -596,19 +593,11 @@ fn build_blocked_response(
 pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
     let msg = Message::from_bytes(response_bytes).ok()?;
     match msg.metadata.response_code {
-        ResponseCode::NoError => {
-            if msg.answers.is_empty() {
-                Some(negative_ttl_from_soa(&msg))
-            } else {
-                let ttl_secs = msg
-                    .answers
-                    .iter()
-                    .map(|r| r.ttl)
-                    .min()
-                    .unwrap_or(DEFAULT_TTL_SECS as u32);
-                Some(Duration::from_secs(ttl_secs as u64))
-            }
-        }
+        // No minimum means no answers: an empty `NoError` is a negative answer.
+        ResponseCode::NoError => match msg.answers.iter().map(|r| r.ttl).min() {
+            Some(ttl) => Some(Duration::from_secs(u64::from(ttl))),
+            None => Some(negative_ttl_from_soa(&msg)),
+        },
         ResponseCode::NXDomain => Some(negative_ttl_from_soa(&msg)),
         _ => None,
     }
