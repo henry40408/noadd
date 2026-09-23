@@ -54,7 +54,6 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 
 ## Build-time behavior (`build.rs`)
 
-- Downloads six filter lists via `curl` into `OUT_DIR/lists/`; on network failure writes an empty file and warns. (Nothing in `src/` currently reads them; first-run defaults come from `DEFAULT_LISTS` in `src/filter/lists.rs`.)
 - Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
 - Stamps `GIT_VERSION` from `git describe` (env var overrides; a literal `dev` counts as unset). `.dockerignore` excludes `.git`, so image builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
 
