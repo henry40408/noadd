@@ -5,9 +5,14 @@
 //! it on re-opens that one connection, so both are asserted: a row arrives, and
 //! the status indicator on the same connection does not blink OFFLINE.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use noadd_e2e::dom::Page;
-use noadd_e2e::{Api, Profile, Server, Suite, dns, ports};
+use noadd_e2e::{Api, Profile, Server, Suite, dns, ports, wait};
+
+/// How long a pushed row gets to reach the page once the server has sent it.
+const PUSH_GRACE: Duration = Duration::from_millis(500);
 
 async fn open_logs(page: &Page, session: &str) -> Result<()> {
     page.adopt_session(session).await?;
@@ -22,7 +27,8 @@ pub async fn run() -> Result<Vec<String>> {
         ports::LOGS_LIVE_TAIL.1,
     )
     .await?;
-    let session = Api::new(server.base_url()).provision().await?;
+    let api = Api::new(server.base_url());
+    let session = api.provision().await?;
     let dns_port = server.dns_port();
 
     let mut suite = Suite::new(
@@ -84,8 +90,20 @@ pub async fn run() -> Result<Vec<String>> {
 
                 dns::send_query(dns_port, "not-tailed.example").await?;
 
-                // NOTE: this only re-checks the indicator, which is typically
-                // already online, so it adds no real delay before the absence check.
+                // An absence proves nothing until the row could have arrived. The
+                // logger broadcasts an entry before it flushes it, so once
+                // `/api/logs` has the row a live subscription has already been sent
+                // it; the grace covers the push reaching the page.
+                wait::eventually("the query reaching the log", async || {
+                    let body = api
+                        .get_json(&session, "/api/logs?search=not-tailed.example")
+                        .await?;
+                    let total = body["total"].as_i64().unwrap_or(0);
+                    Ok((total > 0, format!("total={total}")))
+                })
+                .await?;
+                tokio::time::sleep(PUSH_GRACE).await;
+
                 page.testid("server-status")
                     .expect_attr("data-state", "online")
                     .await?;
