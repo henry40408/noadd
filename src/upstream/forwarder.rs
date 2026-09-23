@@ -21,9 +21,8 @@ use super::strategy::UpstreamStrategy;
 /// EMA smoothing factor. 0.3 means 30% weight for new observations.
 const EMA_ALPHA: f64 = 0.3;
 
-/// Minimum upstream timeout. Mobile clients (NAT rebinding, Wi-Fi↔cellular
-/// switches) routinely need more than 2s for the first query after a
-/// network transition.
+/// Minimum upstream timeout: mobile clients often need more than 2s for the
+/// first query after a network switch.
 const MIN_TIMEOUT_MS: u64 = 5000;
 
 /// Configuration for upstream DNS servers.
@@ -46,9 +45,8 @@ impl Default for UpstreamConfig {
             servers: vec![
                 "1.1.1.1:53".into(),
                 "9.9.9.9:53".into(),
-                // Mullvad's `194.242.2.2:53` plain-UDP endpoint is not a
-                // recursive resolver from arbitrary networks (returns
-                // REFUSED), so use their DoT endpoint instead.
+                // Mullvad's plain-UDP endpoint answers REFUSED from arbitrary
+                // networks; its DoT endpoint does not.
                 "tls://dns.mullvad.net:853".into(),
             ],
             timeout_ms: 5000,
@@ -67,18 +65,15 @@ enum UpstreamKind {
 /// A syntactically validated upstream entry, prior to address resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UpstreamSpec {
-    /// Hostname (DoT/DoH) or IP literal (UDP) used for both display
-    /// and the address-resolution step.
+    /// Hostname (DoT/DoH) or IP literal (UDP).
     host: String,
     port: u16,
     kind: UpstreamKind,
 }
 
 impl UpstreamSpec {
-    /// Parse an upstream entry string. Recognizes the `tls://` and
-    /// `https://` URL schemes; everything else is treated as plain UDP,
-    /// either `IP:port` or a bare IP literal that takes the standard
-    /// DNS port 53.
+    /// Parse an upstream entry: `tls://`, `https://`, or plain UDP
+    /// (`IP:port` or a bare IP on port 53).
     fn parse(input: &str) -> Result<Self, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -110,12 +105,8 @@ impl UpstreamSpec {
                 kind: UpstreamKind::Udp,
             })
         } else if let Ok(ip) = trimmed.parse::<IpAddr>() {
-            // A bare IP takes the standard DNS port, matching the default
-            // ports `tls://` and `https://` already get. The two parses
-            // cannot both succeed — `SocketAddr` always requires a port and
-            // `IpAddr` always rejects one — so the fallback introduces no
-            // ambiguity. Note that testing for a `:` instead would misread
-            // every bare IPv6 literal as already carrying a port.
+            // Parse as `IpAddr` rather than testing for `:`, which would
+            // misread every bare IPv6 literal as carrying a port.
             Ok(Self {
                 host: ip.to_string(),
                 port: 53,
@@ -129,12 +120,8 @@ impl UpstreamSpec {
         }
     }
 
-    /// Render the spec back to its canonical entry string: every port and
-    /// path made explicit, IPv6 hosts bracketed.
-    ///
-    /// Storing this rather than what the operator typed is what keeps
-    /// `1.1.1.1` and `1.1.1.1:53` from becoming two independent upstreams —
-    /// each with its own health check and latency EMA — for one server.
+    /// Canonical entry string: port and path explicit, IPv6 bracketed. Stored
+    /// instead of the typed form so `1.1.1.1` and `1.1.1.1:53` are one upstream.
     fn canonical(&self) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host)
@@ -150,18 +137,12 @@ impl UpstreamSpec {
     }
 }
 
-/// Parse textarea / CSV upstream input into validated server strings.
-/// Splits on newlines and commas, trims, drops blanks, and validates each
-/// entry via [`UpstreamSpec::parse`]. Returns each entry in its canonical
-/// form (see [`UpstreamSpec::canonical`]) in first-seen order with
-/// duplicates dropped, or an error naming the first offending entry.
-/// Empty input is an error — a resolver with zero upstreams is
-/// non-functional.
+/// Parse newline/comma-separated upstream input into canonical entries
+/// (see [`UpstreamSpec::canonical`]), deduplicated in first-seen order.
+/// Errors on the first invalid entry, or on empty input.
 ///
-/// Canonicalizing here rather than preserving what was typed is what makes
-/// the deduplication meaningful: `1.1.1.1` and `1.1.1.1:53` name one server
-/// and must collapse to one upstream, or the forwarder health-checks it
-/// twice and the Lowest Latency strategy treats it as two candidates.
+/// Dedup runs on canonical forms so equivalent spellings collapse to one
+/// upstream rather than being health-checked and latency-ranked twice.
 pub fn parse_upstreams(input: &str) -> Result<Vec<String>, String> {
     let mut servers: Vec<String> = Vec::new();
     for raw in input.split(['\n', ',']) {
@@ -180,8 +161,7 @@ pub fn parse_upstreams(input: &str) -> Result<Vec<String>, String> {
     Ok(servers)
 }
 
-/// Parse a `host[:port]` fragment, returning a default port when omitted.
-/// Handles bracketed IPv6 literals (`[::1]:853`).
+/// Parse `host[:port]` (including `[::1]:853`), defaulting the port.
 fn parse_host_port(s: &str, default_port: u16) -> Result<(String, u16), String> {
     if s.is_empty() {
         return Err("missing host".into());
@@ -225,23 +205,18 @@ pub enum ForwardError {
     BadQuery,
 }
 
-/// A single-upstream connection pool paired with its display label.
-///
-/// Each pool wraps exactly one upstream server; hickory's `NameServerPool`
-/// owns the per-server connection management (lazy connect, UDP retransmit
-/// within the timeout, reconnect for DoT/DoH) while [`UpstreamForwarder`]
-/// keeps the cross-upstream selection strategy and latency tracking.
+/// A one-server hickory `NameServerPool` (connection management) plus its
+/// label; selection and latency tracking stay in [`UpstreamForwarder`].
 struct UpstreamEntry {
     label: String,
     pool: NameServerPool<TokioRuntimeProvider>,
 }
 
-/// EDNS UDP payload advertised when forcing DO. 1232 is the DNS-flag-day
-/// recommendation that avoids IP fragmentation of larger signed responses.
+/// EDNS UDP payload when forcing DO: the DNS-flag-day value, avoiding IP
+/// fragmentation of signed responses.
 const DNSSEC_UDP_PAYLOAD: u16 = 1232;
 
-/// Upsert an EDNS(0) OPT on `msg` with the DNSSEC-OK (DO) bit set, preserving
-/// any existing OPT and its options. Never produces a second OPT record.
+/// Set DO on `msg`'s OPT, adding one only if absent (never a second OPT).
 fn ensure_dnssec_ok(msg: &mut Message) {
     if let Some(edns) = msg.edns.as_mut() {
         edns.set_dnssec_ok(true);
@@ -257,15 +232,12 @@ fn ensure_dnssec_ok(msg: &mut Message) {
     }
 }
 
-/// Convert an upstream response into the wire profile advertised by the
-/// original client request.
+/// Fit an upstream response to what the client's request advertised.
 ///
-/// The upstream transaction may force DO even when the client did not. RFC
-/// 3225 requires a recursive resolver to remove DNSSEC security records again
-/// before replying to such a client. RFC 6891 likewise requires OPT presence
-/// to follow the client transaction, not the separately modified upstream
-/// transaction. Rebuilding a minimal OPT also prevents upstream/client-specific
-/// EDNS options from leaking through the shared response cache.
+/// DO may have been forced upstream: RFC 3225 requires stripping DNSSEC
+/// records for a non-DO client, and RFC 6891 ties OPT presence to the client's
+/// request. A fresh minimal OPT also keeps upstream EDNS options out of the
+/// shared cache.
 fn prepare_response_for_client(mut response: Message, client_request: &Message) -> Message {
     let client_dnssec_ok = client_request
         .edns
@@ -274,9 +246,7 @@ fn prepare_response_for_client(mut response: Message, client_request: &Message) 
 
     response = response.maybe_strip_dnssec_records(client_dnssec_ok);
     response.metadata.checking_disabled = client_request.metadata.checking_disabled;
-    // RFC 6840 §5.7: never advertise Authenticated Data to a client that did
-    // not request DNSSEC. Leaving AD set after stripping the RRSIG/NSEC records
-    // would tell a plain stub the answer is validated with nothing to back it.
+    // RFC 6840 §5.7: no AD for a client that did not request DNSSEC.
     if !client_dnssec_ok {
         response.metadata.authentic_data = false;
     }
@@ -294,20 +264,12 @@ fn prepare_response_for_client(mut response: Message, client_request: &Message) 
     response
 }
 
-/// Build the DNS response for an authoritative negative answer (NXDOMAIN or
-/// NODATA) that hickory surfaced as a [`NoRecords`] error.
+/// Rebuild an NXDOMAIN/NODATA answer that hickory surfaced as [`NoRecords`].
 ///
-/// Preserves the upstream's authority section — the SOA and any DNSSEC
-/// NSEC/RRSIG records — so downstream clients can negative-cache the answer
-/// per [RFC 2308]. Without the SOA a resolver such as iOS/mDNSResponder falls
-/// back to a short default negative TTL and re-queries the name on nearly
-/// every connection; that is measurably slow for IPv4-only hosts whose
-/// AAAA/HTTPS lookups are always NODATA. An EDNS OPT is echoed when the
-/// client's request carried one, as required by [RFC 6891 §6.1.1].
-///
-/// The AD bit is intentionally left unset: [`NoRecords`] does not expose an
-/// authenticated-data field (see docs/superpowers/specs/
-/// 2026-06-28-dnssec-transparency-design.md "Known limitations").
+/// Keeps the authority section (SOA, NSEC/RRSIG) so clients can negative-cache
+/// per [RFC 2308]; without the SOA, iOS re-queries always-NODATA AAAA/HTTPS
+/// names on nearly every connection. OPT follows the client per
+/// [RFC 6891 §6.1.1]. AD stays unset: [`NoRecords`] has no AD field.
 ///
 /// [RFC 2308]: https://www.rfc-editor.org/rfc/rfc2308
 /// [RFC 6891 §6.1.1]: https://www.rfc-editor.org/rfc/rfc6891#section-6.1.1
@@ -321,11 +283,8 @@ fn build_negative_response(client_id: u16, no_records: &NoRecords, request: &Mes
         response.add_query(q.clone());
     }
 
-    // Carry the authority section so clients can negative-cache (RFC 2308).
-    // `authorities` is the full section hickory saw upstream (SOA plus any
-    // NSEC/RRSIG); `soa` is that same SOA extracted out of it. Prefer the full
-    // section when present and fall back to the bare SOA, so the SOA is added
-    // exactly once.
+    // `soa` is extracted from `authorities`, so use one or the other to add
+    // the SOA exactly once.
     if let Some(authorities) = no_records.authorities.as_deref() {
         for record in authorities {
             response.add_authority(record.clone());
@@ -337,19 +296,15 @@ fn build_negative_response(client_id: u16, no_records: &NoRecords, request: &Mes
     prepare_response_for_client(response, request)
 }
 
-/// Sentinel "no observation yet" value for [`UpstreamForwarder::latencies`].
-/// Sorts last under `total_cmp`, so an unobserved upstream is naturally
-/// the worst choice for `LowestLatency`.
+/// "No observation yet" latency; sorts last under `total_cmp`, so
+/// `LowestLatency` tries unobserved upstreams last.
 const NO_LATENCY: f64 = f64::INFINITY;
 
-/// Fold a new latency observation `ms` into the EMA stored in `cell`.
+/// Fold `ms` into the EMA in `cell` via a CAS loop.
 ///
-/// Operates on a borrowed cell so callers can write through the snapshot they
-/// already hold (`load_full`), rather than re-loading the live snapshot and
-/// risking an index into a different generation after a concurrent
-/// `reconfigure`. Concurrent updates on the same cell race via a CAS loop so
-/// the EMA is always computed from the most recent stored value rather than a
-/// stale local copy.
+/// Takes a cell, not an index, so callers write through the snapshot they
+/// hold rather than indexing a live one a concurrent `reconfigure` may have
+/// replaced.
 fn update_latency_cell(cell: &AtomicU64, ms: f64) {
     let mut prev_bits = cell.load(Ordering::Relaxed);
     loop {
@@ -381,36 +336,26 @@ struct Upstreams {
     latencies: Vec<AtomicU64>,
 }
 
-/// Build the upstream pool set for `config` (concurrent host resolution +
-/// one `NameServerPool` per server + a fresh latencies vec). Performs no
-/// query I/O — connections are lazy.
+/// Resolve hosts concurrently and build one lazy `NameServerPool` per server.
 async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
     let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
 
-    // Only `timeout` is honoured on the `NameServerPool` path used below:
-    // it bounds each upstream attempt and feeds the per-connection I/O
-    // timeout. `attempts` / `preserve_intermediates` only affect the full
-    // `Resolver` (RetryDnsHandle / CachingClient), which we don't use —
-    // this forwarder owns retry and caching itself. UDP retransmit is
-    // handled inside hickory's transport (every ~333ms within `timeout`).
+    // Only `timeout` matters on the `NameServerPool` path; `attempts` etc.
+    // apply to hickory's full `Resolver`, which we don't use. UDP retransmit
+    // happens inside hickory's transport (every ~333ms within `timeout`).
     let mut opts = ResolverOpts::default();
     opts.timeout = timeout;
 
     let provider = TokioRuntimeProvider::default();
-    // Shared connection context for every upstream pool: holds the resolver
-    // options plus the default (aws-lc-rs–backed) rustls client config used
-    // for DoT/DoH. The provider selects aws-lc-rs explicitly, so this does
-    // not depend on a process-wide rustls crypto provider being installed.
+    // The TLS config selects aws-lc-rs explicitly, so no process-wide rustls
+    // crypto provider is needed.
     let cx = Arc::new(PoolContext::new(
         opts,
         TlsConfig::new().expect("failed to build default rustls TLS config"),
     ));
 
-    // Resolve all upstream hosts concurrently — geo-routed providers and
-    // slow DNS can otherwise make startup linear in the number of
-    // upstreams. Each task reports its config index so we can place
-    // the result back into the parallel `entries` Vec without a
-    // post-hoc sort.
+    // Concurrent, so slow lookups don't make startup linear in upstream
+    // count. Each task carries its config index to slot into `entries`.
     let mut lookup_set = tokio::task::JoinSet::new();
     for (idx, server) in config.servers.iter().enumerate() {
         let spec = match UpstreamSpec::parse(server) {
@@ -472,12 +417,8 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
             }
         };
 
-        // One NameServerConfig per upstream, with a single connection of the
-        // requested transport — matching the pre-0.26 behavior (a truncated
-        // UDP response is relayed to the client, which retries over TCP
-        // itself). DoT/DoH carry the SNI / HTTP path inside the
-        // per-connection ProtocolConfig. The resolved address' port is
-        // propagated onto the connection.
+        // A single connection of the requested transport, no TCP fallback: a
+        // truncated UDP response is relayed and the client retries over TCP.
         let ns_cfg = match &spec.kind {
             UpstreamKind::Udp => {
                 let mut udp = ConnectionConfig::udp();
@@ -499,8 +440,6 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
             }
         };
 
-        // Connections are established lazily on first use, so constructing
-        // the pool performs no network I/O here.
         let pool = NameServerPool::from_config([ns_cfg], cx.clone(), provider.clone());
         entries[idx] = Some(UpstreamEntry {
             label: server,
@@ -519,31 +458,22 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
     }
 }
 
-/// Forwards DNS queries to upstream servers with configurable strategy.
+/// Forwards DNS queries to upstreams by strategy; transport is delegated to
+/// per-upstream hickory pools.
 ///
-/// Transport (UDP retransmit, socket handling, txid validation/rewrite) is
-/// delegated to a per-upstream hickory `NameServerPool`. This type owns the
-/// per-upstream selection strategy and latency tracking.
-///
-/// Upstreams are addressed by index (matching `config.servers`) — looking
-/// them up by label-string used to allocate a `String` per query and was
-/// the dominant per-query allocation outside the cache hot path.
+/// Upstreams are addressed by index into `config.servers`, avoiding a
+/// per-query label allocation.
 pub struct UpstreamForwarder {
     upstreams: ArcSwap<Upstreams>,
     strategy: ArcSwap<UpstreamStrategy>,
     rr_counter: AtomicUsize,
-    /// When true, force the DO bit on upstream requests (DNSSEC transparency).
-    /// Runtime-switchable so the admin-UI toggle takes effect without restart.
+    /// Force DO on upstream requests (DNSSEC transparency); runtime-switchable.
     dnssec_enabled: AtomicBool,
 }
 
 impl UpstreamForwarder {
-    /// Create a new forwarder with the given configuration.
-    ///
-    /// Hostname-bearing entries (`tls://`, `https://`) are resolved to
-    /// `SocketAddr` via `tokio::net::lookup_host`. The first address
-    /// returned is used; geo-routed providers like Mullvad therefore
-    /// pin to the `PoP` that DNS picks at startup.
+    /// Create a forwarder. Hostnames resolve once, to their first address, so
+    /// geo-routed providers pin to the `PoP` picked at startup.
     pub async fn new(config: UpstreamConfig) -> Self {
         Self {
             upstreams: ArcSwap::from_pointee(build_upstreams(config).await),
@@ -553,10 +483,8 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Atomically replace the upstream set with `servers`, with no restart and
-    /// no query interruption. The current timeout is preserved. DNS-resolution
-    /// failures for individual hosts are tolerated (logged, left unavailable),
-    /// exactly as `new` handles them.
+    /// Atomically replace the upstream set, keeping the timeout. Hosts that fail
+    /// to resolve are logged and left unavailable, as in `new`.
     pub async fn reconfigure(&self, servers: Vec<String>) {
         let timeout_ms = self.upstreams.load().config.timeout_ms;
         let next = build_upstreams(UpstreamConfig {
@@ -587,10 +515,7 @@ impl UpstreamForwarder {
         self.dnssec_enabled.load(Ordering::Relaxed)
     }
 
-    /// Return the server try-order for the current strategy as indices
-    /// into `config.servers` / `entries`. Indices are returned (not
-    /// labels) to avoid a per-query allocation; callers that need a
-    /// label can read `entries[idx].label`.
+    /// Try-order for the current strategy, as indices into `config.servers`.
     pub fn server_order(&self) -> Vec<usize> {
         let up = self.upstreams.load();
         let len = up.entries.len();
@@ -616,22 +541,15 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Read the EMA latency for the upstream at `idx`, in milliseconds.
-    /// Returns `f64::INFINITY` when no observation has been recorded yet.
+    /// EMA latency (ms) at `idx`; `f64::INFINITY` if unobserved.
     #[cfg(test)]
     fn latency_ms_at(&self, idx: usize) -> f64 {
         let up = self.upstreams.load();
         f64::from_bits(up.latencies[idx].load(Ordering::Relaxed))
     }
 
-    /// Update the EMA latency for the upstream at `idx`. Concurrent
-    /// updates on the same index race via a CAS loop so the EMA is
-    /// always computed from the most recent stored value rather than a
-    /// stale local copy.
-    ///
-    /// Panic-safe across a concurrent `reconfigure`: indexing is bounds-checked
-    /// via `get`, so an `idx` that has been shrunk out of the live snapshot is a
-    /// silent no-op rather than an out-of-bounds panic.
+    /// Update the EMA latency at `idx`. An `idx` a concurrent `reconfigure`
+    /// shrank away is a no-op, not a panic.
     pub fn update_latency(&self, idx: usize, ms: f64) {
         let up = self.upstreams.load();
         if let Some(cell) = up.latencies.get(idx) {
@@ -639,9 +557,7 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Get a snapshot of current EMA latencies, keyed by server label.
-    /// Servers without any observation yet are omitted (matches the
-    /// previous `Mutex<HashMap>`-backed behavior).
+    /// EMA latencies by server label; unobserved servers are omitted.
     pub fn latencies(&self) -> HashMap<String, f64> {
         let up = self.upstreams.load();
         up.config
@@ -649,10 +565,7 @@ impl UpstreamForwarder {
             .iter()
             .enumerate()
             .filter_map(|(i, label)| {
-                // Read from the single held snapshot. `i` is in range for
-                // `up.config.servers`, which is index-aligned with
-                // `up.latencies`, so this never races a concurrent
-                // `reconfigure` into a different generation.
+                // One snapshot, index-aligned: in range whatever `reconfigure` does.
                 let ms = f64::from_bits(up.latencies[i].load(Ordering::Relaxed));
                 if ms.is_finite() {
                     Some((label.clone(), ms))
@@ -665,29 +578,21 @@ impl UpstreamForwarder {
 
     /// Forward a DNS query using the current strategy.
     ///
-    /// Returns `(response_bytes, upstream_address, authenticated_data)` on
-    /// success. `authenticated_data` is the upstream resolver's AD verdict read
-    /// from its response *before* it is tailored to the client — so the query
-    /// log can surface the verdict even for clients that did not set DO and
-    /// therefore have the AD bit stripped from their wire response.
+    /// Returns `(response_bytes, upstream_label, authenticated_data)`, where
+    /// `authenticated_data` is the upstream's AD bit read *before* it is
+    /// stripped for non-DO clients, so the query log still sees it.
     pub async fn forward(
         &self,
         query_bytes: &[u8],
     ) -> Result<(Vec<u8>, String, bool), ForwardError> {
-        // Snapshot the upstream set for the duration of this query. Using
-        // `load_full` (Arc) rather than `load` (Guard) so the reference
-        // can be held across `.await` points on the multi-threaded runtime.
+        // `load_full` (Arc, not Guard) so the snapshot can be held across `.await`.
         let up = self.upstreams.load_full();
-        // Parse incoming wire bytes once. We need a hickory `Message` to
-        // build a `DnsRequest`; the caller has already parsed this once
-        // in the handler, but the forwarder API stays bytes-in / bytes-out
-        // so the handler doesn't have to know about transport details.
+        // The handler parsed this already; re-parsing keeps the API bytes-in /
+        // bytes-out.
         let client_request_msg =
             Message::from_vec(query_bytes).map_err(|_err| ForwardError::BadQuery)?;
         let client_id = client_request_msg.metadata.id;
-        // Only clone the client message when we actually need to mutate it to
-        // force DO; with DNSSEC disabled the upstream query is the client query
-        // verbatim, so borrow it and skip a full-`Message` copy per query.
+        // Clone only when forcing DO; otherwise send the client query as-is.
         let forced_request_msg = if self.dnssec_enabled() {
             let mut msg = client_request_msg.clone();
             ensure_dnssec_ok(&mut msg);
@@ -714,21 +619,16 @@ impl UpstreamForwarder {
             match entry.pool.send(request).first_answer().await {
                 Ok(response) => {
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
-                    // Write through the snapshot held for this query (`up`),
-                    // not the live one: `idx` already passed `up.entries.get`
-                    // above, so the same-generation cell is always in range,
-                    // and a post-swap write lands harmlessly in the old `Arc`.
+                    // Write through `up`, not the live snapshot; a post-swap
+                    // write lands harmlessly in the old `Arc`.
                     if let Some(cell) = up.latencies.get(idx) {
                         update_latency_cell(cell, ms);
                     }
 
-                    // hickory rewrites txids for connection multiplexing,
-                    // so the response message we get back may not echo the
-                    // client's original id. Restore it before re-encoding.
+                    // hickory rewrites txids for multiplexing; restore the client's.
                     let mut msg: Message = response.into();
                     msg.metadata.id = client_id;
-                    // Capture the upstream's AD verdict before tailoring strips
-                    // the AD bit for non-DO clients (see `forward` docs).
+                    // Read AD before tailoring strips it for non-DO clients.
                     let upstream_authenticated = msg.metadata.authentic_data;
                     let msg = prepare_response_for_client(msg, &client_request_msg);
 
@@ -747,11 +647,8 @@ impl UpstreamForwarder {
                     }
                 }
                 Err(e) => {
-                    // NXDOMAIN / NoError-with-no-records is a valid authoritative
-                    // response, not an upstream failure.  hickory converts it to a
-                    // ProtoError so we reconstruct a proper DNS response (preserving
-                    // the SOA/authority section for client-side negative caching) and
-                    // return it immediately so the query gets logged by the handler.
+                    // hickory surfaces NXDOMAIN/NODATA as an error; it is a valid
+                    // answer, so rebuild and return it rather than failing over.
                     if let NetError::Dns(DnsError::NoRecordsFound(no_records)) = &e {
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         if let Some(cell) = up.latencies.get(idx) {
@@ -760,9 +657,7 @@ impl UpstreamForwarder {
                         let response =
                             build_negative_response(client_id, no_records, &client_request_msg);
                         if let Ok(bytes) = response.to_bytes() {
-                            // NoRecordsFound does not expose an AD field, so a
-                            // reconstructed negative answer is logged as
-                            // unauthenticated (documented v1 limitation).
+                            // `NoRecords` has no AD field: logged as unauthenticated.
                             return Ok((bytes, entry.label.clone(), false));
                         }
                     }
@@ -779,8 +674,7 @@ impl UpstreamForwarder {
         Err(ForwardError::AllFailed)
     }
 
-    /// Health check all configured upstream servers.
-    /// Returns a list of (server, status, `latency_ms`).
+    /// Health check every configured upstream: `(server, ok, latency_ms)`.
     pub async fn health_check(&self) -> Vec<(String, bool, u64)> {
         let up = self.upstreams.load_full();
         let mut results = Vec::with_capacity(up.config.servers.len());
@@ -797,7 +691,7 @@ impl UpstreamForwarder {
         results
     }
 
-    /// Probe all servers and update EMA latencies. Used by background task.
+    /// Probe all servers and update EMA latencies (background task).
     pub async fn probe_all(&self) {
         let up = self.upstreams.load_full();
         for (idx, entry) in up.entries.iter().enumerate() {
@@ -805,9 +699,6 @@ impl UpstreamForwarder {
             let start = std::time::Instant::now();
             if self.probe(entry).await.is_ok() {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                // Write through the held snapshot `up`; `idx` came from
-                // `up.entries.iter().enumerate()` so it is always in range
-                // for `up.latencies` of the same generation.
                 if let Some(cell) = up.latencies.get(idx) {
                     update_latency_cell(cell, ms);
                 }
@@ -815,32 +706,19 @@ impl UpstreamForwarder {
         }
     }
 
-    /// Send a root "." NS query to a single upstream and return on success.
+    /// Send a root `.` NS query to one upstream.
     ///
-    /// NS is used (not A) because the root has no A record: a "." A query
-    /// comes back as NOERROR with zero answers, which hickory's
-    /// `ProtoError::from_response` translates into a `NoRecordsFound`
-    /// error and makes every probe look like a failure. The root NS set
-    /// is always populated on any recursive resolver, so NS gives a
-    /// reliable liveness signal without hitting an authoritative zone.
+    /// NS, not A: the root has no A record, and hickory turns that empty
+    /// NOERROR into `NoRecordsFound`, failing every probe.
     ///
-    /// The send is retried once on failure. A persistent DoT/DoH connection
-    /// can be closed by the server's idle timeout (or invalidated by an
-    /// anycast reroute when the client's network changes), so the first send
-    /// on a connection that went stale between health checks fails before
-    /// hickory's `NameServerPool` transparently reconnects. The forward path
-    /// hides this behind cross-upstream failover; the single-upstream probe
-    /// has no such fallback, so it retries the same upstream once to give the
-    /// connection a chance to rebuild.
+    /// Retried once: the first send on a DoT/DoH connection that went stale
+    /// (idle timeout, anycast reroute) fails before the pool reconnects, and
+    /// unlike the forward path a probe has no other upstream to fail over to.
     async fn probe(&self, entry: &UpstreamEntry) -> Result<(), ()> {
-        // 1 original send + 1 retry. `send` consumes the `DnsRequest`, so the
-        // query is rebuilt per attempt (cheap, and a fresh id avoids a late
-        // reply to the first attempt being matched against the second).
         const PROBE_ATTEMPTS: usize = 2;
         for attempt in 0..PROBE_ATTEMPTS {
-            // `Message::query()` assigns a fresh random transaction id and sets
-            // MessageType::Query / OpCode::Query, so a late reply to a previous
-            // attempt won't be matched against this one.
+            // A fresh random id per attempt, so a late reply to the first
+            // attempt is not matched against the second.
             let mut msg = Message::query();
             msg.metadata.recursion_desired = true;
             msg.add_query(Query::query(Name::root(), RecordType::NS));
@@ -848,10 +726,7 @@ impl UpstreamForwarder {
             let request = DnsRequest::new(msg, DnsRequestOptions::default());
             match entry.pool.send(request).first_answer().await {
                 Ok(_) => return Ok(()),
-                // Log the real transport error the old probe used to swallow.
-                // The first failed attempt is the expected stale-connection
-                // signal that the retry recovers from; only a failure on the
-                // final attempt actually marks the upstream down.
+                // Only a failed final attempt marks the upstream down.
                 Err(e) => warn!(
                     event = "upstream.probe_attempt_failed",
                     upstream = %entry.label,
@@ -1022,9 +897,7 @@ mod tests {
         let mut request = Message::query();
         request.add_query(Query::query(name.clone(), RecordType::AAAA));
 
-        // hickory populates both fields: `soa` is extracted from the same
-        // authority section it also exposes via `authorities`. We must not add
-        // the SOA twice.
+        // hickory fills both fields from the same section.
         let soa = example_soa();
         let mut no_records =
             NoRecords::new(Query::query(name, RecordType::AAAA), ResponseCode::NoError);
@@ -1086,9 +959,7 @@ mod tests {
     }
 
     async fn make_forwarder(strategy: UpstreamStrategy) -> UpstreamForwarder {
-        // Use real-looking IP:port so pool construction succeeds; tests
-        // here only exercise ordering and EMA, never actually send. Plain
-        // IP literals don't trigger any DNS lookup in `tokio::net::lookup_host`.
+        // IP literals need no lookup; these tests never send.
         let config = UpstreamConfig {
             servers: vec![
                 "10.0.0.1:53".into(),
@@ -1297,9 +1168,7 @@ mod tests {
         assert_eq!(s.kind, UpstreamKind::Udp);
     }
 
-    /// A bare IPv6 literal is full of colons but carries no port, so the
-    /// fallback must be driven by an `IpAddr` parse rather than by looking
-    /// for a `:`.
+    /// A bare IPv6 literal has colons but no port.
     #[test]
     fn parse_bare_ipv6_takes_port_53() {
         let s = UpstreamSpec::parse("2606:4700:4700::1111").unwrap();
@@ -1309,8 +1178,7 @@ mod tests {
         assert_eq!(s.canonical(), "[2606:4700:4700::1111]:53");
     }
 
-    /// `inet_aton`-style shorthand and octal forms would make a bare IP
-    /// genuinely ambiguous; Rust's parser rejects them, so they stay errors.
+    /// Ambiguous `inet_aton` shorthand and octal forms stay errors.
     #[test]
     fn parse_bare_ip_rejects_inet_aton_shorthand() {
         assert!(UpstreamSpec::parse("1.1").is_err());
@@ -1318,8 +1186,7 @@ mod tests {
         assert!(UpstreamSpec::parse("0x01010101").is_err());
     }
 
-    /// Hostnames still need an explicit scheme — a bare name has no
-    /// transport to infer and is not covered by the port default.
+    /// A bare hostname has no transport to infer; it needs a scheme.
     #[test]
     fn parse_bare_hostname_still_rejected() {
         assert!(UpstreamSpec::parse("dns.example.com").is_err());
@@ -1341,9 +1208,7 @@ mod tests {
         );
     }
 
-    /// The whole point of canonicalizing before storing: these spellings
-    /// name one server and must not become two upstreams, each with its own
-    /// health check and latency EMA.
+    /// Equivalent spellings must collapse to one upstream.
     #[test]
     fn parse_upstreams_dedupes_equivalent_spellings() {
         let out = parse_upstreams("1.1.1.1, 1.1.1.1:53, [::1]:53, ::1").unwrap();
@@ -1367,18 +1232,13 @@ mod tests {
 
     #[tokio::test]
     async fn latency_write_after_shrinking_reconfigure_does_not_panic() {
-        // Regression for finding C1/I1: a latency write or `latencies()` read
-        // that re-loads the live snapshot and indexes by `idx` would panic if a
-        // concurrent `reconfigure` shrank the set during an in-flight query.
+        // A stale `idx` must not panic after `reconfigure` shrinks the set.
         let f = make_forwarder(UpstreamStrategy::LowestLatency).await; // 3 servers
         f.reconfigure(vec!["10.0.9.9:53".into()]).await; // shrink to 1
 
-        // idx 2 is now out of range for the live snapshot — must be a no-op,
-        // not an index-out-of-bounds panic.
+        // idx 2 is now out of range: a no-op.
         f.update_latency(2, 5.0);
 
-        // And `latencies()` must not panic after the swap, and must reflect
-        // only the surviving generation.
         let snap = f.latencies();
         assert!(
             !snap.contains_key("10.0.0.3:53"),

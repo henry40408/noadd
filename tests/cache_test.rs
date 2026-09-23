@@ -108,12 +108,8 @@ async fn test_cache_invalidate_all() {
     assert!(cache.get(&key_aaaa).await.is_none());
 }
 
-/// How many of `n` entries survive when each response is `response_len` bytes
-/// and the cache is capped at `cap_bytes`.
-///
-/// Synthetic response bodies rather than real DNS messages: what is under test
-/// is the bound, and a fixed size per entry is what makes the two arms of a
-/// comparison differ in exactly one way.
+/// How many of `n` entries of `response_len` bytes survive a `cap_bytes` cap.
+/// Synthetic bodies, so compared arms differ only in size.
 async fn survivors(cap_bytes: u64, n: usize, response_len: usize) -> usize {
     let cache = DnsCache::with_capacity_bytes(cap_bytes);
     let keys: Vec<CacheKey> = (0..n).map(|i| key(&format!("e{i}.test"), 1)).collect();
@@ -138,9 +134,8 @@ async fn survivors(cap_bytes: u64, n: usize, response_len: usize) -> usize {
     alive
 }
 
-/// The cache is bounded by the bytes its entries occupy, not by how many there
-/// are. Under an entry-count bound both arms below would hold all 60; under a
-/// byte bound the large ones evict each other long before the count is reached.
+/// The cache is bounded by bytes, not entry count: an entry-count bound would
+/// hold all 60 in both arms.
 #[tokio::test]
 async fn capacity_is_measured_in_bytes_not_entries() {
     const CAP: u64 = 100_000;
@@ -160,9 +155,8 @@ async fn capacity_is_measured_in_bytes_not_entries() {
     );
 }
 
-/// A large response costs proportionally more to keep, which is the property
-/// that stops one pathological answer holding the space of dozens of ordinary
-/// ones.
+/// A large response costs proportionally more to keep, so one pathological
+/// answer cannot hold the space of dozens of ordinary ones.
 #[tokio::test]
 async fn a_large_response_displaces_more_than_a_small_one() {
     const CAP: u64 = 100_000;

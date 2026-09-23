@@ -1,26 +1,16 @@
 {#
   The settings page.
 
-  Every scalar setting is one form with one submit, rather than a POST per
-  field. Without JavaScript that is what makes the page usable at all; with it,
-  `app.js` removes the button and restores per-field autosave, so the operator
-  sees no button either way.
+  Every scalar setting is in one form with one submit; `app.js` removes the
+  button and autosaves per field instead.
 
-  What is *not* here stays client-rendered because it is not settings at all:
-  the read-only server info, the upstream health table, the EMA latency figures
-  and the DoH token list. They are live data with their own refresh, and a form
-  has nothing to say about them.
+  Server info, upstream health, EMA latency and the DoH token list stay
+  client-rendered: they are live data, not settings.
 #}
 {% extends "shell.html" %}
 
 {% block page %}
-      {#
-        Wrapped in the custom element the client already defines. It upgrades in
-        place over this markup, so the enhancement — autosave, the live upstream
-        table, the token list — attaches to the server-rendered form rather than
-        replacing it. Nothing mounts it: every page ships its own element now,
-        so `app.js` has no path-to-component table left.
-      #}
+      {# Upgrades in place, enhancing the server-rendered form rather than replacing it. #}
       <settings-page>
       <div class="page-header fade-in"><h2>Settings</h2><p>Server configuration</p></div>
       <div class="card fade-in">
@@ -35,11 +25,9 @@
         <textarea id="s-upstream" name="upstream_servers" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853">{{ upstream_servers }}</textarea>
         <div class="field-msg{% if error_field == "upstream_servers" %} error{% endif %}" id="msg-upstream">{% if error_field == "upstream_servers" %}{{ error_message }}{% endif %}</div>
         {#
-          A submit, not a plain button: without JavaScript it saves the form
-          like any other submit. `app.js` intercepts it to PUT just the upstream
-          list and refresh the health table, which is the behaviour it has
-          always had — upstreams are the one field with a visible apply step,
-          because applying them reconfigures the forwarder.
+          A submit, so it saves the form without JavaScript. `app.js` intercepts
+          it to PUT just the upstreams — the one field with a visible apply step,
+          since applying reconfigures the forwarder.
         #}
         <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
           <button type="submit" class="btn btn-sm btn-primary" id="apply-upstream">Save &amp; apply</button>
@@ -126,7 +114,7 @@
         </div>
         <div class="field-msg" id="msg-doh-policy"></div>
       </div>
-      {# Removed by app.js, which restores per-field autosave in its place. #}
+      {# Removed by app.js, which autosaves per field instead. #}
       <div class="fade-in" id="settings-save-row" style="animation-delay:0.15s;margin-top:4px;display:flex;align-items:center;gap:10px">
         <button type="submit" class="btn btn-primary btn-sm" id="save-settings" data-testid="save-settings">Save settings</button>
         {%- if saved %}

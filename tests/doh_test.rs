@@ -51,7 +51,7 @@ async fn make_handler() -> Arc<DnsHandler> {
 
 async fn test_db() -> Database {
     let dir = tempfile::tempdir().unwrap();
-    // Persist the tempdir (no Drop cleanup) so it lives for the test duration.
+    // Persist the tempdir (no Drop cleanup) so it lives for the test.
     let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
     Database::open(&path_str).await.unwrap()

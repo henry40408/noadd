@@ -1,20 +1,13 @@
-//! The noadd instances under test.
+//! The noadd instances under test, each with its own `SQLite` file and HTTP +
+//! DNS ports.
 //!
-//! Replaces `playwright.config.js`'s `webServer` block *and* the `startNoadd` /
-//! `waitHealthy` / `stopNoadd` trio every spec file carried its own copy of.
-//! Each instance gets its own `SQLite` file and its own HTTP + DNS ports, exactly
-//! as before, and the port numbers are unchanged so nothing a developer has
-//! bookmarked moves.
+//! Seeded suites boot, stop, seed, boot: noadd creates the schema on first
+//! start and the fixture is written to the *stopped* database with `sqlite3`.
+//! So [`Server::stop`] is a graceful SIGTERM (the WAL is checkpointed), and
+//! [`Server::start`] can be called again on the same handle.
 //!
-//! Several suites need the boot–seed–boot dance: noadd creates the schema on
-//! first start, the fixture is written against the *stopped* database with
-//! `sqlite3`, and the second boot renders it. [`Server::stop`] is therefore a
-//! real graceful stop (SIGTERM, so the WAL is checkpointed) rather than a kill,
-//! and [`Server::start`] can be called again on the same handle.
-//!
-//! The binary is spawned directly rather than through `cargo run`, so the PID
-//! held here is noadd's own. Killing `cargo` would leave the server it spawned
-//! holding the port.
+//! The binary is spawned directly, not via `cargo run`, so the PID held is
+//! noadd's own; killing `cargo` would leave the server holding the port.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -29,9 +22,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a SIGTERM gets before the process is killed outright.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Brings the maintained `query_logs` row count back in line after a seed —
-/// see [`Server::seed`]. An upsert, because the counter row is only there once
-/// noadd has migrated this database.
+/// Recomputes the maintained `query_logs` row count after a seed (see
+/// [`Server::seed`]). An upsert: the row exists only once noadd has migrated.
 const RECOUNT_LOGS: &str = "INSERT INTO settings (key, value) \
      SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
      ON CONFLICT(key) DO UPDATE SET value = excluded.value;\n";
@@ -88,15 +80,13 @@ impl Server {
                 "json".as_ref(),
             ])
             .stdout(Stdio::null())
-            // Inherited, so a refusal to start is visible in the test output
-            // rather than swallowed into a pipe nobody reads.
+            // Inherited, so a refusal to start shows in the test output.
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawning noadd at {}", binary.display()))?;
 
-        // Bound before the wait, so a server that never answers is still killed
-        // when the error propagates.
+        // Stored before the wait, so a server that never answers is still killed.
         self.child = Some(child);
         self.wait_healthy().await
     }
@@ -111,9 +101,8 @@ impl Server {
             return Ok(());
         };
         if let Some(pid) = child.id() {
-            // `kill(2)` would mean unsafe code, which this workspace denies,
-            // and `Child::kill` is SIGKILL — which skips the checkpoint the
-            // seeding suites need.
+            // `kill(2)` needs unsafe code (denied here) and `Child::kill` is
+            // SIGKILL, which skips the checkpoint the seeding suites need.
             let _ = Command::new("kill")
                 .args(["-TERM", &pid.to_string()])
                 .status()
@@ -130,14 +119,9 @@ impl Server {
 
     /// Runs SQL against the stopped database with the `sqlite3` CLI.
     ///
-    /// The instance must not be running: these fixtures backdate months of
-    /// traffic and rewrite settings noadd reads at boot, so they are written
-    /// between the two starts rather than underneath a live server.
-    ///
-    /// Rows written here bypass the write paths that maintain `query_logs`'
-    /// row count in `settings`, so the count is recomputed after every seed;
-    /// otherwise the query log's pager and the Database Health card report the
-    /// total from before the fixture.
+    /// The instance must be stopped: fixtures rewrite settings noadd reads at
+    /// boot. Rows written here bypass the maintained `query_logs` count in
+    /// `settings`, so it is recomputed after every seed.
     ///
     /// # Errors
     ///
@@ -201,7 +185,7 @@ impl Server {
     }
 }
 
-/// Where every instance's database lives — gitignored, and wiped per run.
+/// Where every instance's database lives (gitignored); [`Server::fresh`] wipes its own.
 pub fn tmp_dir() -> PathBuf {
     crate_dir().join(".tmp")
 }
@@ -218,11 +202,9 @@ async fn remove_db(db: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Path to the noadd binary, building it first when it is not there.
-///
-/// CI builds it in an earlier step, so this is the local-developer path — and
-/// the reason it exists is that the admin UI is embedded at compile time, so a
-/// suite run against a stale binary is testing yesterday's markup.
+/// Path to the noadd binary: `NOADD_BIN`, else `target/debug/noadd`, built only
+/// when missing. An existing binary is not rebuilt, so run `cargo build` first
+/// or the embedded UI is stale.
 async fn ensure_binary() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("NOADD_BIN") {
         return Ok(PathBuf::from(path));

@@ -87,10 +87,8 @@ body::after {
 
 ::selection { background: var(--green); color: var(--inverse-fg); }
 
-/* Scrollbars are deliberately left native: styling ::-webkit-scrollbar opts
-   Chrome/Safari out of overlay scrollbars, so every scrollable container would
-   own a permanently visible 8px bar instead of one that fades in while
-   scrolling. */
+/* Scrollbars are left native: styling ::-webkit-scrollbar opts Chrome/Safari
+   out of overlay scrollbars, leaving a permanent bar on every scroller. */
 
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
@@ -126,9 +124,7 @@ body::after {
   padding: 8px 14px;
   border-right: 1px solid var(--border);
   transition: color var(--transition), background var(--transition);
-  /* The navigation items are <a> elements now that routing is server-side —
-     these two are the only places a link does not already inherit what the
-     <button> they replaced was given for free. */
+  /* Nav items are <a>s; undo the link styling a <button> never had. */
   text-decoration: none;
   text-align: center;
 }
@@ -143,9 +139,8 @@ body::after {
   color: var(--text-dim);
   border-left: 1px solid var(--border);
 }
-/* Logging out is a form submission now, so the button sits inside a <form>.
-   The topbar stretches its children, and without this the form would be the
-   stretched item while the button kept its own height inside it. */
+/* Logout's button sits in a <form>; the topbar stretches its children, so the
+   button must fill the form. */
 .topbar-logout { display: flex; }
 #topbar-logout { border-left: 1px solid var(--border); border-right: none; }
 #topbar-logout:hover { color: var(--red); background: var(--red-dim); }
@@ -165,21 +160,18 @@ body::after {
   content: '●'; margin-right: 6px;
   animation: blink 1.6s steps(2, start) infinite;
 }
-/* Reconnecting is not yet bad news, so it stays dim rather than red; the dot
-   keeps blinking because something is still being attempted. */
+/* Reconnecting: dim, not red, and still blinking — something is being tried. */
 .statusbar .live.connecting { color: var(--text-dim); text-shadow: none; }
-/* Offline holds a steady dot on purpose: the blink reads as activity, and
-   there is none. */
+/* Offline: a steady dot, since a blink reads as activity. */
 .statusbar .live.offline { color: var(--red); text-shadow: none; }
 .statusbar .live.offline::before { animation: none; }
 .statusbar .right { margin-left: auto; }
 
 .fnbar { display: none; }
 
-/* The status bar is fixed to the bottom, so anything the browser scrolls to —
-   a focused field reached by Tab, an anchor target — can land underneath it.
-   `scroll-padding` is what keeps scrolling clear of it; the `padding-bottom`
-   below only helps at the very end of the page. */
+/* The status bar is fixed to the bottom; `scroll-padding` keeps scroll targets
+   (Tab focus, anchors) clear of it. `padding-bottom` below only helps at the
+   end of the page. */
 :root { scroll-padding-bottom: 56px; }
 
 .main-content {
@@ -245,8 +237,7 @@ body::after {
 .card-title::before { content: '┤ '; color: var(--text-dim); }
 .card-title::after { content: ' ├'; color: var(--text-dim); }
 
-/* Cheatsheet under the custom-rule list: a boxed panel whose <code> samples all
-   share one treatment, so they are styled by descent rather than one by one. */
+/* Cheatsheet under the custom-rule list; its <code> samples styled by descent. */
 .syntax-ref {
   margin-top: 16px;
   padding: 12px;
@@ -307,11 +298,8 @@ body::after {
   letter-spacing: 0.12em;
 }
 .stat-label::before { content: '▌'; color: var(--green); margin-right: 6px; }
-/* The ▌ marker picks up whatever colour its card's value carries. Matching is
-   by class only: this used to also read [style*="--red"], which quietly stopped
-   working the moment a value moved from an inline colour to a utility class —
-   the marker fell back to green with nothing else changing. Colour belongs in a
-   class here precisely so this rule can see it. */
+/* The ▌ marker takes its card value's colour, matched by class — so a value's
+   colour must be a class, not an inline style, or the marker falls back to green. */
 .stat-card:has(.stat-value.red) .stat-label::before,
 .stat-card:has(.stat-value.text-red) .stat-label::before { color: var(--red); }
 .stat-card:has(.stat-value.text-orange) .stat-label::before { color: var(--orange); }
@@ -331,10 +319,9 @@ body::after {
 .stat-value.green { color: var(--green); text-shadow: var(--glow); }
 .stat-value.red { color: var(--red); text-shadow: var(--glow-red); }
 .stat-value.accent { color: var(--accent); text-shadow: var(--glow); }
-/* Database Health packs ten cards into one grid, so its values run smaller
-   than the dashboard's headline stats. */
+/* Database Health packs ten cards, so its values run smaller. */
 #health-grid .stat-value { font-size: 1.4rem; }
-/* Highlights sits between the two: four cards, wider than Health's ten. */
+/* Highlights: four cards, sized between the two. */
 #highlights-grid .stat-value { font-size: 1.6rem; }
 
 .stat-sub {
@@ -383,18 +370,14 @@ td {
 
 tr:hover td { background: var(--bg-hover); }
 
-/* Mono utility — applied to numeric / code-like cells (timestamps, IPs, tokens, latency, query types) */
+/* Mono utility for numeric / code-like cells. */
 .mono { font-family: var(--font-mono); letter-spacing: -0.01em; }
 td.mono, .mono { font-variant-numeric: tabular-nums; }
 
-/* Text colour utilities — the one deliberate exception to this stylesheet's
-   otherwise semantic naming. They cover the case where the only thing being
-   said is "this text is that colour" and no better name exists; anything with
-   a real role (.stat-value, .card-desc, .badge) keeps its own rule. Names
-   mirror the custom properties they set, so the mapping stays obvious.
-   Declared after the semantic rules so a bare utility wins over an inherited
-   colour, but note that a same-specificity rule later in the file still beats
-   it — these are for plain text, not for overriding components. */
+/* Text colour utilities — the deliberate exception to semantic naming, for text
+   with no better name; anything with a role keeps its own rule. A
+   same-specificity rule later in the file still beats these, so they are for
+   plain text, not for overriding components. */
 .text-dim { color: var(--text-dim); }
 .text-secondary { color: var(--text-secondary); }
 .text-primary { color: var(--text-primary); }
@@ -403,8 +386,7 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .text-orange { color: var(--orange); }
 .text-green { color: var(--green); }
 
-/* Top-N tables: fixed layout keeps the right-hand count column visible
-   even when the left-hand label (domain, upstream, client) is very long. */
+/* Top-N tables: fixed layout keeps the count column visible past a long label. */
 .top-table { table-layout: fixed; width: 100%; }
 .top-table td, .top-table th { overflow: hidden; }
 .truncate-cell {
@@ -458,9 +440,7 @@ td.mono, .mono { font-variant-numeric: tabular-nums; }
 .btn::before { content: '[ '; color: inherit; opacity: 0.55; }
 .btn::after { content: ' ]'; color: inherit; opacity: 0.55; }
 
-/* A `.btn` that is a link — the filters page's Edit control, which is an anchor
-   so it resolves on the server when there is no JavaScript to open the dialog.
-   Anchors bring an underline that buttons do not. */
+/* A `.btn` that is a link (e.g. the filters page's Edit): drop the underline. */
 a.btn { text-decoration: none; }
 
 .btn:hover { border-color: var(--green); color: var(--green); }
@@ -522,15 +502,13 @@ textarea { resize: vertical; line-height: 1.7; }
 
 .input-row input { flex: 1; }
 
-/* Inline save/validation feedback on its own reserved-height line directly
-   below a control — never shares the control's flex row, so the control keeps
-   a constant full width and the message toggling causes no reflow. */
+/* Save/validation feedback on its own reserved-height line below a control, so
+   toggling the message causes no reflow. */
 .field-msg { display: block; font-size: 0.8rem; line-height: 1.15em; min-height: 1.15em; margin: 6px 0; }
-/* Server-rendered validation messages carry a class, where the autosave path
-   sets the colour inline. Both land on the same element. */
+/* Server-rendered errors use a class; autosave sets the colour inline. */
 .field-msg.error { color: var(--red); }
 
-/* Label sitting above its form control (consistent placement for every field). */
+/* Label above its form control. */
 .field-label { display: block; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 6px; }
 
 .toggle {
@@ -575,18 +553,14 @@ textarea { resize: vertical; line-height: 1.7; }
   background: var(--green);
 }
 
-/* A form that exists only to carry one button — a delete, a toggle — and must
-   not introduce a line of its own where the button used to sit bare. */
+/* A form carrying one button; must not add a line of its own. */
 .inline-form { display: inline; }
 
-/* The toggle and, without JavaScript, the submit that applies it. `app.js`
-   removes the button and saves on change instead, leaving the toggle alone in
-   the row. */
+/* The toggle plus its no-JS submit, which `app.js` removes. */
 .list-toggle-form { display: flex; align-items: center; gap: 8px; }
 
-/* Controls that only work in one of the two worlds. `js-only` ships hidden and
-   `app.js` unhides it; `nojs-only` ships visible and `app.js` removes it. Both
-   default to the state that is right when the script never arrives. */
+/* `js-only` ships hidden and `app.js` unhides it; `nojs-only` ships visible and
+   `app.js` removes it — both correct if the script never arrives. */
 .js-only[hidden] { display: none; }
 
 .all-disabled-warning {
@@ -597,14 +571,11 @@ textarea { resize: vertical; line-height: 1.7; }
   border: 1px solid var(--red);
 }
 
-/* The row a list expands into when edited without JavaScript, and the row an
-   operator expands into to confirm a delete. */
+/* A row expanded server-side: a no-JS list edit or an operator delete confirmation. */
 .edit-row > td { background: var(--bg-secondary); }
 .edit-row .input-row { margin-bottom: 0; }
 
-/* A newly minted API key's one and only appearance. Orange rather than the
-   usual border: it is the only thing on the page that cannot be recovered by
-   reloading it. */
+/* A new API key's only appearance: orange, as reloading cannot recover it. */
 .api-key-reveal {
   display: block;
   margin: 12px 0;
@@ -620,13 +591,10 @@ textarea { resize: vertical; line-height: 1.7; }
   margin-top: 12px;
 }
 
-/* Timeline line-chart SVG (Dashboard 24h + Statistics Nd). Sits inside the
-   200px .chart-container; 50px is reserved below the plot = the 28px
-   .chart-labels row (20px + 4px margin + 4px padding) plus the 22px legend
-   (14px .tl-legend + 8px margin-top). preserveAspectRatio="none" stretches
-   the 600×180 viewBox to the container, same approach as .rate-svg. Y-axis
-   numbers must NOT live inside this SVG (non-uniform scaling distorts glyphs)
-   — they render in the .tl-yticks HTML overlay below. */
+/* Timeline bar-chart SVG (Dashboard 24h + Statistics). 50px is reserved below
+   the plot: the 28px .chart-labels row (20px + 4px margin + 4px padding) plus
+   the 22px legend. preserveAspectRatio="none" stretches the 600×180 viewBox, so
+   y-axis numbers live in the .tl-yticks HTML overlay, not the SVG. */
 .tl-svg {
   width: 100%;
   height: calc(100% - 50px);
@@ -634,10 +602,7 @@ textarea { resize: vertical; line-height: 1.7; }
   touch-action: none;
 }
 
-/* Y-axis tick labels as real HTML so preserveAspectRatio="none" never
-   distorts the digits. The overlay tracks the .tl-svg box exactly
-   (bottom 50px = the 28px .chart-labels row + 22px legend). pointer-events:none
-   keeps the SVG's hover/tooltip interaction working underneath. */
+/* Tracks the .tl-svg box exactly; pointer-events:none keeps hover working below. */
 .tl-yticks {
   position: absolute;
   top: 0;
@@ -688,10 +653,8 @@ textarea { resize: vertical; line-height: 1.7; }
   height: 20px;
   align-items: center;
   margin-top: 4px;
-  /* Inset by padX so the dashed separator and the first/last x-labels line up
-     with the plotted data, not the full SVG box. The data spans viewBox x=8..592
-     of w=600 (preserveAspectRatio="none", svg is width:100%), so the inset is
-     8/600 = 100%/75 of the container width on each side. Shared by all 3 charts. */
+  /* Inset by padX so labels line up with the plotted data: padX 8 of w 600 is
+     100%/75 per side. Shared by all 3 charts. */
   margin-left: calc(100% / 75);
   margin-right: calc(100% / 75);
   border-top: 1px dashed var(--border);
@@ -702,20 +665,17 @@ textarea { resize: vertical; line-height: 1.7; }
   font-family: var(--font-mono);
   font-size: 0.72rem;
   color: var(--text-dim);
-  /* Keep each x-axis label on one line — otherwise narrow (mobile) widths wrap
-     a time like "23:00" or a date like "Jun 9" onto a second row. */
+  /* Narrow widths would otherwise wrap "23:00" or "Jun 9". */
   white-space: nowrap;
 }
 
-/* Bar charts (timeline + rate). On hover the cursor dims every bar except the
-   focused bucket's, so the tooltip's subject stands out. fill-opacity is set
-   per-segment inline; the CSS opacity here multiplies on top of it. */
+/* Bar charts (timeline + rate): hover dims every bar but the focused bucket's.
+   This opacity multiplies the inline fill-opacity. */
 .tlbar, .ratebar { transition: opacity 90ms ease; }
 .tl-svg.cursoring .tlbar:not(.hl),
 .rate-svg.cursoring .ratebar:not(.hl) { opacity: 0.4; }
 
-/* Legend for the timeline charts (reuses .rate-legend styling). Sized to fit
-   the 50px reserved below .tl-svg: 14px box + 8px margin-top = 22px. */
+/* Timeline legend: 14px + 8px margin-top = the 22px reserved below .tl-svg. */
 .tl-legend {
   height: 14px;
   margin-top: 8px;
@@ -797,10 +757,8 @@ textarea { resize: vertical; line-height: 1.7; }
 .login-line input {
   flex: 1;
   width: auto;
-  /* allow the field to shrink below its intrinsic width inside the flex row —
-     without this, the default min-width:auto makes the password input overflow
-     the box on narrow viewports (e.g. 375px), forcing a horizontal scrollbar
-     (which in turn pushes out a spurious vertical one). */
+  /* Let the field shrink below its intrinsic width, or the password input
+     overflows narrow viewports (e.g. 375px). */
   min-width: 0;
   background: transparent;
   border: none;
@@ -951,9 +909,7 @@ textarea { resize: vertical; line-height: 1.7; }
 .log-card-row2 .lc-token  { color: var(--accent); }
 .log-card-row2 .lc-ms     { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
-/* Query-log specific bumps — table is for scanning, not specimen-style display.
-   Primary rows sit at body size (1rem ≈ 14 px); th sized down 1 step to keep
-   the data-over-label hierarchy reading-comfortable rather than data-dense. */
+/* Query log: rows at body size for scanning; th one step smaller. */
 logs-page table { font-size: 1rem; }
 logs-page th { font-size: 0.78rem; padding: 11px 12px; }
 logs-page td { font-size: 1rem; padding: 12px 12px; }
@@ -1081,8 +1037,7 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   border-radius: 0;
   overflow: hidden;
 }
-/* Links, not buttons: the range selects the server's window, so it is in the
-   URL and switching it is a navigation. */
+/* Links: the range selects the server's window, so switching navigates. */
 .range-switcher a {
   background: none;
   border: none;
@@ -1223,8 +1178,7 @@ logs-page .log-card-row2 { font-size: 0.85rem; }
   display: block;
   touch-action: none;
 }
-/* Tracks the 160px .rate-svg box exactly so % labels are real HTML and
-   never distorted by preserveAspectRatio="none" (same fix as .tl-yticks). */
+/* % labels as HTML over the .rate-svg box, as with .tl-yticks. */
 .rate-yticks { position: absolute; top: 0; left: 0; right: 0; height: 160px; pointer-events: none; }
 .rate-tooltip {
   transform: translate(-50%, -100%);
@@ -1263,14 +1217,9 @@ stats-page .heatmap-col-labels {
   min-width: 0;
 }
 stats-page .heatmap-wrap { overflow: visible; }
-/* Only long lists become scroll containers. Short lists (Outcomes has 3 rows
-   ≈ 85.5px) must never own a scrollbar: their fractional auto height rounds
-   so scrollHeight exceeds clientHeight by 1px at fractional browser zoom,
-   and overflow-y:auto then shows a phantom, 1px-scrollable bar (reproduced
-   in Chromium and Firefox at 90–120% zoom). Rows are ~24.5px + 6px gap:
-   7 rows ≈ 207px < 220px cap, 8 rows ≈ 238px > 220px — so gating on the 8th
-   row enables scrolling exactly when content can actually exceed the cap.
-   Top Domains / Top Sources / Query Types (10 rows) keep their scrollbar. */
+/* Only lists that can exceed the 220px cap scroll (8+ rows at ~24.5px + 6px
+   gap). A short list with overflow-y:auto shows a phantom 1px scrollbar at
+   fractional zoom, as its auto height rounds past clientHeight. */
 stats-page .bar-list:has(> .bar-row:nth-child(8)) { max-height: 220px; overflow-y: auto; padding-right: 4px; }
 stats-page .card { margin-bottom: 12px; }
 stats-page .stat-grid { margin-bottom: 12px; }
@@ -1280,8 +1229,7 @@ stats-page #health-grid .stat-card {
   grid-template-rows: auto 1fr 1rem;
 }
 stats-page #health-grid .stat-sub { align-self: end; margin-top: 0; white-space: nowrap; }
-/* A date, not a figure: it reads at the width of the other tiles rather than at
-   the size a six-digit count needs. */
+/* A date, not a figure, so it is sized to fit the tile. */
 stats-page .stat-value.stat-date { font-size: 1.1rem; color: var(--text-secondary); }
 @media (min-width: 1024px) {
   stats-page #health-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
@@ -1366,10 +1314,8 @@ rebuild-banner { display: block; }
   to { opacity: 1; transform: none; }
 }
 
-/* Notice banner — in-flow, persistent, dismissible messages.
-   Deliberately NOT a floating auto-dismiss toast: banners stay in the
-   reading order, don't time out before assistive tech reaches them, and
-   are closed by the user. Shares the rebuild-banner visual language. */
+/* Notice banner: in-flow and user-dismissed, not an auto-dismiss toast, so it
+   stays in reading order and never times out before assistive tech reaches it. */
 #notice-host { display: flex; flex-direction: column; gap: 8px; }
 #notice-host:not(:empty) { margin-bottom: 16px; }
 .notice-banner {
@@ -1402,15 +1348,11 @@ rebuild-banner { display: block; }
 .notice-banner .close svg { width: 15px; height: 15px; }
 @media (prefers-reduced-motion: reduce) {
   .notice-banner { animation: none; }
-  /* Every card slides up 8px as it appears. Decoration, and decoration is
-     exactly what this setting asks us to drop — it also means a control is
-     moving under the pointer for the first 0.3s of every page. */
+  /* The card slide-in is decoration this setting asks us to drop. */
   .fade-in { animation: none; }
 }
 
-/* Registry page — filter picker.
-   The overlay and dialog are gone: this is a page, and the cards
-   around these blocks supply the frame the modal used to draw. */
+/* Registry page — filter picker. */
 .registry-toolbar {
   display: flex;
   align-items: center;
@@ -1444,9 +1386,7 @@ rebuild-banner { display: block; }
 }
 .registry-toolbar label.check input { accent-color: var(--accent); }
 
-/* The registry runs to a couple of hundred entries, so the list scrolls inside
-   its card rather than turning the page into one long scroll away from the Add
-   button. */
+/* Hundreds of entries: scroll inside the card, keeping the Add button in reach. */
 .registry-body {
   max-height: min(60vh, 560px);
   overflow-y: auto;
@@ -1538,8 +1478,7 @@ rebuild-banner { display: block; }
 }
 .registry-foot .count { flex: 1; color: var(--text-secondary); font-size: 0.85rem; }
 
-/* No loading state: the page arrives with the entries in it. What is left is
-   the third party being unreachable, which is a state, not a spinner. */
+/* The registry being unreachable is a rendered state, not a spinner. */
 .registry-error {
   padding: 60px 20px;
   text-align: center;

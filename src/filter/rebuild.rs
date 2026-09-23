@@ -9,12 +9,8 @@ use tokio::task::JoinHandle;
 
 use crate::now_unix;
 
-/// Rows of history behind the status channel.
-///
-/// A rebuild publishes two messages — one as it starts, one as it ends — and
-/// nothing else uses the channel, so this only has to cover a client stalled
-/// across several consecutive rebuilds. A client that falls further behind is
-/// answered with the live state rather than the messages it missed.
+/// Status channel backlog: two messages per rebuild, so this covers several
+/// rebuilds; a client further behind is answered with the live state.
 const STATUS_CHANNEL_CAPACITY: usize = 16;
 
 pub struct RebuildCoordinator {
@@ -42,9 +38,7 @@ impl RebuildState {
 
 /// What a rebuild is doing at one instant, as pushed to `GET /api/events`.
 ///
-/// The same shape the admin UI's banner reads, and the only one: the atomics
-/// above are the fact, this is how it travels, and there is no third spelling
-/// of it in the admin layer to drift from either.
+/// The one shape the admin UI's banner reads; the atomics above are the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RebuildStatus {
     pub rebuilding: bool,
@@ -66,22 +60,18 @@ impl RebuildCoordinator {
         self.state.clone()
     }
 
-    /// The state right now, for a caller that has just connected and cannot
-    /// wait for the next transition to learn what is happening.
+    /// The current state, for a caller that just connected.
     pub fn status(&self) -> RebuildStatus {
         self.state.snapshot()
     }
 
-    /// Both edges of every rebuild: `rebuilding` true as one starts, false as
-    /// it ends. Two messages per rebuild rather than a reading on a timer,
-    /// because a rebuild that starts and finishes between two ticks of a clock
-    /// is one the operator would never see.
+    /// Both edges of every rebuild (start and end), not a timed reading, so a
+    /// rebuild shorter than a tick is still seen.
     pub fn subscribe(&self) -> broadcast::Receiver<RebuildStatus> {
         self.status.subscribe()
     }
 
-    /// A send with no subscribers is not an error: it means no admin page is
-    /// open, which is the appliance's normal state.
+    /// No subscribers is normal (no admin page open), not an error.
     fn publish(&self) {
         let _ = self.status.send(self.state.snapshot());
     }
@@ -107,9 +97,8 @@ impl RebuildCoordinator {
                 .last_duration_ms
                 .store(duration_ms, Ordering::Relaxed);
             self.state.rebuilding.store(false, Ordering::Relaxed);
-            // Published after the flag clears and the duration lands, so a
-            // subscriber never sees a completion whose numbers are still the
-            // previous rebuild's.
+            // After the flag and duration update, so a completion never carries
+            // the previous rebuild's numbers.
             self.publish();
             if let Err(e) = result {
                 tracing::warn!(

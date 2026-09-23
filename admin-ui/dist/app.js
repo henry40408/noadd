@@ -1,8 +1,4 @@
-// Routing moved to the server, so `#settings` became `/settings`. A bookmark or
-// a link from before that still carries the hash, and left alone it would land
-// on the dashboard with no sign anything was missed. Rewritten here, before
-// anything renders, so the redirect is invisible rather than a visible flash of
-// the wrong page.
+// Old hash routes (`#settings`) from bookmarks: redirect before anything renders.
 const LEGACY_HASH_ROUTES = {
   '#dashboard': '/',
   '#stats': '/stats',
@@ -15,11 +11,8 @@ if (LEGACY_HASH_ROUTES[location.hash]) {
   location.replace(LEGACY_HASH_ROUTES[location.hash]);
 }
 
-// Endpoints where a 401 means "that credential was wrong", not "your session
-// is gone". Everywhere else a 401 is the signal to bounce back to the login
-// screen; on these it would throw an operator out of a live session for
-// mistyping a password, and discard the response body the form needs to
-// explain what happened.
+// Endpoints where a 401 means "wrong credential", not "session gone" — so it must
+// not bounce the operator to the login page or discard the body.
 const CREDENTIAL_ENDPOINTS = new Set(['/api/auth/login', '/api/auth/reauth']);
 
 const api = {
@@ -35,18 +28,14 @@ const api = {
       throw new Error('Unauthorized');
     }
     if (!res.ok) {
-      // Some 4xx responses carry `{"error": "..."}` explaining what the caller
-      // has to change — a rejected password is the case that matters, where
-      // the status code alone leaves the operator guessing. Surfaced as
-      // `.detail` so a caller can prefer it over its own fallback copy;
-      // responses without one are unchanged.
+      // A 4xx may carry `{"error": "..."}` (e.g. a rejected password); surfaced
+      // as `.detail` so callers can prefer it over their own fallback copy.
       const err = new Error(`${res.status} ${res.statusText}`);
       err.status = res.status;
       try {
         const parsed = await res.json();
         if (parsed && typeof parsed.error === 'string') err.detail = parsed.error;
-        // `code` distinguishes the two 403s the re-authentication guard emits
-        // from the CSRF guard's bare one; see withReauth.
+        // Machine-readable error code, when the body carries one.
         if (parsed && typeof parsed.code === 'string') err.code = parsed.code;
       } catch (e) { /* no body, or not JSON — the status line stands alone */ }
       throw err;
@@ -61,23 +50,17 @@ const api = {
   del: (p) => api.request('DELETE', p),
 };
 
-// A custom element discards its own DOM when it is removed, but not what it
-// attached elsewhere: interval timers, EventSource connections, and listeners
-// on window/document. Those outlive the element, and each stranded closure also
-// keeps the element's whole discarded subtree reachable through `this`.
+// A custom element discards its own DOM on removal, but not timers,
+// EventSources or window/document listeners — which also keep the discarded
+// subtree reachable through `this`. Anything registered through these helpers
+// is released on disconnect. Subclasses overriding disconnectedCallback must
+// call super.
 //
-// Anything registered through these helpers is released on disconnect, so a
-// component cannot leak by forgetting to write a teardown. Subclasses that need
-// their own disconnectedCallback must call super.
+// Start/stop-able resources (e.g. behind a live toggle) stay hand-managed and
+// register one track() that calls their own stopper, rather than one per start.
 //
-// Ownership that is start/stop-able (a poll timer behind a live toggle, say)
-// stays hand-managed — registering it per start would pile up one dead entry
-// per cycle — so those register a single track() that calls their own stopper.
-//
-// The other half of the problem is timing, which no registry can fix: an async
-// connectedCallback resumes after its awaits, by which point the element may
-// already be gone, and disconnectedCallback has run *before* it acquires
-// anything. Guard resumption with `this.isConnected` — see DashboardPage.
+// An async callback may resume after the element is gone: guard resumption
+// with `this.isConnected` (see LogsPage._toggleLive).
 class LiveElement extends HTMLElement {
   // Register an arbitrary teardown to run on disconnect.
   track(fn) {
@@ -104,26 +87,19 @@ class LiveElement extends HTMLElement {
     const cleanups = this._cleanups;
     this._cleanups = null;
     if (!cleanups) return;
-    // Reverse order, mirroring acquisition. One failure must not strand the
-    // rest, so each runs independently.
+    // Reverse acquisition order; one failure must not strand the rest.
     for (let i = cleanups.length - 1; i >= 0; i--) {
       try { cleanups[i](); } catch (e) { /* nothing useful to do here */ }
     }
   }
 }
 
-// The admin UI's single push connection.
+// The admin UI's single push connection. One per page, not per feature: the
+// status indicator is on every page, and plain HTTP/1.1 allows six connections
+// per origin before navigation queues behind them.
 //
-// One EventSource per page, not one per feature: the status indicator sits in
-// the shell and therefore on every page, so a stream per consumer would hold
-// two or three connections per tab. A browser talking HTTP/1.1 to a
-// plain-HTTP appliance gets six per origin before ordinary navigation starts
-// queueing behind them.
-//
-// Whoever needs it first calls start(); the call is idempotent, and `wantStats`
-// is sticky because the query string is fixed when the connection opens and
-// this is an MPA — the page never changes without a full reload taking the
-// connection with it.
+// start() is idempotent. `wantStats` is sticky: the query string is fixed when
+// the connection opens, and in this MPA a page change reloads everything.
 const serverEvents = {
   _es: null,
   _wantStats: false,
@@ -132,8 +108,7 @@ const serverEvents = {
   _statusListeners: new Set(),
   _status: 'connecting',
   _watchdog: null,
-  // Three missed ticks. A single dropped one is not worth flickering the
-  // status bar over, and the server ticks every 10 seconds.
+  // Three missed 10-second ticks; one dropped tick is not worth a flicker.
   STALE_AFTER_MS: 30000,
 
   start(wantStats) {
@@ -142,13 +117,9 @@ const serverEvents = {
     this._open();
   },
 
-  // The query log's tail ships off, so `logs=1` cannot be decided when the
-  // connection opens the way `stats=1` can. Turning it on re-opens the one
-  // connection rather than adding a second: the whole point of this object is
-  // that a tab holds exactly one.
-  //
-  // The swap is deliberate, so it must not be reported as a drop — the status
-  // indicator is on the other end of this same connection and would blink
+  // The log tail ships off, so `logs=1` can't be fixed at open like `stats=1`.
+  // Toggling re-opens the one connection rather than adding a second, and the
+  // swap must not be reported as a drop — the status indicator would blink
   // OFFLINE at an operator who only clicked a toggle.
   setLogs(wantLogs) {
     if (this._wantLogs === wantLogs) return;
@@ -167,18 +138,14 @@ const serverEvents = {
     this._es = es;
 
     es.addEventListener('open', () => this._setStatus('online'));
-    // EventSource reconnects on its own, so this is a report rather than a
-    // recovery: readyState CLOSED means it gave up (an auth failure, say) and
-    // nothing further will arrive. A stale connection's error must not speak
-    // for the current one, hence the identity check.
+    // EventSource reconnects itself; readyState CLOSED means it gave up. The
+    // identity check stops a stale connection's error speaking for this one.
     es.addEventListener('error', () => {
       if (this._es !== es) return;
       this._setStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
     });
 
-    // The heartbeat is the status indicator's, but it carries state too — the
-    // appliance's first answered query rides it — so it is dispatched like the
-    // rest rather than being consumed here.
+    // The heartbeat also carries state (`traffic`), so it is dispatched too.
     es.addEventListener('ping', (e) => {
       this._setStatus('online');
       this._armWatchdog();
@@ -208,9 +175,8 @@ const serverEvents = {
     es.close();
   },
 
-  // A TCP connection can die without the browser noticing, and SSE keep-alive
-  // comments never surface to EventSource — so silence, not an error event, is
-  // what "the server went away" actually looks like from here.
+  // SSE keep-alive comments never reach EventSource, so a dead connection
+  // shows up as silence, not an error event.
   _armWatchdog() {
     clearTimeout(this._watchdog);
     this._watchdog = setTimeout(() => this._setStatus('offline'), this.STALE_AFTER_MS);
@@ -245,16 +211,14 @@ const serverEvents = {
   },
 };
 
-// The status bar's liveness lamp. Ships hidden, and without JavaScript stays
-// that way: a page that cannot sense the server must not claim it is up, which
-// is exactly what the hardcoded ONLINE it replaces did.
+// The status bar's liveness lamp. Ships hidden: a page that cannot sense the
+// server must not claim it is up.
 class ServerStatus extends LiveElement {
   connectedCallback() {
     this.removeAttribute('hidden');
     this.track(serverEvents.onStatus(state => this._render(state)));
-    // The dashboard is the only page that wants snapshots, and it is in the
-    // markup already — server-rendered, like every page body — so this holds
-    // whichever element upgrades first.
+    // Only the dashboard wants snapshots; it is already in the markup, so this
+    // holds whichever element upgrades first.
     serverEvents.start(!!document.querySelector('dashboard-page'));
   }
 
@@ -293,23 +257,15 @@ function formatPct(n, total) {
   if (!total || total <= 0 || n == null || Number.isNaN(n)) return '';
   return `${(n / total * 100).toFixed(1)}%`;
 }
-// Returns Markup so callers can interpolate it into html`` without it being
-// escaped as text.
+// Returns Markup, for interpolation into html``.
 function sharePctSpan(count, sum) {
   const pct = formatPct(count, sum);
   return pct ? html` <span style="color:var(--text-dim);font-size:0.75em">(${pct})</span>` : '';
 }
 
-// Accepts either Unix seconds or milliseconds and returns milliseconds.
-//
-// This is NOT a licence to leave new fields' units unspecified — it exists for
-// one remaining asymmetry: query-log rows carry `timestamp` straight from the
-// `query_logs` column, which is milliseconds, while every other timestamp the
-// API serves (timeline buckets, session created_at/last_seen, filter-list
-// last_updated, rebuild started_at) is seconds. The two timeline types used to
-// disagree with each other too, and this helper is exactly what hid it: a
-// consumer that skipped it was silently off by 1000x. They now agree on
-// seconds; keep it that way.
+// Accepts Unix seconds or milliseconds; returns milliseconds. Only query-log
+// `timestamp` is milliseconds (straight from `query_logs`); every other API
+// timestamp is seconds. Don't add new fields with unspecified units.
 function normalizeTs(ts) {
   return ts > 1e12 ? ts : ts * 1000;
 }
@@ -329,12 +285,10 @@ function absTime(ts) {
   return new Date(normalizeTs(ts)).toLocaleString([], { hour12: false });
 }
 
-// Returns Markup, not text: callers interpolate it into html`` and the span has
-// to survive as an element.
+// Returns Markup, for interpolation into html``.
 function timeAgo(ts) {
   if (!ts) return 'never';
-  // data-ts lets a periodic ticker recompute the relative text in place
-  // (see LogsPage._refreshTimes) without re-rendering the whole row.
+  // data-ts lets LogsPage._refreshTimes update the text in place.
   return html`<span class="timeago" data-ts="${ts}" title="${absTime(ts)}">${timeAgoText(ts)}</span>`;
 }
 
@@ -342,20 +296,16 @@ function formatTime(ts) {
   return new Date(normalizeTs(ts)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// Browser's east-positive UTC offset in minutes (e.g. 480 for UTC+8), for the
-// statistics charts that align buckets to the viewer's local calendar rather than
-// UTC-epoch boundaries — the same unit the stats API's `tz_offset` takes.
-// getTimezoneOffset() is UTC-minus-local, hence the sign flip.
+// East-positive UTC offset in minutes (480 for UTC+8), the unit of the stats
+// API's `tz_offset`. getTimezoneOffset() is UTC-minus-local, hence the flip.
 function tzOffsetMinutes() {
   return -new Date().getTimezoneOffset();
 }
 
-// The statistics page ships its charts as quarter-hour counts on UTC boundaries
-// (QuarterSeries in src/db.rs) and these fold them into the viewer's calendar.
-// They must answer exactly what timeline_multi_since and hourly_heatmap_since
-// answer the API for the same offset, and e2e/tests/specs/stats_charts.rs holds
-// them to it. Exact because every offset in use is a whole number of quarter
-// hours, so no quarter straddles a local hour.
+// Fold the stats page's quarter-hour UTC counts (QuarterSeries, src/db.rs) into
+// the viewer's calendar. Must match timeline_multi_since / hourly_heatmap_since
+// for the same offset (held by e2e/tests/specs/stats_charts.rs). Exact, since
+// every offset in use is a whole number of quarter hours.
 const QUARTER_SECS = 900;
 
 function timelineFromQuarters(series, bucketSecs, offsetMinutes) {
@@ -395,32 +345,24 @@ function heatmapFromQuarters(series, offsetMinutes) {
   return [...cells.entries()].sort((a, b) => a[0] - b[0]).map(([, cell]) => cell);
 }
 
-// Tooltip label for the statistics Nd timeline / rate charts. Date for day
-// buckets; date + HH:mm for sub-day buckets (7d→1h, 30d→6h) so hourly points
-// sharing a date are distinguishable. tsSeconds is epoch seconds (charts 2/3);
-// no timeZone option ⇒ browser-local, same as the rest of the chart formatting.
+// Statistics chart tooltip label: date, plus HH:mm for sub-day buckets (7d→1h,
+// 30d→6h). tsSeconds is epoch seconds; formatted browser-local.
 function fmtBucketLabel(tsSeconds, withTime) {
   const d = new Date(tsSeconds * 1000);
   const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   return withTime ? `${date} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}` : date;
 }
 
-// Escapes a value for interpolation into markup, in text *and* attribute
-// position. Quotes are the reason this cannot go through textContent/innerHTML:
-// that round-trip escapes &, < and > but leaves " alone, while most callers here
-// interpolate into a double-quoted attribute. A raw " then closes the value
-// early and everything after it is parsed as further attributes — including
-// event handlers. A filter-list name of `x" onmouseover="alert(1)` was enough to
-// get a live handler onto its table row.
+// Escapes for text *and* attribute position. Not via textContent/innerHTML,
+// which leaves `"` alone: a raw quote would close a double-quoted attribute and
+// let a name like `x" onmouseover="alert(1)` inject a handler.
 const ESC_CHARS = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ESC_CHARS[c]);
 }
 
-// Escaping keeps a value inside its attribute; it does not make the value safe
-// to navigate to. Registry entries are fetched from a third-party URL at
-// runtime, so a javascript: homepage would run on click no matter how well the
-// string was escaped. Anything that is not http(s) yields '' and renders no link.
+// Escaping does not make a URL safe to navigate to: registry entries come from a
+// third party, so anything but http(s) yields '' and renders no link.
 function safeUrl(u) {
   if (!u) return '';
   try {
@@ -431,31 +373,23 @@ function safeUrl(u) {
   }
 }
 
-// Markup that is already safe to emit as-is. Carrying it as a distinct type is
-// what lets html`` tell "this is a value to escape" apart from "this is markup I
-// built myself" without a flag at every interpolation. toString() means an
-// innerHTML assignment serialises it for free.
+// Markup already safe to emit. A distinct type lets html`` tell built markup
+// from values to escape; toString() lets innerHTML serialise it.
 class Markup {
   constructor(value) { this.value = value; }
   toString() { return this.value; }
 }
 
-// Wrap a string of markup you vouch for — a hand-written fragment, an inline
-// SVG. Every use is a place where escaping is deliberately skipped, so it should
-// only ever wrap a literal, never interpolated data.
+// Wrap markup you vouch for. Skips escaping, so only ever wrap a literal, never
+// interpolated data.
 function raw(value) {
   return new Markup(String(value));
 }
 
-// Tagged template for building markup: interpolations are escaped by default,
-// which is the whole point — forgetting to call esc() is no longer possible,
-// because not doing anything special is the safe path.
-//
-// Passed through untouched: Markup (so nested html`` and raw() compose) and
-// arrays of it (so `${rows.map(r => html`…`)}` needs no join). null and
-// undefined render as nothing rather than the strings "null"/"undefined".
-// Everything else is escaped and stringified, booleans included — attributes
-// like data-blocked="${l.blocked}" must still read "false", not empty.
+// Tagged template for markup: interpolations are escaped by default. Markup and
+// arrays of it pass through (so nested html`` composes and `.map()` needs no
+// join); null/undefined render as nothing. Everything else is stringified and
+// escaped — booleans included, so data-blocked="${l.blocked}" reads "false".
 function html(strings, ...values) {
   let out = '';
   strings.forEach((chunk, i) => {
@@ -477,36 +411,21 @@ function showFormError(el, msg) {
   el.style.display = 'block';
 }
 
-// There is no password dialog here any more. The three actions that need a
-// password proof — add an operator, delete one, mint an API key — carry a
-// "your password" field in their own form, and post it with the action. That
-// removed the retry-after-403 dance along with the dialog, and made the path
-// identical with and without JavaScript. `POST /api/auth/reauth` still exists
-// for API callers; the UI is simply not one of them any more.
-
-// Put a confirmation in front of the form `button` submits, cancelling the
-// submit if it is declined. Attached to the form rather than the button so it
-// also covers Enter from inside the form, and only where there is JavaScript to
-// run it — without one the submit simply goes through, which is the behaviour
-// every other destructive form on the server-rendered pages already has.
+// confirm() before the form `button` submits. Bound to the form so Enter is
+// covered too; without JavaScript the submit simply goes through.
 function confirmBeforeSubmit(button, message) {
   const form = button && button.closest('form');
   if (!form) return;
   form.onsubmit = (e) => { if (!confirm(message)) e.preventDefault(); };
 }
 
-// Password length band, mirroring MIN_PASSWORD_LENGTH / MAX_PASSWORD_LENGTH in
-// src/admin/api.rs. Duplicated rather than fetched: this is only a courtesy
-// check so the operator sees the problem before a round trip — the server
-// enforces the real policy and stays authoritative if the two ever drift.
+// Mirrors MIN_PASSWORD_LENGTH / MAX_PASSWORD_LENGTH in src/admin/api.rs — a
+// courtesy check only; the server enforces the real policy.
 const MIN_PASSWORD_LENGTH = 12;
 const MAX_PASSWORD_LENGTH = 128;
 
-// The message for a password outside the band, or null when it fits. Counts
-// code points rather than UTF-16 units so an emoji or a CJK passphrase is
-// measured the same way `chars().count()` measures it server-side; `.length`
-// would count a single astral character twice and reject a password the
-// server would have accepted.
+// The message for a password outside the band, or null. Counts code points to
+// match the server's `chars().count()`; `.length` counts astral chars twice.
 function passwordLengthError(pw) {
   const len = [...(pw || '')].length;
   if (len < MIN_PASSWORD_LENGTH) return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
@@ -530,9 +449,7 @@ const icons = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
 };
 
-// Marked once, here, rather than at each of the ~30 interpolation sites: these
-// are hand-written SVG literals, and html`` must emit them rather than escape
-// them. Doing it centrally also means no template needs raw() for an icon.
+// Hand-written SVG literals: mark them raw once here, not at every use.
 for (const key of Object.keys(icons)) icons[key] = raw(icons[key]);
 
 // Notice banners: in-flow and dismissible, replacing alert().
@@ -543,11 +460,9 @@ const NOTICE_ICONS = {
 };
 for (const key of Object.keys(NOTICE_ICONS)) NOTICE_ICONS[key] = raw(NOTICE_ICONS[key]);
 
-// Show an in-flow banner at the top of the page content. type: 'error' |
-// 'success' | 'info'. Persistent (no auto-dismiss) with a manual close
-// button; error banners announce assertively, others politely. Duplicate
-// message+type banners are collapsed. Returns the banner element, or null
-// when the app shell (and its #notice-host) isn't mounted.
+// Show a persistent, dismissible banner at the top of the page content. type:
+// 'error' | 'success' | 'info'; errors announce assertively. Identical banners
+// collapse. Returns the element, or null without a #notice-host.
 function showBanner(msg, type = 'info') {
   const host = document.getElementById('notice-host');
   if (!host) return null;
@@ -569,15 +484,9 @@ function showBanner(msg, type = 'info') {
 }
 
 class AccountPage extends HTMLElement {
-  // The page arrives server-rendered: the three tables, every form, and every
-  // row action are real markup that works on its own. Nothing is fetched here
-  // and nothing is re-drawn — a change redirects, and the page that comes back
-  // is already correct.
-  //
-  // What is left is the one thing markup cannot do (copy to the clipboard) and
-  // a confirmation in front of the destructive submits. Deleting an operator
-  // needs neither: it expands into a named confirmation with a password field,
-  // which is a better prompt than `confirm()` and is there without scripting.
+  // Server-rendered and fully functional; a change redirects. Added here: copy
+  // to clipboard, and confirm() on destructive submits — except operator
+  // deletion, which has its own server-side confirmation.
   connectedCallback() {
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
@@ -611,24 +520,18 @@ class AccountPage extends HTMLElement {
 }
 customElements.define('account-page', AccountPage);
 
-// A slim strip while the filter engine is rebuilding, plus a brief success
-// flash on completion. Both edges arrive as `rebuild` events on the shared
-// stream, and every connection is handed the current state as it opens, so a
-// page loaded mid-rebuild shows the strip without waiting for an edge.
+// A strip while the filter engine rebuilds, plus a brief success flash. Driven
+// by `rebuild` events; each connection gets the current state on open.
 //
-// It deliberately does not call serverEvents.start(): this element upgrades
-// before <server-status> in the footer does, and the connection's query string
-// is fixed when it opens — opening it from here would settle `stats=1` as
-// false and leave the dashboard without its snapshots.
+// Must not call serverEvents.start(): this upgrades before <server-status>, and
+// opening the stream here would fix `stats=1` as false for the dashboard.
 class RebuildBanner extends LiveElement {
   connectedCallback() {
     this.prev = null;         // last observed rebuilding flag
     this.doneTimer = null;    // timer handle for the post-rebuild flash
     this.elapsedTimer = null; // ticks the "Ns elapsed" meter while rebuilding
     this.render('', '');
-    // doneTimer is re-armed on every completed rebuild, so it is cleared by
-    // reading whatever handle is current at teardown rather than registering
-    // one entry per arming. The elapsed ticker is re-armed the same way.
+    // Re-armed timers: clear whatever handle is current at teardown.
     this.track(() => { if (this.doneTimer) clearTimeout(this.doneTimer); });
     this.track(() => this._stopElapsed());
     this.track(serverEvents.on('rebuild', body => this.apply(body)));
@@ -651,18 +554,15 @@ class RebuildBanner extends LiveElement {
         this.render('', '', '');
       }, 3000);
     } else {
-      // Steady idle — hide unless we're still showing the success flash. This
-      // is also the opening event on an appliance that is not rebuilding, which
-      // is why it must not be mistaken for a completion.
+      // Idle — hide unless the success flash is showing. Also the opening event
+      // when nothing is rebuilding, so it must not read as a completion.
       this._stopElapsed();
       if (!this.doneTimer) this.render('', '', '');
     }
     this.prev = rebuilding;
   }
-  // The meter used to advance because the poll recomputed it; with a push
-  // there is no second message until the rebuild ends, so the element counts
-  // for itself. One second rather than the old two: the number is a duration
-  // an operator is watching tick, and a stalled one reads as a stalled server.
+  // No push arrives until the rebuild ends, so count locally, every second — a
+  // stalled number reads as a stalled server.
   _startElapsed(startedAt) {
     this.startedAt = startedAt || 0;
     if (this.elapsedTimer) return;
@@ -697,13 +597,8 @@ class RebuildBanner extends LiveElement {
 customElements.define('rebuild-banner', RebuildBanner);
 
 // On a fresh install, tells the operator how to point a device's DNS at noadd.
-//
-// The server decides whether this appears at all — it knows the dismissal, the
-// DNS address and whether any query has ever been answered — so the markup
-// arrives rendered and there is nothing to fetch. Two things are left for a
-// client: taking the notice down the moment traffic starts, off the heartbeat's
-// `traffic` flag, and dismissing without a page load. Without JavaScript the
-// form posts and the operator lands back on the same page.
+// The server decides whether it appears. The client only takes it down when the
+// heartbeat reports `traffic`, and dismisses it without a page load.
 class NextStepBanner extends LiveElement {
   connectedCallback() {
     if (!this.firstElementChild) return;   // the server decided not to show it
@@ -715,16 +610,9 @@ class NextStepBanner extends LiveElement {
       form.addEventListener('submit', e => {
         e.preventDefault();
         this.innerHTML = '';
-        // The same form post a browser would make — `api` speaks JSON and the
-        // route takes a form — with the redirect left unfollowed, since the
-        // page it would fetch is the one already on screen. Best-effort: a
-        // failure only means the notice is offered again on the next load.
-        //
-        // `keepalive` because the notice is gone from the DOM before the post
-        // is answered, so the operator is free to click a nav link in the same
-        // breath — and a navigation cancels an ordinary in-flight fetch, which
-        // loses the dismissal and brings the notice back on the page they land
-        // on. This is the flag that lets the request outlive the document.
+        // The form post a browser would make, redirect unfollowed. Best-effort:
+        // failure only re-offers the notice next load. `keepalive` because the
+        // operator may navigate straight away, which would cancel a plain fetch.
         fetch(form.action, {
           method: 'POST',
           credentials: 'same-origin',
@@ -738,21 +626,13 @@ class NextStepBanner extends LiveElement {
 }
 customElements.define('next-step-banner', NextStepBanner);
 
-// Browse AdGuard HostlistsRegistry and batch-add filter lists.
-//
-// This used to be a modal built entirely here, which made "Browse Registry" the
-// one control on the filters page that did nothing without JavaScript. The
-// server renders the page now; what is left is the part a client is actually
-// better at.
-//
-// The server filters by navigating, which starts a fresh selection. Filtering
-// in place instead is the whole enhancement: the ticks survive a change of
-// search, and the counts keep up as they go.
+// Browse AdGuard HostlistsRegistry and batch-add filter lists. Server-rendered;
+// the enhancement is filtering in place, so the ticks survive a change of
+// search (navigating would start a fresh selection).
 class RegistryPage extends HTMLElement {
   connectedCallback() {
     this.form = this.querySelector('#registry-form');
-    // Nothing to enhance when the registry could not be fetched — the page is
-    // an error and a retry link.
+    // The registry could not be fetched: the page is an error and a retry link.
     if (!this.form) return;
 
     this.rows = [...this.querySelectorAll('.registry-row')];
@@ -761,9 +641,7 @@ class RegistryPage extends HTMLElement {
     this.addBtn = this.querySelector('#reg-add');
     this.limit = Number(this.dataset.limit) || 50;
 
-    // The filter form never submits now, so its submit button is not a control
-    // any more. Removed rather than hidden: the state that ships is the one
-    // that is right when this file never arrives.
+    // Filtering is in place now, so the no-JS submit goes.
     this.querySelectorAll('.nojs-only').forEach(el => el.remove());
 
     for (const id of ['#reg-search', '#reg-group', '#reg-deprecated']) {
@@ -800,8 +678,7 @@ class RegistryPage extends HTMLElement {
     this.updateSelection();
   }
 
-  // Name and description, the same two fields the server searches. Cached on
-  // the row: this runs on every keystroke.
+  // The fields the server searches, cached on the row (runs per keystroke).
   haystack(row) {
     if (row._hay === undefined) {
       const name = row.querySelector('.name')?.textContent || '';
@@ -811,9 +688,7 @@ class RegistryPage extends HTMLElement {
     return row._hay;
   }
 
-  // A hidden row's checkbox still posts, so the count is every tick on the
-  // page rather than only the visible ones — which is the point of filtering
-  // in place, and would be a lie if the two disagreed.
+  // Counts every tick, visible or not: a hidden row's checkbox still posts.
   updateSelection() {
     const picked = this.form.querySelectorAll('input[name="filter_id"]:checked').length;
     if (this.selectedEl) {
@@ -831,13 +706,10 @@ class RegistryPage extends HTMLElement {
 }
 customElements.define('registry-page', RegistryPage);
 
-// Pointer events fire for touch too, but a single tap doesn't reliably produce a
-// `pointermove`, and `pointerleave` fires the instant the finger lifts — so on
-// mobile the hover-driven tooltip never shows. addChartTouch() adds tap-to-show
-// and drag-to-scrub for touch/pen while leaving mouse hover untouched. A single
-// document-level "tap outside dismisses" listener (registered once, keyed by the
-// persistent chart host so it never accumulates across re-renders) clears the
-// tooltip — touch keeps it visible until then, matching native mobile tooltips.
+// On touch, a tap may not fire `pointermove` and `pointerleave` fires on lift,
+// so hover tooltips never show. addChartTouch() adds tap-to-show and
+// drag-to-scrub for touch/pen, leaving mouse hover alone. One document-level
+// outside-tap dismisser per persistent chart host, so none accumulate.
 const _chartTouchDismissers = new Map(); // persistent host element -> dismiss fn
 document.addEventListener('pointerdown', (e) => {
   for (const [host, dismiss] of [..._chartTouchDismissers]) {
@@ -850,11 +722,8 @@ document.addEventListener('pointerdown', (e) => {
 // onMove — chart's existing hover handler (positions cursor/tooltip from evt.clientX)
 // onLeave— chart's existing handler that clears cursor/tooltip
 function addChartTouch(svg, host, onMove, onLeave) {
-  // Set while a touch/pen tooltip is up. After a tap, the browser synthesizes a
-  // compatibility mouse sequence, and its `pointerleave` (pointerType 'mouse',
-  // since the virtual cursor was never over the chart) would otherwise dismiss
-  // the tooltip within ~20ms of the finger lifting — the tooltip appeared and
-  // vanished, which on a phone reads as the tap not registering at all.
+  // Set while a touch/pen tooltip is up, so the synthetic mouse `pointerleave`
+  // that follows a tap does not dismiss it ~20ms later.
   let touchHeld = false;
   const dismiss = () => { _chartTouchDismissers.delete(host); touchHeld = false; onLeave(); };
   svg.addEventListener('pointerdown', (evt) => {
@@ -866,19 +735,14 @@ function addChartTouch(svg, host, onMove, onLeave) {
   });
   svg.addEventListener('pointermove', onMove);
   // Mouse dismisses on leave; touch/pen keep the tooltip until a tap outside.
-  // The `touchHeld` guard is what distinguishes a real cursor leaving the chart
-  // from the synthetic leave that follows a tap.
   svg.addEventListener('pointerleave', (evt) => {
     if (evt.pointerType === 'mouse' && !touchHeld) onLeave();
   });
   svg.addEventListener('pointercancel', dismiss);
 }
 
-// Aggregate adjacent timeline buckets so a bar chart never draws more bars than
-// it can show legibly. Numeric fields are summed; each group keeps its first
-// bucket's timestamp as the x-axis / tooltip anchor (rates are recomputed from
-// the summed counts downstream). Returns `data` untouched when it already fits
-// within `maxBars`.
+// Merge adjacent buckets so a chart draws at most `maxBars`. Numeric fields sum;
+// each group keeps its first bucket's timestamp.
 function downsampleBuckets(data, maxBars) {
   if (!data || data.length <= maxBars) return data;
   const groupSize = Math.ceil(data.length / maxBars);
@@ -904,19 +768,15 @@ function downsampleBuckets(data, maxBars) {
 const MAX_BARS_STACKED = () => (window.innerWidth <= 480 ? 24 : 56);
 const MAX_BARS_GROUPED = () => (window.innerWidth <= 480 ? 14 : 30);
 
-// Used by Dashboard "Queries (24h)" and Statistics "Queries (last Nd)".
-// One stacked bar per bucket: the sub-series stack from the bottom and the
-// remainder (total − subs) is painted on top in series[0]'s colour, so the bar
-// height always equals `total`. Hover dims the other bars and shows a tooltip.
-// el      — a .chart-container (position:relative, 200px tall)
-// data    — raw API rows; series[0].key must be 'total': it sets the y-scale
-//           and colours the top "remainder" segment.
-// series  — [{ key, color, label }]; series[0] is the total, the rest are
-//           sub-categories (e.g. blocked, cached) stacked at the bottom.
-//           `label` is the legend caption (shown in the .tl-legend row below).
-// fmtX    — (row) => x-axis label as plain text; escaped here
-// fmtTooltip — (row) => tooltip Markup, i.e. built with html`` (it carries markup
-//           of its own, so it cannot be escaped as text)
+// Dashboard "Queries (24h)" and Statistics timeline: one stacked bar per bucket,
+// its height always `total`.
+// el         — a .chart-container
+// data       — rows; series[0].key must be 'total' (sets the y-scale)
+// series     — [{ key, color, label }]; series[0] is the total, the rest are
+//              sub-categories stacked at the bottom, with the remainder on top
+//              in series[0]'s colour
+// fmtX       — (row) => x-axis label as plain text
+// fmtTooltip — (row) => tooltip Markup (built with html``)
 function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   data = downsampleBuckets(data, MAX_BARS_STACKED());
   const len = data.length;
@@ -928,9 +788,8 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
   const hOf = (v) => (v / max) * innerH; // value → bar height in viewBox units
   const slot = innerW / len;
   const bw = Math.min(slot * 0.7, 40);
-  // Stack order, bottom→top: the sub-series in reverse of how they're passed,
-  // then the remainder (total − subs) painted on top in series[0]'s colour.
-  // So [total, cached, blocked] stacks blocked, cached, then resolved on top.
+  // Bottom→top: sub-series in reverse order, then the remainder. So
+  // [total, cached, blocked] stacks blocked, cached, then resolved.
   const subs = series.slice(1).reverse();
   const bars = [];
   let rects = '';
@@ -950,8 +809,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     if (rh > 0.3) rects += `<rect class="tlbar" data-i="${i}" x="${x.toFixed(1)}" y="${(cursor - rh).toFixed(1)}" width="${bw.toFixed(1)}" height="${rh.toFixed(1)}" fill="${series[0].color}" fill-opacity="0.58"/>`;
     bars.push({ i, cx, topY: baseline - hOf(d[totalKey] || 0), d });
   }
-  // Gridlines stay inside the stretched SVG; numeric labels are real HTML in a
-  // .tl-yticks overlay so preserveAspectRatio="none" never distorts the digits.
+  // Numeric labels are HTML (.tl-yticks) so the stretched SVG cannot distort them.
   const ticks = [0.25, 0.5, 0.75].map(p => {
     const y = (baseline - p * innerH).toFixed(1);
     return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/>`;
@@ -1004,8 +862,7 @@ function renderTimelineChart(el, data, series, fmtX, fmtTooltip) {
     const containerRect = el.getBoundingClientRect();
     const pxX = (best.cx / w) * rect.width;
     const pxY = (rect.top - containerRect.top) + (best.topY / h) * rect.height;
-    // Tooltip is centered on `left` via translate(-50%); clamp so it never
-    // spills past the container (the .card has overflow:hidden and clips it).
+    // Clamp the centred tooltip inside the card, which clips overflow.
     const half = tooltip.offsetWidth / 2;
     tooltip.style.left = `${Math.max(half, Math.min(pxX, el.clientWidth - half))}px`;
     tooltip.style.top = `${pxY}px`;
@@ -1026,13 +883,9 @@ class DashboardPage extends LiveElement {
     this._dnsAddr = '';
   }
 
-  // The body arrives server-rendered, with the real numbers already in it. What
-  // is added here is what makes it a *dashboard* rather than a snapshot: the
-  // chart, the pushed updates, and the flash on whatever changed.
-  //
-  // The opening snapshot re-draws cards that already hold the same values. That
-  // is deliberate — the alternative is teaching the client to trust markup it
-  // did not write, and every `_prev*` starts empty so nothing flashes on it.
+  // Server-rendered; this adds the chart, pushed updates and change flashes.
+  // The opening snapshot redraws identical values on purpose (the client does
+  // not trust markup it did not write); `_prev*` start empty, so nothing flashes.
   async connectedCallback() {
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
@@ -1045,29 +898,20 @@ class DashboardPage extends LiveElement {
         : '<span class="live-dot"></span> PAUSED';
     };
 
-    // Pausing does not close the stream: the status indicator in the shell is
-    // on the other end of it, and it must keep reporting whether the server is
-    // there whatever this page is doing. What pausing stops is applying what
-    // arrives.
+    // Pausing stops applying snapshots, not the stream: the status indicator
+    // shares it.
     this.track(serverEvents.on('stats', (snapshot) => {
       if (this._live) this._apply(snapshot);
     }));
 
-    // The address to point a device at was rendered into the onboarding notice
-    // already; take it from there rather than asking for it again. Every
-    // appliance that has ever answered a query has no notice and needs none,
-    // which is why this is not fetched up front any more.
+    // Rendered into the onboarding notice already; read it from there.
     this._dnsAddr = this.querySelector('#onboard-empty code')?.textContent?.trim() || '';
 
-    // The server sends one snapshot as soon as the stream opens, so there is
-    // nothing to fetch here and no window in which the page shows the markup
-    // and the first push disagreeing.
+    // The server sends a snapshot as the stream opens.
     serverEvents.start(true);
   }
 
-  // Only ever needed by the onboarding notice, and only when the server did not
-  // already render one — an appliance that starts answering queries mid-session
-  // is the one case the markup cannot have covered.
+  // Only when the server rendered no notice to read the address from.
   async _resolveDnsAddr() {
     if (this._dnsAddr) return this._dnsAddr;
     try {
@@ -1079,9 +923,7 @@ class DashboardPage extends LiveElement {
     return this._dnsAddr;
   }
 
-  // One pushed snapshot carries what five separate polls used to fetch. The
-  // field names are those endpoints' response bodies unchanged, so every
-  // renderer below is the one that read them before.
+  // Snapshot fields are the stats endpoints' response bodies, unchanged.
   _apply(snapshot) {
     if (!snapshot) return;
     try {
@@ -1111,14 +953,13 @@ class DashboardPage extends LiveElement {
     this[prevKey] = sig;
   }
 
-  // head opens <table>...<tbody>; the matching '</tbody></table>' close is appended here.
+  // `head` opens <table>…<tbody>; the close is appended here.
   _renderTopTable(data, { target, card, prevKey, sigFn, limit, head, row }) {
     this._flashIfChanged(prevKey, data.map(sigFn).join(';'), card);
     if (!data.length) { this.querySelector(target).innerHTML = '<p class="text-dim">No data</p>'; return; }
     const visible = limit ? data.slice(0, limit) : data;
     const sumVal = visible.reduce((a, d) => a + d.count, 0);
-    // `head` is a literal from the caller and each row() returns Markup, so both
-    // pass through unescaped; only the values inside row() get escaped.
+    // `head` is a caller literal and row() returns Markup, so neither is escaped.
     let markup = head;
     for (const d of visible) markup += row(d, sumVal);
     this.querySelector(target).innerHTML = markup + '</tbody></table>';
@@ -1128,9 +969,7 @@ class DashboardPage extends LiveElement {
     const pct = (v) => ((v || 0) * 100).toFixed(1);
     const ms = (v) => (v || 0).toFixed(1);
 
-    // Server-provided, like its 7d/30d siblings — recomputing it here from
-    // blocked_today/total_today produced the same number by a second route,
-    // so the two could drift apart on any change to how the server divides.
+    // Server-provided, like 7d/30d, so client and server cannot divide differently.
     const ratio = pct(s.block_ratio_today);
     const ratio7d = pct(s.block_ratio_7d);
     const ratio30d = pct(s.block_ratio_30d);
@@ -1141,14 +980,9 @@ class DashboardPage extends LiveElement {
     const avgMs7d = ms(s.avg_response_ms_7d);
     const avgMs30d = ms(s.avg_response_ms_30d);
     const fmtQps = (v) => v >= 100 ? Math.round(v).toString() : v >= 10 ? v.toFixed(1) : v.toFixed(2);
-    // Main value is the live rate from the server's 60-second window. The card
-    // is labelled Throughput and flashes on change, both of which promise a
-    // current reading — a 24h mean cannot move on a traffic spike, so it went
-    // in the sub-line with the other averages.
-    // Sub-line carries 24h and 7d only. Three entries ("24h / 7d / 30d") wrap
-    // to a second line in the six-column desktop grid, which makes this card
-    // taller than the five beside it; the 30d mean is the least useful of the
-    // three for a rate anyway, since it is smoothed almost flat.
+    // Main value: the live rate over the server's 60-second window (the card
+    // flashes, so it must be current). The sub-line has 24h and 7d only: a
+    // third entry wraps in the six-column grid, and a 30d rate is nearly flat.
     const qpsNow = fmtQps((s.queries_1m || 0) / 60);
     const qpsToday = fmtQps((s.total_today || 0) / 86400);
     const qps7d = fmtQps((s.total_7d || 0) / (7 * 86400));
@@ -1250,30 +1084,19 @@ class DashboardPage extends LiveElement {
 }
 customElements.define('dashboard-page', DashboardPage);
 
-//
-// The server rendered this page. What is left here is the three charts and one
-// date, which is the whole of what the server could not do: the timeline, the
-// rate trend drawn from it and the heatmap are bucketed against the viewer's
-// calendar, and a calendar needs a UTC offset that arrives with the browser
-// rather than with the request. The highlights, both breakdowns, both ranged
-// lists and the health grid are plain `now - range` windows, so they are in the
-// first response and this file does not redraw them.
-//
-// The range switcher is links now, not buttons — it changes the server's
-// window, so it is a navigation.
+// Server-rendered except the three charts and one date. The charts bucket by the
+// viewer's calendar, which needs a UTC offset only the browser has; everything
+// else is a plain `now - range` window and is not redrawn here.
 class StatsPage extends HTMLElement {
   connectedCallback() {
-    // Adopt the range the server answered with rather than resetting to 7d; the
-    // charts have to agree with the card titles around them.
+    // Adopt the server's range so the charts agree with the card titles.
     const raw = new URLSearchParams(location.search).get('range');
     this._range = ['7d', '30d', '90d'].includes(raw) ? raw : '7d';
     this._localizeDates();
     this._drawCharts();
   }
 
-  // The one cell the server could only write in UTC. Same division as the query
-  // log's relative times: the server ships a correct, unambiguous value and the
-  // browser restates it in a locale only it knows.
+  // The server writes this date in UTC; restate it in the browser's locale.
   _localizeDates() {
     this.querySelectorAll('[data-date-ts]').forEach(el => {
       const ts = Number(el.dataset.dateTs);
@@ -1281,9 +1104,7 @@ class StatsPage extends HTMLElement {
     });
   }
 
-  // The series came with the page, from the scan that answered the breakdowns;
-  // only the viewer's calendar is added here. Without it the hour-of-day rows
-  // and the bucket boundaries would sit on UTC.
+  // The series came with the page; only the viewer's calendar is applied here.
   _drawCharts() {
     try {
       const series = JSON.parse(this.dataset.series);
@@ -1344,8 +1165,7 @@ class StatsPage extends HTMLElement {
       return;
     }
 
-    // Column labels row. Named `markup` rather than `html` so it does not shadow
-    // the tagged template of that name.
+    // Named `markup`, not `html`, so it does not shadow the tagged template.
     let markup = '<div class="heatmap-wrap"><div class="heatmap-col-labels"><div></div>';
     for (let h = 0; h < 24; h++) {
       const label = (h === 0 || h === 6 || h === 12 || h === 18) ? String(h).padStart(2, '0') : '';
@@ -1373,9 +1193,8 @@ class StatsPage extends HTMLElement {
     markup += '</div></div>';
     el.innerHTML = markup;
 
-    // Touch: CSS :hover never fires on mobile, so tap a cell to show its tooltip,
-    // tap another to switch, tap outside to dismiss. The listener lives on the
-    // freshly-built .heatmap-wrap (GC'd with the next re-render — no accumulation).
+    // Touch has no :hover: tap a cell to show, another to switch, outside to
+    // dismiss. The listener dies with .heatmap-wrap on the next re-render.
     const wrap = el.querySelector('.heatmap-wrap');
     const clearActive = () => { _chartTouchDismissers.delete(el); wrap.querySelectorAll('.heatmap-cell.touch-active').forEach(c => c.classList.remove('touch-active')); };
     wrap.addEventListener('pointerup', (evt) => {
@@ -1428,9 +1247,7 @@ class StatsPage extends HTMLElement {
       });
       bars.push({ i, cx, topY: baseline - hOf(Math.max(blockedPct, cachedPct)), d, blockedPct, cachedPct });
     }
-    // Gridlines stay inside the stretched SVG (geometry should stretch). The
-    // numeric % labels are real HTML in a .rate-yticks overlay so they are
-    // never distorted by preserveAspectRatio="none" (same fix as .tl-yticks).
+    // % labels are HTML (.rate-yticks), as with .tl-yticks.
     const ticks = [25, 50, 75].map(p => {
       const y = (baseline - hOf(p)).toFixed(1);
       return `<line x1="${padX}" y1="${y}" x2="${padX + innerW}" y2="${y}" stroke="var(--border)" stroke-dasharray="2 4" stroke-width="0.5"/>`;
@@ -1482,8 +1299,7 @@ class StatsPage extends HTMLElement {
       const pxX = (best.cx / w) * rect.width;
       const containerRect = el.getBoundingClientRect();
       const pxY = (rect.top - containerRect.top) + (best.topY / h) * rect.height;
-      // Tooltip is centered on `left` via translate(-50%); clamp so it never
-      // spills past the container (the .card has overflow:hidden and clips it).
+      // Clamp the centred tooltip inside the card, which clips overflow.
       const half = tooltip.offsetWidth / 2;
       tooltip.style.left = `${Math.max(half, Math.min(pxX, el.clientWidth - half))}px`;
       tooltip.style.top = `${pxY}px`;
@@ -1507,17 +1323,13 @@ class LogsPage extends LiveElement {
     this._timeTimer = null;
   }
 
-  // The body arrives server-rendered, filters and page and all, read out of the
-  // URL. What is taken over here is the interaction: filtering without a
-  // navigation, paging without one, and the live tail — which is the documented
-  // exception to this page working without scripting.
+  // Server-rendered from the URL. This adds filtering and paging without
+  // navigation, and the live tail (the page's no-JS exception).
   connectedCallback() {
     this.querySelectorAll('.nojs-only').forEach(el => el.remove());
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
-    // Adopt what the server was showing rather than resetting to defaults: the
-    // operator may have arrived on a filtered, paged URL, and re-fetching page
-    // one of everything would throw that away in front of them.
+    // Adopt the URL's filters and page rather than resetting to defaults.
     const params = new URLSearchParams(location.search);
     this.search = params.get('q') || '';
     this.actionFilter = params.get('action') || '';
@@ -1539,34 +1351,27 @@ class LogsPage extends LiveElement {
     this.querySelector('#log-type').onchange = (e) => {
       this.typeFilter = e.target.value; this.offset = 0; this.load();
     };
-    // The form still submits without JavaScript; here the controls above have
-    // already done the work, so the navigation would only repeat it.
+    // The controls above already filter; the submit would only repeat it.
     this.querySelector('#log-filters').onsubmit = (e) => e.preventDefault();
 
-    // The button lives in the filters row but belongs to the POST form below it
-    // (via its `form` attribute), so the confirmation goes on that form rather
-    // than on whichever one happens to contain the button.
+    // Clear All belongs to this POST form via its `form` attribute, not to the
+    // form that contains it.
     this.querySelector('#clear-logs-form').onsubmit = (e) => {
       if (!confirm('Delete all query logs?')) e.preventDefault();
     };
     this.querySelector('#log-live-btn').onclick = () => this._toggleLive();
-    // The tail rides the shell's connection now, so what is toggled is the
-    // server-side subscription, not a socket this page owns. The listener is
-    // registered once for the page's life — `_prependRow` already drops
-    // anything that arrives while the tail is off.
+    // The tail toggles a subscription on the shell's stream. The listener lives
+    // for the page; `_prependRow` drops what arrives while the tail is off.
     this.track(serverEvents.on('log', (entry) => this._prependRow(entry)));
-    // Both the subscription and the ticker are toggled during the page's life,
-    // so they register single teardowns that defer to their own stoppers.
+    // Start/stop-able, so one teardown deferring to their stoppers.
     this.track(() => { this._stopLive(); this._stopTimeTicker(); });
-    // The rows on screen came from the server; bind their actions where they
-    // are instead of re-fetching a page that is already correct.
+    // Bind the server-rendered rows rather than re-fetching them.
     this._bindRowActions(this);
     this._bindPagination();
     this._startTimeTicker();
   }
 
-  // The pager is two links, so it works with no JavaScript. With it, they move
-  // through the same pages without the navigation.
+  // The pager's links, paged in place.
   _bindPagination() {
     const go = (delta) => {
       this.offset = Math.max(0, this.offset + delta * this.limit);
@@ -1578,9 +1383,7 @@ class LogsPage extends LiveElement {
     if (next && next.tagName === 'A') next.onclick = (e) => { e.preventDefault(); go(1); };
   }
 
-  // Relative times ("2 seconds ago") are baked in at render/insert time, so
-  // rows already on screen would otherwise freeze — most visibly during a live
-  // tail. Recompute the visible spans in place once a second.
+  // Relative times would freeze once rendered; recompute them every second.
   _startTimeTicker() {
     this._stopTimeTicker();
     this._timeTimer = setInterval(() => this._refreshTimes(), 1000);
@@ -1604,9 +1407,8 @@ class LogsPage extends LiveElement {
     if (this._live) {
       // Live tail only makes sense on the newest page with default ordering.
       this.offset = 0;
-      // Start streaming only after the baseline render completes, so incoming
-      // events aren't wiped by renderLogs resetting body.innerHTML. Also hide
-      // pagination — the live tail always shows the newest page.
+      // Stream only after the baseline render, which resets body.innerHTML and
+      // would wipe incoming rows. Paging is hidden while live.
       this.load().then(() => { if (this._live && this.isConnected) this._startLive(); });
       this._togglePagination(false);
     } else {
@@ -1675,10 +1477,7 @@ class LogsPage extends LiveElement {
     }
   }
 
-  // Each row's Allow/Block is a real form, so it works with no JavaScript.
-  // Here the submit is taken over: the rule is posted and the button reports
-  // back in place, rather than the page navigating away from the row that was
-  // just acted on.
+  // Row Allow/Block forms: post the rule and report in place, no navigation.
   _bindRowActions(scope) {
     (scope || this).querySelectorAll('.log-action').forEach(btn => {
       if (btn._bound) return; btn._bound = true;
@@ -1695,16 +1494,12 @@ class LogsPage extends LiveElement {
     });
   }
 
-  // The rule a row's one-click action adds, mirroring what the server puts in
-  // the form's hidden field: a blocked query is already blocked, so its action
-  // is the allow rule.
+  // Mirrors the server's hidden field: a blocked query gets the allow rule.
   _ruleFor(l) {
     return l.blocked ? `@@||${l.domain}^` : `||${l.domain}^`;
   }
 
-  // The view the client is currently showing, as a path — the same value the
-  // server renders into each row's `next`, so a row action lands back here
-  // whichever half of the UI submitted it.
+  // The current view as a path — what the server renders into each row's `next`.
   _currentHref() {
     const params = new URLSearchParams();
     if (this.search) params.set('q', this.search);
@@ -1760,9 +1555,7 @@ class LogsPage extends LiveElement {
 
     this._bindRowActions(this);
 
-    // Links, matching what the server renders: same shape, and still
-    // right-clickable into a new tab. `_bindPagination` cancels the navigation
-    // and pages in place.
+    // Links, as the server renders them; `_bindPagination` pages in place.
     const pag = this.querySelector('#log-pagination');
     const currentPage = Math.floor(this.offset / this.limit) + 1;
     const totalPages = Math.max(1, Math.ceil(this.total / this.limit));
@@ -1819,9 +1612,8 @@ class LogsPage extends LiveElement {
 }
 customElements.define('logs-page', LogsPage);
 
-// What turning a list off would cost, phrased exactly as `list_impact` in
-// `src/admin/pages.rs` phrases it — a column that reworded itself when the
-// poll landed would read as the value having changed.
+// What turning a list off would unblock; must phrase it exactly as `list_impact`
+// in src/admin/pages.rs does.
 function listImpact(l) {
   if (l.unique_rules === null || l.unique_rules === undefined) {
     if (!l.enabled) return { text: 'Disabled', none: false };
@@ -1833,23 +1625,14 @@ function listImpact(l) {
 }
 
 class FiltersPage extends HTMLElement {
-  // The body arrives server-rendered: every control here is a real form that
-  // works on its own. What follows takes those forms over — same ids, same
-  // buttons — so with JavaScript the page updates in place instead of
-  // navigating, which is the behaviour it has always had.
-  //
-  // Nothing is loaded on connect. The lists and rules in the markup came from
-  // the same storage a fetch would ask, and re-fetching them would only replace
-  // what is already correct.
+  // Server-rendered with working forms; these take them over (same ids) to
+  // update in place. Nothing is loaded on connect.
   connectedCallback() {
-    // The no-JS submits are removed rather than hidden: a button that is there
-    // but does nothing is worse than one that was never shipped. The reverse
-    // for `js-only`, which the server ships hidden.
+    // Remove no-JS submits; unhide `js-only`.
     this.querySelectorAll('.nojs-only').forEach(el => el.remove());
     this.querySelectorAll('.js-only[hidden]').forEach(el => el.removeAttribute('hidden'));
 
-    // A GET form the server can answer on its own; here the verdict is fetched
-    // and written into the same element, without the navigation.
+    // Fetch the verdict in place instead of navigating.
     this.querySelector('#domain-test-form').onsubmit = (e) => {
       e.preventDefault();
       this.testDomain();
@@ -1881,9 +1664,6 @@ class FiltersPage extends HTMLElement {
       this.querySelector('#list-url').value = '';
       this.loadLists();
     };
-
-    // Browse Registry is a link to a page of its own now, so there is nothing
-    // to wire here — following it is the whole behaviour.
 
     this.querySelector('#enable-recommended').closest('form').onsubmit = (e) => {
       e.preventDefault();
@@ -1930,9 +1710,8 @@ class FiltersPage extends HTMLElement {
     }
   }
 
-  // Re-draw both the table and the cards after a change. The markup mirrors
-  // `templates/filters.html` — forms and all — so a redrawn row is the same row
-  // the server would have sent, and the bindings below apply to either.
+  // Redraw the table and cards in the shape of `templates/filters.html`, forms
+  // included, so the same bindings apply to either.
   async loadLists() {
     try {
       const lists = await api.get('/api/lists');
@@ -1987,16 +1766,14 @@ class FiltersPage extends HTMLElement {
     } catch (e) { console.error(e); }
   }
 
-  // Applied to whatever rows are in the document — the ones the server rendered
-  // on first load, and the ones `loadLists` drew afterwards.
+  // Binds server-rendered and redrawn rows alike.
   bindLists() {
     this.querySelectorAll('#lists-body input[type=checkbox], #lists-cards input[type=checkbox]').forEach(cb => {
       cb.onchange = async () => {
         try {
           await api.put(`/api/lists/${cb.dataset.id}`, { enabled: cb.checked });
         } catch (e) {
-          // Put the toggle back where it was: leaving it showing a state the
-          // server never accepted is the one outcome worse than failing.
+          // Revert: never show a state the server did not accept.
           cb.checked = !cb.checked;
           showBanner('Could not change that list', 'error');
         }
@@ -2013,8 +1790,7 @@ class FiltersPage extends HTMLElement {
       };
     });
 
-    // A link without JavaScript, which expands the row on the server. Here the
-    // navigation is cancelled and the dialog opens over the page instead.
+    // A server-side row expansion without JavaScript; here, open the dialog.
     this.querySelectorAll('.edit-list').forEach(link => {
       link.onclick = (e) => {
         e.preventDefault();
@@ -2025,9 +1801,7 @@ class FiltersPage extends HTMLElement {
     this._refreshAllDisabledWarning();
   }
 
-  // Read off the checkboxes rather than a cached list: they are the state the
-  // operator is looking at, and after a toggle they are correct before any
-  // reload would be.
+  // Read the checkboxes: after a toggle they are right before any reload.
   _refreshAllDisabledWarning() {
     const warn = this.querySelector('[data-testid="filters-all-disabled-warning"]');
     if (!warn) return;
@@ -2145,10 +1919,7 @@ customElements.define('filters-page', FiltersPage);
 
 class SettingsPage extends HTMLElement {
   connectedCallback() {
-    // The server ships a submit button so the page works without JavaScript.
-    // With it, each field saves as it is changed — the button would be a second
-    // way to do the same thing, and one that discards the per-field messages
-    // the autosave path shows.
+    // Fields autosave with inline messages, so the no-JS submit row goes.
     const saveRow = this.querySelector('#settings-save-row');
     if (saveRow) saveRow.remove();
 
@@ -2173,9 +1944,7 @@ class SettingsPage extends HTMLElement {
     };
 
     this.querySelector('#apply-upstream').onclick = async (event) => {
-      // It is a submit button so the page works without JavaScript. Here there
-      // is JavaScript, so take over: PUT just this field and refresh the health
-      // table, rather than submitting the whole form and navigating away.
+      // PUT just the upstreams and refresh the health table.
       event.preventDefault();
       const msg = this.querySelector('#upstream-apply-msg');
       try {
@@ -2187,8 +1956,7 @@ class SettingsPage extends HTMLElement {
       } catch (e) { msg.style.color = 'var(--red)'; msg.textContent = 'Failed to apply'; }
     };
 
-    // Unified auto-save: every control saves on change/blur and reports its
-    // own result inline, right next to that field. Invalid values never PUT.
+    // Every control saves on change/blur and reports inline; invalid values never PUT.
     const setMsg = (id, ok, msg) => {
       const el = this.querySelector(id);
       if (!el) return;
@@ -2241,10 +2009,8 @@ class SettingsPage extends HTMLElement {
       this.querySelector('#s-block-custom').style.display =
         this.querySelector('#s-block-mode').value === 'custom_ip' ? 'block' : 'none';
     };
-    // Validate the custom IPs (errors shown next to the offending field) and
-    // save; report success at `msgId` (the control the user just touched).
-    // Non-custom modes ignore the IP fields: send mode only so a stale/partial
-    // value in a hidden field can never trigger a backend 400.
+    // Validate and save; report success at `msgId`. Non-custom modes send the
+    // mode only, so a stale hidden IP value cannot cause a 400.
     const saveBlock = (msgId) => {
       const mode = this.querySelector('#s-block-mode').value;
       if (mode !== 'custom_ip') { putField(msgId, { block_mode: mode }, 'Saved'); return; }
@@ -2272,12 +2038,8 @@ class SettingsPage extends HTMLElement {
 
   async load() {
     try {
-      // Only what the form does not already hold. Every field on this page was
-      // rendered with its current value by the server, so re-fetching settings
-      // to fill them in would be asking a question already answered — and worse
-      // than redundant: this used to overwrite whatever the operator had typed
-      // in the window between the markup appearing and the response landing,
-      // silently reverting the change they had just made.
+      // Never refill fields the server rendered: that would overwrite whatever
+      // the operator typed before the response landed.
       const info = await api.get('/api/server-info');
       this.renderUpstreams();
       this.loadEma();
@@ -2351,28 +2113,12 @@ class SettingsPage extends HTMLElement {
 }
 customElements.define('settings-page', SettingsPage);
 
-// Reaching this file at all means the server already resolved the session and
-// decided this is a page for a signed-in operator — an unauthenticated request
-// was redirected before any HTML was written. Two round trips (`/api/health`,
-// then `/api/settings`) and the repaint they forced are gone with that.
-//
-// There is nothing here that mounts a page, either. Every one of the six paths
-// renders its own body, wrapped in that page's custom element, and the element
-// upgrades in place when this file defines it: the `connectedCallback` enhances
-// markup that is already on the screen rather than replacing it. The table that
-// used to map a path to a component, and the branch that mounted one when the
-// server had left `#page-content` empty, went with the last page P3 converted.
-//
-// The shell is in the document already too — topbar, navigation, status bar and
-// all — so there is no shell component here to wrap it in, and nothing below
-// re-derives what the template settled: the active navigation item is a class
-// it set from the path it was answering, and working that out again from
-// `location.pathname` would be a second source for one fact.
+// No page mounting here: the server resolved the session, rendered the shell
+// and every page body inside its custom element, which upgrades in place.
+// Nothing re-derives what the template settled (e.g. the active nav item).
 
-// Dismiss is attached only where there is JavaScript to make it work, rather
-// than shipped in the markup as a button that does nothing without it. The
-// strip is one-shot either way: the flash cookie behind it was cleared by the
-// very response that rendered it, so a navigation is enough to be rid of it.
+// Dismiss needs JavaScript, so it is added here. The flash cookie behind the
+// strip is already cleared, so any navigation also removes it.
 const welcome = document.querySelector('[data-testid="setup-welcome"]');
 if (welcome) {
   const dismiss = document.createElement('button');
@@ -2385,10 +2131,8 @@ if (welcome) {
   welcome.appendChild(dismiss);
 }
 
-// A 401 from any later API call means the session ended underneath us — it
-// expired, or another device revoked it. Navigate rather than swap in a login
-// component: the sign-in form is a server-rendered page now, and `next` is what
-// brings the operator back to the page they were on.
+// A 401 means the session ended (expired or revoked): go to the sign-in page,
+// with `next` to return here.
 window.addEventListener('auth-required', () => {
   const here = location.pathname + location.search;
   window.location.assign(here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`);

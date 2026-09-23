@@ -6,29 +6,25 @@ use crate::db::{
 };
 
 /// Days of query-log history kept when `log_retention_days` is unset or
-/// unparseable. The hourly prune task and the DB health report both fall back
-/// to this, so the admin UI shows the retention that is actually in effect.
+/// unparseable. The prune task and the DB health report share it, so the UI
+/// shows the retention actually in effect.
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
-/// Retention spans the settings form suggests, ascending, from a day of
-/// debugging up to a year. [`DEFAULT_LOG_RETENTION_DAYS`] is among them so the
-/// list can restore the default the operator started from.
+/// Retention spans the settings form suggests, ascending, including
+/// [`DEFAULT_LOG_RETENTION_DAYS`].
 ///
-/// Unlike the block-mode addresses, `apply_settings` does not validate this
-/// field — an unparseable value is stored and every reader falls back to the
-/// default. The suggestions are therefore held to the stricter bar the readers
-/// actually need: each must parse as a positive `i64`. Enforced by
-/// `log_retention_suggestions_are_usable`.
+/// `apply_settings` does not validate this field (readers fall back to the
+/// default), so each suggestion must itself parse as a positive `i64` —
+/// enforced by `log_retention_suggestions_are_usable`.
 pub const LOG_RETENTION_DAYS_SUGGESTIONS: &[i64] = &[1, 7, 14, 30, 90, 365];
 
-/// `Default` is all zeroes, which is what the dashboard renders when the read
-/// fails: a page of zeroes is more useful than one that will not load, and it
-/// is the same shape an appliance that has answered nothing yet reports.
+/// `Default` is all zeroes: what the dashboard renders when the read fails,
+/// and what an appliance that has answered nothing reports anyway.
 #[derive(Debug, Clone, Default, Serialize, utoipa::ToSchema)]
 pub struct Summary {
-    /// Total queries handled since local midnight today.
+    /// Total queries handled in the trailing 24 hours.
     pub total_today: i64,
-    /// Queries blocked by the filter engine since local midnight today.
+    /// Queries blocked by the filter engine in the trailing 24 hours.
     pub blocked_today: i64,
     /// Total queries handled in the trailing 7 days.
     pub total_7d: i64,
@@ -38,19 +34,19 @@ pub struct Summary {
     pub total_30d: i64,
     /// Queries blocked in the trailing 30 days.
     pub blocked_30d: i64,
-    /// `blocked_today / total_today`, or `0` if there were no queries today.
+    /// `blocked_today / total_today`, or `0` if there were no queries in the window.
     pub block_ratio_today: f64,
     /// `blocked_7d / total_7d`, or `0` if there were no queries in the window.
     pub block_ratio_7d: f64,
     /// `blocked_30d / total_30d`, or `0` if there were no queries in the window.
     pub block_ratio_30d: f64,
-    /// Fraction of today's queries answered from the DNS cache.
+    /// Fraction of allowed queries in the trailing 24 hours answered from cache.
     pub cache_hit_rate_today: f64,
-    /// Fraction of the trailing-7-day queries answered from the DNS cache.
+    /// Fraction of allowed queries in the trailing 7 days answered from cache.
     pub cache_hit_rate_7d: f64,
-    /// Fraction of the trailing-30-day queries answered from the DNS cache.
+    /// Fraction of allowed queries in the trailing 30 days answered from cache.
     pub cache_hit_rate_30d: f64,
-    /// Average response time in milliseconds for today's queries.
+    /// Average response time in milliseconds over the trailing 24 hours.
     pub avg_response_ms_today: f64,
     /// Average response time in milliseconds over the trailing 7 days.
     pub avg_response_ms_7d: f64,
@@ -116,25 +112,21 @@ pub async fn compute_top_domains(
     db.top_domains_since(since, limit).await
 }
 
-/// How far back the domain suggestions look. A week rather than the
-/// dashboard's day: those two boxes are used to chase something already
-/// noticed, and "it was misbehaving on Friday" has to still be offered on
-/// Monday. It also matches [`DEFAULT_LOG_RETENTION_DAYS`], so the window is
-/// the log itself on a default install.
+/// How far back the domain suggestions look: a week, not the dashboard's day,
+/// so something noticed on Friday is still offered on Monday. Equal to
+/// [`DEFAULT_LOG_RETENTION_DAYS`], i.e. the whole log on a default install.
 const DOMAIN_SUGGESTION_WINDOW_SECS: i64 = DEFAULT_LOG_RETENTION_DAYS * 86400;
 
-/// How many domains those boxes offer. Long enough to cover a home network's
-/// regulars, short enough that the dropdown stays a shortlist — past a screenful
-/// scrolling it is slower than typing.
+/// How many domains are offered: a home network's regulars, but still a
+/// shortlist.
 const DOMAIN_SUGGESTION_LIMIT: i64 = 20;
 
 /// The domains to suggest in a box the operator types a domain into: the
 /// `/filters` tester and the `/logs` search.
 ///
-/// Ordered by how often each was queried, not alphabetically — the whole point
-/// is that the domain being chased is near the top, and a browser renders a
-/// datalist in document order. Empty on a read failure or an empty log, which
-/// the pages turn into no `<datalist>` at all rather than an empty one.
+/// Most-queried first, since a browser renders a datalist in document order.
+/// Empty on a read failure or an empty log, which the pages render as no
+/// `<datalist>` at all.
 pub async fn domain_suggestions(db: &Database, now: i64) -> Vec<String> {
     db.top_domains_since(now - DOMAIN_SUGGESTION_WINDOW_SECS, DOMAIN_SUGGESTION_LIMIT)
         .await
@@ -153,9 +145,8 @@ pub async fn compute_top_clients(
     db.top_clients_since(since, limit).await
 }
 
-/// The dashboard's two 24-hour lists from the one scan that answers both —
-/// what it shows every tick, where asking [`compute_top_domains`] and
-/// [`compute_top_clients`] separately would read two indexes.
+/// The dashboard's two 24-hour lists from one statement, rather than
+/// [`compute_top_domains`] and [`compute_top_clients`] reading twice.
 pub async fn compute_top_domains_and_clients(
     db: &Database,
     now: i64,
@@ -227,9 +218,8 @@ impl StatsRange {
         }
     }
 
-    /// The spelling `parse` accepts, which is also what the range switcher puts
-    /// in the URL and every card title says. One source for all three, so a
-    /// title cannot disagree with the link that produced it.
+    /// The spelling `parse` accepts, and what the range switcher's URL and every
+    /// card title use, so they cannot disagree.
     pub fn label(self) -> &'static str {
         match self {
             Self::Days7 => "7d",
@@ -238,8 +228,8 @@ impl StatsRange {
         }
     }
 
-    /// Width of one timeline bucket, in seconds. The page hands this to the
-    /// browser alongside the series it folds, so the bucket is chosen once.
+    /// Width of one timeline bucket, in seconds; handed to the browser with the
+    /// series it folds.
     pub fn bucket_secs(self) -> i64 {
         self.window().1
     }
@@ -315,8 +305,7 @@ pub async fn compute_breakdowns(
 ) -> Result<Breakdowns, DbError> {
     let (window_secs, _) = range.window();
     let since = now - window_secs;
-    // Both breakdowns fold out of one statement; asking for them separately is
-    // two scans of the index that answers either.
+    // Both breakdowns fold out of one statement.
     let metrics = db.window_metrics_since(since).await?;
     Ok(Breakdowns {
         query_types: metrics.query_types,
@@ -347,20 +336,11 @@ pub async fn compute_highlights(
     })
 }
 
-/// Everything the Statistics page reads out of `query_logs` for its window, in
-/// the fewest scans the indexes allow.
-///
-/// The page used to ask for the five readings separately — a query-type
-/// breakdown, an outcome breakdown, a latency summary, a unique-domain count,
-/// a top-domain list — and every one of them re-scanned an index another had
-/// just walked. Three of them share
-/// [`crate::db::Database::stats_scan_since`] and two share
-/// [`crate::db::Database::traffic_lists_since`], which is two index scans
-/// instead of six.
-///
-/// The charts ride the first of those scans as `series`, rather than being
-/// fetched by the browser afterwards at the cost of two more, and the top
-/// clients ride the second rather than scanning an index of their own.
+/// Everything the Statistics page reads for its window, from two statements:
+/// [`crate::db::Database::stats_scan_since`] (the breakdowns, latency and the
+/// charts' `series`) and [`crate::db::Database::traffic_lists_since`] (top
+/// domains, the distinct-domain count and top clients). A new reading should
+/// fold out of one of them rather than add a third.
 pub struct RangeStats {
     pub metrics: crate::db::WindowMetrics,
     pub series: crate::db::QuarterSeries,
@@ -489,15 +469,13 @@ mod tests {
         assert_eq!(h.log_retention_days, Some(30));
     }
 
-    /// The retention field takes anything the save is given, so the guarantee
-    /// the suggestions have to meet is the readers': each must come back as a
-    /// positive count rather than silently collapsing to the default.
+    /// The save accepts anything, so each suggestion must read back as itself
+    /// rather than collapsing to the default.
     #[tokio::test]
     async fn log_retention_suggestions_are_usable() {
         assert!(LOG_RETENTION_DAYS_SUGGESTIONS.contains(&DEFAULT_LOG_RETENTION_DAYS));
 
-        // A browser renders a datalist in document order, so an unsorted list
-        // reads as arbitrary.
+        // A datalist renders in document order.
         assert!(
             LOG_RETENTION_DAYS_SUGGESTIONS
                 .windows(2)
@@ -562,9 +540,6 @@ mod tests {
         }
     }
 
-    /// The suggestions are a shortlist of what the resolver has actually seen,
-    /// most-queried first — the domain being chased should be near the top,
-    /// and a browser renders a datalist in document order.
     #[tokio::test]
     async fn domain_suggestions_are_ordered_by_how_often_each_was_queried() {
         let db = Database::open(":memory:").await.unwrap();
@@ -586,8 +561,6 @@ mod tests {
         );
     }
 
-    /// The window is a week, not the dashboard's day: chasing something first
-    /// noticed on Friday has to still work on Monday.
     #[tokio::test]
     async fn domain_suggestions_span_a_week_but_no_further() {
         let db = Database::open(":memory:").await.unwrap();
@@ -606,8 +579,6 @@ mod tests {
         );
     }
 
-    /// A fresh install has nothing to suggest, and says so with an empty list
-    /// rather than an error — the pages turn that into no `<datalist>` at all.
     #[tokio::test]
     async fn domain_suggestions_are_empty_when_nothing_has_been_queried() {
         let db = Database::open(":memory:").await.unwrap();

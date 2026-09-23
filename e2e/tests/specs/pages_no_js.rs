@@ -1,19 +1,13 @@
-//! The three pages the no-JS suites had not reached: the dashboard, settings
-//! and account. Filters, the query log and statistics each have their own file
-//! because each seeds heavily or empties something; these three do not, so they
-//! share one instance rather than booting three more binaries for it.
+//! The dashboard, settings and account with JavaScript off. None seeds or
+//! empties anything, so they share one instance.
 //!
-//! What each is here to prove:
-//!   dashboard — a page of pure readings arrives with the readings in it, and
-//!               says so where the chart would be.
-//!   settings  — the no-JS save row is real: it posts, it persists, and a
-//!               rejected value comes back in the field with a reason.
-//!   account   — the actions that need a password proof carry the password in
-//!               their own form, so the path is identical with scripting off.
+//!   dashboard — the readings arrive rendered; the chart says it needs a browser.
+//!   settings  — the no-JS save row posts and persists; a rejected value comes
+//!               back in the field with a reason.
+//!   account   — password-proofed actions carry the password in their own form.
 //!
-//! Account spends password confirmations against the five-per-minute budget, so
-//! there is exactly one here plus the sign-in — the same reason
-//! `account_sensitive_actions` is self-contained.
+//! Password confirmations share the five-per-minute login budget, so there is
+//! exactly one here plus the sign-in.
 
 use anyhow::Result;
 use noadd_e2e::dom::Page;
@@ -25,11 +19,9 @@ async fn open(page: &Page, session: &str, path: &str) -> Result<()> {
     page.testid("app-shell").expect_visible().await
 }
 
-/// Settings is the one form here that does not submit on Enter: implicit
-/// submission is skipped when a form holds more than one field and the browser
-/// cannot pick a default button for it, so this activates the real one.
-/// `click_js` skips the hit-target check the fixed status bar can fail on a
-/// short viewport — the assertions after it only pass if the POST landed.
+/// Settings does not submit on Enter (no default button for implicit
+/// submission), so this activates the real button; `click_js` because the fixed
+/// status bar can cover it. Callers' assertions prove the POST landed.
 async fn save_settings(page: &Page) -> Result<()> {
     page.testid("save-settings").click_js().await
 }
@@ -50,8 +42,7 @@ pub async fn run() -> Result<Vec<String>> {
             async |_browser, page| {
                 open(page, &session, "/").await?;
 
-                // Six stat cards, filled in. This appliance has answered
-                // nothing, so the rates are a real zero rather than a blank.
+                // No traffic yet, so the rates are a real zero, not a blank.
                 page.testid("stat-blocked-today").expect_visible().await?;
                 page.testid("stat-block-rate")
                     .expect_text_contains("0.0%")
@@ -62,20 +53,15 @@ pub async fn run() -> Result<Vec<String>> {
                 // The top-N tables are rendered, not fetched.
                 page.testid("top-domains-card").expect_visible().await?;
 
-                // The control that only works with a client ships hidden rather
-                // than sitting there doing nothing.
+                // The client-only control ships hidden.
                 page.testid("live-toggle").expect_hidden().await?;
 
-                // Same for the status indicator, and for a sharper reason: it
-                // used to be a hardcoded ONLINE, which claimed the server was
-                // up on a page that had no way of knowing. With no client to
-                // hold the event stream open it shows nothing instead.
+                // So does the status indicator: without the event stream it
+                // cannot know the server is up, so it must not claim it.
                 page.testid("server-status").expect_hidden().await?;
 
-                // Nothing has been queried, so the page explains what to do
-                // about it — and hides the chart card rather than drawing an
-                // empty axis, which is why the "drawn in the browser" note is
-                // in the markup but not on screen yet.
+                // No traffic: the empty state shows and the chart card is hidden,
+                // so its "drawn in the browser" note is in the markup, not on screen.
                 page.testid("dashboard-empty-state")
                     .expect_visible()
                     .await?;
@@ -94,13 +80,11 @@ pub async fn run() -> Result<Vec<String>> {
             async |_browser, page| {
                 open(page, &session, "/settings").await?;
 
-                // The no-JS save row is real markup, not a hidden fallback:
-                // `app.js` removes it when it takes the form over.
+                // The no-JS save row ships visible; `app.js` would remove it.
                 page.testid("save-settings").expect_visible().await?;
 
-                // A browser posts the whole form, so every field has to be valid —
-                // an appliance that has never been configured has no upstream yet,
-                // and saving without one is a rejection rather than a partial write.
+                // A browser posts the whole form, and a fresh appliance has no
+                // upstream, so saving without one would be rejected outright.
                 page.loc("#s-upstream").fill("1.1.1.1:53").await?;
                 page.loc("#s-retention").fill("21").await?;
                 save_settings(page).await?;
@@ -123,8 +107,7 @@ pub async fn run() -> Result<Vec<String>> {
             async |_browser, page| {
                 open(page, &session, "/settings").await?;
 
-                // Store a known-good state first, so this case does not depend
-                // on another one having run.
+                // Store a known-good state first, independent of earlier cases.
                 page.loc("#s-upstream").fill("9.9.9.9:53").await?;
                 page.loc("#s-retention").fill("14").await?;
                 save_settings(page).await?;
@@ -133,15 +116,12 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc("#s-upstream").fill("not a server").await?;
                 save_settings(page).await?;
 
-                // Re-rendered with what was submitted rather than redirected,
-                // which would have discarded it, and the reason sits next to
-                // the field that caused it.
+                // Re-rendered with the submitted value, reason next to the field.
                 page.loc("#s-upstream").expect_value("not a server").await?;
                 page.expect_text("Not a valid upstream").await?;
                 page.testid("settings-saved").expect_count(0).await?;
 
-                // Nothing was written: the whole save is rejected rather than
-                // half applied.
+                // Nothing was written: the save is rejected whole, not half applied.
                 page.goto("/settings").await?;
                 page.loc("#s-upstream").expect_value("9.9.9.9:53").await?;
                 page.loc("#s-retention").expect_value("14").await
@@ -158,8 +138,7 @@ pub async fn run() -> Result<Vec<String>> {
                 // All three tables are in the first response.
                 page.testid("operator-row").expect_count(1).await?;
                 page.testid("session-row").expect_count_at_least(1).await?;
-                // The password field rides in the form that needs it — no
-                // dialog to open.
+                // The password field rides in the form that needs it.
                 page.testid("operator-your-password")
                     .expect_visible()
                     .await?;
@@ -167,8 +146,7 @@ pub async fn run() -> Result<Vec<String>> {
                     .expect_visible()
                     .await?;
 
-                // A destructive row action expands into a named confirmation,
-                // which exists without scripting because it is a link to a URL.
+                // A destructive row action expands into a named confirmation via URL.
                 page.goto("/account?confirm_delete=1").await?;
                 page.testid("operator-confirm-row").expect_visible().await?;
                 page.testid("operator-delete-password")
@@ -190,9 +168,7 @@ pub async fn run() -> Result<Vec<String>> {
                     .await?;
                 page.testid("api-key-your-password").press_enter().await?;
 
-                // The one deliberate exception to PRG on these pages: the token
-                // exists in this response and nowhere else, so it renders
-                // rather than redirecting.
+                // The one exception to PRG: this response holds the only copy.
                 page.testid("api-key-token").expect_visible().await?;
                 page.testid("api-key-token")
                     .expect_value_not_empty()
@@ -207,16 +183,14 @@ pub async fn run() -> Result<Vec<String>> {
         )
         .await;
 
-    // Last, deliberately: dismissing is stored server-side, so this case takes
-    // the notice away from the instance for good.
+    // Last: the dismissal is stored, removing the notice for good.
     suite
         .case(
             "the onboarding notice is rendered, and dismissing it is a form post",
             async |_browser, page| {
                 open(page, &session, "/account").await?;
 
-                // It used to be drawn by `app.js` after three fetches, so with
-                // scripting off there was nothing here at all.
+                // Server-rendered, so it exists with scripting off.
                 page.testid("next-step-banner").expect_visible().await?;
                 page.testid("next-step-banner-addr")
                     .expect_text_contains(":")
@@ -224,12 +198,11 @@ pub async fn run() -> Result<Vec<String>> {
 
                 page.testid("next-step-banner-dismiss").click().await?;
 
-                // The `next` field carries where it was dismissed from, so the
-                // operator lands back on the page rather than the dashboard.
+                // The `next` field returns the operator to where they dismissed it.
                 page.expect_url_ends_with("/account").await?;
                 page.testid("next-step-banner").expect_count(0).await?;
 
-                // And it stays dismissed, because the choice is stored.
+                // And it stays dismissed.
                 page.goto("/settings").await?;
                 page.testid("next-step-banner").expect_count(0).await
             },

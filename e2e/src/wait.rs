@@ -1,13 +1,6 @@
-//! Retrying assertions.
-//!
-//! Playwright's `expect(...)` polls until the assertion holds or a timeout
-//! expires, which is what let the old tests write `await expect(page).toHaveURL('/')`
-//! straight after a click. `WebDriver` has no such layer: a `find` that runs
-//! before `app.js` has finished swapping a class simply reports the old state.
-//!
-//! There were 208 `await expect(...)` calls in the suite this replaces, so the
-//! polling is not an occasional convenience — it is the substrate. Every
-//! assertion in [`crate::dom`] is built on these two.
+//! Retrying assertions. `WebDriver` does not retry: a `find` that runs before
+//! `app.js` has swapped a class reports the old state. Every assertion in
+//! [`crate::dom`] is built on these two.
 
 use std::fmt::Debug;
 use std::future::Future;
@@ -19,18 +12,10 @@ use crate::browser::{WAIT_INTERVAL, WAIT_TIMEOUT};
 
 /// Polls `probe` until it reports the expected value.
 ///
-/// On timeout the failure names the last value seen, not merely that a wait
-/// expired — that is the difference between "the row count never reached 2" and
-/// a message you have to reproduce by hand to understand.
-///
-/// An error from `probe` is "not yet", the same as a value that does not match
-/// — matching [`eventually`], which always read them that way. Reading an
-/// element is two round trips (find it, then ask it for the value), and on a
-/// page that re-draws itself from server pushes the node can be replaced
-/// between them: `Element is stale` is the ordinary state of a live page, not
-/// a verdict. Treating it as fatal made every such assertion a race against
-/// the next push, which is how a dashboard poll interval ended up deciding
-/// whether a test passed.
+/// On timeout the failure names the last value seen. An error from `probe` means
+/// "not yet", as in [`eventually`]: reading an element is two round trips, and a
+/// page re-drawn from server pushes can replace the node between them, so a
+/// stale element is ordinary on a live page, not a verdict.
 ///
 /// # Errors
 ///
@@ -79,9 +64,7 @@ where
 /// Polls `probe` until it reports `Ok(true)`, describing the last state it saw.
 ///
 /// `probe` returns the value it judged alongside the verdict so a failure can
-/// print it. An error from `probe` is treated as "not yet" rather than fatal:
-/// a `find` against a page mid-navigation legitimately fails, and the timeout
-/// is what decides whether that was transient.
+/// print it. An error means "not yet": a `find` mid-navigation legitimately fails.
 ///
 /// # Errors
 ///

@@ -1,29 +1,19 @@
-//! Per-entry memory measurement for the DNS response cache. Not an assertion —
-//! meant to be run manually to compare the resident cost of a cache entry
-//! across implementations:
+//! Per-entry memory of the DNS response cache, run manually:
 //!
 //!   cargo nextest run --no-capture --release \
 //!     --run-ignored only `cache_memory_bench`
 //!
-//! Fills the cache with N entries whose record-type mix follows production
-//! resolver traffic (56% A, 25% AAAA, 19% TXT) and reports the live heap bytes
-//! and allocation count attributable to each entry. A tracking allocator wraps
-//! the system allocator to get those numbers; `main.rs` installs mimalloc, but
-//! an integration test is its own binary and does not link it, so this crate is
-//! free to install its own.
+//! Fills the cache with a production record-type mix (56% A, 25% AAAA, 19% TXT)
+//! and reports live heap bytes and allocations per entry, via a tracking
+//! allocator (an integration test does not link `main.rs`'s mimalloc).
 //!
-//! ⚠️ **The two kinds of figure need opposite arrangements, so they come from
-//! separate fills.** Bytes are measured with the responses built inside the
-//! window, because the encoder's reservation is part of what an entry occupies
-//! and the builder's temporaries are freed before the window closes, netting
-//! out of a live-byte reading. Allocations have no such cancellation — a freed
-//! allocation still happened — so `allocations_per_entry` builds everything
-//! first and counts only what caching it costs.
+//! ⚠️ **Bytes and allocations come from separate fills.** Bytes are measured
+//! with responses built inside the window, since the encoder's reservation is
+//! part of the entry and the builder's temporaries net out. Allocation counts
+//! do not net out, so `allocations_per_entry` builds everything first.
 //!
-//! Entries are also served once, because an entry that grows when it is read
-//! costs whatever that growth is for as long as it stays hot. It used to grow
-//! by a whole second copy of the response; the serving figure is what watches
-//! for that coming back.
+//! Entries are also served once: an entry that grows when read (it once held a
+//! second copy of the response) costs that growth for as long as it is hot.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -100,15 +90,13 @@ fn counters() -> Counters {
     }
 }
 
-/// Live-byte delta between two reads, as a signed value. Allocations made
-/// before `before` can be freed after it, so a phase that nets negative is a
-/// legitimate outcome rather than an underflow — hence the wrapping subtract.
+/// Signed live-byte delta. A phase can free earlier allocations and net
+/// negative, hence the wrapping subtract.
 fn live_delta(before: Counters, after: Counters) -> isize {
     after.live_bytes.wrapping_sub(before.live_bytes) as isize
 }
 
-/// The record-type mix of production resolver traffic, from Cloudflare's
-/// published 1.1.1.1 cache distribution: 56% A, 25% AAAA, 19% TXT.
+/// Record-type mix from Cloudflare's published 1.1.1.1 cache distribution.
 fn record_type_for(index: usize) -> RecordType {
     match index % 100 {
         0..=55 => RecordType::A,
@@ -117,9 +105,8 @@ fn record_type_for(index: usize) -> RecordType {
     }
 }
 
-/// A realistic upstream answer: the echoed question plus two or three records
-/// of the requested type. The TXT answers carry token-sized strings, which is
-/// what puts them at the large end of the distribution.
+/// A realistic upstream answer: the question plus two or three records of the
+/// requested type, TXT carrying token-sized strings.
 fn build_response(domain: &str, qtype: RecordType, id: u16) -> Vec<u8> {
     let name = Name::from_str(domain).unwrap();
     let mut resp = Message::new(id, MessageType::Response, OpCode::Query);
@@ -172,19 +159,15 @@ fn bench_key(index: usize) -> CacheKey {
     )
 }
 
-/// A response payload small enough that a caller's reservation dwarfs it,
-/// which is the situation every real caller is in: `Message::to_vec` reserves
-/// 512 bytes for an answer that is typically under 100.
+/// Small next to the reservation, as in production: `Message::to_vec` reserves
+/// 512 bytes for an answer typically under 100.
 const PAYLOAD: usize = 64;
-/// The reservation a slack buffer carries. Exaggerated well past the 512 the
-/// encoder actually uses so the two measurements cannot be confused.
+/// Exaggerated well past the encoder's 512 so the two measurements cannot be
+/// confused.
 const SLACK: usize = 64 * 1024;
 
-/// Live bytes retained after storing a `PAYLOAD`-byte response handed over in a
-/// buffer reserved at `capacity`.
-///
-/// The buffer is allocated *inside* the measured window: the reservation is the
-/// thing under test, so a buffer built beforehand would be invisible here.
+/// Live bytes retained after storing a `PAYLOAD`-byte response in a buffer
+/// reserved at `capacity`, allocated inside the window so the reservation shows.
 async fn retained_by_insert(cache: &DnsCache, key: CacheKey, capacity: usize) -> isize {
     let before = counters();
     let mut response = Vec::with_capacity(capacity);
@@ -196,8 +179,7 @@ async fn retained_by_insert(cache: &DnsCache, key: CacheKey, capacity: usize) ->
     live_delta(before, counters())
 }
 
-/// What the handler does on a cache hit, minus writing the client's
-/// transaction ID: copy the response, then rewrite its TTLs in place.
+/// A cache hit as the handler serves it, minus the transaction ID.
 fn serve(entry: &CacheValue) -> Vec<u8> {
     let mut bytes = entry.bytes().to_vec();
     let elapsed = entry.elapsed().as_secs() as u32;
@@ -207,17 +189,12 @@ fn serve(entry: &CacheValue) -> Vec<u8> {
 
 /// An entry must not retain the slack capacity of the buffer it was handed.
 ///
-/// Measured twice — once with a buffer sized to the response, once with a
-/// heavily over-reserved one — and only the difference is asserted on.
-/// Comparing the two cancels the entry's own bookkeeping and moka's, so the
-/// threshold does not encode anything about how either is implemented.
-///
-/// nextest gives each test its own process, so the counters see this test's
-/// allocations and no other's.
+/// Only the difference between a tight and an over-reserved buffer is asserted,
+/// which cancels the entry's and moka's own bookkeeping. nextest runs each test
+/// in its own process, so the counters see only this test.
 #[tokio::test]
 async fn an_entry_does_not_retain_its_caller_s_spare_capacity() {
-    // Generous next to the allocator's rounding of a 64-byte request, and two
-    // orders of magnitude below `SLACK`.
+    // Generous for allocator rounding, two orders of magnitude below `SLACK`.
     const BUDGET: isize = 1024;
 
     let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
@@ -240,15 +217,11 @@ async fn an_entry_does_not_retain_its_caller_s_spare_capacity() {
     );
 }
 
-/// Serving an entry must not make it bigger.
-///
-/// It used to: the TTL-decremented response was cached on the entry, so an
-/// entry under traffic held a second copy of its own bytes. The offsets are
-/// found at insert now and a hit rewrites a copy, which leaves nothing behind.
+/// Serving an entry must not make it bigger (it once cached a TTL-decremented
+/// second copy of its bytes).
 #[tokio::test]
 async fn serving_an_entry_retains_nothing() {
-    // Room for allocator noise, and well below the response size a second copy
-    // would add.
+    // Room for allocator noise, well below what a second copy would add.
     const BUDGET: isize = 512;
 
     let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
@@ -279,16 +252,8 @@ async fn serving_an_entry_retains_nothing() {
     );
 }
 
-/// Allocations one entry costs, counted with its response and key built
-/// beforehand.
-///
-/// This needs its own pass, in the opposite arrangement to the byte figures.
-/// Those build inside their window on purpose, because the encoder's
-/// reservation is part of what an entry occupies, and the builder's temporaries
-/// are freed before the window closes so they net out of a *live-byte* reading.
-/// A count of allocations has no such cancellation: every `Name`, `Record` and
-/// `String` the builder touches is an allocation that happened, and there are
-/// far more of them than the handful the cache itself makes.
+/// Allocations one entry costs, with its response and key built beforehand —
+/// unlike live bytes, the builder's allocations would not net out of a count.
 async fn allocations_per_entry(n_entries: usize) -> f64 {
     let cache = DnsCache::with_capacity_bytes(n_entries as u64 * 1024);
     let prepared: Vec<(CacheKey, Vec<u8>)> = (0..n_entries)
@@ -305,8 +270,7 @@ async fn allocations_per_entry(n_entries: usize) -> f64 {
             .insert(key, bytes, Duration::from_secs(300), false)
             .await;
     }
-    // Included in the window: moka applies writes asynchronously, so the node
-    // allocation for an entry lands here rather than in the `insert` call.
+    // moka applies writes asynchronously; the node allocation lands here.
     cache.run_pending_tasks().await;
     let allocs = counters().allocs - before.allocs;
 
@@ -324,11 +288,8 @@ async fn cache_memory_bench() {
 
     let cache = DnsCache::with_capacity_bytes(n_entries as u64 * 1024);
 
-    // Keys and responses are built inside the measured window on purpose. The
-    // buffer `Message::to_vec` allocates is the buffer the cache goes on to
-    // hold, so how the encoder sized it is part of the per-entry cost; hoisting
-    // construction out would hide exactly the thing being measured. Only live
-    // bytes are compared, so the parse-side temporaries net out.
+    // Built inside the window on purpose: the encoder's buffer is what the cache
+    // holds, so its sizing is part of the per-entry cost.
     let mut wire_bytes = 0usize;
     let mut key_bytes = 0usize;
 
@@ -388,16 +349,12 @@ async fn cache_memory_bench() {
         "  overhead vs wire = {:.2}x",
         (cold + by_serving) as f64 / wire_bytes as f64
     );
-    // What an entry costs beyond the two things that vary with it: moka's node,
-    // the `Arc` header, the key struct and the offsets allocation. This is the
-    // constant the weigher adds to every entry, so it is reported rather than
-    // left to be re-derived by hand from the three lines above.
+    // Everything beyond wire bytes and domain: the weigher's per-entry constant.
     eprintln!(
         "  fixed overhead   = {:.1} bytes/entry   <- ENTRY_OVERHEAD_BYTES",
         (cold + by_serving - wire_bytes as isize - key_bytes as isize) as f64 / n
     );
 
-    // Hold the cache past the final counter read so nothing measured above is
-    // dropped before it is reported.
+    // Keep the cache alive past the last counter read.
     drop(cache);
 }

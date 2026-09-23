@@ -44,7 +44,7 @@ async fn test_forward_failover_on_bad_primary() {
             "192.0.2.1:53".into(),
             "1.1.1.1:53".into(),
         ],
-        // Short timeout so the test doesn't take too long waiting for the bad server.
+        // Short timeout (the forwarder clamps it up to MIN_TIMEOUT_MS anyway).
         timeout_ms: 1000,
     };
     let forwarder = UpstreamForwarder::new(config).await;
@@ -68,10 +68,8 @@ async fn test_forward_failover_on_bad_primary() {
 
 #[tokio::test]
 async fn test_forward_failover_on_closed_local_port() {
-    // Bind a UDP socket to claim a port, then immediately drop it so the
-    // port is guaranteed closed for the duration of the test. This gives
-    // a fast-failing primary upstream (ICMP unreachable / connection
-    // refused) without waiting for a network timeout.
+    // Claim then drop a UDP port: a closed port fails fast (ICMP unreachable)
+    // instead of waiting out a timeout.
     let dead_addr = {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sock.local_addr().unwrap()
@@ -97,18 +95,13 @@ async fn test_forward_failover_on_closed_local_port() {
     );
 }
 
-// TC (truncation) → TCP fallback is now handled inside hickory's
-// NameServer transport layer (`ResolverOpts::try_tcp_on_error`), so we
-// no longer test it here — it would amount to testing a third-party
-// dependency. The end-to-end behavior is still exercised by
-// `test_forward_resolves_known_domain` against real upstreams.
+// TC (truncation) → TCP fallback happens inside hickory's `NameServerPool`,
+// so it is not tested here.
 
 #[tokio::test]
 async fn test_health_check_reports_live_upstream_as_ok() {
-    // Regression test for the probe hitting the root "." with A instead
-    // of NS: hickory translates the empty-answer NOERROR from "." A into
-    // a NoRecordsFound error, making every probe look like a failure.
-    // A live upstream must appear as ok=true.
+    // Regression: probing "." with A instead of NS got an empty NOERROR that
+    // hickory turns into NoRecordsFound, so every probe looked failed.
     let config = UpstreamConfig {
         servers: vec!["1.1.1.1:53".into()],
         timeout_ms: 5000,
@@ -124,11 +117,8 @@ async fn test_health_check_reports_live_upstream_as_ok() {
 
 #[tokio::test]
 async fn test_health_check_mullvad_dot_succeeds() {
-    // Mullvad's plain UDP:53 endpoint returns REFUSED to recursive
-    // queries from arbitrary networks (anti-amplification policy), so
-    // 194.242.2.2:53 cannot be used as a real upstream. Their DoT
-    // endpoint at dns.mullvad.net:853 fully recurses, so the forwarder
-    // must report it as healthy.
+    // Mullvad's plain UDP:53 REFUSEs recursion from arbitrary networks, but
+    // its DoT endpoint (dns.mullvad.net:853) recurses and must probe healthy.
     let config = UpstreamConfig {
         servers: vec!["tls://dns.mullvad.net:853".into()],
         timeout_ms: 8000,
@@ -144,8 +134,7 @@ async fn test_health_check_mullvad_dot_succeeds() {
 
 #[tokio::test]
 async fn test_forward_via_mullvad_dot_resolves_known_domain() {
-    // End-to-end: forward a real query through Mullvad DoT and verify
-    // we get a usable DNS response back.
+    // End-to-end: a real query through Mullvad DoT.
     let config = UpstreamConfig {
         servers: vec!["tls://dns.mullvad.net:853".into()],
         timeout_ms: 8000,
@@ -164,8 +153,7 @@ async fn test_forward_via_mullvad_dot_resolves_known_domain() {
 
 #[tokio::test]
 async fn test_health_check_reports_dead_upstream_as_fail() {
-    // A closed local port should probe as fail without affecting the
-    // live upstream's result.
+    // A closed port probes as fail without affecting the live upstream.
     let dead_addr = {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sock.local_addr().unwrap()
@@ -186,20 +174,13 @@ async fn test_health_check_reports_dead_upstream_as_fail() {
 
 #[tokio::test]
 async fn test_health_check_probe_retries_once_on_failure() {
-    // A persistent DoT/DoH connection can go stale between health checks;
-    // the probe retries the same upstream once so a single stale-connection
-    // failure doesn't report a live upstream as down. Use an unreachable
-    // TEST-NET-1 address (RFC 5737) that black-holes packets so each attempt
-    // burns the full timeout: two attempts must take noticeably longer than
-    // one, which is how we observe that the retry actually ran. The upstream
-    // is genuinely dead, so it must still report fail (the retry must not
-    // turn a dead upstream into a false positive).
+    // The probe retries once so a stale DoT/DoH connection does not report a
+    // live upstream down. A black-holed TEST-NET-1 address burns the full
+    // timeout per attempt, so elapsed time shows the retry ran — and the dead
+    // upstream must still report fail.
     //
-    // The per-attempt timeout is clamped to a 5000ms floor (MIN_TIMEOUT_MS in
-    // the forwarder), so `timeout_ms` below is effectively 5000ms/attempt
-    // regardless of the small value requested. One attempt therefore takes
-    // ~5s and two take ~10s; the 7500ms lower bound sits between them so it
-    // can only be reached if the retry actually ran.
+    // `timeout_ms` is clamped up to MIN_TIMEOUT_MS (5000ms) in the forwarder:
+    // one attempt ~5s, two ~10s, so a 7500ms floor proves the retry.
     const EFFECTIVE_TIMEOUT_MS: u64 = 5000;
     let config = UpstreamConfig {
         servers: vec!["192.0.2.1:53".into()],
@@ -219,16 +200,13 @@ async fn test_health_check_probe_retries_once_on_failure() {
     );
 }
 
-// Regression tests for the fix that converts hickory's ProtoErrorKind::NoRecordsFound
-// (NXDOMAIN / NODATA) from a forwarding error into a synthesized DNS response with
-// the real upstream response code, so callers receive Ok instead of an error.
+// Hickory's NoRecordsFound (NXDOMAIN / NODATA) must become a synthesized response
+// carrying the upstream's rcode, not a ForwardError (which the client saw as
+// SERVFAIL).
 
 #[tokio::test]
 async fn test_forward_nxdomain_returns_response_not_error() {
-    // Query a guaranteed-nonexistent name under the .invalid TLD (RFC 6761).
-    // Before the fix, hickory's NoRecordsFound propagated as ForwardError,
-    // producing SERVFAIL to the client. After the fix, forward() returns Ok
-    // with a proper NXDOMAIN response message.
+    // .invalid (RFC 6761) is guaranteed not to exist: expect Ok(NXDOMAIN).
     let config = UpstreamConfig::default();
     let forwarder = UpstreamForwarder::new(config).await;
 
@@ -268,12 +246,7 @@ async fn test_forward_nxdomain_returns_response_not_error() {
 
 #[tokio::test]
 async fn test_forward_nodata_returns_noerror() {
-    // Query example.com for MX records. example.com has no MX records
-    // (it is a reserved example domain per RFC 2606), so the upstream
-    // returns NoError with an empty answer section — NODATA. hickory
-    // converts this to a NoRecordsFound error; before the fix that
-    // propagated as ForwardError. After the fix, forward() returns Ok
-    // with a NoError response.
+    // example.com (RFC 2606) has no MX records: NODATA, expect Ok(NoError).
     let config = UpstreamConfig::default();
     let forwarder = UpstreamForwarder::new(config).await;
 

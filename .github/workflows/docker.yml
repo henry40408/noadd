@@ -5,9 +5,8 @@ on:
     branches: [main]
     tags: ['v*']
 
-# One run per ref at a time. A newer push supersedes the run it interrupted;
-# a tag does not — a tagged build publishes one specific version and nothing
-# should quietly cancel it.
+# One run per ref; a newer push cancels the older one, except on tags, which
+# publish a specific version.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -21,18 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history + tags so `git describe` resolves a release tag rather
-          # than falling back to a bare short SHA.
+          # Full history + tags, or `git describe` falls back to a bare SHA.
           fetch-depth: 0
-      # `.dockerignore` excludes `.git`, so build.rs cannot describe the version
-      # itself inside the builder — resolve it here and pass it in. No `--dirty`:
-      # a fresh checkout is always clean, and a stray mode/EOL difference would
-      # otherwise brand a release image `-dirty`.
+      # `.git` is not in the build context, so resolve the version here. No
+      # `--dirty`: a stray mode/EOL difference would brand a release `-dirty`.
       - name: Resolve build version
         id: version
         run: echo "value=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
-      # No qemu: the Dockerfile builder is pinned to the native platform and zig
-      # cross-compiles both musl targets, so the arm64 image needs no emulation.
+      # No qemu: zig cross-compiles both targets on the native builder.
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

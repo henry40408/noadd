@@ -1,14 +1,10 @@
-//! Regression: the settings page must use ONE consistent "change = saved"
-//! model. Every control auto-saves on change/blur; there is no "Save Settings"
-//! button; mid-typing fires zero requests (`onchange`, not `oninput`);
-//! invalid/partial values never hit the network.
+//! Regression: the settings page uses ONE "change = saved" model. Every control
+//! auto-saves on change/blur; there is no "Save Settings" button; mid-typing
+//! fires zero requests (`onchange`, not `oninput`); invalid/partial values never
+//! hit the network.
 //!
-//! Playwright answered "did a request go out" with `page.on('request')` and
-//! `waitForResponse`. `WebDriver` has no request stream, so the page records
-//! its own: [`RECORD_REQUESTS`] wraps `window.fetch` before the document's own
-//! scripts run, and `app.js` routes every call through `fetch`. That is a
-//! closer instrument than it sounds — it observes exactly what the page asked
-//! for, which is what these assertions are about.
+//! `WebDriver` has no request stream, so [`RECORD_REQUESTS`] records every
+//! `fetch` the page makes.
 
 use std::time::Duration;
 
@@ -17,8 +13,7 @@ use noadd_e2e::browser::RECORD_REQUESTS;
 use noadd_e2e::dom::Page;
 use noadd_e2e::{ADMIN_PASSWORD, ADMIN_USERNAME, Api, Profile, Server, Suite, ensure, ports};
 
-/// How long an incorrect handler is given to fire before a case concludes that
-/// none did.
+/// How long a wrong handler gets to fire before a case concludes none did.
 const SETTLE: Duration = Duration::from_millis(300);
 
 async fn goto_settings(page: &Page) -> Result<()> {
@@ -93,11 +88,8 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc("#s-block-mode").select_value("custom_ip").await?;
                 let before = page.request_count("PUT", "/api/settings").await?;
 
-                // Type an incomplete IPv4 character by character, which fires
-                // an `input` event per keystroke. Deliberately *not* cleared
-                // first: clearing is itself a change, and this case is about
-                // what typing does — whatever is already in the field, what
-                // comes out of this is not a valid address.
+                // Type an incomplete IPv4 key by key. Not cleared first:
+                // clearing is itself a change, and the result is invalid either way.
                 page.loc("#s-block-ipv4").click().await?;
                 page.loc("#s-block-ipv4").type_text("192.168.1").await?;
                 ensure(
@@ -106,16 +98,14 @@ pub async fn run() -> Result<Vec<String>> {
                 )?;
 
                 page.loc("#s-block-ipv4").blur().await?;
-                // Give any (incorrect) handler a chance to fire, then assert
-                // none did.
+                // Give a wrong handler a chance to fire, then assert none did.
                 tokio::time::sleep(SETTLE).await;
                 ensure(
                     page.request_count("PUT", "/api/settings").await? == before,
                     "an invalid IPv4 was sent to the server",
                 )?;
 
-                // The error appears inline, right next to the IPv4 field (not a
-                // shared line).
+                // The error is inline next to the IPv4 field, not a shared line.
                 page.loc("#msg-block-ipv4")
                     .expect_text_contains("IPv4")
                     .await
@@ -137,8 +127,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.reload().await?;
                 page.loc("#s-retention").expect_value("14").await?;
 
-                // Blank means "use the default" — it must be accepted and saved
-                // (not rejected).
+                // Blank means "use the default": saved, not rejected.
                 let before = page.request_count("PUT", "/api/settings").await?;
                 page.loc("#s-retention").fill("").await?;
                 page.loc("#s-retention").blur().await?;

@@ -183,8 +183,7 @@ async fn stats_v2_health_returns_expected_fields() {
     assert!(body.get("db_size_bytes").is_some());
     assert!(body.get("total_log_count").is_some());
     assert!(body.get("oldest_log_timestamp").is_some());
-    // Retention falls back to the default when unconfigured, so the UI shows
-    // the policy actually in effect rather than a null/dash.
+    // Unconfigured retention reports the default in effect, not null.
     assert_eq!(
         body.get("log_retention_days")
             .and_then(serde_json::Value::as_i64),
@@ -193,12 +192,9 @@ async fn stats_v2_health_returns_expected_fields() {
     assert!(body.get("avg_new_rows_per_day").is_some());
 }
 
-// Each stats/v2 endpoint accepts exactly the parameters it honours.
-//
-// These endpoints shared one `range` + `tz_offset` struct, so the heatmap took a
-// `range` it could not apply (its window is a fixed 30 days) and the range-only
-// endpoints took a `tz_offset` they never read. Both were accepted with a 200,
-// which told the caller its parameter had been applied when it had not.
+// Each stats/v2 endpoint accepts exactly the parameters it honours; accepting
+// one it ignores (a `range` on the fixed-window heatmap, a `tz_offset` on the
+// range-only endpoints) would tell the caller it had been applied.
 
 async fn get_with_auth(app: axum::Router, uri: &str, token: &str) -> StatusCode {
     app.oneshot(
@@ -234,9 +230,7 @@ async fn stats_v2_heatmap_still_accepts_tz_offset() {
 
 #[tokio::test]
 async fn stats_v2_range_only_endpoints_reject_tz_offset() {
-    // The mirror image of the heatmap case: these two select a window but do
-    // not align it to the viewer's calendar, so a tz_offset would be silently
-    // dropped.
+    // These select a window but never align it to a calendar.
     for uri in [
         "/api/stats/v2/breakdown?tz_offset=480",
         "/api/stats/v2/highlights?tz_offset=480",
@@ -275,10 +269,8 @@ async fn stats_v2_timeline_accepts_both_parameters() {
     );
 }
 
-/// The offset is rounded to the nearest quarter hour, the grain the charts'
-/// rollup is kept at. A query at ten to the hour shows it: fifteen minutes
-/// either way moves it across the hour, so an offset that is not rounded lands
-/// it in a different cell from the quarter it rounds to.
+/// The offset is rounded to the nearest quarter hour, the charts' rollup grain.
+/// A query at ten to the hour lands in a different cell if it is not.
 #[tokio::test]
 async fn stats_v2_tz_offset_is_rounded_to_a_quarter_hour() {
     let (app, token, db) = setup_with_db().await;

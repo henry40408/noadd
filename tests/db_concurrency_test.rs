@@ -28,15 +28,10 @@ async fn open_db() -> Database {
     Database::open(&path_str).await.unwrap()
 }
 
-/// Concurrently run a heavy reader (`latency_summary_since`, which uses
-/// window functions and scans `query_logs`) alongside a streaming writer
-/// (`insert_query_logs`). With the reader connection in place, WAL allows
-/// both paths to proceed in parallel on their own worker threads. The
-/// assertion is existence: both tasks must complete without error.
-///
-/// No timing assertion beyond a generous 5s ceiling — speedup vs. the
-/// single-connection baseline is machine-dependent and would make the
-/// test flaky.
+/// A reader (`latency_summary_since`) and a streaming writer
+/// (`insert_query_logs`) run concurrently under WAL on their own connections;
+/// both must complete. Only a generous 5s ceiling — speedup is
+/// machine-dependent.
 #[tokio::test]
 async fn reader_and_writer_run_concurrently_without_error() {
     let db = open_db().await;
@@ -81,13 +76,9 @@ async fn reader_and_writer_run_concurrently_without_error() {
     assert_eq!(total, 10_000 + 10 * 500);
 }
 
-/// Smoke check for the spec's "defence-in-depth" claim: the read
-/// connection is opened with `SQLITE_OPEN_READ_ONLY`, so any write
-/// attempt would be rejected by `SQLite`. We can only observe this
-/// indirectly through the public API — `Database` routes all writes
-/// to the writer connection by construction. This test asserts the
-/// positive: a write followed by a read works, which means Database
-/// correctly chose each connection for each operation.
+/// Readers are `SQLITE_OPEN_READ_ONLY`, so a write routed to one would fail.
+/// The public API cannot observe routing directly; a write then a read
+/// succeeding shows each went to the right connection.
 #[tokio::test]
 async fn read_only_routing_does_not_break_writes() {
     let db = open_db().await;

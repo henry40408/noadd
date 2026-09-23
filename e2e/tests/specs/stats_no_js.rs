@@ -1,18 +1,9 @@
-//! The statistics page with JavaScript switched off entirely.
+//! The statistics page with JavaScript off. Every reading arrives rendered
+//! except the three charts (timeline, rate trend, heatmap), which need the
+//! viewer's UTC offset and say so instead of sitting empty. The range switcher
+//! picks the server's window, so it is three plain links.
 //!
-//! The claim this page makes is that the readings are readings: five of the
-//! seven arrive in the first response and stay put. The three that do not are
-//! the timeline, the rate trend drawn from it and the heatmap — the only three
-//! that bucket a query against a calendar, which needs a UTC offset that
-//! arrives with the browser rather than with the request. Those say so here
-//! instead of sitting empty.
-//!
-//! The range switcher is the other half: it selects the *server's* window, so
-//! it is three links and it works with nothing running.
-//!
-//! Its own noadd instance on dedicated ports, seeded through `sqlite3` against
-//! the stopped database — the rows have to span more than seven days for
-//! switching the range to change any number.
+//! Seeded with rows older than seven days, so switching the range changes numbers.
 
 use anyhow::Result;
 use noadd_e2e::dom::Page;
@@ -88,16 +79,14 @@ pub async fn run() -> Result<Vec<String>> {
                     .expect_text_excludes("old.example")
                     .await?;
 
-                // And the health grid, which reports on the file rather than on
-                // traffic.
+                // And the health grid, which reports on the file, not traffic.
                 page.testid("db-health-card")
                     .expect_text_contains("Database Size")
                     .await?;
                 page.testid("db-health-card")
                     .expect_text_contains("Total Logs")
                     .await?;
-                // The date the server could only write in UTC is still a
-                // readable date.
+                // The UTC date the server writes is still a readable date.
                 let health = page.testid("db-health-card").text().await?;
                 noadd_e2e::ensure(
                     contains_iso_day(&health),
@@ -116,8 +105,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.testid("timeline-needs-js").expect_visible().await?;
                 page.testid("rate-trend-needs-js").expect_visible().await?;
                 page.testid("heatmap-needs-js").expect_visible().await?;
-                // Nothing was drawn — these are the elements the client would
-                // have made.
+                // Nothing the client would draw is there.
                 page.loc("#timeline-chart .tl-svg").expect_count(0).await?;
                 page.loc("#heatmap-container .heatmap-cell")
                     .expect_count(0)
@@ -139,14 +127,9 @@ pub async fn run() -> Result<Vec<String>> {
                     .expect_text_eq("Top Domains (last 7d)")
                     .await?;
 
-                // Follow the link. No client: this is an ordinary navigation.
-                //
-                // `click_js` skips the stability check, which the page header's
-                // fade-in fails for its first frames — with scripting off the
-                // page is interactive the moment it parses, so the card is
-                // still sliding when the click lands. The assertions below only
-                // pass if the navigation actually happened, so a link that did
-                // nothing still fails this case.
+                // `click_js`: with scripting off the page is interactive while
+                // the header is still fading in, so a pointer click can miss.
+                // The assertions below only pass if the navigation happened.
                 switcher.loc("a").having_text("30d").click_js().await?;
                 page.expect_url_ends_with("/stats?range=30d").await?;
 
@@ -157,8 +140,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc("#timeline-title")
                     .expect_text_eq("Queries (last 30d)")
                     .await?;
-                // The wider window reaches the older traffic the 7-day one
-                // could not.
+                // The wider window reaches the older traffic.
                 page.testid("ranged-domains")
                     .expect_text_contains("old.example")
                     .await?;
@@ -188,10 +170,8 @@ pub async fn run() -> Result<Vec<String>> {
 
 /// Is a `YYYY-MM-DD` anywhere in this text?
 ///
-/// The old assertion was `toContainText(/\d{4}-\d{2}-\d{2}/)`; this slides the
-/// same shape along the string rather than pulling in a regex crate for one
-/// check. It has to slide rather than split on whitespace: the label and the
-/// date share a text node, so the card reads `Oldest Log2026-08-05`.
+/// Slides a window rather than splitting on whitespace: the label and date
+/// share a text node (`Oldest Log2026-08-05`). No regex crate for one check.
 fn contains_iso_day(text: &str) -> bool {
     text.as_bytes().windows(10).any(|window| {
         window.iter().enumerate().all(|(i, b)| {

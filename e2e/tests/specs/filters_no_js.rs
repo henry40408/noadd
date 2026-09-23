@@ -1,12 +1,9 @@
-//! The filters page with JavaScript switched off entirely. Everything on it is
-//! a real form, so the page has to keep working: add a rule, delete it, add a
-//! list, toggle it, edit it, remove it, test a domain. `app.js` never loads
-//! here, which is the point — what these exercise is the markup the server
-//! sent, not the enhancement layered over it.
+//! The filters page with JavaScript off: every control is a real form, so
+//! adding, toggling, editing and deleting rules and lists, and testing a
+//! domain, must all work from the server's markup alone.
 //!
-//! Its own noadd instance on dedicated ports, like the other specs here: it
-//! mutates the very lists and rules the shared instance's scenarios assert on,
-//! and it signs in for itself.
+//! Forms are submitted with Enter and row controls activated with `click_js`,
+//! because the fixed status bar can cover them in the short no-JS viewport.
 
 use std::time::{Duration, Instant};
 
@@ -14,10 +11,7 @@ use anyhow::{Result, anyhow};
 use noadd_e2e::dom::Page;
 use noadd_e2e::{Api, Profile, Server, Suite, ports};
 
-/// One login for the whole file, replayed as a cookie: a UI sign-in per case
-/// would spend the five-per-minute budget on setup rather than on what is
-/// under test. The sign-in form's own no-JS behaviour is covered by the auth
-/// feature.
+/// Replays the file's one login as a cookie, sparing the login budget.
 async fn open(page: &Page, session: &str, query: &str) -> Result<()> {
     page.adopt_session(session).await?;
     page.goto(&format!("/filters{query}")).await?;
@@ -46,9 +40,7 @@ pub async fn run() -> Result<Vec<String>> {
                 open(page, &session, "").await?;
                 page.testid("rules-list").expect_visible().await?;
                 page.testid("nav-filters").expect_class("active").await?;
-                // The registry browser used to be the one control that needed a
-                // client, so it shipped hidden. It is a page of its own now,
-                // and this is a link.
+                // The registry browser is a page of its own, reached by a link.
                 page.loc("#browse-registry").expect_visible().await?;
                 page.loc("#browse-registry")
                     .expect_attr("href", "/filters/registry")
@@ -72,8 +64,7 @@ pub async fn run() -> Result<Vec<String>> {
                     .having_text("nojs-added.example.com");
                 row.expect_visible().await?;
                 row.expect_attr("data-type", "block").await?;
-                // The POST redirected, so the URL is the page and not the
-                // endpoint — a refresh here re-renders rather than re-submitting.
+                // The POST redirected, so a refresh re-renders, not re-submits.
                 page.expect_url_ends_with("/filters").await?;
 
                 row.testid("rule-delete").click_js().await?;
@@ -96,8 +87,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.testid("rule-add-error")
                     .expect_text_contains("Not a rule noadd understands")
                     .await?;
-                // Still the filters page, with the navigation knowing it, even
-                // though the POST arrived on `/filters/rules`.
+                // The nav still marks Filters, though the POST hit `/filters/rules`.
                 page.testid("nav-filters").expect_class("active").await
             },
         )
@@ -119,23 +109,19 @@ pub async fn run() -> Result<Vec<String>> {
                 row.testid("filter-list-toggle")
                     .expect_checked(true)
                     .await?;
-                // Impact is rendered by the server like every other cell. This
-                // list downloaded nothing, which is a different answer from
-                // "nothing would be lost" and has to read as one.
+                // This list downloaded nothing: "No rules", distinct from "No impact".
                 row.testid("filter-list-impact")
                     .expect_text_eq("No rules")
                     .await?;
 
-                // Untick, then submit — two steps without a script, which is
-                // the trade the no-JS path makes. The submit is the button
-                // `app.js` would have removed.
+                // Untick, then submit via the `.nojs-only` button `app.js` removes.
                 row.loc("label.toggle").click_js().await?;
                 row.loc(".nojs-only").click_js().await?;
                 page.loc(r#"[data-testid="filter-list-row"][data-name="No JS List"]"#)
                     .testid("filter-list-toggle")
                     .expect_checked(false)
                     .await?;
-                // A list that is off is not being asked what it contributes.
+                // A disabled list reports no impact figure.
                 page.loc(r#"[data-testid="filter-list-row"][data-name="No JS List"]"#)
                     .testid("filter-list-impact")
                     .expect_text_eq("Disabled")
@@ -196,24 +182,17 @@ pub async fn run() -> Result<Vec<String>> {
                     .fill("||nojs-tested.example.com^")
                     .await?;
                 page.testid("rule-input").press_enter().await?;
-                // Wait for the row the POST's redirect renders before asking
-                // anything else. Pressing Enter only dispatches the key: the
-                // submission is still in flight, and navigating away from it —
-                // which the poll below does immediately — cancels it. That is a
-                // race the old suite had too; it just lost it less often.
+                // Wait for the redirect's row: Enter only dispatches the key, and
+                // the navigation below would cancel a submission still in flight.
                 page.testid("rule-row")
                     .having_text("nojs-tested.example.com")
                     .expect_visible()
                     .await?;
 
-                // The verdict comes from the live engine, which a background
-                // rebuild refreshes; re-run the GET until the rule has landed.
-                //
-                // The wait is the element wait rather than the ten seconds the
-                // old `expect.poll` allowed: a rebuild reparses the enabled
-                // lists, so it is the one thing here whose cost is not the
-                // browser's, and it is the first thing to run late when the
-                // eight spec files share a machine.
+                // The verdict comes from the live engine, refreshed by a
+                // background rebuild; re-run the GET until the rule lands. The
+                // full `WAIT_TIMEOUT`, since rebuilds run late when the spec
+                // files share a machine.
                 let deadline = Instant::now() + noadd_e2e::browser::WAIT_TIMEOUT;
                 loop {
                     page.goto("/filters?test=nojs-tested.example.com").await?;
@@ -248,15 +227,11 @@ pub async fn run() -> Result<Vec<String>> {
             "Browse Registry is a link that reaches its page",
             async |_browser, page| {
                 open(page, &session, "").await?;
-                // This was the one control here that did nothing without
-                // JavaScript.
                 page.loc("#browse-registry").click_js().await?;
                 page.expect_url_ends_with("/filters/registry").await?;
                 page.loc("registry-page").expect_visible().await?;
-                // What the page then says depends on whether the third-party
-                // registry is reachable from wherever this is running, and both
-                // answers are the page working: entries to tick, or an
-                // explanation and a retry.
+                // Either answer is the page working: entries, or (registry
+                // unreachable) an explanation and a retry.
                 page.loc(r#"#registry-form, [data-testid="registry-unavailable"]"#)
                     .first()
                     .expect_visible()

@@ -1,15 +1,11 @@
-//! Throughput measurement for the cache-hit fast path. Not an assertion —
-//! meant to be run manually to compare the `prepare_cached_response` cost
-//! across implementations:
+//! Cache-hit fast path throughput, run manually:
 //!
 //!   cargo nextest run --no-capture --release \
 //!     --run-ignored only `cache_hit_bench`
 //!
-//! Pre-populates the cache with N (domain, qtype) entries via real upstream
-//! lookups on a UDP mock, then issues M concurrent queries that all hit the
-//! cache. Cold-miss + upstream cost is amortised in warmup so the timed phase
-//! reflects only filter check + cache.get + `prepare_cached_response` + logger
-//! send. Defaults: 64 workers × 2000 cache-hit queries each.
+//! Warms the cache through a UDP mock upstream, then times concurrent pure hits:
+//! filter check + cache.get + `prepare_cached_response` + logger send.
+//! Defaults: 64 workers × 2000 queries each.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -48,9 +44,7 @@ fn build_mock_response(query_bytes: &[u8]) -> Vec<u8> {
         resp.add_query(q.clone());
     }
     if let Some(q) = query.queries.first() {
-        // Three answer records to make the parse + reencode in the legacy
-        // decrement_ttl path non-trivial — single-record responses are too
-        // small for the patched-bytes cache to show measurable effect.
+        // Three answers, so a hit has several TTLs to rewrite.
         for octet in [10, 20, 30] {
             resp.add_answer(Record::from_rdata(
                 q.name().clone(),
@@ -117,8 +111,7 @@ async fn cache_hit_bench() {
     let handler = make_test_handler(upstream_addr).await;
     let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-    // Warm cache by issuing one query per key. After this loop every
-    // subsequent handle() for these keys is a pure cache hit.
+    // One query per key; everything after is a pure cache hit.
     let domains: Vec<String> = (0..n_keys)
         .map(|i| format!("hit-{i}.bench.example.com"))
         .collect();
@@ -127,8 +120,7 @@ async fn cache_hit_bench() {
         handler.handle(&q, client_ip, None).await.unwrap();
     }
 
-    // Build the per-worker query lists so cycling cost doesn't pollute
-    // the inner loop's timing.
+    // Prebuilt so building them stays out of the timed loop.
     let queries: Vec<Vec<u8>> = domains
         .iter()
         .map(|d| make_query_bytes(d, RecordType::A))

@@ -43,12 +43,9 @@ fn test_password_hash_and_verify() {
     assert!(hash.starts_with("$argon2"));
 }
 
-/// Every operator password already on disk was written by an older argon2, so
-/// an upgrade that changed the PHC encoding or the default parameters would
-/// lock out every existing account on the first sign-in after the deploy —
-/// silently, and with the stored hash the only evidence. The literal below was
-/// produced by argon2 0.5 and verified there before being pinned here, so it
-/// tests the one thing hashing and verifying in the same process cannot.
+/// Stored hashes were written by an older argon2; an upgrade that changed the PHC
+/// encoding or default parameters would lock out every existing account. The
+/// literal was produced by argon2 0.5 — something a same-process round trip cannot test.
 #[test]
 fn a_hash_written_by_the_previous_argon2_still_verifies() {
     let stored = "$argon2id$v=19$m=19456,t=2,p=1$CFgBxAxypIe+BAv7VNQH0A$cMNXkJbVMEIFcFx0ets3cdrhZEbcp5IAIs5lkC2ppaQ";
@@ -57,18 +54,11 @@ fn a_hash_written_by_the_previous_argon2_still_verifies() {
     assert!(!verify_password("not the password", stored).unwrap());
 }
 
-/// `spend_verify_cost` exists to make a login against an unknown username cost
-/// what a login against a known one costs, so the two cannot be told apart by
-/// response time. That property is a *duration*, so it is the duration this
-/// asserts — a test that only called the function would pass just as happily
-/// against an empty body.
+/// `spend_verify_cost` makes an unknown username cost what a known one does, so
+/// they cannot be told apart by response time — so this asserts a duration.
 ///
-/// The comparison is deliberately loose. Argon2's ~50 ms dwarfs the scheduling
-/// noise a shared CI runner adds, and the regression being guarded against is
-/// the function being emptied out or the call site dropped, which turns ~50 ms
-/// into microseconds — three orders of magnitude, not the factor of three this
-/// allows. Medians rather than means, so one descheduled sample cannot swing
-/// the verdict.
+/// Deliberately loose (3x, medians): the regression guarded against — an emptied
+/// body or dropped call — turns ~50 ms into microseconds, far beyond CI noise.
 #[test]
 fn spend_verify_cost_costs_what_a_real_verification_costs() {
     use std::time::{Duration, Instant};
@@ -87,9 +77,7 @@ fn spend_verify_cost_costs_what_a_real_verification_costs() {
 
     let hash = hash_password("a genuine stored password").unwrap();
 
-    // Warm up both paths first: the very first `spend_verify_cost` also pays
-    // to generate its process-wide dummy hash, and measuring that one-off
-    // would flatter the result rather than test it.
+    // The first `spend_verify_cost` also generates its process-wide dummy hash.
     spend_verify_cost("warm up");
     let _ = verify_password("warm up", &hash).unwrap();
 
@@ -132,12 +120,8 @@ fn session_log_id_is_stable_and_distinct() {
     // 16 hex chars (64 bits).
     assert_eq!(id.len(), 16);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-    // Whether salting actually happens (as opposed to, say, an unsalted
-    // `blake2b(token)[..8]`, which would pass every assertion above just as
-    // well) is exercised directly against `session_log_id_with` in
-    // `src/admin/auth.rs`'s unit tests, using two explicit salts over the
-    // same token — that property is not observable through this process-wide
-    // `session_log_id`, which only ever runs under one salt per test binary.
+    // Salting itself is tested against `session_log_id_with` in
+    // `src/admin/auth.rs`: this process-wide function only ever has one salt.
 }
 
 #[test]
@@ -190,11 +174,8 @@ fn active_session_survives_past_the_idle_window() {
     let stale_last_seen = now - SESSION_IDLE_TIMEOUT_SECS + 600;
     store_session(&store, &token, info_at(1, now, stale_last_seen));
     assert_eq!(validate_session(&store, &token), Some(1));
-    // The 600s of headroom before the idle window means a second call would
-    // pass regardless of whether the first refreshed `last_seen` — that
-    // wouldn't distinguish "refresh happened" from "refresh is a no-op", so
-    // assert the refresh directly: `last_seen` must have moved forward from
-    // the fixture's stale value to (at least) `now`.
+    // With 600s of headroom a second call passes either way, so assert the
+    // refresh of `last_seen` directly.
     let refreshed_last_seen = store.lock().get(&token).unwrap().last_seen;
     assert!(refreshed_last_seen > stale_last_seen);
     assert!(refreshed_last_seen >= now);
@@ -242,13 +223,9 @@ async fn sweep_expired_reports_both_counts() {
     let uid = db.create_user("judy", "h", 0).await.unwrap();
     let now = noadd::now_unix();
 
-    // Persist matching rows in the DB so purge_expired_sessions (which reads
-    // last_seen from disk) agrees with what the in-memory store holds.
-    //
-    // The literals stand in for token *hashes* — both the store key and
-    // `sessions.token_hash` are digests now (see `hash_session_token`), and
-    // nothing here goes through a cookie, so any consistent pair of strings
-    // exercises the same code path a real digest would.
+    // Matching DB rows, since `purge_expired_sessions` reads `last_seen` from disk.
+    // The literals stand in for token hashes (`hash_session_token`); any
+    // consistent strings do, since nothing here goes through a cookie.
     db.insert_session("active", uid, now - 1_000, now, None, None)
         .await
         .unwrap();

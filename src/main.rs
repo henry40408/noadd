@@ -1,10 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-// Use mimalloc to keep resident memory low: the filter rebuild allocates a
-// large transient BuildNode tree, and the system glibc allocator tends to
-// retain those pages as RSS afterwards. mimalloc returns freed pages to the
-// OS far more aggressively.
+// mimalloc returns the filter rebuild's large transient `BuildNode` tree to the
+// OS; glibc tends to keep those pages resident.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -33,10 +31,7 @@ use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
 /// Resident bytes the DNS response cache may occupy.
 ///
-/// 5 MiB holds roughly the 10,000 entries this was bounded by before, at the
-/// ~499 bytes an entry measures on ordinary traffic — the point of the change
-/// is not to cache less but to stop the ceiling depending on response sizes.
-/// A run of large DNSSEC or TXT answers now evicts instead of growing.
+/// About 10,000 entries at the ~499 bytes an entry measures on ordinary traffic.
 const DNS_CACHE_CAPACITY_BYTES: u64 = 5 * 1024 * 1024;
 
 #[tokio::main]
@@ -170,17 +165,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let (shutdown_tx, shutdown_signal) = shutdown_signal();
-    // Convert the OS signal into the broadcast so the HTTP server, DNS
-    // listeners and background tasks all observe one shutdown event. A fatal
-    // DNS listener failure broadcasts on the same channel (see
-    // supervise_listener) so the whole process winds down instead of silently
-    // serving HTTP/DoH with dead plain-DNS.
+    // One shutdown broadcast for everything. A fatal DNS listener failure uses
+    // it too (`supervise_listener`), so HTTP/DoH does not keep serving without
+    // plain DNS.
     tokio::spawn(shutdown_signal);
     let listener_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Subscribe the HTTP server to the shutdown broadcast *before* spawning the
-    // DNS listeners. A listener can fail (and broadcast) within microseconds of
-    // being spawned; subscribing afterwards would race and miss that message,
-    // leaving HTTP serving until an OS signal arrives.
+    // Subscribe before spawning the DNS listeners: one can fail and broadcast
+    // immediately, and a later subscriber would miss it.
     let mut http_shutdown = shutdown_tx.subscribe();
 
     let dns_addr: SocketAddr = args.dns_addr.parse()?;
@@ -225,13 +216,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let doh_routes = doh_router(handler.clone(), db.clone(), trusted_proxies.clone());
-    // Must happen before any code path that can log a session event runs —
-    // not specifically because of `load_sessions_from_db` (its startup
-    // restore purges expired rows in SQL and emits nothing), but as a general
-    // rule: any `session.*` event logged before the salt is installed would
-    // carry a `sid_hash` computed under a temporary random salt instead of
-    // the persisted one, breaking correlation with everything logged
-    // before/after it.
+    // Before anything can log a `session.*` event: one logged earlier would
+    // carry a `sid_hash` under a temporary salt, breaking correlation.
     let session_log_salt = load_or_create_session_log_salt(&db).await?;
     init_session_log_salt(session_log_salt);
     let session_store = new_session_store();
@@ -239,21 +225,17 @@ async fn main() -> anyhow::Result<()> {
     let session_store_for_flush = session_store.clone();
     let db_for_flush = db.clone();
     let rate_limiter = Arc::new(RateLimiter::new(5, 60));
-    // Bounded by the number of operator accounts, so unlike the two IP-keyed
-    // limiters it needs no pruning tick.
+    // Keyed by operator account, so unlike the IP-keyed limiters it needs no
+    // pruning.
     let lockout = Arc::new(noadd::admin::auth::AccountLockout::new());
     let invalid_session_limiter = Arc::new(RateLimiter::new(
         noadd::admin::auth::INVALID_SESSION_MAX_ATTEMPTS,
         noadd::admin::auth::INVALID_SESSION_WINDOW_SECS,
     ));
-    // Both admin counters are keyed by source IP and so grow with the number
-    // of distinct clients seen; they are pruned alongside the DNS limiter
-    // below.
+    // IP-keyed, so pruned alongside the DNS limiter below.
     let login_limiter_for_prune = rate_limiter.clone();
     let invalid_session_limiter_for_prune = invalid_session_limiter.clone();
-    // noadd terminates TLS itself either from user-supplied certs or via ACME.
-    // Both count: the listener below picks whichever is configured, so
-    // `tls_enabled` must cover both or it misreports an ACME deployment.
+    // Static certs or ACME: `tls_enabled` must cover both.
     let use_tls = args.tls_cert.is_some() && args.tls_key.is_some();
     let use_acme = !args.acme_domain.is_empty();
     let tls_enabled = use_tls || use_acme;
@@ -283,10 +265,8 @@ async fn main() -> anyhow::Result<()> {
         forward_auth,
     });
 
-    // Periodically persist session last_seen so it survives restarts, and
-    // sweep expired rows every tenth tick (~10 min) so they do not accumulate
-    // on a long-running instance — the startup restore is otherwise the only
-    // thing that ever deletes them.
+    // Persist session last_seen every minute; sweep expired sessions every
+    // tenth tick, since otherwise only startup deletes them.
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         tick.tick().await; // skip immediate fire
@@ -318,27 +298,14 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // One listener for both, deliberately — there is no `--admin-addr`.
-    //
-    // Publishing noadd for DoH therefore publishes the login page too, which
-    // sounds like an argument for a second listener until you cost it: an
-    // admin listener on an internal address cannot use the ACME certificate
-    // issued for the DoH domain, so it needs its own TLS identity, and
-    // `resolve_cookie_secure` / `resolve_hsts` would have to answer per
-    // listener instead of once. Getting that pair wrong locks an operator out
-    // of their own box (see the comments on both) — real risk, for a
-    // configuration a reverse proxy already expresses as a path rule.
-    //
-    // The judgement behind it: publishing a service straight to the internet
-    // with no reverse proxy in front is now rare, and anyone who does have one
-    // can already route `/dns-query*` publicly and keep the rest internal.
-    // README's "Publishing DoH without publishing the admin UI" is the
-    // supported answer. Revisit if that assumption stops holding.
+    // One listener for DoH and admin, deliberately (no `--admin-addr`). A second
+    // listener would need its own TLS identity and per-listener
+    // `resolve_cookie_secure` / `resolve_hsts`, which risk locking the operator
+    // out; a reverse proxy path rule does the job instead (README: "Publishing
+    // DoH without publishing the admin UI").
     let app = doh_routes.merge(admin_routes);
 
-    // HSTS covers the whole listener (admin UI *and* DoH): both are only
-    // reachable over the same scheme, and a DoH client that gets pinned to
-    // https:// is fine — DoH is https-only by definition.
+    // HSTS covers DoH too: same scheme, and DoH is HTTPS-only anyway.
     let app = if noadd::config::resolve_hsts(args.hsts, tls_enabled) {
         let value = noadd::headers::hsts_value(args.hsts_max_age);
         tracing::info!(
@@ -428,12 +395,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Rate-limiter bucket pruning — IPs unseen for 10 min are evicted so
-    // the map cannot grow without bound under clients that roam or scanners
-    // that cycle through source addresses. The two admin counters ride along
-    // on the same tick: they are keyed by source IP just the same, and without
-    // this the login limiter in particular retained one entry per address that
-    // ever attempted a login, for the lifetime of the process.
+    // Evict rate-limit buckets unseen for 10 min so roaming clients and
+    // scanners cannot grow the maps without bound; the admin limiters too.
     let prune_limiter = ip_rate_limiter.clone();
     let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
@@ -578,17 +541,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(event = "shutdown.started", "shutting down");
     udp_handle.abort();
     tcp_handle.abort();
-    // Loops forever and holds a `Database` clone, so it is aborted rather than
-    // awaited: `db.close()` below cannot checkpoint the WAL while it is alive.
+    // Aborted, not awaited: it loops forever holding a `Database` clone, which
+    // would stop `db.close()` checkpointing the WAL.
     events_handle.abort();
     drop(handler); // drops log_tx
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), logger_handle).await;
     db.close().await; // checkpoint WAL and close connections so -wal/-shm are removed
     tracing::info!(event = "shutdown.complete", "goodbye");
 
-    // If a DNS listener brought us down (rather than an OS signal), exit
-    // non-zero so orchestrators and health checks see the failure instead of a
-    // clean shutdown.
+    // A DNS listener failure exits non-zero so orchestrators see it.
     if listener_failed.load(std::sync::atomic::Ordering::Relaxed) {
         anyhow::bail!("DNS listener failed; exiting with non-zero status");
     }

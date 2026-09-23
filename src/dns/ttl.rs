@@ -1,14 +1,8 @@
 //! Locating and rewriting the TTL fields of a DNS response in place.
 //!
-//! A cached response is served many times, each time with its TTLs reduced by
-//! however long it has been cached. Doing that by parsing the message and
-//! re-encoding it costs a full round trip through the record types for what is
-//! a handful of four-byte writes, so the offsets of those four-byte fields are
-//! found once — when the response is cached — and reused for every hit after.
-//!
-//! Rewriting in place also means a served response is the upstream's own bytes
-//! with its TTLs adjusted, rather than a re-encoding of them: name compression
-//! and record order survive exactly as the upstream wrote them.
+//! Each cache hit reduces the TTLs by the entry's age. Rather than parse and
+//! re-encode, the TTL offsets are found once at insert and patched per hit, so
+//! a served response keeps the upstream's exact bytes (compression, order).
 
 /// Fixed DNS header: ID, flags, and the four section counts.
 const HEADER_LEN: usize = 12;
@@ -17,9 +11,8 @@ const TYPE_AND_CLASS_LEN: usize = 4;
 const TTL_LEN: usize = 4;
 const RDLENGTH_LEN: usize = 2;
 
-/// EDNS(0) OPT. Its TTL field is not a TTL — it carries the extended RCODE,
-/// the EDNS version and the DO flag ([RFC 6891 §6.1.3]), so decrementing it
-/// would corrupt the response's DNSSEC signalling.
+/// EDNS(0) OPT, whose "TTL" carries the extended RCODE, version and DO flag
+/// ([RFC 6891 §6.1.3]) and must not be decremented.
 ///
 /// [RFC 6891 §6.1.3]: https://www.rfc-editor.org/rfc/rfc6891#section-6.1.3
 const TYPE_OPT: u16 = 41;
@@ -30,9 +23,8 @@ const TYPE_TSIG: u16 = 250;
 
 /// Byte offsets of every TTL field in `response` that may be decremented.
 ///
-/// Empty when the message cannot be walked, which leaves the response served
-/// with its original TTLs — the same outcome the parse-based path produced for
-/// a message it could not read.
+/// Empty when the message cannot be walked, so it is served with its original
+/// TTLs.
 pub fn ttl_offsets(response: &[u8]) -> Box<[u32]> {
     scan(response).unwrap_or_default()
 }
@@ -40,8 +32,7 @@ pub fn ttl_offsets(response: &[u8]) -> Box<[u32]> {
 /// Reduce every TTL at `offsets` by `elapsed_secs`, reading the original value
 /// from the buffer itself.
 ///
-/// Floored at 1 rather than 0: a zero TTL tells a client not to cache the
-/// answer at all, so it would re-query on the very next lookup.
+/// Floored at 1: a zero TTL would stop the client caching the answer at all.
 pub fn apply_elapsed(bytes: &mut [u8], offsets: &[u32], elapsed_secs: u32) {
     if elapsed_secs == 0 {
         return;
@@ -62,9 +53,8 @@ pub fn apply_elapsed(bytes: &mut [u8], offsets: &[u32], elapsed_secs: u32) {
 
 /// Reduce every TTL in a response by `elapsed_secs`, scanning it first.
 ///
-/// For a response served repeatedly, prefer [`ttl_offsets`] once plus
-/// [`apply_elapsed`] per hit; this is for callers holding bytes they will
-/// patch a single time.
+/// For one-off patching; a repeatedly served response should use
+/// [`ttl_offsets`] once plus [`apply_elapsed`] per hit.
 pub fn decrement_ttl(response: &[u8], elapsed_secs: u32) -> Vec<u8> {
     let offsets = ttl_offsets(response);
     let mut bytes = response.to_vec();
@@ -75,9 +65,8 @@ pub fn decrement_ttl(response: &[u8], elapsed_secs: u32) -> Vec<u8> {
 /// Advance past the domain name starting at `pos`, returning the offset of the
 /// byte after it.
 ///
-/// The name is skipped, not decoded: a compression pointer ends the name where
-/// it appears, so nothing here has to follow it or guard against a pointer
-/// loop.
+/// Skipped, not decoded: a compression pointer ends the name, so there is no
+/// pointer to follow and no loop to guard against.
 fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
     loop {
         let len = *buf.get(pos)?;
@@ -94,7 +83,7 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
                 buf.get(pos + 1)?;
                 return Some(pos + 2);
             }
-            // 0x40 and 0x80 are reserved label types (RFC 6891 §3).
+            // 0x40 (deprecated extended label, RFC 6891 §5) and 0x80 (reserved).
             _ => return None,
         }
     }

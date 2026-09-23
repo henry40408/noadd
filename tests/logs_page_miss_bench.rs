@@ -1,20 +1,16 @@
-//! What the query log page costs in **page misses**, the unit
-//! `stats_page_miss_bench` explains. Manual-only, gated by `#[ignore]`.
+//! What the query log page costs in **page misses** (see
+//! `stats_page_miss_bench`). Manual-only.
 //!
 //!   BENCH_DB=/tmp/noadd-bench.db cargo nextest run --release \
 //!     --no-capture --run-ignored only `logs_page_miss`
 //!
-//! Unlike the dashboard and the Statistics page, `/logs` has no time window:
-//! the list is a page of the whole table and the count is over all of it, so
-//! what a load costs depends on the filters rather than on a range. Every
-//! filter the page offers is measured on its own and in the combinations the
-//! form allows, with a common and a rare value each, because an index choice
-//! that helps one routinely hurts the other.
+//! `/logs` has no time window, so cost depends on the filters. Each is measured
+//! alone and in combinations, with a common and a rare value, because an index
+//! choice that helps one routinely hurts the other.
 //!
-//! The filter values are picked from `BENCH_DB` itself — the busiest and the
-//! quietest domain, token and query type — so the same bench means the same
-//! thing on any database. `BENCH_NOW` (unix seconds) pins the clock for the
-//! domain suggestions, the one reading here that has a window.
+//! Filter values are the busiest and quietest domain, token and query type in
+//! `BENCH_DB` itself. `BENCH_NOW` (unix seconds) pins the clock for the domain
+//! suggestions, the one windowed reading.
 
 use noadd::admin::stats::domain_suggestions;
 use noadd::db::Database;
@@ -24,13 +20,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 /// `LOGS_PAGE_SIZE` in `src/admin/pages.rs`.
 const PAGE_SIZE: i64 = 50;
 
-/// How deep the second list reading goes. `OFFSET` is not free: every skipped
-/// row is still read, so a filter that is cheap on page one can be expensive
-/// further in.
+/// How deep the second list reading goes: `OFFSET` still reads every skipped
+/// row.
 const DEEP_PAGE: i64 = 20;
 
-/// Run `f` with the pool's page cache dropped first, and report how many pages
-/// it had to read.
+/// Pages `f` reads with the pool's page cache dropped first.
 async fn page_misses<F, Fut, T>(db: &Database, f: F) -> i64
 where
     F: FnOnce() -> Fut,
@@ -44,9 +38,8 @@ where
 }
 
 /// The value of `column` with the most (`DESC`) or fewest (`ASC`) rows, ties
-/// broken by value so repeated runs pick the same one. Values holding a search
-/// metacharacter are passed over: as a search term one would turn the prefix
-/// match being measured into a `LIKE`.
+/// broken by value. Values with a search metacharacter are skipped, since they
+/// would turn the prefix match into a `LIKE`.
 fn pick(conn: &Connection, column: &str, order: &str) -> Option<String> {
     conn.query_row(
         &format!(
@@ -86,8 +79,7 @@ async fn logs_page_miss_bench() {
     let db = Database::open(&db_path).await.unwrap();
     let storage = db.db_storage_stats().await.unwrap();
 
-    // Picked on a connection outside the read pool, so none of these scans is
-    // counted against the readings below.
+    // Outside the read pool, so these scans are not counted below.
     let (busy_domain, quiet_domain, busy_token, quiet_token, busy_type, quiet_type) = {
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         (
@@ -119,8 +111,7 @@ async fn logs_page_miss_bench() {
              blocked: Option<bool>,
              token: Option<&Option<String>>,
              query_type: Option<&Option<String>>| {
-        // A database with no DoH traffic has no token to filter by; that row is
-        // skipped rather than measured as an empty filter.
+        // No such value (e.g. no DoH traffic): skip the row.
         let token = match token {
             Some(None) => return None,
             Some(Some(t)) => Some(t.clone()),
@@ -232,8 +223,7 @@ async fn logs_page_miss_bench() {
         storage.main_bytes as f64 / (1024.0 * 1024.0)
     );
 
-    // A reading that costs nothing means the cache was not actually dropped, so
-    // every later number would be meaningless.
+    // Zero means the cache was not dropped and every number is meaningless.
     assert!(
         total > 0,
         "no page misses recorded — is BENCH_DB an empty database?"

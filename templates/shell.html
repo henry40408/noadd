@@ -1,10 +1,7 @@
 {#
-  The signed-in application shell.
-
-  Everything here is settled by the server: which navigation item is active,
-  the version, the host in the status bar, and any one-shot notice. Only
-  `#page-content` is left for `app.js`, which mounts the page component for
-  this path into it.
+  The signed-in application shell, settled entirely by the server: the active
+  nav item, the version, the status-bar host and any one-shot notice. The page
+  body fills `#page-content`; its custom element upgrades in place.
 #}
 {% extends "base.html" %}
 
@@ -43,7 +40,7 @@
           <div id="notice-host"></div>
           <rebuild-banner></rebuild-banner>
           {%- if shell.show_next_step %}
-          {# Rendered here rather than fetched: the three reads app.js used to make to decide this are three the server already has. #}
+          {# Decided by the server (`next_step_target`), not fetched by the client. #}
           <next-step-banner>
             <div class="rebuild-banner show" role="status" aria-live="polite" data-testid="next-step-banner">
               <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
@@ -60,7 +57,7 @@
           <div id="page-content">{% block page %}{% endblock %}</div>
         </main>
         <footer class="statusbar">
-          {# Ships hidden: without a client there is no way to sense the server, and a badge that cannot sense it must not claim it is up. #}
+          {# Ships hidden: without a client it cannot sense the server, so must not claim it is up. #}
           <server-status class="live" data-testid="server-status" hidden>ONLINE</server-status>
           <span>noadd {{ shell.version }}</span>
           <span class="right">{{ shell.host }}</span>

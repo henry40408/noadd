@@ -1,18 +1,14 @@
 {#
   The query log.
 
-  Every filter and the page number are in the URL. That is what makes this page
-  work without JavaScript — the filters are a GET form, the pager is two links,
-  and a filtered view can be refreshed, bookmarked and shared. It is also what
-  `app.js` reads back when it takes the page over, so the two agree on what is
-  being shown without either having to tell the other.
+  Every filter and the page number are in the URL: the filters are a GET form
+  and the pager is two links, so the page works without JavaScript, and
+  `app.js` reads the same query string back when it takes over.
 
-  The live tail is the exception, alongside the dashboard's chart: it is an
-  `EventSource`, so its button ships hidden and `app.js` unhides it.
+  The live tail needs the event stream, so its button ships hidden.
 
-  Row actions and Clear All are POSTs that redirect. A row action carries the
-  view it was invoked from in `next`, so acting on row 40 of page 3 of a
-  filtered view returns to row 40 of page 3 of that filtered view.
+  Row actions and Clear All are POSTs that redirect. A row action carries its
+  view in `next`, so it returns to the same filtered page.
 #}
 {% extends "shell.html" %}
 
@@ -27,11 +23,7 @@
         <div class="text"><span class="label">Query log cleared</span></div>
       </div>
       {%- endif %}
-      {#
-        A GET form: submitting it puts the filters in the URL, which is where
-        the rest of the page reads them from. `app.js` takes it over to filter
-        without the navigation, but the shape of the result is the same.
-      #}
+      {# GET: the filters land in the URL. `app.js` filters without navigating. #}
       <form method="get" action="/logs" class="filters-row fade-in" id="log-filters">
         <input type="text" id="log-search" name="q" value="{{ q }}" data-testid="logs-search" placeholder="Domain prefix, or *pattern*" title="Plain text matches the domain prefix (fast). Use * or % anywhere for a substring/wildcard match (slower)."{% if !domain_suggestions.is_empty() %} list="log-domain-list"{% endif %} autocomplete="off">
         {% if !domain_suggestions.is_empty() %}
@@ -59,10 +51,8 @@
         {# Removed by app.js, which filters as the controls change. #}
         <button type="submit" class="btn btn-sm nojs-only" data-testid="logs-filter-apply">Filter</button>
         {#
-          Clear All posts, and the filters GET, so they cannot be the same form
-          — and a form cannot nest inside another. The `form` attribute points
-          this button at the empty POST form below, which keeps it on this row
-          where it has always been.
+          A GET form cannot also POST, and forms cannot nest, so `form` points
+          this button at the empty POST form below.
         #}
         <button type="submit" form="clear-logs-form" class="btn btn-danger btn-sm" id="clear-logs" data-testid="logs-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Clear All</button>
       </form>
@@ -145,10 +135,7 @@
           {%- endfor %}
           {%- endif %}
         </div>
-        {#
-          Links, not buttons: paging is a different view of the same data, and a
-          view you can bookmark and go Back out of is what the URL is for.
-        #}
+        {# Links: a page is a view, so it belongs in the URL. #}
         <div class="pagination" id="log-pagination">
           {%- if has_prev %}
           <a class="btn btn-sm" id="pg-prev" data-testid="logs-prev" href="{{ prev_href }}">Prev</a>

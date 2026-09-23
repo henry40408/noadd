@@ -154,8 +154,7 @@ fn x_forwarded_for_rightmost_non_proxy_hop_is_used() {
 
 #[test]
 fn configured_proxy_hops_are_skipped_to_reach_the_client() {
-    // The realistic shape: proxy appends its own peer, so the client sits to
-    // the left of the proxy hops and every proxy is in --trusted-proxies.
+    // The realistic shape: each proxy appends its peer, all in --trusted-proxies.
     let tp = TrustedProxies::parse("172.18.0.0/16,10.0.0.0/8").unwrap();
     let connect = ci("172.18.0.19:50000");
     let headers = headers_xff("203.0.113.7, 10.0.0.1, 172.18.0.19");
@@ -224,8 +223,7 @@ fn unreadable_hop_ends_the_walk_instead_of_being_stepped_over() {
 
 #[test]
 fn unreadable_innermost_hop_falls_back_to_the_peer() {
-    // Nothing in the header was readable, so there is no hop to attribute and
-    // the peer — the one address the client cannot choose — stands in.
+    // No readable hop, so the peer — which the client cannot choose — stands in.
     let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
     let connect = ci("172.18.0.19:50000");
     let headers = headers_xff("1.2.3.4, not-an-ip");
@@ -267,8 +265,7 @@ fn rfc7239_for_parameter_leaking_into_the_header_is_read() {
 
 #[test]
 fn walk_reaches_the_client_at_the_hop_limit_but_not_past_it() {
-    // Pins MAX_XFF_HOPS at 32: a client 32 hops in is still found, one hop
-    // further is not, and the walk falls back to the outermost proxy read.
+    // Pins MAX_XFF_HOPS at 32: one hop further falls back to the outermost proxy read.
     let tp = TrustedProxies::parse("172.18.0.0/16").unwrap();
     let connect = ci("172.18.0.19:50000");
     let proxies = |n: usize| {

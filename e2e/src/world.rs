@@ -1,15 +1,7 @@
 //! The Cucumber world: one browser session per scenario, against the instance
-//! the feature's tag names.
+//! the feature's tag (`@app`, `@auth`, `@onboarding`) names.
 //!
-//! `playwright.config.js` expressed the split as three BDD projects, each with
-//! its own `baseURL` and its own `webServer` entry. The features already carry
-//! the same information as a tag on the feature — `@app`, `@auth`,
-//! `@onboarding` — so the runner starts three instances, registers them here,
-//! and a `before` hook picks one by tag. Nothing about the Gherkin changed.
-//!
-//! The session cannot be opened in `new`, because `World::new` never sees the
-//! scenario and so cannot know which instance it belongs to. A `before` hook
-//! opens it instead.
+//! `World::new` never sees the scenario, so a `before` hook opens the session.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -29,9 +21,7 @@ pub struct Instance {
     /// The UDP port its DNS listener answers on.
     pub dns_port: u16,
     /// A session minted by the runner, replayed into the browser instead of a
-    /// UI sign-in. `None` for the instances a feature is meant to configure
-    /// itself — the first-run setup scenarios would have nothing to prove
-    /// against an instance somebody else had already set up.
+    /// UI sign-in. `None` for instances the feature configures itself.
     pub session: Option<String>,
 }
 
@@ -54,9 +44,7 @@ pub fn register(instances: impl IntoIterator<Item = (String, Instance)>) -> Resu
 ///
 /// # Errors
 ///
-/// Fails when no tag matches — a new feature that forgot its tag, which is
-/// better caught here than as a scenario that quietly ran against the wrong
-/// database.
+/// Fails when no tag matches, e.g. a new feature that forgot its tag.
 pub fn instance_for(tags: &[String]) -> Result<Instance> {
     let registry = INSTANCES.get().context("no instances registered")?;
     tags.iter()
@@ -72,8 +60,7 @@ pub struct NoaddWorld {
     browser: Option<Browser>,
     page: Option<Page>,
     instance: Option<Instance>,
-    /// Filled by the sweep that visits every tab looking for markup rendered as
-    /// visible text, and read by the assertion that follows it.
+    /// Markup-as-text found by the every-tab sweep, for the assertion after it.
     pub leaked_markup: Vec<String>,
 }
 

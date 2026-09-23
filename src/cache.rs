@@ -13,9 +13,8 @@ pub struct ClientResponseProfile {
     pub has_edns: bool,
     pub dnssec_ok: bool,
     pub checking_disabled: bool,
-    /// Upstream DO-forcing policy captured when handling the request. This
-    /// prevents an in-flight request from the old policy generation from
-    /// repopulating a cache entry used after a runtime toggle.
+    /// Upstream DO-forcing policy at request time, so an in-flight request from
+    /// before a runtime toggle cannot repopulate an entry used after it.
     pub upstream_dnssec_enabled: bool,
 }
 
@@ -39,32 +38,23 @@ impl CacheKey {
 
 /// Cache value: raw DNS response bytes + TTL metadata for optimistic serving.
 ///
-/// Backed by an `Arc<Inner>` so the clone `cache.get()` hands back is a
-/// refcount bump rather than a copy of the response.
+/// `Arc`-backed so the clone `cache.get()` returns is a refcount bump.
 #[derive(Clone)]
 pub struct CacheValue {
     inner: Arc<CacheValueInner>,
 }
 
 struct CacheValueInner {
-    /// A `Box<[u8]>` rather than a `Vec<u8>`: a cached response never grows, so
-    /// the capacity field buys nothing and the spare capacity costs real
-    /// resident memory. `Message::to_vec` hands back a buffer reserved at 512
-    /// bytes whatever the answer's size, and a typical A response is under 100
-    /// — the shrink at insert is what stops the cache holding that difference
-    /// for every entry.
+    /// `Box<[u8]>` so insert shrinks the buffer: `Message::to_vec` reserves 512
+    /// bytes, while a typical A response is under 100.
     bytes: Box<[u8]>,
     ttl: Duration,
     inserted_at: Instant,
-    /// Upstream resolver's Authenticated Data verdict for this answer, captured
-    /// before the response was tailored to any client. Stored separately from
-    /// `bytes` because a non-DO client's cached wire response has the AD bit
-    /// stripped, yet the query log must still surface the upstream verdict.
+    /// Upstream's AD verdict, captured before tailoring: a non-DO client's
+    /// cached `bytes` have AD stripped, but the query log still needs it.
     authenticated_data: bool,
-    /// Where the decrementable TTL fields sit inside `bytes`, found once here
-    /// so serving the entry never has to parse it again. A typical answer has
-    /// one to three records, so this is a handful of bytes against the second
-    /// full copy of the response it replaces.
+    /// Offsets of the TTL fields in `bytes`, found once at insert so serving
+    /// never re-parses the response.
     ttl_offsets: Box<[u32]>,
 }
 
@@ -103,10 +93,10 @@ impl CacheValue {
 
 /// Optimistic DNS response cache backed by moka.
 ///
-/// Entries are kept in moka for up to `ttl + stale_window` (default 5 minutes).
-/// When an entry's TTL has expired but is still within the stale window, `get()`
-/// returns it with `is_stale() == true`, signaling the caller to serve it
-/// immediately while refreshing in the background.
+/// `get()` serves an entry for up to `ttl + stale_window` (5 minutes) and drops
+/// it on read after that; moka itself evicts only by size (LRU). Past its TTL an
+/// entry comes back with `is_stale() == true`: serve it and refresh in the
+/// background.
 #[derive(Clone)]
 pub struct DnsCache {
     cache: Cache<CacheKey, CacheValue>,
@@ -114,19 +104,15 @@ pub struct DnsCache {
     stale_window: Duration,
 }
 
-/// What an entry costs beyond its response bytes and its domain: moka's node,
-/// the `Arc` header, the `CacheKey` struct and the TTL-offsets allocation.
-///
-/// Measured, not estimated — `cache_memory_bench` reports it, so a change in
-/// the entry's shape shows up as this constant drifting rather than as a cache
-/// that quietly holds more memory than it was told to.
+/// Per-entry cost beyond the variable parts: moka's node, the `Arc` header, the
+/// `CacheKey` and the TTL-offsets allocation. Measured by `cache_memory_bench`;
+/// update it when the entry's shape changes.
 const ENTRY_OVERHEAD_BYTES: u32 = 365;
 
 /// Resident cost of one entry, for moka to bound the cache by bytes.
 ///
-/// Saturating rather than wrapping: a response large enough to overflow a `u32`
-/// cannot be produced by DNS (65535 bytes is the wire maximum), but a weight
-/// that wrapped to a small number would admit an entry by claiming it is tiny.
+/// Saturating: DNS cannot overflow a `u32`, but a wrapped weight would admit an
+/// entry by claiming it is tiny.
 fn entry_weight(key: &CacheKey, value: &CacheValue) -> u32 {
     let variable = key.domain.len() + value.bytes().len() + value.ttl_offsets().len() * 4;
     ENTRY_OVERHEAD_BYTES.saturating_add(u32::try_from(variable).unwrap_or(u32::MAX))
@@ -135,10 +121,8 @@ fn entry_weight(key: &CacheKey, value: &CacheValue) -> u32 {
 impl DnsCache {
     /// Create a cache bounded by the total resident bytes of its entries.
     ///
-    /// Bytes rather than entry count because a DNS response spans tens of bytes
-    /// to tens of kilobytes: a bound of N entries leaves the memory a full cache
-    /// occupies decided by whatever traffic it happened to see, which is the
-    /// wrong thing to leave open on the small hosts noadd targets.
+    /// Bytes rather than entries: responses range from tens of bytes to tens of
+    /// kilobytes, so an entry bound would leave memory use up to the traffic.
     pub fn with_capacity_bytes(max_capacity_bytes: u64) -> Self {
         let cache = Cache::builder()
             .max_capacity(max_capacity_bytes)
@@ -152,11 +136,8 @@ impl DnsCache {
         }
     }
 
-    /// Get cached DNS response for a given domain + record type.
-    ///
-    /// Returns the entry even if its TTL has expired (stale), as long as it
-    /// is within the stale window. Caller should check `is_stale()` and
-    /// trigger a background refresh if true.
+    /// Get a cached response, including a stale one still within the stale
+    /// window; the caller refreshes in the background when `is_stale()`.
     pub async fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         let entry = self.cache.get(key).await?;
         if entry.inner.inserted_at.elapsed() > entry.inner.ttl + self.stale_window {
@@ -196,10 +177,8 @@ impl DnsCache {
         self.cache.invalidate_all();
     }
 
-    /// Drain moka's write buffer so the cache holds exactly the entries that
-    /// have been inserted. Only measurement needs this: moka applies writes
-    /// asynchronously, so a memory reading taken right after a batch of
-    /// inserts would otherwise count the buffer rather than the entries.
+    /// Apply moka's buffered writes. For measurement only: a memory reading
+    /// right after inserts would otherwise count the buffer, not the entries.
     pub async fn run_pending_tasks(&self) {
         self.cache.run_pending_tasks().await;
     }

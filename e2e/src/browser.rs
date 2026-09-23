@@ -1,35 +1,22 @@
 //! The browser session, and every emulation the suite depends on.
 //!
-//! `WebDriver::managed` downloads and supervises a matching chromedriver
-//! itself, so nothing has to be installed alongside the tests — but it does
-//! *not* download the browser, unlike the Playwright setup this replaces. A
-//! Chrome or Chromium in one of the well-known locations is a prerequisite now;
-//! [`Browser::open`] says so in as many words when it is missing, because the
-//! raw driver error does not.
+//! `WebDriver::managed` fetches and supervises chromedriver but *not* the
+//! browser: a local Chrome or Chromium is a prerequisite, and [`Browser::open`]
+//! says so when it is missing because the raw driver error does not.
 //!
-//! Everything `playwright.config.js` expressed as a `use:` block is a CDP call
-//! here:
+//! Emulation is CDP:
 //!
-//! * `viewport` / `deviceScaleFactor` / `isMobile` — `Emulation.setDeviceMetricsOverride`,
-//!   for every profile rather than only the mobile ones. A `--window-size`
-//!   argument sets the *outer* window and leaves the viewport a function of the
-//!   browser's own chrome; the no-JS specs pin 1024×600 precisely because the
-//!   fixed status bar overlaps what sits at the foot of a short window, so an
-//!   approximate viewport would quietly stop testing that.
-//! * `hasTouch` — `Emulation.setTouchEmulationEnabled`, plus
-//!   `Input.dispatchTouchEvent` for the taps themselves.
-//! * `reducedMotion` / `colorScheme` — `Emulation.setEmulatedMedia`.
-//! * `javaScriptEnabled: false` — `Emulation.setScriptExecutionDisabled`, which
-//!   is what Playwright used underneath. It applies to the *next* document, so
-//!   sessions are per-case and the flag is set before the first navigation.
-//! * `addInitScript` — `Page.addScriptToEvaluateOnNewDocument`. Two of the
-//!   ported tests need it: one rewrites a JSON response the dashboard reads,
-//!   the other records what the settings page sends. Both are `window.fetch`
-//!   wrappers, because `app.js` makes every call through `fetch`.
+//! * Viewport — `Emulation.setDeviceMetricsOverride` for every profile, since
+//!   `--window-size` sets the *outer* window. The no-JS specs need an exact
+//!   1024×600 so the fixed status bar really overlaps the foot of the page.
+//! * Touch — `Emulation.setTouchEmulationEnabled` plus `Input.dispatchTouchEvent`.
+//! * Reduced motion / colour scheme — `Emulation.setEmulatedMedia`.
+//! * No JS — `Emulation.setScriptExecutionDisabled`. It applies to the *next*
+//!   document, so sessions are per-case and it is set before the first navigation.
+//! * Init scripts — `Page.addScriptToEvaluateOnNewDocument` ([`RECORD_REQUESTS`],
+//!   [`override_summary`]).
 //!
-//! `BiDi` is deliberately not enabled. `Emulation.setEmulatedMedia` is the only
-//! route to `prefers-color-scheme` at all, and the rest is a WebSocket stack
-//! for things CDP already does over the connection we have.
+//! `BiDi` is not enabled: CDP already covers all of this over the one connection.
 
 use std::time::Duration;
 
@@ -39,16 +26,14 @@ use thirtyfour::prelude::*;
 
 /// How long a query waits for a condition before giving up.
 ///
-/// Only ever paid in full by a genuine failure, so it is set for the slowest
-/// machine that runs this rather than the fastest: locally every wait settles
-/// in well under a second, while a two-core CI runner driving several browsers
-/// took longer than Playwright's 10 s `expect` timeout to land a navigation.
+/// Paid in full only on a genuine failure, so it is sized for a two-core CI
+/// runner driving several browsers, where 10 s was too short for a navigation.
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often a query re-checks while waiting.
 pub const WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Whether the page's own scripts run — the `javaScriptEnabled` split.
+/// Whether the page's own scripts run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scripting {
     /// The scripted path: `app.js` runs and enhances the server-rendered body.
@@ -57,7 +42,7 @@ pub enum Scripting {
     Disabled,
 }
 
-/// A viewport, matching a Playwright `devices[...]` entry.
+/// An emulated viewport.
 #[derive(Debug, Clone, Copy)]
 pub struct Viewport {
     pub width: u32,
@@ -68,7 +53,7 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    /// `devices['Desktop Chrome']`.
+    /// Desktop Chrome.
     pub const DESKTOP: Self = Self {
         width: 1280,
         height: 720,
@@ -87,7 +72,7 @@ impl Viewport {
         touch: false,
     };
 
-    /// `devices['Pixel 5']`.
+    /// Pixel 5.
     pub const PIXEL_5: Self = Self {
         width: 393,
         height: 851,
@@ -97,7 +82,7 @@ impl Viewport {
     };
 }
 
-/// Everything a Playwright project's `use:` block used to carry.
+/// How a browser session is emulated.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub scripting: Scripting,
@@ -105,9 +90,7 @@ pub struct Profile {
     pub reduced_motion: bool,
     /// `prefers-color-scheme`, when the case cares which one it gets.
     pub color_scheme: Option<&'static str>,
-    /// IANA zone the page's clock reports. The screenshots pin UTC so the
-    /// heatmap keeps the seed's diurnal curve instead of smearing it across
-    /// whatever zone the machine capturing them is in.
+    /// IANA zone the page's clock reports (the screenshots pin UTC to match the seed).
     pub timezone: Option<&'static str>,
     /// BCP 47 tag the page formats numbers and dates with.
     pub locale: Option<&'static str>,
@@ -135,8 +118,7 @@ impl Profile {
         Self::default()
     }
 
-    /// The `javaScriptEnabled: false, reducedMotion: 'reduce'` profile the four
-    /// no-JS specs share, in the 1024×600 window they pin.
+    /// Scripts off, reduced motion, 1024×600: the four no-JS specs' profile.
     pub fn no_js() -> Self {
         Self {
             scripting: Scripting::Disabled,
@@ -199,10 +181,9 @@ impl Browser {
         caps.set_headless()?;
         // Containers get a 64 MB /dev/shm by default, which Chrome outgrows.
         caps.add_arg("--disable-dev-shm-usage")?;
-        // A `confirm()` is a real control here — the account page's "log out
-        // other sessions" is one — and the W3C default of "dismiss and notify"
-        // would answer Cancel before the test ever saw it. `ignore` leaves the
-        // dialog standing so `accept_alert` can answer it.
+        // The W3C default "dismiss and notify" would answer a `confirm()` (e.g.
+        // the account page's "log out other sessions") with Cancel; `ignore`
+        // leaves it for `accept_alert`.
         caps.as_mut().set("unhandledPromptBehavior", "ignore")?;
 
         let driver = WebDriver::managed(caps).await.context(
@@ -218,12 +199,9 @@ impl Browser {
 
     /// Downloads and starts the driver once, before any case asks for it.
     ///
-    /// `WebDriver::managed` builds a *new* manager per call, so each session
-    /// prepares the driver for itself. That is harmless when it is already
-    /// cached and pathological when it is not: several sessions opening at once
-    /// on a cold cache all try to download the same driver and contend on its
-    /// lock file, which is a stall, not a slowdown. CI has a cold cache every
-    /// run, which is exactly where the specs run in parallel.
+    /// `WebDriver::managed` builds a new manager per call, so parallel sessions
+    /// on a cold cache (every CI run) all download the driver and stall on its
+    /// lock file.
     ///
     /// # Errors
     ///
@@ -249,11 +227,8 @@ impl Browser {
 
     /// Taps at a viewport point, as a finger would.
     ///
-    /// `Input.dispatchTouchEvent` is a plain CDP command, so this needs no
-    /// event stream — which is the whole reason the touch spec ports without
-    /// `BiDi`. Chrome turns the touch points into `pointerdown` / `pointerup`
-    /// with `pointerType: 'touch'`, which is exactly what `addChartTouch` in
-    /// `app.js` keys on.
+    /// Chrome turns the touch points into `pointerdown` / `pointerup` with
+    /// `pointerType: 'touch'`, which `addChartTouch` in `app.js` keys on.
     ///
     /// # Errors
     ///
@@ -300,8 +275,7 @@ impl Browser {
         Ok(())
     }
 
-    /// Grows the emulated viewport to `height`, so a screenshot catches more of
-    /// the page than the window shows.
+    /// Re-emulates the viewport, e.g. taller so a screenshot catches more of the page.
     ///
     /// # Errors
     ///
@@ -322,9 +296,8 @@ impl Browser {
 
     /// A PNG of the viewport, at the emulated device scale factor.
     ///
-    /// `Page.captureScreenshot` rather than `WebDriver`'s "Take Screenshot":
-    /// the latter is defined in CSS pixels, so the 2× shots the README uses
-    /// would come back at 1×.
+    /// `Page.captureScreenshot`, because `WebDriver`'s "Take Screenshot" is in
+    /// CSS pixels and would return the README's 2× shots at 1×.
     ///
     /// # Errors
     ///
@@ -338,10 +311,8 @@ impl Browser {
 
     /// Installs a script to run before the *next* document's own scripts.
     ///
-    /// A profile carries the ones a whole suite needs; this is for the one
-    /// scenario that installs its own mid-run — the dashboard's Throughput
-    /// card, whose `Given` sets up the response override and whose `When`
-    /// then navigates.
+    /// For a scenario that installs one mid-run (the dashboard's Throughput
+    /// card); suite-wide scripts belong on the [`Profile`].
     ///
     /// # Errors
     ///
@@ -433,10 +404,7 @@ impl Browser {
 /// An init script that records every `fetch` the page makes, so a test can ask
 /// what was sent without a request-interception stream.
 ///
-/// Replaces `page.on('request', …)` and `page.waitForResponse(…)`: both of the
-/// settings-page assertions are about *whether* a PUT went out and when, which
-/// a wrapper answers exactly. `app.js` routes everything through `fetch`
-/// (`api.request`), so nothing escapes this.
+/// `app.js` routes every call through `fetch` (`api.request`), so nothing escapes it.
 pub const RECORD_REQUESTS: &str = r"
     window.__requests = [];
     const __fetch = window.fetch;
@@ -448,20 +416,13 @@ pub const RECORD_REQUESTS: &str = r"
     };
 ";
 
-/// An init script that rewrites the two rates on `/api/stats/summary`.
-///
-/// Replaces `page.route('**/api/stats/summary', …)`. Driving the real
-/// 60-second window from a browser would mean generating live DNS traffic and
-/// racing the logger's flush, so the figures are injected instead — see the
-/// scenario in `dashboard.feature` for why they are chosen to differ.
+/// An init script that rewrites `queries_1m` and `total_today` in the summary
+/// of every pushed `stats` event, rather than generating live DNS traffic and
+/// racing the logger's flush.
 pub fn override_summary(queries_1m: i64, total_today: i64) -> String {
-    // Patches `EventSource`, not `fetch`: the dashboard's readings arrive as
-    // `stats` events on the shared stream now, so a wrapper around
-    // `/api/stats/summary` would intercept a request the page no longer makes
-    // and the card would keep showing the real zeroes.
-    //
-    // `MessageEvent.data` is read-only, so the listener is handed a
-    // reconstructed event rather than a mutated one.
+    // Patches `EventSource`, not `fetch`: the dashboard's readings arrive on the
+    // event stream. `MessageEvent.data` is read-only, so the listener gets a
+    // reconstructed event.
     format!(
         r"
         const __add = EventSource.prototype.addEventListener;

@@ -1,6 +1,4 @@
-# Coverage configuration. main.rs only wires components together inside a live
-# process (socket bind, runtime spawn) and is not unit-testable; exclude it from
-# the project coverage denominator.
+# main.rs only wires a live process together and is not unit-testable.
 ignore:
   - "src/main.rs"
 
@@ -8,8 +6,7 @@ coverage:
   status:
     project:
       default:
-        # Compare against the base commit rather than an absolute bar: the gate
-        # fails only when a PR regresses coverage by more than the threshold.
+        # Fail only when a PR drops coverage by more than the threshold.
         target: auto
         threshold: 1%
     patch:

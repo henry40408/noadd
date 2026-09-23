@@ -1,10 +1,7 @@
-//! Coverage for the wire-format TTL walk in `noadd::dns::ttl`.
-//!
-//! The walk replaced a parse-and-re-encode round trip, so most of what is here
-//! checks that it decrements exactly what the parser used to and nothing else.
-//! The pseudo-TTL fields are the sharp edge: OPT's four bytes carry the
-//! extended RCODE, the EDNS version and the DO flag, and decrementing them
-//! would corrupt a response's DNSSEC signalling without failing to parse.
+//! Coverage for the wire-format TTL walk in `noadd::dns::ttl`: it must
+//! decrement exactly the TTLs a parser sees and nothing else. The sharp edge is
+//! OPT's pseudo-TTL (extended RCODE, EDNS version, DO flag), which decrementing
+//! would corrupt without failing to parse.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -202,9 +199,8 @@ fn an_opt_pseudo_ttl_is_left_alone() {
     );
 }
 
-/// TSIG's TTL must be transmitted as 0 (RFC 8945 §4.2), so it is not ours to
-/// decrement either. Built by hand: what matters to the walk is the TYPE and
-/// RDLENGTH, not whether the RDATA is a well-formed signature.
+/// TSIG's TTL must be transmitted as 0 (RFC 8945 §4.2). Built by hand: the walk
+/// reads only TYPE and RDLENGTH, not the signature.
 #[test]
 fn a_tsig_pseudo_ttl_is_left_alone() {
     let mut msg = response(0x0007, "example.com.", RecordType::A);
@@ -291,12 +287,9 @@ fn patching_rewrites_only_the_ttl_bytes() {
     );
 }
 
-/// A record type the walk has never heard of must not stop it: TYPE and
-/// RDLENGTH are all it reads, and the payload is opaque.
-///
-/// Built by appending to an encoded message rather than through hickory, whose
-/// decoder rejects the `RData::Unknown` its own encoder produces — and a record
-/// type this crate cannot represent is exactly the case worth covering.
+/// An unrecognised record type must not stop the walk: it reads only TYPE and
+/// RDLENGTH. Appended by hand because hickory's decoder rejects the
+/// `RData::Unknown` its own encoder produces.
 #[test]
 fn an_unknown_record_type_is_walked_past() {
     let mut msg = response(0x000A, "example.com.", RecordType::A);
@@ -315,8 +308,7 @@ fn an_unknown_record_type_is_walked_past() {
     bytes.extend_from_slice(&40u16.to_be_bytes());
     bytes.extend_from_slice(&[0xDE; 40]);
 
-    // A second A record after it, which is only reachable if the walk got the
-    // unknown record's length right.
+    // Reachable only if the walk got the unknown record's length right.
     let trailing_ttl_at = bytes.len() + 6;
     bytes.extend_from_slice(&[0xC0, 0x0C, 0x00, 1, 0x00, 0x01]);
     bytes.extend_from_slice(&450u32.to_be_bytes());

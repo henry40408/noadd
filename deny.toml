@@ -1,22 +1,19 @@
-# cargo-deny configuration — supply-chain checks for the dependency graph.
-# Run locally with `cargo deny check`; CI runs the same on every push and PR.
+# cargo-deny supply-chain checks: `cargo deny check`, also run in CI.
 
 [graph]
-# Check the dependency graph for all targets, not just the host's, so a
-# platform-specific dependency can't smuggle in a bad license or advisory.
+# Include every feature's dependencies, so an optional one can't smuggle in a
+# bad license or advisory.
 all-features = true
 
 [advisories]
 version = 2
-# Deny crates with a known security advisory (RUSTSEC) or that have been yanked.
-# `ignore` holds advisory IDs we've reviewed and consciously accept.
+# `ignore`: advisory IDs reviewed and accepted.
 yanked = "deny"
 ignore = []
 
 [licenses]
 version = 2
-# Permissive / public-domain-equivalent licenses only. Verify the active set
-# with `cargo deny list`; add a license here only after reviewing the crate.
+# Permissive licenses only; add one only after reviewing the crate.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -35,13 +32,11 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-# Duplicate transitive versions are common; surface them as a warning, not a
-# hard failure.
 multiple-versions = "warn"
 wildcards = "deny"
 
 [sources]
-# Only crates.io is trusted; an unknown registry or any git source is rejected.
+# Only crates.io; any other registry or git source is rejected.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

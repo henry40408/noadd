@@ -1,17 +1,9 @@
-//! The query log's live tail, which is the one thing on that page that only
-//! exists with a client.
+//! The query log's live tail: a real query must arrive after the page is open,
+//! which seeding a stopped database cannot show.
 //!
-//! It earns its own file because it is the only test here that needs the
-//! appliance to *answer* something while a browser is watching: the tail is
-//! server-pushed, so proving it works means making a real query arrive after
-//! the page is already open. Seeding the database the way `logs_no_js` does
-//! cannot show this — those rows are written while the server is stopped.
-//!
-//! The tail rides the shell's shared event stream (`/api/events?logs=1`) rather
-//! than a connection of its own, and switching it on re-opens that one
-//! connection with the subscription added. Two things therefore have to hold at
-//! once, and both are asserted here: a row arrives, and the status indicator on
-//! the other end of the same connection does not blink OFFLINE while it does.
+//! The tail rides the shell's event stream (`/api/events?logs=1`), and turning
+//! it on re-opens that one connection, so both are asserted: a row arrives, and
+//! the status indicator on the same connection does not blink OFFLINE.
 
 use anyhow::Result;
 use noadd_e2e::dom::Page;
@@ -45,16 +37,13 @@ pub async fn run() -> Result<Vec<String>> {
             async |_browser, page| {
                 open_logs(page, &session).await?;
 
-                // The status indicator is driven by the same connection the
-                // tail is about to join, so it has to be up before the toggle
-                // to mean anything after it.
+                // The indicator must be up before the toggle to mean anything after.
                 page.testid("server-status")
                     .expect_attr("data-state", "online")
                     .await?;
 
                 page.testid("logs-live-toggle").expect_visible().await?;
-                // Unlike the dashboard's, this button keeps its label and
-                // carries its state in a class, so that is what is asserted.
+                // Unlike the dashboard's, this toggle keeps its label; state is a class.
                 page.testid("logs-live-toggle")
                     .expect_class("paused")
                     .await?;
@@ -63,16 +52,13 @@ pub async fn run() -> Result<Vec<String>> {
                     .expect_not_class("paused")
                     .await?;
 
-                // Answered after the tail is on, so a row that appears cannot
-                // have come from the page's initial render. Whether an upstream
-                // resolves it is beside the point — noadd logs what it handled.
+                // Sent after the tail is on, so the row cannot come from the
+                // initial render. noadd logs it whether or not an upstream answers.
                 dns::send_query(dns_port, "tailed-query.example").await?;
 
                 page.expect_text("tailed-query.example").await?;
 
-                // Switching the tail on re-opens the shared connection. If that
-                // were reported as the server going away, the operator would
-                // watch the status bar drop to OFFLINE for clicking a toggle.
+                // Re-opening the connection must not read as the server going away.
                 page.testid("server-status")
                     .expect_attr("data-state", "online")
                     .await
@@ -90,8 +76,7 @@ pub async fn run() -> Result<Vec<String>> {
                     .expect_not_class("paused")
                     .await?;
 
-                // Off again. The subscription goes with it; the connection, and
-                // so the indicator, stays.
+                // Off again: the subscription goes, the connection stays.
                 page.testid("logs-live-toggle").click().await?;
                 page.testid("logs-live-toggle")
                     .expect_class("paused")
@@ -99,8 +84,8 @@ pub async fn run() -> Result<Vec<String>> {
 
                 dns::send_query(dns_port, "not-tailed.example").await?;
 
-                // A bounded negative: long enough that a row would have been
-                // pushed and prepended had the subscription survived.
+                // NOTE: this only re-checks the indicator, which is typically
+                // already online, so it adds no real delay before the absence check.
                 page.testid("server-status")
                     .expect_attr("data-state", "online")
                     .await?;

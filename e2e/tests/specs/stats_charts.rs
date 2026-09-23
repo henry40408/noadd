@@ -1,18 +1,12 @@
-//! The statistics charts are folded in the browser, and have to agree with the
-//! API that answers the same question on the server.
+//! The browser's chart folds (`timelineFromQuarters` / `heatmapFromQuarters` in
+//! `app.js`, over the page's UTC quarter-hour series) must equal what
+//! `/api/stats/v2/timeline` and `…/heatmap` answer for the same `tz_offset`,
+//! for every range and for offsets either side of UTC, including half- and
+//! three-quarter-hour zones. The folds take the offset as an argument, so the
+//! machine's own zone does not matter.
 //!
-//! The page ships its timeline and heatmap as quarter-hour counts on UTC
-//! boundaries, and `timelineFromQuarters` / `heatmapFromQuarters` in `app.js`
-//! fold them into the viewer's calendar. `/api/stats/v2/timeline` and
-//! `/api/stats/v2/heatmap` compute the same thing in SQL from a `tz_offset`.
-//! Two spellings of one rule drift, so this holds the JavaScript one to the SQL
-//! one for every range and for offsets on both sides of UTC, including the
-//! half- and three-quarter-hour zones — run in this browser, whatever zone the
-//! machine is in, because the folds take the offset as an argument.
-//!
-//! Its own noadd instance on dedicated ports. The seed keeps every row at
-//! least an hour clear of every window's edge, so the page and the API, asked
-//! a few seconds apart, are looking at the same rows.
+//! The seed keeps every row at least an hour clear of every window's edge, so
+//! the page and the API, asked seconds apart, see the same rows.
 
 use anyhow::{Context, Result};
 use noadd_e2e::dom::Page;
@@ -53,8 +47,7 @@ fn seed(now: i64) -> String {
         rows.push(row(now - 20 * DAY_MS - k * 11 * 60_000, k));
         rows.push(row(now - 60 * DAY_MS - k * 11 * 60_000, k));
     }
-    // Retention would otherwise prune the older rows on the first hourly tick,
-    // which fires as the server starts.
+    // Retention would otherwise prune the older rows at boot.
     format!(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', '120');\n\
          INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, \
@@ -150,9 +143,8 @@ pub async fn run() -> Result<Vec<String>> {
     Ok(suite.finish())
 }
 
-/// The API's cells in weekday-then-hour order, which is the order the fold
-/// returns them in. The SQL orders them the same way; this only keeps the
-/// comparison from depending on it.
+/// The API's cells in weekday-then-hour order, the fold's order, so the
+/// comparison does not depend on the server's ordering.
 fn sorted_cells(cells: &Value) -> Value {
     let mut cells = cells.as_array().cloned().unwrap_or_default();
     cells.sort_by_key(|c| (c["weekday"].as_i64(), c["hour"].as_i64()));

@@ -5,9 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-# One run per ref at a time. A newer push supersedes the run it interrupted;
-# a tag does not — a tagged build publishes one specific version and nothing
-# should quietly cancel it.
+# One run per ref; a newer push cancels the older run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -67,8 +65,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # cargo-llvm-cov installs the llvm-tools-preview component itself, so the
-      # toolchain needs no extra declaration beyond rust-toolchain.toml.
+      # cargo-llvm-cov installs llvm-tools-preview itself.
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
@@ -103,24 +100,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # `e2e` is its own workspace, deliberately outside the one at the
-          # repository root, so it has to be named or none of its dependencies
-          # are cached.
+          # `e2e` is its own workspace; unnamed, its dependencies go uncached.
           workspaces: |
             .
             e2e
 
-      # The suites start this binary themselves; building it here keeps the
-      # compile off their own timeouts, and the admin UI is embedded at compile
-      # time, so a stale binary would be testing yesterday's markup.
+      # The suites boot this binary; building it first keeps the compile off
+      # their timeouts and embeds the current admin UI.
       - name: Build noadd (embeds the admin UI)
         run: cargo build
 
-      # `e2e` is linted here rather than in `check`, so it shares the build this
-      # job already pays for. It is deliberately outside `cargo deny`: the
-      # browser stack pulls in licences the server's allow-list does not carry,
-      # and none of it is distributed — the Docker image contains the server
-      # alone.
+      # Linted here to share this job's build. Deliberately outside `cargo deny`:
+      # the browser stack's licences aren't on the allow-list, and none of it
+      # ships in the image.
       - name: Check formatting (e2e)
         working-directory: e2e
         run: cargo fmt --check
@@ -129,8 +121,7 @@ jobs:
         working-directory: e2e
         run: cargo clippy --all-targets -- -D warnings
 
-      # No browser install step: `WebDriver::managed` downloads a matching
-      # chromedriver on demand, and the runner image already ships Chrome.
+      # `WebDriver::managed` fetches chromedriver; the runner ships Chrome.
       - name: Run the Cucumber features
         working-directory: e2e
         run: cargo test --test e2e

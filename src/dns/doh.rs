@@ -21,8 +21,8 @@ use crate::net::{TrustedProxies, extract_client_ip};
 
 const DNS_MESSAGE_CONTENT_TYPE: &str = "application/dns-message";
 
-/// RFC 8484 §6: POST requests MUST use `application/dns-message` Content-Type.
-/// Returns true if header is present and acceptable (or absent).
+/// A POST's Content-Type must be `application/dns-message` (RFC 8484); an
+/// absent header is accepted.
 fn post_content_type_ok(headers: &HeaderMap) -> bool {
     let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) else {
         return true;
@@ -53,13 +53,9 @@ pub struct DohState {
     pub trusted_proxies: Arc<TrustedProxies>,
 }
 
-/// Create an axum Router with `DoH` endpoints per RFC 8484.
-///
-/// Access policy is controlled by the `doh_access_policy` setting:
-/// - `"deny"` (default when tokens exist): unauthenticated requests are rejected (403)
-/// - `"allow"`: all requests are allowed, even without a token
-///
-/// Token-authenticated route: `/dns-query/{token}`
+/// `DoH` router (RFC 8484): `/dns-query` and token-authenticated
+/// `/dns-query/{token}`. The `doh_access_policy` setting `"deny"` rejects
+/// tokenless requests (403); anything else, including unset, allows them.
 pub fn doh_router(
     handler: Arc<DnsHandler>,
     db: Database,
@@ -87,8 +83,7 @@ fn client_ip_for(
     extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
-/// Determine if unauthenticated access is allowed.
-/// Returns true unless policy is explicitly set to "deny".
+/// Whether tokenless access is allowed: unless the policy is `"deny"`.
 async fn is_open_access(db: &Database) -> bool {
     if let Ok(Some(policy)) = db.get_setting("doh_access_policy").await {
         return policy.trim() != "deny";
@@ -207,8 +202,8 @@ async fn handle_dns_query(
                 error = %e,
                 "query handler failed; answering SERVFAIL"
             );
-            // RFC 8484 §4.2.1: return HTTP 200 with DNS SERVFAIL, not HTTP 500.
-            // HTTP 500 causes iOS to penalize/disable the resolver entirely.
+            // RFC 8484 §4.2.1: HTTP 200 with SERVFAIL, not 500, which makes iOS
+            // disable the resolver.
             let servfail = handler::build_servfail(query_bytes);
             dns_response(servfail, 0)
         }

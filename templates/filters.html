@@ -1,26 +1,14 @@
 {#
   The filters page: domain test, filter lists, custom rules.
 
-  Every action here is a real form. The domain test is a GET, so its verdict
-  lands in the URL and survives a refresh; everything that changes a filter is a
-  POST that redirects. `app.js` takes each of them over — the same buttons, the
-  same ids — and talks to `/api/*` instead, so with JavaScript the page behaves
-  exactly as it always has.
-
-  The registry browser used to be the exception — a modal `app.js` mounted on
-  `document.body`, and the one control here that did nothing without
-  JavaScript. It has its own page now (`templates/registry.html`), so "Browse
-  Registry" is an ordinary link.
+  Every action is a real form: the domain test is a GET, so its verdict lands in
+  the URL; every change is a POST that redirects. `app.js` takes each over —
+  same buttons, same ids — and talks to `/api/*` instead.
 #}
 {% extends "shell.html" %}
 
 {% block page %}
-      {#
-        Wrapped in the custom element the client already defines, so it upgrades
-        in place and enhances this markup rather than replacing it. Nothing
-        mounts it: every page ships its own element now, so `app.js` has no
-        path-to-component table left.
-      #}
+      {# Upgrades in place, enhancing this markup rather than replacing it. #}
       <filters-page>
       <div class="page-header fade-in"><h2>Filters</h2><p>Domain test, filter lists, and custom rules</p></div>
       {%- if shell.filters_saved %}
@@ -42,10 +30,7 @@
       <div class="card fade-in">
         <div class="card-title">Domain Test</div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Check whether a domain is allowed or blocked by your current filters.</p>
-        {#
-          GET, not POST: a test changes nothing, and putting the domain in the
-          query string is what makes the verdict refreshable and linkable.
-        #}
+        {# GET: a test changes nothing, and the verdict stays refreshable and linkable. #}
         <form method="get" action="/filters" class="input-row" id="domain-test-form">
           <input type="text" id="test-domain" name="test" data-testid="domain-test-input" placeholder="ads.example.com" value="{{ test_domain }}"{% if !domain_suggestions.is_empty() %} list="domain-list"{% endif %} autocomplete="off">
           {% if !domain_suggestions.is_empty() %}
@@ -85,7 +70,7 @@
           <form method="post" action="/filters/lists/update">
             <button type="submit" class="btn btn-primary btn-sm" id="update-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Update All</button>
           </form>
-          {# A page of its own now, so this is a link and needs no client. #}
+          {# A page of its own, so a plain link. #}
           <a class="btn btn-sm" href="/filters/registry" id="browse-registry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Browse Registry</a>
         </div>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Impact is what you would stop blocking by turning a list off. Two lists holding the same rules both read <em>No impact</em> — turn one off at a time, and the rest recompute.</p>
@@ -96,9 +81,8 @@
           <tr data-testid="filter-list-row" data-name="{{ l.name }}">
             <td>
               {#
-                One form per row rather than one for the table: a browser posts
-                only the form that was submitted, so a single form would need
-                every row's state in it and would report every row as changed.
+                One form per row: a table-wide form would carry every row's
+                state and report every row as changed.
               #}
               <form method="post" action="/filters/lists/{{ l.id }}/toggle" class="list-toggle-form">
                 <label class="toggle">
@@ -112,17 +96,13 @@
             </td>
             <td class="text-primary">{{ l.name }}</td>
             <td>{{ l.rule_count }}</td>
-            {#
-              What turning this list off would actually cost. Zero is the value
-              an operator acts on, so it is a badge rather than a number.
-            #}
+            {# What turning this list off would unblock. Zero is what an operator acts on, so it is a badge. #}
             <td data-testid="filter-list-impact">{% if l.impact_none %}<span class="badge badge-off">{{ l.impact_text }}</span>{% else %}{{ l.impact_text }}{% endif %}</td>
             <td><span class="timeago" data-ts="{{ l.last_updated }}">{{ l.last_updated_text }}</span></td>
             <td style="white-space:nowrap">
               {#
-                A link, not a button: without JavaScript it expands this row
-                into an edit form on the server. `app.js` cancels the
-                navigation and opens the dialog it always has.
+                A link: the server expands this row into an edit form. `app.js`
+                cancels the navigation and opens its dialog instead.
               #}
               <a href="/filters?edit={{ l.id }}" class="btn btn-sm edit-list" data-id="{{ l.id }}" data-name="{{ l.name }}" data-url="{{ l.url }}">Edit</a>
               <form method="post" action="/filters/lists/{{ l.id }}/delete" class="inline-form">

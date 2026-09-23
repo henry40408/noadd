@@ -1,14 +1,8 @@
 //! Per-client-IP token bucket rate limiter for incoming DNS queries.
 //!
-//! One noisy device (misconfigured, infected, running a scanner) can easily
-//! emit hundreds of queries per second. Without isolation, it starves the
-//! shared DNS cache of space for other clients' records and burns the
-//! upstream provider's per-source quota. This module bounds each IP's rate
-//! independently so a single client's excess traffic can't harm the rest.
-//!
-//! The bucket fills at `qps` tokens/sec up to `burst` tokens. Each query
-//! consumes one token; a query arriving with no tokens is rejected (the
-//! caller should respond with DNS REFUSED or drop it).
+//! Keeps one noisy device from starving the shared cache and upstream quota.
+//! Each IP's bucket fills at `qps` tokens/sec up to `burst`; a query with no
+//! token is rejected (the handler answers REFUSED).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -31,13 +25,8 @@ pub struct IpRateLimiter {
 }
 
 impl IpRateLimiter {
-    /// Create a new limiter.
-    ///
-    /// - `qps`: steady-state refill rate in tokens/sec per IP
-    /// - `burst`: maximum tokens a single IP may accumulate
-    ///
-    /// Passing `qps == 0` yields a limiter that allows every query (useful
-    /// for tests and opt-out deployments).
+    /// `qps`: refill rate per IP; `burst`: bucket capacity. `qps == 0` allows
+    /// every query.
     pub fn new(qps: u32, burst: u32) -> Self {
         Self {
             qps: qps as f64,
@@ -46,8 +35,7 @@ impl IpRateLimiter {
         }
     }
 
-    /// Returns `true` and consumes one token when the caller is allowed.
-    /// Returns `false` when the bucket for this IP is empty.
+    /// Consume a token for `ip`; `false` when its bucket is empty.
     pub fn try_acquire(&self, ip: IpAddr) -> bool {
         if self.qps == 0.0 {
             return true;
@@ -71,9 +59,7 @@ impl IpRateLimiter {
         }
     }
 
-    /// Drop buckets for IPs unseen for longer than `max_age`. Call
-    /// periodically from a background task to stop the map growing without
-    /// bound on a public-facing deployment.
+    /// Drop buckets unseen for `max_age`; call periodically to bound the map.
     pub fn prune(&self, max_age: Duration) -> usize {
         let now = Instant::now();
         let mut map = self.buckets.lock();
@@ -82,7 +68,7 @@ impl IpRateLimiter {
         before - map.len()
     }
 
-    /// Current number of tracked IPs. Exposed for observability / tests.
+    /// Number of tracked IPs.
     pub fn tracked_ips(&self) -> usize {
         self.buckets.lock().len()
     }

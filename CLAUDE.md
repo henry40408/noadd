@@ -9,7 +9,7 @@ noadd is a single-binary, self-hosted DNS ad-blocker (plain DNS + DNS-over-HTTPS
 ## Commands
 
 ```bash
-cargo build                              # debug; embeds admin-ui/dist, downloads lists via build.rs
+cargo build                              # debug; embeds admin-ui/dist, runs build.rs
 cargo nextest run                        # tests — nextest, not `cargo test` (CI uses nextest)
 cargo nextest run filter_engine          # by name substring
 cargo nextest run -E 'test(parse_hosts)' # nextest filter expression
@@ -21,11 +21,11 @@ cargo deny check                         # advisories, licenses, bans, sources
 RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Integration tests live in `tests/`, not `src/`; shared helpers in `tests/common/`. Files ending `_bench.rs` are benchmark-style tests run by the normal test command.
+Integration tests live in `tests/` (shared helpers in `tests/common/`). Files ending `_bench.rs` are benchmark-style tests run by the normal test command.
 
 ### End-to-end (admin UI)
 
-`cucumber` + `thirtyfour` in `e2e/`, which is **its own cargo workspace** — deliberately outside the root one, so a `--workspace` coverage run never compiles the browser stack or drives a real browser. There is no Node.js anywhere in this repository. The suites boot the `noadd` binary themselves, so **`cargo build` first** or the UI under test is stale.
+`cucumber` + `thirtyfour` in `e2e/`, **its own cargo workspace** so a `--workspace` coverage run never compiles the browser stack. No Node.js anywhere. The suites boot the `noadd` binary themselves, so **`cargo build` first** or the UI under test is stale.
 
 ```bash
 cargo build
@@ -35,173 +35,173 @@ cargo test --test specs      # the regression specs
 cargo run --bin screenshots  # re-seeds fake traffic, re-captures docs/screenshots/
 ```
 
-A local **Chrome or Chromium is a prerequisite**: `WebDriver::managed` downloads and supervises a matching chromedriver, but not the browser, which is the one capability Playwright had and this does not (`brew install --cask ungoogled-chromium`; CI's runner image already ships Chrome).
+A local **Chrome or Chromium is required**: `WebDriver::managed` fetches a matching chromedriver but not the browser (`brew install --cask ungoogled-chromium`; CI's runner ships Chrome).
 
-Gherkin features in `e2e/features/` — unchanged by the port, `cucumber` reads the same files — with steps in `e2e/tests/e2e/steps.rs`. Which instance a feature runs against is the tag it already carried (`@app`, `@auth`, `@onboarding`); `tests/e2e/main.rs` starts one server per tag and a `before` hook picks by it.
+Features are in `e2e/features/`, steps in `e2e/tests/e2e/steps.rs`. A feature's tag (`@app`, `@auth`, `@onboarding`) picks its instance: `e2e/tests/e2e/main.rs` starts one server per tag and a `before` hook selects by it.
 
-Destructive scenarios (password changes), anything needing its own login rate-limit budget, and anything needing the appliance to *answer* something while a browser watches (`logs_live_tail.rs`, which sends a real DNS query to prove the tail streams) get a self-contained file in `e2e/tests/specs/` with dedicated ports — see `settings_autosave.rs`. Those files run concurrently, capped at `available_parallelism` and four; cases *within* a file run in the order they are written, which several depend on.
+Destructive scenarios (password changes), anything needing its own login rate-limit budget, and anything needing the appliance to *answer* while a browser watches (`logs_live_tail.rs`) get a self-contained file in `e2e/tests/specs/` with dedicated ports — see `settings_autosave.rs`. Files run concurrently, capped at `available_parallelism` and four; cases *within* a file run in written order, which several depend on.
 
-Two Playwright conveniences are rebuilt in `e2e/src/`, and are the first place to look when an assertion behaves oddly:
+Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when an assertion behaves oddly:
 
-- **`expect()` retried; `WebDriver` does not.** Every `Locator::expect_*` in `src/dom.rs` polls for 30 s and reports the last value it saw.
-- ⚠️ **Text is `textContent`, not the rendered text.** WebDriver's "Get Element Text" applies `text-transform`, and this UI uppercases badges and headings in CSS — a verdict written `Blocked` comes back as `BLOCKED`. `Locator::text` reads `textContent` so assertions are phrased against the markup, not the stylesheet.
+- **`WebDriver` does not retry.** Every `Locator::expect_*` in `src/dom.rs` polls for 30 s and reports the last value seen.
+- ⚠️ **Text is `textContent`, not rendered text.** WebDriver's "Get Element Text" applies `text-transform`, and this UI uppercases badges and headings in CSS (`Blocked` reads as `BLOCKED`). `Locator::text` reads `textContent`, so assert against the markup.
 
-**Every page has no-JS coverage**, in four files using `Profile::no_js()` — `Emulation.setScriptExecutionDisabled` (what Playwright's `javaScriptEnabled: false` did underneath) and a pinned 1024×600 viewport: `filters_no_js`, `logs_no_js`, `stats_no_js` and `pages_no_js` (the dashboard, settings and account together — unlike the other three, none of them seeds or empties anything, so they share one instance instead of booting three). Ports run 14107–14110 with DNS on 15107–15110; a new file takes the next pair from `ports` in `e2e/src/lib.rs`, where every instance's ports now live in one place.
+**Every page has no-JS coverage** in four files using `Profile::no_js()` (`Emulation.setScriptExecutionDisabled`, 1024×600 viewport): `filters_no_js`, `logs_no_js`, `stats_no_js` and `pages_no_js` (dashboard, settings and account on one shared instance, since none seeds or empties anything). Ports 14107–14110, DNS 15107–15110. Every instance's ports live in `ports` in `e2e/src/lib.rs`; a new file takes the next free pair there.
 
-⚠️ **`setScriptExecutionDisabled` applies to the *next* document**, so sessions are per-case and the flag is set before the first navigation. It also stops the page's own scripts only — `Execute Script` still runs, which is what lets the no-JS files measure anything. The exception is a callback the DOM has to invoke: a `TreeWalker` filter is page script and is refused, so `Page::has_text` walks the elements itself.
+⚠️ **`setScriptExecutionDisabled` applies to the *next* document**, so sessions are per-case and the flag is set before the first navigation. It stops only page scripts — `Execute Script` still runs — but a DOM callback such as a `TreeWalker` filter counts as page script and is refused, so `Page::has_text` walks elements itself.
 
-⚠️ **A browser posts the whole form, so a no-JS save has to satisfy every field on it.** A fresh appliance has no upstream configured, and saving settings without one is a rejection, not a partial write — which is why `pages_no_js` fills the upstream before it saves anything. This is the correct behaviour (`apply_settings` validates before it persists so a bad entry cannot leave half a save applied); it just means a test that fills one field and submits is testing the rejection path whether it meant to or not.
+⚠️ **A browser posts the whole form, so a no-JS save must satisfy every field.** A fresh appliance has no upstream, and saving settings without one is rejected outright (`apply_settings` validates before persisting), so `pages_no_js` fills the upstream first. A test that fills one field and submits is testing the rejection path.
 
 ## Build-time behavior (`build.rs`)
 
-- Downloads the six built-in filter lists via `curl` into `OUT_DIR/lists/`. On network failure it writes an empty file and warns rather than failing.
+- Downloads six filter lists via `curl` into `OUT_DIR/lists/`; on network failure writes an empty file and warns. (Nothing in `src/` currently reads them; first-run defaults come from `DEFAULT_LISTS` in `src/filter/lists.rs`.)
 - Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
-- Stamps `GIT_VERSION` from `git describe` (override via the env var; a literal `dev` counts as unset). `.dockerignore` excludes `.git`, so image builds must pass `--build-arg GIT_VERSION=...`; an arg-less `docker build` yields a working image labelled `dev`.
+- Stamps `GIT_VERSION` from `git describe` (env var overrides; a literal `dev` counts as unset). `.dockerignore` excludes `.git`, so image builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
 
 ## Admin UI
 
-**Routing and authentication are server-side.** `src/admin/pages.rs` renders the browser-facing HTML from `templates/` (askama, compile-time). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing any HTML, redirecting to `/login?next=…` or `/setup` when there is none. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is ordinary links with full page loads; there is no client-side router.
+**Routing and authentication are server-side.** `src/admin/pages.rs` renders `templates/` (askama). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing HTML, redirecting to `/login?next=…` or `/setup`. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is plain links; no client-side router.
 
-Sign-in and setup need **no CSRF token** — tower-http's `CsrfLayer` (wired in `admin_router`; documented, and its rejections logged, in `src/admin/csrf.rs`) is a header-based origin guard covering every unsafe method on the router, so a cross-origin form post is refused before it reaches a handler.
+Sign-in and setup need **no CSRF token**: tower-http's `CsrfLayer` (wired in `admin_router`; documented and its rejections logged in `src/admin/csrf.rs`) is a header-based origin guard over every unsafe method, refusing cross-origin form posts before any handler.
 
-Password sign-in lives in **one** place, `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, the constant Argon2 cost, the lockout and the audit events are all in there — do not grow a second path.
+Password sign-in lives **only** in `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, constant Argon2 cost, lockout and audit events are all there — do not grow a second path.
 
-**The shell is server-rendered too** (`templates/shell.html`): topbar, both navigation bars, status bar, and any one-shot notice. `app.js` does not render it and must not re-derive what it already decided — the active nav item is a class the template set from the path it answered. Only `#page-content` is left for the client, and even that arrives rendered: the page's custom element is in the markup and upgrades in place, so `app.js` enhances a body it never had to build. The nav table lives once, in `NAV` (`src/admin/pages.rs`), and drives both the desktop strip and the mobile F-key bar.
+**The shell is server-rendered** (`templates/shell.html`): topbar, both nav bars, status bar, one-shot notices. `app.js` must not re-derive what it decided — e.g. the active nav item is a class set from the path. The nav table is `NAV` (`src/admin/pages.rs`), driving both the desktop strip and the mobile F-key bar.
 
-Page bodies are still **vanilla-JS web components — no framework, no build step**, in `admin-ui/dist/`: `app.css` and `app.js`. There is no `index.html` and **no SPA fallback** — every page path is a real route, so an unmatched path 404s. The directory is embedded via `include_dir!` in `src/admin/api.rs` (`ADMIN_UI`). Editing the UI means editing `app.js`, `app.css`, or a file under `templates/`, then `cargo build` to re-embed. Assets are served with a content-hash `ETag` + `Cache-Control: no-cache`, computed per file; server-rendered pages get `no-store` from the same layer, which keys on whether a response already declares a policy.
+Page bodies are **vanilla-JS web components — no framework, no build step** — in `admin-ui/dist/app.css` and `app.js`. No `index.html`, **no SPA fallback**: an unmatched path 404s. The directory is embedded via `include_dir!` (`ADMIN_UI`, `src/admin/api.rs`), so edit `app.js`, `app.css` or `templates/`, then `cargo build`. Assets get a per-file content-hash `ETag` + `Cache-Control: no-cache`; server-rendered pages get `no-store` from the same layer, which applies only when a response declares no policy.
 
-One-shot notices ride a **flash cookie** (`Flash` in `src/admin/pages.rs`), read and cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
+One-shot notices ride a **flash cookie** (`Flash`, `src/admin/pages.rs`), cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
 
-### Server-rendering a page body (the P3 pattern)
+### Server-rendering a page body
 
-Settings is the worked example; the remaining pages follow it.
+Settings is the worked example.
 
-- The page template `{% extends "shell.html" %}` and fills `{% block page %}`. Its struct embeds `ShellData` as a `shell` field — `shell.html` reads `shell.*`.
-- **Wrap the body in the page's existing custom element** (`<settings-page>…</settings-page>`). It upgrades in place, so `app.js` enhances the rendered markup instead of replacing it. Every page does this now, so `app.js` has **no bootstrap that mounts a page**: the path→component table and the "only when `#page-content` is empty" branch went with the last page converted, and so did `shell_page` / `ShellTemplate`.
-- Validation lives in **one** function shared with the JSON endpoint (`apply_settings`), returning a field-tagged error so the form can put the message next to the offending input while the API keeps answering a bare 400.
-- A successful POST redirects with a flash; a rejected one re-renders **with the submitted values**, not the stored ones, at 400/401 — never 200.
-- When `app.js` enhances a form, it removes the no-JS submit row (`#settings-save-row`) rather than hiding it, and any submit button it takes over must `preventDefault()`.
-- **`load()` must not refill fields the server rendered.** Doing so overwrites what the operator typed in the window before the response lands — a real bug this pattern removed.
+- The template `{% extends "shell.html" %}` and fills `{% block page %}`; its struct embeds `ShellData` as `shell`.
+- **Wrap the body in the page's custom element** (`<settings-page>…</settings-page>`), which upgrades in place; `app.js` enhances the markup and never mounts a page.
+- Validation lives in **one** function shared with the JSON endpoint (`apply_settings`), returning a field-tagged error so the form shows it by the input while the API returns a bare 400.
+- A successful POST redirects with a flash; a rejected one re-renders **with the submitted values** at 400/401 — never 200.
+- When `app.js` enhances a form it removes (not hides) the no-JS submit row (`#settings-save-row`), and any submit button it takes over must `preventDefault()`.
+- **`load()` must not refill server-rendered fields**, or it overwrites what the operator typed before the response landed.
 
-⚠️ A `querySelector` that returns `null` in a `connectedCallback` throws and **silently kills every binding after it**. When moving markup to a template, check that every id `app.js` reaches for still exists.
+⚠️ A `querySelector` returning `null` in `connectedCallback` throws and **silently kills every binding after it**. When moving markup to a template, check every id `app.js` reaches for still exists.
 
-Filters adds the conventions for a page whose body is a *list of things*:
+Filters — a page whose body is *a list of things*:
 
-- **A read is a GET, a change is a POST.** The domain test posts nothing — it is `GET /filters?test=…`, so the verdict is refreshable, linkable, and survives the back button. Every mutation is its own route (`/filters/lists/{id}/toggle`, `…/edit`, `…/delete`, `/filters/rules`, …) rather than one endpoint switching on an action field: a form's target is the clearest statement of what it does.
-- **One form per row, not one for the table.** A browser posts only the form that was submitted, so a table-wide form would have to carry every row's state and would report every row as changed.
-- **Row state that needs a client lives in the URL.** Editing a list is `GET /filters?edit={id}`, which expands that row into a form the server filled *from storage* — never from the query string, so a link cannot pre-fill a form with values it carried. With JavaScript the same control is an `<a>` whose click is cancelled in favour of the dialog.
-- **`.nojs-only` / `.js-only`.** Both ship in the state that is correct when the script never arrives: `app.js` removes the first and unhides the second. A control that needs a client (the registry modal) ships `hidden` rather than sitting there doing nothing.
-- **A number an operator acts on is read from where the fact lives.** The Impact column — what would stop being blocked if a list were removed — comes off the live engine (`FilterEngine::unique_rules_by_list`), not from storage: it is a property of the rule set currently loaded, and every list change already triggers the rebuild that recomputes it. `list_impact` (`src/admin/pages.rs`) and `listImpact` (`app.js`) must phrase it identically, the same way the number formatters do.
-- **Two lists holding the same rules both report "No impact"**, because removing either *on its own* changes nothing — and removing both would not. That is a true answer to the question each row asks, so the page tells the operator to turn one off at a time rather than the column pretending to answer a question about sets.
-- **`app.js` re-draws rows in the same shape the template emits**, forms included, so a redrawn row is the row the server would have sent and one set of bindings applies to either.
-- Values the page derives (thousands separators, "5 minutes ago") are computed **server-side to match what `app.js` produces** for the same column — a formatting rule living in two languages drifts.
+- **A read is a GET, a change is a POST.** The domain test is `GET /filters?test=…` (refreshable, linkable). Each mutation is its own route (`/filters/lists/{id}/toggle`, `…/edit`, `…/delete`, `/filters/rules`, …), not one endpoint switching on an action field.
+- **One form per row**, since a browser posts only the submitted form.
+- **Row state that needs a client lives in the URL.** `GET /filters?edit={id}` expands that row into a form filled *from storage*, never from the query string. With JavaScript the same `<a>` opens a dialog instead.
+- **`.nojs-only` / `.js-only`** ship in the no-script-correct state: `app.js` removes the first and unhides the second. A client-only control (the registry modal) ships `hidden`.
+- **The Impact column comes from the live engine** (`FilterEngine::unique_rules_by_list`), not storage; every list change already triggers the rebuild that recomputes it. `list_impact` (`src/admin/pages.rs`) and `listImpact` (`app.js`) must phrase it identically.
+- **Two lists with the same rules both report "No impact"** — true for removing either alone — so the page says to turn one off at a time.
+- **`app.js` redraws rows in the template's exact shape**, forms included, so one set of bindings serves both.
+- Derived values (thousands separators, "5 minutes ago") are computed **server-side to match `app.js`**.
 
-The registry browser (`/filters/registry`) adds the conventions for **a picker that batch-submits**:
+Registry browser (`/filters/registry`) — **a picker that batch-submits**:
 
-- **Two forms, never nested.** The three filters are a `method="get"` form whose state lands in the URL; the selection is a `method="post"` form wrapping the rows. A GET form cannot also be a POST form, and forms cannot nest — the same constraint the query log's Clear All hit.
-- **Filtering by navigating clears the selection, and `app.js` is what fixes that.** With a client the same three controls hide rows in place, so the ticks survive a change of search and the counts keep up. That is the enhancement — not different behaviour, just less lost.
-- **The form posts ids; the server decides what they mean.** A browser sends one `filter_id` per ticked box, and the name and URL are looked up in the registry rather than trusted from the body. `Form<Vec<(String, String)>>` is the one shape that keeps repeated keys — `serde_urlencoded` will not fill a `Vec` from them any other way.
-- **`add_lists_batch` (`src/admin/api.rs`) is the only batch-add path**, shared with `POST /api/lists/batch`: one concurrency cap, one per-item rollback, one rebuild.
-- **A full success redirects; a partial failure renders.** The reasons a list could not be added exist in that response and nowhere else, which is the same exception minting an API key takes.
-- **A third party being unreachable is a state the page renders**, with a retry that is an ordinary link back to the same URL — not a spinner, and not a 502.
-- ⚠️ **`safe_url` (`src/admin/pages.rs`) is what keeps a `javascript:` homepage out of an `href`.** Escaping keeps a value inside its attribute; it does not stop the browser navigating to it. Only absolute `http(s)` survives, and the coverage for it is Rust now (`a_hostile_homepage_never_becomes_a_link`) — the registry is fetched server-side, so a browser-side route stub no longer intercepts it.
+- **Two forms, never nested**: a `method="get"` form for the three filters (state in the URL) and a `method="post"` form wrapping the rows.
+- **Filtering by navigating clears the selection**; with a client, `app.js` hides rows in place so ticks and counts survive.
+- **The form posts ids; the server looks up name and URL** in the registry rather than trusting the body. `Form<Vec<(String, String)>>` is the shape that keeps repeated `filter_id` keys.
+- **`add_lists_batch` (`src/admin/api.rs`) is the only batch-add path**, shared with `POST /api/lists/batch`: one concurrency cap, per-item rollback, one rebuild.
+- **Full success redirects; partial failure renders**, since the per-item reasons exist only in that response.
+- **An unreachable registry is a rendered state** with a retry link to the same URL — not a spinner, not a 502.
+- ⚠️ **`safe_url` (`src/admin/pages.rs`) keeps a `javascript:` homepage out of an `href`** — escaping does not stop navigation. Only absolute `http(s)` survives; covered by `a_hostile_homepage_never_becomes_a_link`.
 
-The query log adds the conventions for **filtering and paging**:
+Query log — **filtering and paging**:
 
-- **The whole view is in the URL** — `/logs?q=&action=&type=&token=&page=`. The filters are a `method="get"` form and the pager is two `<a>`s, so both work with no client; `app.js` reads the same query string back on connect and adopts it rather than resetting to page one of everything.
-- **The pager carries every filter.** Dropping them looks like the filter stopped working rather than like the page changed, so `logs_query_string` rebuilds the whole query with only `page` replaced.
-- **A row action carries where it was invoked from** in a `next` field, validated by the same `safe_next` the sign-in page uses, so acting on row 40 of page 3 of a filtered view returns there.
-- **An empty table means two things and says which**: the empty-log guide when nothing is filtered, "No logs found" when something is.
-- **Clearing answers on an unfiltered first page** whatever view it came from — every filter now matches nothing, and "No logs found" would read as the filter breaking.
-- ⚠️ **A GET form and a POST form cannot be the same form, and forms cannot nest.** Clear All stays on the filters row via `form="clear-logs-form"`, pointing at an empty POST form after it. `app.js` must bind the confirmation to *that* form, not to `closest('form')`.
-- **The live tail is a subscription, not a connection.** It rides the shell's stream (see *The event stream*), so the page owns no `EventSource` of its own; `_prependRow` still drops what arrives while the tail is off, which is why the listener is registered once for the page's life rather than added and removed with the toggle.
-- ⚠️ **This toggle keeps its label.** It carries its state in a `paused` class, unlike the dashboard's, which rewrites its own text — a test asserting on `"PAUSED"` here passes against nothing.
-- The relative times are the one thing deliberately **not** matched between the two halves: the server renders `"3 minutes ago"` and the client's ticker replaces it with the browser's locale via `Intl.RelativeTimeFormat` (`"3 min. ago"`). The server cannot know the locale, and the alternative is shipping no time at all without scripting.
+- **The whole view is in the URL**: `/logs?q=&action=&type=&token=&page=`. Filters are a GET form, the pager two `<a>`s; `app.js` adopts the query string on connect.
+- **The pager carries every filter**: `logs_query_string` rebuilds the query with only `page` replaced.
+- **A row action carries its origin** in a `next` field, validated by `safe_next`, so it returns to the same page and filter.
+- **An empty table says which case it is**: the empty-log guide when unfiltered, "No logs found" when filtered.
+- **Clearing lands on an unfiltered first page** whatever view it came from.
+- ⚠️ **Forms cannot nest.** Clear All sits in the filters row via `form="clear-logs-form"`, pointing at an empty POST form after it; `app.js` must bind its confirmation to *that* form, not `closest('form')`.
+- **The live tail is a subscription on the shell's stream** (see *The event stream*); the page owns no `EventSource`. `_prependRow` drops what arrives while the tail is off, so the listener is registered once for the page's life.
+- ⚠️ **This toggle keeps its label** and carries state in a `paused` class (the dashboard's rewrites its text) — asserting `"PAUSED"` here passes against nothing.
+- Relative times are the one deliberate mismatch: the server renders `"3 minutes ago"`, the client replaces it via `Intl.RelativeTimeFormat` in the browser's locale.
 
-Dashboard adds the conventions for a page that is **all readings and no controls**:
+Dashboard — **all readings, no controls**:
 
-- **The numbers are in the first response.** `dashboard_page` makes the five reads `app.js` used to make on its poll — `compute_summary`, `compute_top_domains_and_clients` and `compute_top_upstreams` in `src/admin/stats.rs` — the same functions the `stats` snapshot calls every tick, which is why the domain and client lists come from one scan rather than one each. A failed read renders zeroes rather than an error page: a dashboard that says nothing beats one that will not load.
-- **`app.js` re-draws the same markup from a pushed snapshot**, so every shape in the template has a counterpart in `DashboardPage`. The five polls are gone: the numbers arrive as `stats` events on the shared stream (see *The event stream* below), and `_apply` reads the same five response bodies the fetches returned, so every renderer is the one that read them before. Number formatting is duplicated in Rust to match (`format_num_adaptive`, `percent1`, `share_percent`, `format_qps`) — a count that changed its own notation when an update landed would read as a change in the number.
-- **The chart is the documented exception** to no-JS: it is drawn from a timeline series by the client. The card says so rather than sitting empty, and the client replaces that text on connect.
-- ⚠️ **A conditional `style` must be merged into the element's existing one.** Two `style` attributes means the second is dropped — the chart card's `animation-delay` and its `display:none` are one attribute for that reason.
+- **The numbers are in the first response.** `dashboard_page` calls `compute_summary`, `compute_top_domains_and_clients` and `compute_top_upstreams` (`src/admin/stats.rs`) — the same functions the `stats` snapshot uses each tick (`compute_snapshot` adds `compute_timeline`). A failed read renders zeroes rather than an error page.
+- **`app.js` redraws the same markup from pushed snapshots**; every template shape has a counterpart in `DashboardPage`, and `_apply` reads the snapshot's five bodies (summary, timeline, top domains, clients, upstreams). Number formatting is duplicated in Rust to match (`format_num_adaptive`, `percent1`, `share_percent`, `format_qps`), so a count never changes notation when an update lands.
+- **The chart is the documented no-JS exception**: drawn client-side, and the card says so until the client replaces that text.
+- ⚠️ **Merge a conditional `style` into the element's existing one.** A second `style` attribute is dropped — the chart card's `animation-delay` and `display:none` share one attribute for that reason.
 
-Statistics adds the conventions for a page whose readings sit in a **chosen window**, and the rule for **what the server cannot render**:
+Statistics — readings in a **chosen window**, and what the server cannot render:
 
-- **Let the data draw the line, not the page.** Only the three charts need a calendar, and a calendar-aligned bucket needs the viewer's UTC offset, which arrives with the browser and not with the request. Everything else is a plain `now - range` window with no calendar in it, so it renders on the server and never moves again: the highlights, both breakdowns, both ranged lists and the health grid are all in the first response.
-- **The charts' data is in the first response too, just not in the viewer's calendar.** `<stats-page data-series>` is a `QuarterSeries` (`src/db.rs`) — query counts per quarter hour on UTC boundaries, out of the same scan as the breakdowns — and `timelineFromQuarters` / `heatmapFromQuarters` in `app.js` fold it into the browser's hours and days. That is exact, not approximate: every offset in use is a whole number of quarter hours, so no quarter straddles a local hour. The page makes no request for its charts. `/api/stats/v2/timeline` and `…/heatmap` still take `tz_offset` for API callers — rounded to the nearest quarter hour, the grain of `query_stats_quarter` they fold, which no zone in use notices — and `e2e/tests/specs/stats_charts.rs` holds the JavaScript folds to them across ranges and offsets — change one and that is what fails.
-- **`app.js` does not redraw what it did not need to draw.** `StatsPage` is three charts and one date; the bar-list, health-grid and highlights renderers are gone rather than kept as a second copy of the markup. There is no polling here — this page is history, not a live reading.
-- **The range is in the URL and the switcher is three `<a>`s** (`/stats?range=30d`), because the range picks the *server's* window. `StatsRange::label()` is the one spelling shared by the link, the parse and every card title. An unrecognised range renders the default rather than 400ing — it is a link an operator can edit, and every window on offer is spelled out right above it.
-- **A date the server can only write in UTC ships as an ISO day plus its timestamp** (`data-date-ts`), and `app.js` restates it in the browser's locale — the same division as the query log's relative times, and for the same reason.
-- **This page is measured in page misses, not milliseconds.** Development is on an SSD and the appliance runs off an SD card, so a duration measured here says nothing about a Raspberry Pi; the pages a query fetches from the file are the same on both. `cargo nextest run --release --no-capture --run-ignored only stats_page_miss` with `BENCH_DB` pointed at a copy of a real database reports them; `dashboard_page_miss` and `logs_page_miss` do the same for the dashboard (first response and tick) and the query log (every filter), and `BENCH_NOW` pins the clock on a copy older than its windows. A wall-clock reading is the thing to distrust when the two disagree — it is what left the outcome breakdown scanning the whole table through version 11.
-- **One statement per rollup family, not one per reading.** `stats_scan_since` and `traffic_lists_since` (`src/db.rs`) are the page's two reads — the first folding the quarter and metrics rollups, the second answering top domains, the distinct-domain count and top clients from one statement over the domain and client rollups — and every reading on it — the charts included — is folded out of one of them; `compute_range_stats` (`src/admin/stats.rs`) is what the page calls. `stats_scan_since` streams its rows and folds them in Rust rather than grouping in SQL, telling its four arms (two rollups, then the table rows each window starts inside) apart by a leading column. The single-purpose functions `/api/stats/*` uses are statements of their own over the same rollups — adding a seventh reading to the page means folding it out of one of those two statements, not adding one.
-- **A total nobody can count cheaply is maintained, not counted.** `query_logs`' row count lives in `settings` (`query_log_count`), moved by the insert batch, the prune and Clear All inside their own transactions — `SELECT COUNT(*)` walks an index end to end, and both the Database Health card and the query log's pager (whenever no filter is applied, via `count_logs`) ask on every load. A fourth write path to `query_logs` means a fourth `bump_log_count`, not a fourth reader.
-- **The same holds for the statistics rollups** (`query_stats_*`, see ARCHITECTURE.md *Rollups*), which must always equal a recount of `query_logs`. Inserts are covered by the `query_logs_maintain_stats` trigger whatever writes them; a new path that *deletes* from `query_logs` has to unwind them in its own transaction, as `prune_logs_before` (`unwind_stats_rollups`) and Clear All do.
-- Four bar lists in one template share **one askama macro** (`templates/_macros.html`); `{% call … %}` needs a matching `{% endcall %}` in askama 0.16, and `{% include %}` cannot see a loop variable at all.
+- **Only the three charts need a calendar**, and calendar-aligned buckets need the viewer's UTC offset, which the request lacks. Everything else is a plain `now - range` window rendered server-side: highlights, both breakdowns, both ranged lists, the health grid.
+- **Chart data is in the first response too**, in UTC: `<stats-page data-series>` is a `QuarterSeries` (`src/db.rs`, per-quarter-hour counts from the same scan), and `timelineFromQuarters` / `heatmapFromQuarters` in `app.js` fold it into local hours and days — exact, since every offset in use is a whole number of quarter hours. `/api/stats/v2/timeline` and `…/heatmap` take `tz_offset` (rounded to the nearest quarter hour) for API callers; `e2e/tests/specs/stats_charts.rs` holds the JS folds to them — change one and that fails.
+- **`StatsPage` draws three charts and one date**, nothing else, and does not poll.
+- **The range is in the URL**, the switcher three `<a>`s (`/stats?range=30d`). `StatsRange::label()` is the one spelling for link, parse and card titles. An unrecognised range renders the default rather than 400ing.
+- **A date the server can only write in UTC ships as an ISO day plus `data-date-ts`**; `app.js` restates it in the browser's locale.
+- **Measured in page misses, not milliseconds** — the appliance runs off an SD card; page counts transfer, durations do not. `cargo nextest run --release --no-capture --run-ignored only stats_page_miss` with `BENCH_DB` pointed at a copy of a real database reports them; `dashboard_page_miss` and `logs_page_miss` cover the dashboard (first response and tick) and the query log (every filter); `BENCH_NOW` pins the clock for an older copy. Distrust a wall-clock reading when the two disagree.
+- **One statement per rollup family.** The page's reads are `stats_scan_since` (quarter + metrics rollups) and `traffic_lists_since` (top domains, distinct-domain count, top clients) in `src/db.rs`, via `compute_range_stats` (`src/admin/stats.rs`). `stats_scan_since` streams rows and folds in Rust, telling its four arms apart by a leading column. A new reading is folded out of one of these, not added as a statement.
+- **A total nobody can count cheaply is maintained.** `query_logs`' row count lives in `settings` (`query_log_count`), moved by the insert batch, the prune and Clear All inside their own transactions; the Database Health card and the unfiltered pager (`count_logs`) read it. A fourth write path to `query_logs` needs a fourth `bump_log_count`.
+- **The rollups (`query_stats_*`, ARCHITECTURE.md *Rollups*) must always equal a recount of `query_logs`.** Inserts are covered by the `query_logs_maintain_stats` trigger; a new path that *deletes* from `query_logs` must unwind them in its own transaction, as `prune_logs_before` (`unwind_stats_rollups`) and Clear All do.
+- Four bar lists share **one askama macro** (`templates/_macros.html`); `{% call … %}` needs a matching `{% endcall %}` in askama 0.16, and `{% include %}` cannot see a loop variable.
 
-Account adds the conventions for **actions that need a password proof**:
+Account — **actions that need a password proof**:
 
-- **The password rides in the form that needs it** (`your_password`), for adding an operator, deleting one, and minting an API key. There is no dialog and no retry-after-403: `promptForPassword` / `withReauth` are gone, and the path is identical with and without JavaScript. `POST /api/auth/reauth` still exists for API callers.
-- **`confirm_password` (`src/admin/api.rs`) is the only place either path checks a password** — one rate limit, one lockout, one `auth.reauthenticated` event. Do not grow a second.
-- **A destructive row action expands into a named confirmation** (`GET /account?confirm_delete={id}`) rather than putting a password field on every row. That is a better prompt than `confirm()` and it exists without scripting; `app.js` adds `confirm()` only where the server has no confirmation of its own.
-- **Creating an API key renders instead of redirecting** — the one deliberate exception to PRG on these pages. The token exists in that response and nowhere else, so a redirect would discard the only copy. A refresh re-posts and mints a second key, which the operator can see and delete.
-- **A rejected form never echoes a password back into the markup.** Only the non-secret fields (username, key name, expiry) are re-rendered.
-- Account POSTs answer as `/account` whatever path they arrived on — `ShellData::build_for("/account", …)`, so the navigation still marks the page the operator is looking at.
+- **The password rides in the form that needs it** (`your_password`) for adding an operator, deleting one, and minting an API key — identical with and without JavaScript, no dialog. `POST /api/auth/reauth` remains for API callers.
+- **`confirm_password` (`src/admin/api.rs`) is the only password check for either path** — one rate limit, one lockout, one `auth.reauthenticated` event.
+- **A destructive row action expands into a named confirmation** (`GET /account?confirm_delete={id}`); `app.js` adds `confirm()` only where the server has none.
+- **Creating an API key renders instead of redirecting** — the one PRG exception, since the token exists only in that response. A refresh mints a second key, which the operator can see and delete.
+- **A rejected form never echoes a password.** Only username, key name and expiry are re-rendered.
+- Account POSTs render as `/account` whatever path they arrived on (`ShellData::build_for("/account", …)`), so the nav marks the right page.
 
 ### The event stream
 
-`GET /api/events` (`stream_events` in `src/admin/api.rs`, hub in `src/admin/events.rs`) is the admin UI's **one** push channel, and `serverEvents` in `app.js` is the single `EventSource` behind it.
+`GET /api/events` (`stream_events` in `src/admin/api.rs`, hub in `src/admin/events.rs`) is the admin UI's **only** push channel; `serverEvents` in `app.js` is its single `EventSource`.
 
-- **One connection per page, not one per feature.** The status indicator is in the shell and therefore on every page, so a stream per consumer would hold two or three per tab. Nothing here configures HTTP/2, so a browser talking plain HTTP gets six connections per origin before ordinary navigation queues behind them. Every push the UI takes rides this one connection — there is no second stream, and adding a fifth event name is how a new one arrives.
-- **`ping` every tick, always.** It is the status indicator's heartbeat and has to be a real event: SSE keep-alive comments never surface to `EventSource`, so a socket that died silently would look exactly like an idle one. The client flips to OFFLINE after three missed ticks — silence, not an `error` event, is what a dead server actually looks like from the browser.
-- **`stats` only when asked** (`?stats=1`, which only the dashboard sends). An idle settings page holding the stream open must not cost five aggregate queries a tick. A `StatsGuard` drops the claim when the connection does, which is the normal way an SSE connection ends.
-- **`log` only when asked** (`?logs=1`), and the query log's tail ships *off*, so unlike `stats` it cannot be decided when the connection opens. `serverEvents.setLogs()` re-opens the one connection with the subscription added rather than starting a second, and the swap is deliberately not reported as a drop — the indicator is on the other end and would blink OFFLINE at an operator who only clicked a toggle.
-- **`rebuild` unasked-for, like `ping`**, because the banner it feeds is in the shell too. It is an *edge*, not a reading: `RebuildCoordinator` publishes as a rebuild starts and again as it ends (`src/filter/rebuild.rs`), because a rebuild that starts and finishes between two ticks is one the operator would never see. `RebuildStatus` is the one shape — the atomics are the fact, that struct is how it travels, and the admin layer has no third spelling to drift from.
-- ⚠️ **A lagged `rebuild` subscriber is answered with the live state, not `continue`.** A missed tick comes round in ten seconds carrying everything; a missed rebuild edge never comes round at all, and skipping the completion leaves the banner spinning over a rebuild that finished.
-- **Every connection is handed a `rebuild` as it opens, idle or not.** The stream is the only place this state is published — there is no status endpoint behind it any more — so it has to answer "what is happening right now", not only "what changed since you connected". This is also what lets a *test* wait on a rebuild that may already have finished (`Api::wait_until_rebuilt` in `e2e/src/api.rs`, `wait_for_rebuild` in `tests/admin_api_test.rs`).
-- ⚠️ **`RebuildBanner` must not call `serverEvents.start()`.** It upgrades before `<server-status>` in the footer does, and the query string is fixed when the connection opens — starting it from there would settle `stats=1` as false and leave the dashboard without snapshots. Any future element in `<main>` that consumes the stream inherits this rule.
-- **A closed source retires its own arm** rather than ending the connection (`next_broadcast`): the heartbeat and the tail are independent, and taking the stream down with one of them would blank an indicator that can still report. The `Arc<EventHub>` is held by the pump for the connection's life for the same reason — without it the router's can be the last, and a stream that asked for no stats watches its tick source close the moment the handler returns.
-- **`ping` carries `traffic`**, whether the appliance has ever answered a query. A field on the heartbeat rather than a fifth event name: it is a state bit, not something that happened, and the onboarding notice is the only thing that reads it. `EventHub` latches it one-way — a machine that has served traffic is not a fresh one again — so the `EXISTS` behind it stops being asked once the answer is yes, and a page render that learns the same fact sets the latch too (`next_step_target`).
-- **The snapshot is computed once per tick and shared**, not once per client — the ticker is O(1) in connected dashboards, where the polling it replaced was O(n).
-- **A `stats=1` client gets a snapshot as the stream opens**, not on the first tick, so the server-rendered numbers are never up to ten seconds out of step with the first push.
-- **Nothing ticks while nobody is connected.** `run()` skips the whole cycle on `connection_count() == 0`.
-- The dashboard's LIVE toggle no longer starts and stops a timer: pausing stops *applying* what arrives, because the shell's indicator is on the other end of the same connection and must keep reporting.
-- ⚠️ **A browser-side stub that wraps `fetch` no longer reaches the dashboard.** `override_summary` (`e2e/src/browser.rs`) patches `EventSource.prototype.addEventListener` instead, and hands the listener a reconstructed `MessageEvent` because `data` is read-only.
+- **One connection per page.** The status indicator is on every page, and without HTTP/2 a browser gets six connections per origin. New pushes arrive as a new event name on this stream, never a second stream.
+- **`ping` every tick, always** — the indicator's heartbeat. It must be a real event (SSE keep-alive comments never reach `EventSource`); the client shows OFFLINE after three missed ticks, since silence is what a dead server looks like.
+- **`stats` only when asked** (`?stats=1`, dashboard only), so an idle page costs no aggregate queries per tick. A `StatsGuard` drops the claim when the connection closes.
+- **`log` only when asked** (`?logs=1`). The tail ships *off*, so `serverEvents.setLogs()` re-opens the one connection with the subscription added; that swap is deliberately not reported as a drop, or the indicator would blink OFFLINE on a toggle click.
+- **`rebuild` unasked-for, like `ping`**, since the banner is in the shell. It is an *edge*: `RebuildCoordinator` (`src/filter/rebuild.rs`) publishes at start and end, so a rebuild between two ticks is still seen. `RebuildStatus` is the one shape it travels in.
+- ⚠️ **A lagged `rebuild` subscriber gets the live state, not `continue`.** A missed tick recurs in ten seconds; a missed completion edge never does and leaves the banner spinning.
+- **Every connection gets a `rebuild` as it opens.** The stream is the only place this state is published, so it must answer "what is happening now". Tests rely on it to wait on a rebuild that may already have finished (`Api::wait_until_rebuilt` in `e2e/src/api.rs`, `wait_for_rebuild` in `tests/admin_api_test.rs`).
+- ⚠️ **`RebuildBanner` must not call `serverEvents.start()`.** It upgrades before `<server-status>`, and the query string is fixed at open — starting there would settle `stats=1` as false and starve the dashboard. Any future stream consumer in `<main>` inherits this rule.
+- **A closed source retires its own arm** (`next_broadcast`) rather than ending the connection. The pump holds the `Arc<EventHub>` for the connection's life; otherwise the router's copy could be the last, and a stream without stats would see its tick source close as the handler returns.
+- **`ping` carries `traffic`** — whether the appliance has ever answered a query — as a state bit rather than a new event; only the onboarding notice reads it. `EventHub` latches it one-way, so the `EXISTS` stops once true; a page render that learns the fact sets the latch too (`next_step_target`).
+- **The snapshot is computed once per tick and shared** across clients.
+- **A `stats=1` client gets a snapshot as the stream opens**, so it is never ten seconds behind the server-rendered numbers.
+- **Nothing ticks while nobody is connected** (`run()` skips on `connection_count() == 0`).
+- The dashboard's LIVE toggle stops *applying* snapshots, not the connection, because the indicator shares it.
+- ⚠️ **A `fetch` stub no longer reaches the dashboard.** `override_summary` (`e2e/src/browser.rs`) patches `EventSource.prototype.addEventListener` and hands the listener a reconstructed `MessageEvent`, since `data` is read-only.
 
-**The onboarding notice is the shell's, and the server decides it** (`show_next_step` / `next_step_addr` on `ShellData`, resolved by `next_step_target` in `src/admin/pages.rs`). It used to be `<next-step-banner>` fetching `/api/settings`, `/api/server-info` and `/api/stats/summary` on every page load and then polling the last one every three seconds; all four calls are gone. Three things follow:
+**The onboarding notice is the shell's, decided server-side** (`show_next_step` / `next_step_addr` on `ShellData`, resolved by `next_step_target` in `src/admin/pages.rs`), with no client fetches:
 
-- **It is not rendered on `/`.** The dashboard's own empty state (`dashboard-empty-state`) makes the same point at more length, and a page carrying both reads as two different notices. The e2e scenarios that cover the banner therefore sit on another tab.
-- **Dismissing is `POST /onboarding/dismiss`**, a real form carrying `next` through `safe_next`, writing the same `onboarding_banner_dismissed` setting the JSON API does. `app.js` cancels the submit and removes the notice in place, so the path is identical with and without scripting.
-- **It takes itself down on the heartbeat's `traffic` flag**, which is the whole reason that flag exists.
+- **It is not rendered on `/`**, where the dashboard's own empty state (`dashboard-empty-state`) says the same; e2e scenarios covering the banner therefore use another tab.
+- **Dismissing is `POST /onboarding/dismiss`**, a real form carrying `next` through `safe_next` and writing the `onboarding_banner_dismissed` setting the JSON API uses. `app.js` cancels the submit and removes the notice in place.
+- **It removes itself on the heartbeat's `traffic` flag.**
 
-⚠️ **The status bar's indicator reports the stream, not the markup.** It ships `hidden` with a placeholder label and is unhidden by its own `connectedCallback`; with no JavaScript it stays hidden, because a page that cannot sense the server must not claim it is up — which is exactly what the hardcoded `ONLINE` it replaced did.
+⚠️ **The status indicator reports the stream, not the markup.** It ships `hidden` and is unhidden by its own `connectedCallback`; without JavaScript it stays hidden, since a page that cannot sense the server must not claim it is up.
 
-⚠️ **The status bar is `position: fixed` at the bottom of the viewport**, so a control near the foot of the page can sit underneath it and swallow a click ("intercepts pointer events" — how this surfaced was an e2e run on a shorter CI window). `:root` carries `scroll-padding-bottom` so scrolling keeps clear of it; `e2e/tests/specs/filters_no_js.rs` submits with `Enter` and activates row controls with `Locator::click_js` for the same reason, and says so.
+⚠️ **The status bar is `position: fixed` at the bottom**, so a control near the page foot can sit under it and swallow a click ("intercepts pointer events", seen on a shorter CI window). `:root` sets `scroll-padding-bottom`; `e2e/tests/specs/filters_no_js.rs` submits with `Enter` and uses `Locator::click_js` for row controls for this reason.
 
-⚠️ **With scripting off a page is interactive the moment it parses**, so a `fade-in` card is still sliding when the first click lands and a click aimed at its centre lands somewhere else. `e2e/tests/specs/stats_no_js.rs` activates the range switcher with `Locator::click_js` and follows it with assertions that only pass if the navigation happened.
+⚠️ **With scripting off a page is interactive as soon as it parses**, so a click can land while a `fade-in` card is still sliding. `e2e/tests/specs/stats_no_js.rs` uses `Locator::click_js` on the range switcher and follows it with assertions that only pass if the navigation happened.
 
-`/api/*` remains the contract for API keys and the OpenAPI spec, but the UI no longer consumes it to decide who is signed in or which screen to show.
+`/api/*` remains the contract for API keys and the OpenAPI spec, but the UI does not use it to decide who is signed in or which screen to show.
 
-After any change that alters the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && cargo run --bin screenshots`) and commit the PNGs alongside. Skip only for non-visual edits (copy, logic, test hooks, accessibility attributes).
+After any change to the UI's appearance, regenerate the affected `docs/screenshots/` (`cd e2e && cargo run --bin screenshots`) and commit the PNGs. Skip for non-visual edits (copy, logic, test hooks, accessibility attributes).
 
 ## Architecture essentials
 
-Everything runs in one tokio runtime. Query path (`src/dns/handler.rs`): **filter → cache → upstream forward**, with logging fired async over an mpsc channel. Filter runs *before* cache so new block rules take effect immediately.
+One tokio runtime. Query path (`src/dns/handler.rs`): **filter → cache → upstream forward**, logging async over an mpsc channel. Filter runs *before* cache so new block rules take effect immediately.
 
-- **Filter engine** (`src/filter/engine.rs`): FST for exact matches plus a flat reverse-domain trie, serialized into two contiguous byte buffers. The live engine sits behind `ArcSwap`; updates build a fresh engine and swap it in atomically. Coordination in `src/filter/rebuild.rs`.
-- **Storage** (`src/db.rs`): all schema, migrations, and CRUD in one module. Versioning via `PRAGMA user_version`, applied incrementally and forward-only. An hourly task prunes `query_logs` and runs maintenance.
-- **Async logging** (`src/logger.rs`): mpsc → a task batches to SQLite (500 entries or 1s) to keep the query path non-blocking.
+- **Filter engine** (`src/filter/engine.rs`): FST for exact matches plus a flat reverse-domain trie, serialized into two contiguous byte buffers. The live engine sits behind `ArcSwap`; updates build a fresh engine and swap it in. Coordination in `src/filter/rebuild.rs`.
+- **Storage** (`src/db.rs`): all schema, migrations and CRUD. Versioned by `PRAGMA user_version`, incremental and forward-only. An hourly task prunes `query_logs` and runs maintenance.
+- **Async logging** (`src/logger.rs`): mpsc → a task batches to SQLite (500 entries or 1 s).
 - **Upstream** (`src/upstream/`): forwarder plus `strategy.rs` (Sequential / Round Robin / Lowest Latency via EMA), switchable at runtime.
-- **DoH** (`src/dns/doh.rs`): axum router, optionally gated by user-defined URL tokens.
-- **Admin** (`src/admin/`): `api.rs` (REST + static serving), `auth.rs` (Argon2, sessions, rate limiting), `csrf.rs`, `stats.rs`.
-- `src/main.rs` wires it all together — the place to trace how things connect.
+- **DoH** (`src/dns/doh.rs`): axum router, optionally gated by URL tokens.
+- **Admin** (`src/admin/`): `api.rs` (REST, event stream, static serving), `pages.rs` (server-rendered pages), `auth.rs` (Argon2, sessions, rate limiting), `csrf.rs`, `events.rs`, `forward_auth.rs`, `stats.rs`.
+- `src/main.rs` wires it all together.
 
-`mimalloc` is the global allocator specifically so a filter rebuild's large transient allocation returns to the OS, keeping steady-state RSS low on small devices.
+`mimalloc` is the global allocator so a filter rebuild's large transient allocation returns to the OS, keeping steady-state RSS low on small devices.
 
 ## Diagnostic logging
 
-Separate from the per-query `query_logs` table: this is the `tracing` stream on stderr, configured in `src/config.rs` (`--log-format`, `RUST_LOG`, default `error,noadd=info`).
+Separate from the `query_logs` table: the `tracing` stream on stderr, configured in `src/config.rs` (`--log-format`, `RUST_LOG`, default `error,noadd=info`).
 
-**Every `info!`/`warn!`/`error!`/`debug!` carries `event = "domain.action"` as its first field**, every value is a field rather than interpolated, and the message is a static human-readable string:
+**Every `info!`/`warn!`/`error!`/`debug!` carries `event = "domain.action"` as its first field**, every value is a field rather than interpolated, and the message is a static string:
 
 ```rust
 // yes
@@ -211,9 +211,9 @@ debug!(event = "dns.send_failed", transport = "tcp", stage = "flush", client = %
 debug!("TCP flush error for {peer}: {e}");
 ```
 
-`--log-format json` emits each field as its own key, so `event` survives message rewording and fields are filterable without regex: `jq 'select(.fields.event == "upstream.forward_failed")'` works; grepping prose does not.
+With `--log-format json` each field is its own key, so `jq 'select(.fields.event == "upstream.forward_failed")'` works regardless of message wording.
 
-- **Prefer a field over a new event name.** The three TCP write failures share `dns.send_failed` and differ by `stage`; UDP and TCP share `dns.listener_started` and differ by `transport`. That keeps "all send failures" one query.
-- **Name events `domain.action`**, past tense for things that happened (`filter.rebuild_completed`, `session.created`). Existing domains: `dns`, `query`/`querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, plus the audit set (`auth`, `session`, `user`, `apikey`, `forward_auth`, `audit`).
+- **Prefer a field over a new event name.** The TCP write failures share `dns.send_failed` and differ by `stage`; UDP and TCP share `dns.listener_started` and differ by `transport`.
+- **Name events `domain.action`**, past tense for things that happened (`filter.rebuild_completed`, `session.created`). Existing domains: `dns`, `querylog`, `cache`, `upstream`, `filter`, `db`, `server`, `shutdown`, `config`, `acme`, `ratelimit`, `registry`, `events`, `csrf`, plus the audit set (`auth`, `session`, `user`, `apikey`, `forward_auth`, `audit`).
 - **Errors go in an `error` field** (`error = %e`), never in the message.
-- Reuse an existing event name when the event is the same; `rg 'event = "'` is the index.
+- Reuse an existing event name for the same event; `rg 'event = "'` is the index.

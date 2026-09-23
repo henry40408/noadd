@@ -1,7 +1,5 @@
-//! Tests for stale-while-revalidate background refresh deduplication.
-//!
-//! Verifies that concurrent queries for a stale cache entry produce only
-//! a single background upstream refresh, not one per query.
+//! Stale-while-revalidate: concurrent queries for a stale entry trigger one
+//! background refresh, not one each.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -32,11 +30,9 @@ fn make_query_bytes(domain: &str, qtype: RecordType) -> Vec<u8> {
 }
 
 fn cache_key(domain: &str, qtype: RecordType) -> CacheKey {
-    // Mirror the profile the handler derives for `make_query_bytes`: a bare
-    // query carries no EDNS/DO/CD, and `UpstreamForwarder` defaults to DNSSEC
-    // enabled, so `upstream_dnssec_enabled` is true. A `default()` profile here
-    // would key a different entry than the handler looks up and the stale
-    // entries these tests plant would never be found.
+    // Mirror the handler's profile for a bare query: no EDNS/DO/CD, and
+    // `upstream_dnssec_enabled` true by the forwarder's default. A `default()`
+    // profile would key an entry the handler never looks up.
     CacheKey::new(
         domain.to_lowercase(),
         u16::from(qtype),
@@ -127,11 +123,9 @@ async fn make_test_handler(
 /// refresh request, not 50.
 #[tokio::test]
 async fn test_stale_refresh_is_deduplicated() {
-    // The mock delay both holds the coalescing window open and stands in for an
-    // upstream's response time. Keep it under hickory's ~333ms UDP retransmit
-    // floor (proto's DEFAULT_RETRY_FLOOR): a slower mock makes the transport
-    // retransmit a single logical query, inflating the datagram count we assert
-    // on. Real upstreams answer in well under 333ms, so they never retransmit.
+    // The delay holds the coalescing window open. Keep it under hickory's 333ms
+    // UDP retransmit floor (`DEFAULT_RETRY_FLOOR`), or retransmits inflate the
+    // datagram count asserted on.
     let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_millis(200)).await;
 
     let (handler, cache, _log_rx) = make_test_handler(upstream_addr).await;

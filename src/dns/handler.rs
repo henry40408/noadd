@@ -20,23 +20,21 @@ use crate::dns::ttl;
 use crate::filter::engine::{FilterEngine, FilterResult};
 use crate::upstream::forwarder::{ForwardError, UpstreamForwarder};
 
-/// Default TTL (seconds) used when no answer records are present in the response.
+/// Fallback positive TTL (seconds) when no answer TTL can be read.
 const DEFAULT_TTL_SECS: u64 = 300;
 
-/// Maximum TTL (seconds) we will keep a *negative* response (NXDOMAIN or
-/// `NoError` with empty answer section). Caps RFC 2308 SOA-derived TTLs which
-/// can otherwise be hours long for some TLDs and cause prolonged "host not
-/// found" symptoms after a single transient upstream hiccup.
+/// Cap (seconds) on caching a negative response (NXDOMAIN or empty `NoError`).
+/// RFC 2308 SOA-derived TTLs can be hours long, turning one transient upstream
+/// hiccup into a prolonged "host not found".
 const NEGATIVE_TTL_CAP_SECS: u64 = 60;
 
-/// TTL (seconds) used for synthesised blocked-domain responses. Long enough
-/// that clients don't re-query the blocked name on every request, short
-/// enough that an unblock takes effect without restart.
+/// TTL (seconds) of synthesised blocked responses: long enough to stop
+/// re-queries, short enough that an unblock takes effect soon.
 const BLOCKED_RESPONSE_TTL_SECS: u32 = 300;
 
-/// RFC 1035 §4.2.1 minimum UDP message size, and the floor RFC 6891 §6.2.3
-/// mandates for any EDNS-advertised payload size. A client that sends no OPT
-/// (e.g. Apple's mDNSResponder for ordinary lookups) is limited to this.
+/// RFC 1035 §4.2.1 UDP message size, and the RFC 6891 §6.2.3 floor for any
+/// EDNS-advertised payload. A client sending no OPT (e.g. Apple's
+/// mDNSResponder) is limited to this.
 const MIN_UDP_SIZE: usize = 512;
 
 /// Errors that can occur during DNS query handling.
@@ -52,20 +50,17 @@ pub enum HandlerError {
     Upstream(#[from] ForwardError),
 }
 
-/// Outcome of `DnsHandler::handle`. Carries the response bytes plus
-/// metadata that downstream callers (`DoH` adapter, listeners) would
-/// otherwise have to recompute by re-parsing the response.
+/// Outcome of `DnsHandler::handle`: the response bytes plus metadata callers
+/// would otherwise re-parse the response for.
 #[derive(Debug, Clone)]
 pub struct HandleOutcome {
     pub bytes: Vec<u8>,
-    /// Lowest TTL observed in the served response, in seconds. Used by
-    /// the `DoH` adapter for the `Cache-Control: max-age` header so it
-    /// doesn't have to re-parse the response a fourth time.
+    /// Lowest TTL in the served response, in seconds; the `DoH` adapter's
+    /// `Cache-Control: max-age`.
     pub min_ttl: u32,
 }
 
-/// What action the handler took on a query. Replaces the previous
-/// stringly-typed `action: String` field — typos no longer compile.
+/// What action the handler took on a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryAction {
     Allowed,
@@ -75,10 +70,8 @@ pub enum QueryAction {
 
 /// Context for a single DNS query, sent to the async logger.
 ///
-/// `client_ip` and `query_type` are kept in their native form here
-/// (`IpAddr`, `u16`) and stringified once per logger flush rather
-/// than once per query — the conversion only matters at the DB
-/// boundary.
+/// `client_ip` and `query_type` stay native and are stringified at flush,
+/// off the query path.
 #[derive(Debug, Clone)]
 pub struct QueryContext {
     pub timestamp: i64,
@@ -96,8 +89,7 @@ pub struct QueryContext {
     pub authenticated_data: bool,
 }
 
-/// Extract a short summary of the DNS answer section from response bytes.
-/// Returns the first few records as a comma-separated string.
+/// Summarise the first three answer records as a comma-separated string.
 fn extract_result_summary(response_bytes: &[u8]) -> Option<String> {
     let msg = Message::from_bytes(response_bytes).ok()?;
     let parts: Vec<String> = msg
@@ -144,28 +136,21 @@ pub struct DnsHandler {
     cache: DnsCache,
     forwarder: Arc<UpstreamForwarder>,
     log_tx: mpsc::Sender<QueryContext>,
-    /// Tracks cache keys currently being refreshed in the background,
-    /// preventing duplicate refresh tasks for the same stale entry.
-    /// Sharded via `DashMap` so concurrent stale hits for different keys
-    /// don't serialise on a single mutex.
+    /// Keys with a background stale refresh in flight, so each gets one task.
+    /// `DashMap` so stale hits on different keys don't share a mutex.
     refreshing: Arc<DashMap<CacheKey, ()>>,
-    /// Coalesces concurrent cold-miss upstream queries for the same key:
-    /// N simultaneous clients produce one upstream request, not N.
+    /// Coalesces concurrent cold misses for one key into one upstream request.
     inflight_fetches: Arc<InflightUpstream>,
-    /// Bounds concurrent `handle()` calls across all listeners (UDP/TCP/DoH).
-    /// Prevents a single noisy client from exhausting the tokio runtime with
-    /// unbounded spawned tasks. `None` = unlimited.
+    /// Bounds concurrent `handle()` calls across all listeners, so a flood
+    /// cannot exhaust the runtime. `None` = unlimited.
     concurrency_limit: Option<Arc<Semaphore>>,
     /// Per-client-IP token bucket. `None` means no per-IP limiting.
     rate_limiter: Option<Arc<IpRateLimiter>>,
-    /// When true, parse every successful response a third time to populate
-    /// the admin-UI `result` column. Off by default — the column is a
-    /// nice-to-have and this is the largest single overhead on the
-    /// cache-hit path (~10us / cache hit).
+    /// Parse every response again to fill the query log's `result` column.
+    /// Off by default: it is the largest single cost on the cache-hit path.
     log_query_results: bool,
-    /// Runtime block-response configuration (mode + optional custom IPs).
-    /// Behind `ArcSwap` for lock-free reads on the blocked path and atomic
-    /// live updates from the settings API.
+    /// Block-response configuration; `ArcSwap` for lock-free reads and live
+    /// updates from settings.
     block_config: Arc<ArcSwap<BlockConfig>>,
 }
 
@@ -214,16 +199,13 @@ impl DnsHandler {
         self
     }
 
-    /// Enable per-query result-summary extraction for the admin-UI log view.
-    /// Off by default; turn on only when the query log's `result` column is
-    /// actually consumed.
+    /// Enable result-summary extraction for the query log's `result` column.
     pub fn with_log_query_results(mut self, enabled: bool) -> Self {
         self.log_query_results = enabled;
         self
     }
 
-    /// Install the initial block-response configuration. Chainable during
-    /// construction (used by `main.rs` to load the persisted setting).
+    /// Install the initial (persisted) block-response configuration.
     pub fn with_block_config(self, cfg: BlockConfig) -> Self {
         self.block_config.store(Arc::new(cfg));
         self
@@ -239,9 +221,7 @@ impl DnsHandler {
         self.block_config.load()
     }
 
-    /// Handle a DNS query. Takes raw query bytes, client IP, and optional `DoH` token name.
-    /// Returns the response bytes plus metadata downstream callers would
-    /// otherwise have to recompute (e.g. min TTL for the `DoH` `Cache-Control`).
+    /// Handle a raw DNS query from `client_ip`, with the `DoH` token name if any.
     pub async fn handle(
         &self,
         query_bytes: &[u8],
@@ -250,9 +230,8 @@ impl DnsHandler {
     ) -> Result<HandleOutcome, HandlerError> {
         let start = Instant::now();
 
-        // Held until this function returns, so the number of queries actively
-        // consuming upstream / cache / filter resources is bounded regardless
-        // of how many tasks the listeners have spawned.
+        // Held for the whole call, bounding active queries however many tasks
+        // the listeners spawned.
         let _permit = match &self.concurrency_limit {
             Some(sem) => Some(
                 sem.clone()
@@ -265,12 +244,9 @@ impl DnsHandler {
 
         let message = Message::from_bytes(query_bytes)?;
 
-        // Rejected before touching the filter, cache, or upstream. A
-        // forwarding resolver only serves standard queries: any other opcode
-        // (STATUS/NOTIFY/UPDATE/...) gets NOTIMP, and an unsupported EDNS
-        // version gets BADVERS (RFC 6891 §6.1.3). Both echo the client's
-        // question and RD bit; neither is logged or rate-limited (they carry
-        // no domain to attribute).
+        // Non-standard opcodes get NOTIMP and EDNS version > 0 gets BADVERS
+        // (RFC 6891 §6.1.3), before filter, cache or upstream. Neither is
+        // logged or rate-limited.
         if message.metadata.op_code != OpCode::Query {
             return Ok(HandleOutcome {
                 bytes: build_notimp_response(&message)?,
@@ -300,10 +276,7 @@ impl DnsHandler {
             upstream_dnssec_enabled: self.forwarder.dnssec_enabled(),
         };
 
-        // The token drained here is what protects upstream and cache from a
-        // single noisy client. REFUSED (rcode 5) is the semantically correct
-        // answer; it tells the client the server is unwilling, not broken (as
-        // SERVFAIL would).
+        // REFUSED says "unwilling", not "broken" as SERVFAIL would.
         if let Some(limiter) = &self.rate_limiter
             && !limiter.try_acquire(client_ip)
         {
@@ -354,8 +327,7 @@ impl DnsHandler {
             FilterResult::Blocked { rule, list } => {
                 let block_cfg = self.block_config.load();
                 let response = build_blocked_response(&message, query_type, &block_cfg)?;
-                // build_blocked_response sets every record's TTL to
-                // BLOCKED_RESPONSE_TTL_SECS — keep this in sync.
+                // Must match the TTL build_blocked_response writes.
                 (
                     response,
                     BLOCKED_RESPONSE_TTL_SECS,
@@ -369,9 +341,7 @@ impl DnsHandler {
                 )
             }
             FilterResult::Allowed { .. } => {
-                // Most domains arrive lowercase already; skip the per-byte
-                // case-mapping pass of to_lowercase() in that case. Both
-                // branches still allocate the owned key string moka needs.
+                // Skip to_lowercase()'s pass for the common all-lowercase name.
                 let domain_lower = if domain_clean.bytes().any(|b| b.is_ascii_uppercase()) {
                     domain_clean.to_lowercase()
                 } else {
@@ -384,10 +354,7 @@ impl DnsHandler {
                     let remaining = remaining_ttl_secs(&cached);
 
                     if cached.is_stale() {
-                        // Optimistic: serve stale, refresh in background.
-                        // Deduplicate: only spawn if no refresh is already in flight.
-                        // `insert` returns the previous value if any, so
-                        // `is_none()` ⇒ this caller is the first.
+                        // Serve stale, refresh in the background — once per key.
                         let should_refresh =
                             self.refreshing.insert(cache_key.clone(), ()).is_none();
 
@@ -398,11 +365,8 @@ impl DnsHandler {
                             let query_owned = query_bytes.to_vec();
                             let key = cache_key.clone();
                             tokio::spawn(async move {
-                                // RAII guard ensures the in-flight marker is
-                                // always cleared, even if the task panics or
-                                // is cancelled — otherwise a single bad
-                                // refresh could permanently block future
-                                // refreshes for this key.
+                                // Clears the marker even on panic or cancel,
+                                // or one bad refresh would block the key forever.
                                 let _guard = RefreshGuard {
                                     set: refreshing,
                                     key: key.clone(),
@@ -441,23 +405,19 @@ impl DnsHandler {
                         cached.authenticated_data(),
                     )
                 } else {
-                    // Concurrent misses coalesce: if another task is already
-                    // fetching this key, subscribe to its Notify, re-check the
-                    // cache once it fires, and only forward ourselves if the
-                    // original fetcher failed.
+                    // Coalesce misses: a waiter re-checks the cache once the
+                    // fetcher finishes and forwards itself only if it failed.
                     let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
                         BeginResult::Fetcher(g) => Some(g),
                         BeginResult::Waiter(notify) => {
-                            // Subscribe BEFORE checking cache so we don't
-                            // miss `notify_waiters` fired between our
-                            // cache read and our await.
+                            // Subscribe before the cache check, or a
+                            // `notify_waiters` in between is lost.
                             let fut = notify.notified();
                             tokio::pin!(fut);
                             fut.as_mut().enable();
                             if self.cache.get(&cache_key).await.is_none() {
-                                // 3s cap in case the fetcher is wedged
-                                // (bug or stuck upstream); we'll fall
-                                // through and do our own forward.
+                                // Cap in case the fetcher is wedged; then
+                                // forward ourselves.
                                 let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
                             }
                             None
@@ -465,8 +425,7 @@ impl DnsHandler {
                     };
 
                     if let Some(cached) = self.cache.get(&cache_key).await {
-                        // Fetcher populated the cache — treat like a
-                        // cache hit (TTL decrement + ID patch).
+                        // Fetcher filled the cache: serve as a hit.
                         let bytes = prepare_cached_response(&cached, query_id);
                         let remaining = remaining_ttl_secs(&cached);
                         (
@@ -480,26 +439,18 @@ impl DnsHandler {
                             cached.authenticated_data(),
                         )
                     } else {
-                        // We are the fetcher, OR a waiter whose fetcher
-                        // failed / timed out. Forward ourselves.
+                        // Fetcher, or a waiter whose fetcher failed/timed out.
                         let (response, upstream_addr, upstream_ad) =
                             self.forwarder.forward(query_bytes).await?;
-                        // Only cache cacheable responses (skip SERVFAIL
-                        // etc., and apply a capped negative TTL for
-                        // NXDOMAIN/empty NoError) to prevent transient
-                        // failures from poisoning the cache.
                         let cache_ttl = cache_ttl_for_response(&response);
                         if let Some(ttl) = cache_ttl {
                             self.cache
                                 .insert(cache_key.clone(), response.clone(), ttl, upstream_ad)
                                 .await;
                         }
-                        // For DoH max-age: cacheable responses use the
-                        // same TTL we just stored; non-cacheable
-                        // (SERVFAIL etc.) tell downstream not to cache.
+                        // DoH max-age: the stored TTL, or 0 if uncacheable.
                         let min_ttl = cache_ttl.map_or(0, |d| d.as_secs() as u32);
-                        // Drop guard (if we hold one) — notifies waiters
-                        // after the cache insert is observable.
+                        // Wake waiters only once the insert is visible.
                         drop(fetcher_guard);
                         (
                             response,
@@ -538,11 +489,8 @@ impl DnsHandler {
             result,
             authenticated_data: authenticated,
         };
-        // The query is already answered — logging is deliberately non-blocking
-        // — but a dropped entry is gone for good, so every statistic derived
-        // from query_logs silently under-reports. That is a fault, not a
-        // nuisance, so it goes to the error stream where a timestamp and the
-        // surrounding context come for free.
+        // Logging is non-blocking, but a dropped entry makes every statistic
+        // under-report for good — a fault, hence `error!`.
         if let Err(e) = self.log_tx.try_send(ctx) {
             error!(
                 event = "querylog.dropped",
@@ -558,9 +506,7 @@ impl DnsHandler {
     }
 }
 
-/// Build a DNS REFUSED response for the given query message. Used when a
-/// client exceeds its per-IP rate limit. Preserves the query ID and
-/// question section so the caller can correlate the answer.
+/// Build a REFUSED response echoing the query's ID, question and RD bit.
 fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     let mut response = Message::response(query.metadata.id, OpCode::Query);
     response.metadata.response_code = ResponseCode::Refused;
@@ -573,8 +519,7 @@ fn build_refused_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     Ok(response.to_vec()?)
 }
 
-/// Build a blocked DNS response for the given query message, according to the
-/// configured `BlockConfig`.
+/// Build a blocked response according to `config`.
 fn build_blocked_response(
     query: &Message,
     query_type: RecordType,
@@ -596,11 +541,10 @@ fn build_blocked_response(
         BlockMode::NullIp | BlockMode::CustomIp => {}
     }
 
-    // Address-bearing modes: NoError, with an A/AAAA answer when an address is
-    // available for the query type, otherwise an empty answer section.
+    // Address modes: NoError, with an A/AAAA answer when an address exists for
+    // the query type, else no answer.
     let (v4, v6) = match config.mode {
         BlockMode::CustomIp => (config.custom_v4, config.custom_v6),
-        // NullIp: the unspecified addresses.
         _ => (Some(Ipv4Addr::UNSPECIFIED), Some(Ipv6Addr::UNSPECIFIED)),
     };
 
@@ -634,23 +578,16 @@ fn build_blocked_response(
                     ));
                 }
             }
-            _ => {
-                // Empty answer for other types.
-            }
+            _ => {}
         }
     }
 
     Ok(response.to_vec()?)
 }
 
-/// Decide whether and for how long a DNS response should be cached.
+/// How long to cache a response, or `None` if it must not be cached, so
+/// transient upstream failures cannot poison the cache.
 ///
-/// Returns `Some(ttl)` if the response is cacheable, `None` if it must not
-/// be cached (e.g. SERVFAIL or other server errors). The goal is to prevent
-/// transient upstream failures from poisoning the cache and producing
-/// long-lived `NXDOMAIN`/empty answers.
-///
-/// Rules:
 /// - SERVFAIL / Refused / `FormErr` / `NotImp` etc. → `None`
 /// - `NoError` with non-empty answer section → positive TTL from answers
 /// - `NoError` with empty answers → negative TTL (SOA min, capped)
@@ -673,7 +610,6 @@ pub fn cache_ttl_for_response(response_bytes: &[u8]) -> Option<Duration> {
             }
         }
         ResponseCode::NXDomain => Some(negative_ttl_from_soa(&msg)),
-        // Do not cache SERVFAIL, Refused, FormErr, NotImp, etc.
         _ => None,
     }
 }
@@ -693,10 +629,8 @@ fn negative_ttl_from_soa(msg: &Message) -> Duration {
     Duration::from_secs((soa_min as u64).min(NEGATIVE_TTL_CAP_SECS))
 }
 
-/// Build a DNS SERVFAIL response from raw query bytes.
-///
-/// Tries to parse the query to preserve ID and question section. Falls back
-/// to a minimal SERVFAIL with just the ID copied from raw bytes.
+/// Build a SERVFAIL from raw query bytes, echoing ID, question and RD; if the
+/// query does not parse, a bare header carrying only the raw ID.
 pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     if let Ok(query) = Message::from_bytes(query_bytes) {
         let mut response = Message::response(query.metadata.id, OpCode::Query);
@@ -718,10 +652,8 @@ pub fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
     ]
 }
 
-/// Build a NOTIMP (Not Implemented) response for an opcode this forwarding
-/// resolver does not serve (anything other than a standard `Query`, e.g.
-/// STATUS/NOTIFY/UPDATE). The request's opcode, ID, question section, and RD
-/// bit are echoed per RFC 1035.
+/// Build a NOTIMP response for a non-`Query` opcode, echoing opcode, ID,
+/// question and RD bit.
 fn build_notimp_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     let mut response = Message::response(query.metadata.id, query.metadata.op_code);
     response.metadata.response_code = ResponseCode::NotImp;
@@ -733,12 +665,9 @@ fn build_notimp_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     Ok(response.to_vec()?)
 }
 
-/// Build a BADVERS response for a client that requested an EDNS version this
-/// resolver does not support (RFC 6891 §6.1.3). The extended RCODE 16 is split
-/// on the wire — its low 4 bits in the header, its high 8 bits in the OPT —
-/// which hickory does automatically on encode from `ResponseCode::BADVERS`,
-/// provided an OPT is present. The OPT is emitted at version 0 to advertise the
-/// highest version we support. The ID, question, and RD bit are echoed.
+/// Build a BADVERS response for an unsupported EDNS version (RFC 6891 §6.1.3).
+/// RCODE 16 is split between header and OPT, which hickory does on encode only
+/// if an OPT is present; the OPT's version 0 advertises the highest we support.
 fn build_badvers_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     let mut response = Message::response(query.metadata.id, OpCode::Query);
     response.metadata.response_code = ResponseCode::BADVERS;
@@ -754,28 +683,16 @@ fn build_badvers_response(query: &Message) -> Result<Vec<u8>, HandlerError> {
     Ok(response.to_vec()?)
 }
 
-/// Truncate a DNS response for UDP delivery so it fits within the buffer size
-/// the client advertised, setting the TC (truncated) bit when it doesn't.
+/// Fit a response to the client's UDP limit, truncating with TC set so it
+/// retries over TCP (RFC 1035 §4.2.1 / RFC 6891).
 ///
-/// A UDP client that receives an oversized answer either drops it (strict
-/// resolvers, middleboxes) or risks IP fragmentation that some networks
-/// silently discard. RFC 1035 §4.2.1 / RFC 6891 require the server to send a
-/// truncated response with the TC bit set instead, so the client retries the
-/// query over TCP. `noadd` forces the DO bit and a 1232-byte EDNS payload
-/// *upstream*, so upstream answers can exceed what the client asked for —
-/// notably Apple's mDNSResponder, which sends no OPT and is therefore limited
-/// to 512 bytes.
-///
-/// The client's limit is its EDNS OPT payload size, floored at 512 (or 512
-/// when it sent no OPT). Responses that already fit are returned unchanged
-/// with no parse. When truncation is needed, [`Message::truncate`] keeps the
-/// header, question, and any OPT record, drops the answer/authority/additional
-/// sections, and sets TC — always well under 512 bytes. On any parse failure
-/// the original bytes are returned (an oversized datagram beats a dropped
-/// query). TCP callers must not use this — TCP has no 512-byte limit.
+/// Needed because upstream answers can exceed what the client asked for (with
+/// DNSSEC on, `noadd` forces DO and a 1232-byte payload upstream). The limit is
+/// [`client_udp_payload`]. [`Message::truncate`] keeps header, question and OPT
+/// and drops the record sections. On a parse failure the original bytes are
+/// returned — an oversized datagram beats a dropped query. UDP only.
 pub fn truncate_for_udp(query_bytes: &[u8], response_bytes: Vec<u8>) -> Vec<u8> {
-    // 512 is the floor for every client's limit, so anything this small always
-    // fits and needs no query parse.
+    // Every client's limit is at least 512, so skip the query parse.
     if response_bytes.len() <= MIN_UDP_SIZE {
         return response_bytes;
     }
@@ -800,9 +717,7 @@ fn client_udp_payload(query_bytes: &[u8]) -> usize {
     advertised.max(MIN_UDP_SIZE)
 }
 
-/// Remaining TTL of a cached entry, in seconds, clamped to a minimum of 0.
-/// Used as the `DoH` `Cache-Control: max-age` so downstream clients don't keep
-/// a response past the upstream TTL.
+/// Remaining TTL of a cached entry in seconds, floored at 0; the `DoH` max-age.
 fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
     cached
         .ttl()
@@ -811,12 +726,8 @@ fn remaining_ttl_secs(cached: &crate::cache::CacheValue) -> u32 {
         .min(u32::MAX as u64) as u32
 }
 
-/// Produce a cache-hit response: decrement TTLs by how long the entry has been
-/// cached, then overwrite the DNS transaction ID with the client's query ID.
-///
-/// Both edits are writes at offsets the entry already knows, so a hit copies
-/// the response once and touches a few bytes of it — no parse, no re-encode,
-/// and no second copy of the response held on the entry to amortise them.
+/// Produce a cache-hit response: age the TTLs and patch in the client's ID.
+/// Both are writes at known offsets — one copy, no parse or re-encode.
 fn prepare_cached_response(cached: &crate::cache::CacheValue, query_id: u16) -> Vec<u8> {
     let mut bytes = cached.bytes().to_vec();
     let elapsed = cached.elapsed().as_secs() as u32;
@@ -906,7 +817,6 @@ mod tests {
 
     #[test]
     fn nxdomain_with_huge_soa_min_is_capped() {
-        // SOA minimum 3600s should be clamped to NEGATIVE_TTL_CAP_SECS (60).
         let bytes = make_response(ResponseCode::NXDomain, vec![], Some(3600));
         assert_eq!(
             cache_ttl_for_response(&bytes),
@@ -1179,8 +1089,6 @@ mod tests {
     }
 
     fn make_query(domain: &str, rtype: RecordType) -> Message {
-        // Mirror tests/upstream_test.rs::build_query — this repo's hickory
-        // uses Message::new(id, MessageType, OpCode) and Query::query(name, rt).
         let mut msg = Message::new(42, MessageType::Query, OpCode::Query);
         let name = Name::from_ascii(domain).expect("valid domain name");
         msg.add_query(Query::query(name, rtype));

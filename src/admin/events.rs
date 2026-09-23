@@ -1,25 +1,16 @@
-//! The multiplexed event stream behind the shell's status indicator and the
-//! dashboard's readings.
+//! The tick source behind the admin UI's one SSE stream (`stream_events` in
+//! `api.rs`): the `ping` heartbeat and the dashboard's `stats` snapshot.
 //!
-//! One SSE connection per page carries every push the admin UI needs, because
-//! the status indicator lives in the shell and therefore on *every* page: a
-//! stream per feature would hold two or three connections per tab, and a
-//! browser talking HTTP/1.1 to a plain-HTTP appliance only gets six per origin
-//! before ordinary navigation starts queueing behind them.
+//! One connection per page, because the status indicator is in the shell and
+//! so on every page; a stream per feature would eat into the browser's six
+//! HTTP/1.1 connections per origin.
 //!
-//! Two event names ride it:
+//! - `ping` goes out every tick. It must be a real event: SSE keep-alive
+//!   comments never reach `EventSource`, so a dead socket would look idle.
+//! - `stats` goes only to connections that asked, so an idle settings page
+//!   costs no aggregate queries.
 //!
-//! - `ping` — emitted on every tick whether or not anything changed. It is the
-//!   status indicator's heartbeat, and it has to be a real event rather than
-//!   the SSE keep-alive comment: comments never surface to `EventSource`, so a
-//!   connection whose TCP socket died silently would look identical to an idle
-//!   one. Missing pings are what the client times out on.
-//! - `stats` — the dashboard snapshot, sent only to connections that asked for
-//!   it. A settings page holding the stream open must not make the appliance
-//!   run five aggregate queries every ten seconds for a page that shows none
-//!   of them.
-//!
-//! The snapshot is computed once per tick and shared, not once per connection.
+//! The snapshot is computed once per tick and shared across connections.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,12 +21,10 @@ use tokio::sync::broadcast;
 use crate::admin::stats;
 use crate::db::{Database, DbError, TimelinePoint, TopClient, TopDomain, TopUpstream};
 
-/// How often a tick fires. Matches the cadence the dashboard used to poll at,
-/// so the readings move exactly as often as they did before.
+/// How often a tick fires.
 pub const TICK_INTERVAL_SECS: u64 = 10;
 
-/// Rows behind each dashboard table. The client renders ten and the server
-/// renders ten; asking for more only moved bytes the page threw away.
+/// Rows behind each dashboard table; both the client and the server render ten.
 const TOP_N: i64 = 10;
 
 /// Hours of history behind the dashboard chart.
@@ -43,9 +32,8 @@ const TIMELINE_HOURS: i64 = 24;
 
 /// Everything the dashboard draws, in one payload.
 ///
-/// The field names are the five `/api/stats/*` responses the page used to
-/// fetch separately, unchanged — the renderers in `app.js` read the same
-/// shapes whether they arrived by poll or by push.
+/// Each field has the shape of the matching `/api/stats/*` response, so the
+/// renderers in `app.js` read the same shapes either way.
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardSnapshot {
     pub summary: stats::Summary,
@@ -57,16 +45,13 @@ pub struct DashboardSnapshot {
 
 /// One tick of the stream.
 ///
-/// `snapshot` is `None` when no connected client asked for stats, which is the
-/// common case for an appliance sitting on the settings page.
+/// `snapshot` is `None` when no connected client asked for stats.
 #[derive(Debug, Clone)]
 pub struct Tick {
     pub seq: u64,
     pub at: i64,
-    /// Whether the appliance has ever answered a query. Rides the heartbeat
-    /// rather than taking an event name of its own: it is a state bit, not
-    /// something that happened, and the onboarding notice it hides is the only
-    /// thing that reads it.
+    /// Whether the appliance has ever answered a query — a state bit for the
+    /// onboarding notice, so it rides the heartbeat rather than its own event.
     pub traffic: bool,
     pub snapshot: Option<Arc<DashboardSnapshot>>,
 }
@@ -76,10 +61,8 @@ pub struct Tick {
 pub struct EventHub {
     tx: broadcast::Sender<Arc<Tick>>,
     stats_subscribers: AtomicUsize,
-    /// Latches on the first query this appliance is seen to have answered, and
-    /// never clears. The onboarding notice it hides is about a machine that has
-    /// never served traffic, and a machine that has served some is not that
-    /// machine again — so once the answer is yes, nothing needs to ask again.
+    /// One-way latch: set on the first answered query seen, never cleared. A
+    /// machine that has served traffic is not a fresh one again.
     traffic_seen: AtomicBool,
 }
 
@@ -107,9 +90,8 @@ impl EventHub {
         self.traffic_seen.load(Ordering::Relaxed)
     }
 
-    /// Records that it has. Callable from anywhere that happens to learn it —
-    /// the ticker probes for it, and a page render that reads the same fact
-    /// keeps the latch warm on an appliance nobody is watching.
+    /// Records that it has. The ticker probes for it; a page render that learns
+    /// the same fact sets it too.
     pub fn note_traffic(&self) {
         self.traffic_seen.store(true, Ordering::Relaxed);
     }
@@ -119,17 +101,14 @@ impl EventHub {
     }
 
     /// Register interest in snapshots for as long as the returned guard lives.
-    /// A guard rather than a pair of calls because the decrement has to survive
-    /// the connection being dropped mid-stream, which is the normal way an SSE
-    /// connection ends.
+    /// A guard, because an SSE connection normally ends by being dropped.
     pub fn stats_guard(self: &Arc<Self>) -> StatsGuard {
         self.stats_subscribers.fetch_add(1, Ordering::Relaxed);
         StatsGuard { hub: self.clone() }
     }
 
     fn send(&self, tick: Tick) {
-        // A send with no receivers is not an error here: it means every client
-        // disconnected between the tick firing and this call.
+        // No receivers just means every client left since the tick fired.
         let _ = self.tx.send(Arc::new(tick));
     }
 }
@@ -163,13 +142,9 @@ pub async fn compute_snapshot(db: &Database, now: i64) -> Result<DashboardSnapsh
     })
 }
 
-/// Drive the stream: one tick every `interval` for as long as anyone is
-/// listening. Production passes [`TICK_INTERVAL_SECS`]; the interval is a
-/// parameter so a test can run the real loop in milliseconds rather than
-/// mock the clock.
-///
-/// Nothing is computed and nothing is sent while no connection is open, so an
-/// appliance nobody is looking at does no work for this at all.
+/// Drive the stream: one tick every `interval` ([`TICK_INTERVAL_SECS`] in
+/// production; a parameter so tests run the real loop without a mocked clock).
+/// The whole cycle is skipped while no connection is open.
 pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -185,9 +160,7 @@ pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration
         seq = seq.wrapping_add(1);
         let now = crate::now_unix();
 
-        // Asked only while the answer can still be no. The latch is one-way, so
-        // an appliance that has served traffic pays for this once and a fresh
-        // one pays a single `EXISTS` per tick until its first query lands.
+        // One `EXISTS` per tick, only until the one-way latch is set.
         if !hub.has_traffic() {
             match db.has_any_query_logs().await {
                 Ok(true) => hub.note_traffic(),
@@ -204,9 +177,7 @@ pub async fn run(db: Database, hub: Arc<EventHub>, interval: std::time::Duration
             match compute_snapshot(&db, now).await {
                 Ok(snap) => Some(Arc::new(snap)),
                 Err(e) => {
-                    // The heartbeat still goes out: the server answering at all
-                    // is the fact the status indicator reports, and a failed
-                    // stats read does not make it untrue.
+                    // The heartbeat still goes out: the server is still up.
                     tracing::warn!(
                         event = "events.snapshot_failed",
                         error = %e,
@@ -248,8 +219,7 @@ mod tests {
 
     #[test]
     fn a_dropped_stats_guard_releases_its_claim() {
-        // The decrement has to happen on drop rather than on an explicit call,
-        // because a client vanishing mid-stream never reaches one.
+        // A client vanishing mid-stream never makes an explicit call.
         let hub = Arc::new(EventHub::new(8));
         {
             let _guard = hub.stats_guard();
@@ -266,12 +236,10 @@ mod tests {
         assert!(!hub.wants_stats());
     }
 
-    /// A tick every few milliseconds, so the real loop is exercised without a
-    /// mocked clock.
+    /// A fast tick, so the real loop runs without a mocked clock.
     const FAST: std::time::Duration = std::time::Duration::from_millis(20);
 
-    /// Long enough for several `FAST` ticks, short enough that a hang fails the
-    /// test rather than the suite.
+    /// Long enough for several `FAST` ticks; a hang fails the test, not the suite.
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     async fn next_tick(rx: &mut broadcast::Receiver<Arc<Tick>>) -> Arc<Tick> {
@@ -281,16 +249,15 @@ mod tests {
             .unwrap()
     }
 
-    /// The whole cycle is skipped while nobody is connected, so an appliance
-    /// nobody is looking at does no work for this at all.
+    /// The whole cycle is skipped while nobody is connected.
     #[tokio::test]
     async fn the_ticker_does_nothing_while_nobody_is_connected() {
         let db = test_db().await;
         let hub = Arc::new(EventHub::new(8));
         let task = tokio::spawn(run(db, hub.clone(), FAST));
 
-        // Let several intervals pass with no subscriber, then join. The first
-        // tick this receiver sees being seq 1 is what proves none of them ran.
+        // Several intervals pass with no subscriber; a first seen seq of 1
+        // proves none of them ran.
         tokio::time::sleep(FAST * 5).await;
         let mut rx = hub.subscribe();
 
@@ -303,8 +270,7 @@ mod tests {
         task.abort();
     }
 
-    /// A connection that did not ask for stats must not make the appliance run
-    /// five aggregate queries every tick.
+    /// A connection that did not ask for stats must not cost aggregate queries.
     #[tokio::test]
     async fn a_tick_carries_a_snapshot_only_when_one_was_asked_for() {
         let db = test_db().await;
@@ -318,8 +284,7 @@ mod tests {
         );
 
         let guard = hub.stats_guard();
-        // The tick in flight when the guard was taken may already have been
-        // built without one, so this waits for the first that reflects it.
+        // The tick in flight may predate the guard; wait for one reflecting it.
         let got_snapshot = tokio::time::timeout(WAIT, async {
             loop {
                 if next_tick(&mut rx).await.snapshot.is_some() {

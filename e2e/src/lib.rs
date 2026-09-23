@@ -1,11 +1,6 @@
 //! Browser E2E support for noadd: the instances under test, the browser
 //! session, the page and locator layer the tests speak, and the fixture SQL
 //! behind the seeded suites.
-//!
-//! This replaces the `playwright-bdd` project that lived here. The five
-//! `.feature` files are reused verbatim — the `cucumber` crate reads the same
-//! Gherkin — and what was rewritten is everything underneath them, plus the
-//! eight plain Playwright specs and the screenshot pipeline.
 
 pub mod api;
 pub mod browser;
@@ -23,12 +18,8 @@ pub use dom::{Locator, Page, StepError, StepResult, ensure};
 pub use server::Server;
 pub use suite::Suite;
 
-/// The ports every instance listens on, unchanged from `playwright.config.js`.
-///
-/// They are spelled out in one place now rather than once per spec file, which
-/// also settles the note the old onboarding steps carried: the DNS port the
-/// "noadd resolves a real DNS query" step sends to was a literal in the step
-/// file that had to be kept in sync with the config by hand.
+/// `(http, dns)` ports for every instance, kept in one place so no step or spec
+/// file hardcodes one.
 pub mod ports {
     /// The shared, pre-authenticated instance the `@app` features read.
     pub const APP: (u16, u16) = (14100, 15100);
@@ -53,8 +44,7 @@ pub mod ports {
     pub const STATS_NO_JS: (u16, u16) = (14109, 15109);
     /// The dashboard, settings and account with scripting off.
     pub const PAGES_NO_JS: (u16, u16) = (14110, 15110);
-    /// The query log's live tail, which needs the appliance to answer a real
-    /// query while a browser watches.
+    /// The query log's live tail, which sends a real query while a browser watches.
     pub const LOGS_LIVE_TAIL: (u16, u16) = (14111, 15111);
     /// The statistics charts' browser-side folds against the API.
     pub const STATS_CHARTS: (u16, u16) = (14112, 15112);
@@ -63,12 +53,9 @@ pub mod ports {
     pub const SCREENSHOTS: (u16, u16) = (14150, 15150);
 }
 
-/// The most instances — and so browsers — to drive at once, whatever the
-/// machine.
-///
-/// A fixed four is fine on a developer's machine and too many for a two-core CI
-/// runner, where browsers contend until pages take longer to settle than the
-/// assertions wait for.
+/// The most instances (and so browsers) to drive at once: available cores,
+/// capped at four. On a two-core CI runner four browsers contend until pages
+/// settle slower than the assertions wait.
 pub fn max_concurrency() -> usize {
     std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)

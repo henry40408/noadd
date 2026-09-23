@@ -5,11 +5,8 @@ edition = "2024"
 publish = false
 description = "Browser E2E tests and the screenshot pipeline for the noadd admin UI"
 
-# Deliberately its own workspace, not a member of the one at the repository
-# root. CI runs coverage as `cargo llvm-cov nextest --workspace`, which would
-# otherwise compile thirtyfour and drive a real browser on every coverage run.
-# `e2e/` was already a self-contained sub-project when it was JavaScript; this
-# keeps that boundary.
+# Its own workspace so the root's `cargo llvm-cov nextest --workspace` coverage
+# run never compiles thirtyfour or drives a browser.
 [workspace]
 
 [dependencies]
@@ -18,13 +15,12 @@ base64 = "0.23.0"
 cucumber = "0.23.0"
 reqwest = { version = "0.13.0", default-features = false, features = ["rustls", "json"] }
 serde_json = "1.0.145"
-# Pinned exactly: 0.37.5 was published 2026-08-12, inside the seven-day cooldown
-# this project applies to fresh releases. Relax to a caret once it has aged out.
+# Pinned exactly while 0.37.5 (2026-08-12) was inside the seven-day release
+# cooldown; relax to a caret once it has aged out.
 thirtyfour = "=0.37.5"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
-# The Cucumber runner and the spec runner both drive their own scenarios, so
-# neither wants libtest collecting `#[test]` functions.
+# Both runners drive their own scenarios; no libtest harness.
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
@@ -35,9 +31,8 @@ name = "specs"
 path = "tests/specs/main.rs"
 harness = false
 
-# Mirrors the root crate's lint set, minus the entries that only apply to the
-# server. Being a separate workspace means none of it is inherited, and test
-# code that lints differently from the code it tests drifts.
+# Mirrors the root crate's lint set minus server-only entries; a separate
+# workspace inherits none of it.
 [lints.rust]
 unexpected_cfgs = "deny"
 unsafe_code = "deny"

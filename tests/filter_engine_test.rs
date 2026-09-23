@@ -140,9 +140,8 @@ fn test_empty_engine_allows_everything() {
 
 #[test]
 fn new_with_pre_interned_list_names_resolves_provenance() {
-    // Production path: caller hands FilterEngine an already-deduplicated list
-    // name table plus (rule, list_idx) pairs. This is what `rebuild_filter`
-    // does so it can avoid cloning the same list name once per rule.
+    // The `rebuild_filter` path: a deduplicated list table plus
+    // (rule, list_idx) pairs, so no list name is cloned per rule.
     let list_names = vec![ListMeta::new("easylist", 1), ListMeta::new("adguard", 2)];
     let block_rules = vec![
         (block_rule("tracker.net", false), 0u16),
@@ -168,10 +167,8 @@ fn new_with_pre_interned_list_names_resolves_provenance() {
 
 #[test]
 fn build_is_insertion_order_independent() {
-    // The flat trie is built from a HashMap whose iteration order is
-    // non-deterministic. Two builds from the same rules in different orders
-    // must still produce identical lookup results — sorting at flatten time
-    // is what makes that true.
+    // The trie builds from a HashMap; sorting at flatten time must make the
+    // result independent of insertion order.
     let mut rules_a = vec![
         (block_rule("a.example.com", true), 0u16),
         (block_rule("b.example.com", true), 0u16),
@@ -205,9 +202,8 @@ fn build_is_insertion_order_independent() {
 
 #[test]
 fn lowercases_uppercase_query_against_lowercased_rules() {
-    // Parser already lowercases rule.domain. The engine must trust that and
-    // still match queries that arrive in mixed case — i.e. the lookup path
-    // is the only place case folding happens.
+    // The parser lowercases rules; the lookup path is the only place query
+    // case is folded.
     let engine = FilterEngine::from_named_rules(
         vec![(block_rule("ads.example.com", true), "L".into())],
         vec![],

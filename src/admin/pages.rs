@@ -1,24 +1,13 @@
 //! Server-rendered admin pages.
 //!
-//! These handlers serve the browser-facing HTML. They are deliberately separate
-//! from the `/api/*` handlers in [`crate::admin::api`]: the API answers in JSON
-//! with status codes, a page answers in HTML with redirects, and the two
-//! contracts do not fit in one handler. The API remains the contract for API
-//! keys and the `OpenAPI` spec; the UI no longer consumes it to decide who is
-//! signed in or which screen to show.
+//! Kept apart from the JSON `/api/*` handlers in [`crate::admin::api`]: a page
+//! answers in HTML with redirects, the API with status codes. The session is
+//! resolved before any HTML is written, so an unauthenticated request is
+//! redirected rather than painted and then repainted.
 //!
-//! What actually moved to the server is that decision. The client used to ask
-//! `/api/health` whether setup was needed, then `/api/settings` whether it was
-//! authenticated, and repaint once the answers arrived — three round trips
-//! before the first pixel was right, which is where the blank frame and the
-//! flash of the sign-in form came from. Now an unauthenticated request is
-//! redirected before any HTML is written.
-//!
-//! Sign-in and setup need no CSRF token. The origin guard
-//! ([`crate::admin::csrf`]) is header-based and already covers every unsafe
-//! method on this router: a form posted from another origin arrives as
-//! `Sec-Fetch-Site: cross-site` or `same-site` and is refused before it
-//! reaches a handler.
+//! Sign-in and setup need no CSRF token: the header-based origin guard
+//! ([`crate::admin::csrf`]) refuses a cross-origin form post on every unsafe
+//! method before it reaches a handler.
 
 use askama::Template;
 use askama_web::WebTemplate;
@@ -43,10 +32,8 @@ use crate::admin::api::{
 
 /// The sign-in screen.
 ///
-/// `error` and `username` exist so a refused sign-in can re-render this same
-/// page with the message and the typed username intact. Redirecting instead
-/// would discard both, which is the difference between a form an operator can
-/// correct and one they have to start over.
+/// `error` and `username` let a refused sign-in re-render with the message and
+/// the typed username intact, which a redirect would discard.
 #[derive(Template, WebTemplate)]
 #[template(path = "login.html")]
 pub struct LoginTemplate {
@@ -65,11 +52,8 @@ pub struct SetupTemplate {
     min_password_length: usize,
 }
 
-/// One entry in the navigation, and with it one of the paths the shell links to.
-///
-/// A single table drives the desktop strip and the mobile F-key bar both. They
-/// were separate blocks of markup before, which meant adding a page involved
-/// remembering to edit two places that nothing checked against each other.
+/// One navigation entry. The single `NAV` table drives both the desktop strip
+/// and the mobile F-key bar.
 pub struct NavItem {
     pub href: &'static str,
     pub testid: &'static str,
@@ -133,48 +117,37 @@ const NAV: &[NavItem] = &[
     },
 ];
 
-/// Everything the shell needs, independent of which page is inside it.
-///
-/// Carried as a field on each page's template rather than duplicated across
-/// them: `shell.html` reads `shell.*`, so a page template only has to declare
-/// its own data. Every page that grows a server-rendered body gets this for
-/// free by embedding it.
+/// Everything the shell needs, independent of the page inside it. Each page
+/// template embeds it as `shell`, which `shell.html` reads.
 pub struct ShellData {
     version: &'static str,
-    /// The `Host` this request arrived on, shown in the status bar. Attacker-
-    /// influenced (it is a request header), so it is only ever interpolated by
-    /// the template, which escapes it.
+    /// The request's `Host`, shown in the status bar. Attacker-influenced, so
+    /// only ever interpolated by the (escaping) template.
     host: String,
     /// The path being served, so the matching navigation item renders active.
     current_path: String,
     nav: &'static [NavItem],
     welcome: bool,
     proxy_logout_notice: bool,
-    /// Read by the settings page rather than `shell.html` — the confirmation
-    /// belongs next to the save button, not in the shell's notice area. It is
-    /// resolved here because this is where the flash is consumed, and consuming
-    /// it in two places would mean one of them never sees it.
+    /// Read by the settings page, next to its save button. Resolved here because
+    /// this is where the flash is consumed; consuming it twice would lose it.
     settings_saved: bool,
     /// Read by the account page, for the same reason as `settings_saved`.
     password_changed: bool,
-    /// Read by the filters page. Every change there — a list toggled, added,
-    /// edited or removed, a rule added or deleted — kicks off a rebuild, so one
-    /// identifier covers them all; what the operator needs to know is the same
-    /// sentence either way.
+    /// Read by the filters page. Every change there triggers a rebuild, so one
+    /// flag covers them all.
     filters_saved: bool,
-    /// Read by the filters page. Separate from `filters_saved` because
-    /// downloading every list is the one action whose effect is not immediate.
+    /// Read by the filters page. Separate because downloading every list is the
+    /// one action whose effect is not immediate.
     lists_updating: bool,
     /// Read by the account page: an operator or API key was added or removed.
     account_saved: bool,
-    /// Read by the account page. Separate from `account_saved` because signing
-    /// devices out is worth confirming in its own words.
+    /// Read by the account page; signing devices out gets its own wording.
     sessions_revoked: bool,
     /// Read by the query log: the history was emptied.
     logs_cleared: bool,
-    /// Whether to show the onboarding notice: an appliance that has never
-    /// answered a query, whose operator has not dismissed the notice, on a page
-    /// that is not the dashboard.
+    /// Show the onboarding notice: never answered a query, not dismissed, and
+    /// not on the dashboard.
     show_next_step: bool,
     /// Where to point a device, for that notice. Empty when it is not shown.
     next_step_addr: String,
@@ -182,9 +155,7 @@ pub struct ShellData {
 
 impl ShellData {
     /// Build the shell's data for this request, consuming the pending flash.
-    ///
-    /// Returns the jar that clears it alongside, because reading a flash
-    /// without clearing it is the bug this mechanism exists to prevent.
+    /// The returned jar clears it; a flash read but not cleared would repeat.
     async fn build(
         state: &AppState,
         uri: &Uri,
@@ -194,12 +165,9 @@ impl ShellData {
         Self::build_for(state, uri.path(), headers, jar).await
     }
 
-    /// The same, for a response whose page is known regardless of the path the
-    /// request arrived on.
-    ///
-    /// A rejected `POST /account/operators` re-renders the account page, and
-    /// the navigation has to say `/account` — taking it from the request URI
-    /// would leave nothing active on a page the operator is looking straight at.
+    /// The same, for a response whose page differs from the request path — e.g.
+    /// a rejected `POST /account/operators` re-renders `/account`, and the
+    /// navigation must mark that.
     async fn build_for(
         state: &AppState,
         path: &str,
@@ -231,30 +199,25 @@ impl ShellData {
     }
 }
 
-/// Where to tell an operator to point a device, or `None` when the shell should
-/// not be saying so at all.
+/// Where to tell an operator to point a device, or `None` when the notice is
+/// not shown.
 ///
-/// The tests are ordered by what they cost. An appliance that has answered a
-/// query is past this notice, and the hub's latch settles that without touching
-/// the database on every page of every running install; only a machine that
-/// still looks fresh pays for the two reads behind the rest.
+/// Checks run cheapest first: the hub's traffic latch settles it without a
+/// database read on any install that has served traffic.
 async fn next_step_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<String> {
-    // The dashboard makes this point at length in its own empty state, and one
-    // page carrying both reads as two different notices.
+    // The dashboard has its own empty state; both would read as two notices.
     if path == "/" || state.events.has_traffic() {
         return None;
     }
     match state.db.has_any_query_logs().await {
         Ok(true) => {
-            // Learned here rather than on the ticker's next pass, so the reads
-            // above stop happening from now on.
+            // Set the latch now so these reads stop.
             state.events.note_traffic();
             return None;
         }
         Ok(false) => {}
-        // A failed read hides the notice. It is an aside, and one shown to an
-        // operator whose appliance is already working is worse than one briefly
-        // missing from a fresh install.
+        // A failed read hides the notice: wrongly showing it to a working
+        // appliance is worse than briefly missing it on a fresh one.
         Err(_) => return None,
     }
     let dismissed = state.db.get_setting("onboarding_banner_dismissed").await;
@@ -266,10 +229,8 @@ async fn next_step_target(state: &AppState, path: &str, headers: &HeaderMap) -> 
 
 /// The settings page.
 ///
-/// `error_field` names the one field a rejected save objected to, and is
-/// compared by name in the template so the message lands next to the input it
-/// is about — a page with eight fields and one message at the top makes the
-/// operator hunt for which. Empty when there is nothing to report.
+/// `error_field` names the field a rejected save objected to, so the template
+/// puts the message next to that input. Empty when there is nothing to report.
 #[derive(Template, WebTemplate)]
 #[template(path = "settings.html")]
 pub struct SettingsTemplate {
@@ -283,9 +244,8 @@ pub struct SettingsTemplate {
     log_retention_days: String,
     public_url: String,
     doh_access_policy: String,
-    /// Back the three free-text fields' `<datalist>`s. Slices of the constants
-    /// that live beside the checks they have to satisfy, so the suggestions
-    /// and the tests proving they are accepted share one source.
+    /// Back the three free-text fields' `<datalist>`s; the same constants the
+    /// tests prove acceptable.
     block_custom_ipv4_suggestions: &'static [&'static str],
     block_custom_ipv6_suggestions: &'static [&'static str],
     log_retention_suggestions: &'static [i64],
@@ -300,9 +260,8 @@ pub struct OperatorView {
     username: String,
     created_text: String,
     is_you: bool,
-    /// False for yourself and for the last operator standing. Deleting either
-    /// is refused by the server; the row says so rather than offering a button
-    /// that exists to be turned down.
+    /// False for yourself and for the last operator, whose deletion the server
+    /// refuses anyway.
     deletable: bool,
 }
 
@@ -329,12 +288,10 @@ pub struct ApiKeyView {
 
 /// The account page: this account, operators, sessions and API keys.
 ///
-/// The three actions that need a password proof — add an operator, delete one,
-/// mint an API key — carry a password field in the form itself. That is the
-/// whole mechanism: no dialog, no stale-proof round trip, and the same path
-/// whether or not there is JavaScript. `POST /api/auth/reauth` still exists for
-/// API callers, and [`crate::admin::api::confirm_password`] is the one place
-/// either of them checks a password.
+/// Adding or deleting an operator and minting an API key carry a password field
+/// in the form itself — no dialog, and the same path with or without
+/// JavaScript. [`crate::admin::api::confirm_password`] is the one place this
+/// and `POST /api/auth/reauth` check a password.
 #[derive(Template, WebTemplate)]
 #[template(path = "account.html")]
 pub struct AccountTemplate {
@@ -350,8 +307,7 @@ pub struct AccountTemplate {
     sessions: Vec<SessionView>,
     api_keys: Vec<ApiKeyView>,
 
-    /// Submitted values kept across a rejection, so only the field that was
-    /// wrong has to be retyped. Passwords are never among them.
+    /// Submitted values kept across a rejection. Never passwords.
     operator_username: String,
     operator_error: String,
 
@@ -365,9 +321,8 @@ pub struct AccountTemplate {
     api_key_expires: String,
     api_key_error: String,
 
-    /// The one and only sight of a newly minted token. Empty except on the
-    /// response that created it — it is not stored, so this is the only
-    /// chance anyone gets to copy it.
+    /// A newly minted token, set only on the response that created it: it is
+    /// not stored, so this is the only chance to copy it.
     new_key_name: String,
     new_key_token: String,
 
@@ -377,10 +332,8 @@ pub struct AccountTemplate {
 
 /// One filter list, formatted the way the page shows it.
 ///
-/// The numbers and the relative time are rendered here rather than in the
-/// template because the same shapes have to come back out of `app.js` when it
-/// re-draws a row after a change, and a formatting rule that lives in two
-/// languages drifts.
+/// Numbers and relative time are formatted here to match what `app.js`
+/// produces when it re-draws a row.
 pub struct FilterListView {
     id: i64,
     name: String,
@@ -397,9 +350,7 @@ pub struct FilterListView {
     /// What stopping this list would cost, already phrased: `"41,200 rules"`,
     /// `"No impact"`, or why there is no number to give.
     impact_text: String,
-    /// The impact is zero — every rule is provided by another list too. Drawn
-    /// as a badge rather than a number, because it is the one value an
-    /// operator acts on.
+    /// Zero impact — every rule is also in another list. Drawn as a badge.
     impact_none: bool,
 }
 
@@ -413,30 +364,26 @@ pub struct CustomRuleView {
 
 /// The filters page: domain test, filter lists, and custom rules.
 ///
-/// Everything here works without JavaScript, which is what the shape of this
-/// struct is about. The domain test is a GET so its verdict is in the URL and
-/// survives a refresh; every mutation is a POST that redirects. `edit_id` is
-/// how a row expands into an edit form on the server — with JavaScript that
-/// same button opens the dialog instead, and the link is never followed.
+/// Works without JavaScript: the domain test is a GET (the verdict lives in
+/// the URL), every mutation a POST that redirects, and `edit_id` expands a row
+/// into an edit form — which, with JavaScript, is a dialog instead.
 #[derive(Template, WebTemplate)]
 #[template(path = "filters.html")]
 pub struct FiltersTemplate {
     shell: ShellData,
     lists: Vec<FilterListView>,
     rules: Vec<CustomRuleView>,
-    /// Every list is off, so nothing is being blocked at all. Worth saying
-    /// loudly — it is the one state where noadd looks healthy and does nothing.
+    /// Every list is off: noadd looks healthy but blocks nothing.
     all_disabled: bool,
     test_domain: String,
-    /// Recently-queried domains, backing the tester's `<datalist>`. Empty on a
-    /// fresh install, which the template renders as no list at all.
+    /// Recently-queried domains for the tester's `<datalist>`; empty renders none.
     domain_suggestions: Vec<String>,
-    /// Whether a domain was tested at all. The verdict is flat rather than an
-    /// `Option<…>` so the template needs nothing but `{% if %}`.
+    /// Whether a domain was tested. Flat fields rather than an `Option<…>`, so
+    /// the template needs only `{% if %}`.
     tested: bool,
     verdict_blocked: bool,
-    /// The rule that decided it. Empty when the domain is allowed by default —
-    /// nothing matched, which is not the same as an allow rule matching.
+    /// The deciding rule. Empty when allowed by default (nothing matched, as
+    /// opposed to an allow rule matching).
     verdict_rule: String,
     /// The list the deciding rule came from. Only set for a block.
     verdict_list: String,
@@ -468,17 +415,11 @@ pub struct TopRowView {
     avg_ms: String,
 }
 
-/// The dashboard.
+/// The dashboard: all readings, no forms. The six stat cards, three top-N
+/// tables and the empty-state guide arrive filled in the first response.
 ///
-/// Everything here is a reading rather than a control, so there is not a form
-/// on the page. What that buys is a first paint with the real numbers in it:
-/// the six stat cards, the three top-N tables and the onboarding notice all
-/// arrive filled in, where they used to appear empty and then populate over
-/// five API calls.
-///
-/// The chart is the exception, and the one place the no-JS rule was always
-/// going to stop: it is drawn from a timeline series by `app.js`. Without
-/// scripting the card says so rather than sitting empty.
+/// The chart is the exception — `app.js` draws it — and without scripting the
+/// card says so.
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard.html")]
 pub struct DashboardTemplate {
@@ -501,16 +442,14 @@ pub struct DashboardTemplate {
     avg_ms: String,
     avg_ms_7d: String,
     avg_ms_30d: String,
-    /// The live rate from the server's 60-second window, which is what the
-    /// card's label and its flash-on-change both promise.
+    /// The live rate from the server's 60-second window.
     qps_now: String,
     qps_today: String,
     qps_7d: String,
 
-    /// False only on an appliance that has never answered a query, which is
-    /// the one state worth explaining at length.
+    /// False only on an appliance that has never answered a query.
     has_queries: bool,
-    /// Where to point a device, shown by the onboarding notice.
+    /// Where to point a device, for the empty-state guide.
     dns_addr: String,
 
     top_domains: Vec<TopRowView>,
@@ -518,23 +457,19 @@ pub struct DashboardTemplate {
     top_upstreams: Vec<TopRowView>,
 }
 
-/// One row of a horizontal bar list — the shape the statistics page uses for
-/// query types, outcomes, top domains and top sources alike.
-///
-/// The bar is sized against the largest row and the share against the visible
-/// total, so both are decided here rather than in the template: askama has no
-/// business dividing.
+/// One row of a horizontal bar list on the statistics page. Bar width (against
+/// the largest row) and share (against the visible total) are computed here,
+/// not in the template.
 pub struct BarRowView {
     label: String,
     /// The fill's width as a percentage of the widest row, `"42.1"`. Always a
-    /// number, because it goes straight into a `style` attribute.
+    /// number: it goes into a `style` attribute.
     width: String,
     /// The count as the cell shows it.
     count: String,
     /// `"12.3%"`, or empty when the total is zero and a share would be a lie.
     share: String,
-    /// The full, unabbreviated count for the cell's `title`, with the share
-    /// alongside when there is one.
+    /// The full count (and share, if any) for the cell's `title`.
     count_title: String,
 }
 
@@ -545,8 +480,7 @@ pub struct StatCardView {
     value: String,
     /// A class for the value's colour, e.g. `"accent"`. Never empty.
     value_class: &'static str,
-    /// A unit set small after the value, e.g. `"ms"`. Empty when the value is a
-    /// dash, which has no unit.
+    /// A unit set small after the value, e.g. `"ms"`. Empty for a dash.
     unit: &'static str,
     /// The second line under the value. Empty when there is none.
     sub: String,
@@ -563,23 +497,14 @@ pub struct RangeOptionView {
     active: bool,
 }
 
-/// One row of the range switcher's aria-current bookkeeping plus the four
-/// tables and two grids that make up the statistics page.
+/// The statistics page: the range switcher, four bar lists and two stat grids.
 ///
-/// The split down this page is the one the data itself draws. Only the three
-/// charts need a calendar, and a calendar needs the viewer's UTC offset, which
-/// arrives with the browser rather than with the request; the charts were
-/// already the documented exception to this UI working without JavaScript.
-/// So the server ships them as `series` — quarter-hour counts on UTC
-/// boundaries, taken from the same scan as the breakdowns — and `app.js` folds
-/// those into the viewer's hours and days. Everything else here is a window of
-/// `now - range` with no calendar in it, so it renders on the server and never
-/// moves again.
-///
-/// That is also why the range switcher is three links rather than three
-/// buttons. The range picks the server's window, so it belongs in the URL,
-/// where it can be refreshed, bookmarked and shared like every other view on
-/// this UI.
+/// Only the three charts need a calendar, which needs the viewer's UTC offset —
+/// known to the browser, not the request. So the charts ship as `series`
+/// (quarter-hour counts on UTC boundaries, from the same scan as the
+/// breakdowns) for `app.js` to fold; everything else is a plain `now - range`
+/// window rendered on the server. The range picks the server's window, so the
+/// switcher is links and the range lives in the URL.
 #[derive(Template, WebTemplate)]
 #[template(path = "stats.html")]
 pub struct StatsTemplate {
@@ -600,11 +525,8 @@ pub struct StatsTemplate {
     health: Vec<StatCardView>,
 }
 
-/// One `<option>`, with whether it is the selected one already decided.
-///
-/// Worked out here rather than compared in the template: askama would be
-/// comparing a `String` against a reference to a `&str`, and the workarounds
-/// for that are all worse than one extra field.
+/// One `<option>`, with `selected` decided here — comparing `String` to `&&str`
+/// in askama is awkward.
 pub struct OptionView {
     value: String,
     selected: bool,
@@ -635,12 +557,9 @@ pub struct LogRowView {
 
 /// The query log.
 ///
-/// Every filter and the page number live in the URL, which is what makes this
-/// page work without JavaScript: the filters are a GET form, the pager is two
-/// links, and a filtered view can be refreshed, bookmarked and shared.
-///
-/// The live tail is the exception, alongside the dashboard's chart. It is an
-/// `EventSource`, so the button that starts it ships hidden.
+/// Every filter and the page number live in the URL, so the page works without
+/// JavaScript: the filters are a GET form, the pager two links. The live tail
+/// needs the event stream, so its button ships hidden.
 #[derive(Template, WebTemplate)]
 #[template(path = "logs.html")]
 pub struct LogsTemplate {
@@ -648,14 +567,12 @@ pub struct LogsTemplate {
     rows: Vec<LogRowView>,
     /// The `DoH` tokens that exist, for the filter's dropdown.
     tokens: Vec<OptionView>,
-    /// The record types the filter offers. A fixed list rather than the ones
-    /// present in the log: an operator filtering for `PTR` and finding it
-    /// missing from the dropdown learns nothing except that the dropdown is
-    /// unreliable.
+    /// The record types the filter offers: a fixed list, not the ones present
+    /// in the log, so a type is never mysteriously missing.
     query_types: Vec<OptionView>,
 
-    /// Recently-queried domains, backing the search box's `<datalist>`. Empty
-    /// on a fresh install, which the template renders as no list at all.
+    /// Recently-queried domains for the search box's `<datalist>`; empty renders
+    /// none.
     domain_suggestions: Vec<String>,
 
     /// The filters as submitted, so the form comes back showing what is applied.
@@ -672,20 +589,18 @@ pub struct LogsTemplate {
     /// Complete query strings for the pager, so paging keeps the filters.
     prev_href: String,
     next_href: String,
-    /// The current view as a path, which a row action carries so it can return
-    /// the operator to exactly the page they acted from.
+    /// The current view as a path, carried by row actions to return here.
     current_href: String,
-    /// Whether any filter is applied, which decides whether an empty table
-    /// means "nothing matched" or "nothing has happened yet".
+    /// Whether any filter is applied: an empty table then means "nothing
+    /// matched" rather than "nothing has happened yet".
     filtered: bool,
 }
 
 /// An authenticated operator for a *page* request.
 ///
-/// Wraps [`AuthedUser`] and changes only what happens on failure: an API caller
-/// wants a 401, a browser wants to be sent to the sign-in page with its
-/// destination remembered. Sharing the extractor underneath is what stops the
-/// page and the API disagreeing about who is signed in.
+/// Wraps [`AuthedUser`], changing only the failure: a redirect to sign-in (with
+/// the destination remembered) instead of a 401. Sharing the extractor keeps
+/// pages and the API agreeing on who is signed in.
 pub struct SsrUser(#[allow(dead_code)] pub AuthedUser);
 
 impl FromRequestParts<AppState> for SsrUser {
@@ -695,8 +610,7 @@ impl FromRequestParts<AppState> for SsrUser {
         if let Ok(user) = AuthedUser::from_request_parts(parts, state).await {
             return Ok(Self(user));
         }
-        // An appliance with no operator yet must land on the wizard rather than
-        // a sign-in form no one can satisfy.
+        // With no operator yet, sign-in cannot succeed; go to the wizard.
         if needs_setup(state).await {
             return Err(Redirect::to("/setup").into_response());
         }
@@ -708,11 +622,9 @@ impl FromRequestParts<AppState> for SsrUser {
     }
 }
 
-/// The operator, if this request happens to carry a valid credential.
-///
-/// For the two pages that must answer differently depending on whether anyone
-/// is signed in, rather than refuse — `/login` sends an already-authenticated
-/// browser onwards instead of showing it a second sign-in form.
+/// The operator, if the request carries a valid credential — for a page that
+/// answers differently when signed in rather than refusing (e.g. `/login`
+/// sends a signed-in browser onwards).
 pub struct MaybeUser(pub Option<AuthedUser>);
 
 impl FromRequestParts<AppState> for MaybeUser {
@@ -727,10 +639,9 @@ impl FromRequestParts<AppState> for MaybeUser {
 
 /// A one-shot notice left behind by a redirect.
 ///
-/// A closed set rather than free text: the value round-trips through a cookie,
-/// and a cookie holding an arbitrary message is one encoding bug away from
-/// either breaking the header or carrying something the sender did not write.
-/// The wording lives in the template; only the identifier travels.
+/// A closed set, not free text: only the identifier travels in the cookie, so
+/// it cannot break the header or carry text the server did not write. The
+/// wording lives in the template.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Flash {
     /// First-run setup just completed.
@@ -779,8 +690,7 @@ impl Flash {
             "account_saved" => Some(Self::AccountSaved),
             "sessions_revoked" => Some(Self::SessionsRevoked),
             "logs_cleared" => Some(Self::LogsCleared),
-            // An unrecognised value is a stale cookie from an older build, or
-            // something hand-written. Either way there is no notice to show.
+            // A stale or hand-written cookie: no notice.
             _ => None,
         }
     }
@@ -788,10 +698,8 @@ impl Flash {
 
 /// The cookie a flash rides in.
 ///
-/// A cookie rather than the query string: `?welcome=1` survives a refresh, a
-/// bookmark and a shared link, so the strip it drives comes back where it has
-/// no business coming back. It is deliberately session-scoped (no `Max-Age`) —
-/// a notice nobody saw before closing the tab is not one worth keeping.
+/// A cookie rather than the query string, which would survive refreshes,
+/// bookmarks and shared links. Session-scoped (no `Max-Age`) on purpose.
 const FLASH_COOKIE: &str = "noadd_flash";
 
 fn set_flash(jar: CookieJar, flash: Flash) -> CookieJar {
@@ -806,9 +714,7 @@ fn set_flash(jar: CookieJar, flash: Flash) -> CookieJar {
 
 /// Read the pending notice and hand back a jar that clears it.
 ///
-/// Read and clear are one step on purpose: a flash that is rendered but not
-/// cleared shows again on the next page, which is the failure this mechanism
-/// exists to avoid.
+/// One step, so a rendered flash cannot survive to show again.
 fn take_flash(jar: CookieJar) -> (Option<Flash>, CookieJar) {
     let Some(flash) = jar.get(FLASH_COOKIE).and_then(|c| Flash::parse(c.value())) else {
         return (None, jar);
@@ -819,15 +725,10 @@ fn take_flash(jar: CookieJar) -> (Option<Flash>, CookieJar) {
 
 /// Accept only a same-origin destination expressed as an absolute path.
 ///
-/// `next` is attacker-controlled — it arrives in the query string, and the
-/// sign-in page is exactly what a phishing link would point at. Without this,
-/// `/login?next=https://evil.example` sends the operator off-origin the moment
-/// they authenticate, wearing noadd's own URL as the bait. The protocol-relative
-/// `//evil.example` is the same attack without a scheme, and `/\evil.example` is
-/// what several browsers normalise *into* it, so all three are refused.
-///
-/// A control character is rejected too: the value is interpolated into a
-/// `Location` header, and a bare CR or LF there is header injection.
+/// `next` is attacker-controlled: `/login?next=https://evil.example` would be
+/// an open redirect behind noadd's own URL. Protocol-relative `//evil.example`
+/// and `/\evil.example` (which browsers normalise into it) are refused too, as
+/// are control characters, since the value lands in a `Location` header.
 fn safe_next(raw: &str) -> Option<&str> {
     if !raw.starts_with('/') || raw.starts_with("//") || raw.starts_with("/\\") {
         return None;
@@ -840,8 +741,7 @@ fn safe_next(raw: &str) -> Option<&str> {
 
 /// `/login`, carrying `next` when there is a destination worth returning to.
 ///
-/// `/` is omitted deliberately: it is where sign-in lands anyway, and a
-/// `?next=/` on the URL is noise an operator would see and wonder about.
+/// `/` is omitted: sign-in lands there anyway.
 fn login_url(next: Option<&str>) -> String {
     match next.and_then(safe_next) {
         Some(target) if target != "/" => format!("/login?next={}", encode_query_value(target)),
@@ -851,10 +751,8 @@ fn login_url(next: Option<&str>) -> String {
 
 /// Percent-encode a path so it survives as a single query-string value.
 ///
-/// Deliberately conservative — unreserved characters and `/` pass, everything
-/// else is escaped — because the alternative is reasoning about which of `?`,
-/// `#` and `&` would end the value early, and being wrong there truncates the
-/// destination rather than failing visibly.
+/// Conservative: only unreserved characters and `/` pass, so no `?`, `#` or `&`
+/// can silently truncate the value.
 fn encode_query_value(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(value.len());
@@ -880,9 +778,8 @@ pub struct NextQuery {
 
 /// The `Host` this request arrived on.
 ///
-/// Shown in the status bar, where it used to be read from `location.host`. It
-/// is a request header, so it is whatever the client sent — fine for a label,
-/// and the template escapes it — but never treat it as identity.
+/// Client-supplied: fine for the status bar label (the template escapes it),
+/// never for identity.
 fn request_host(headers: &HeaderMap) -> String {
     headers
         .get(axum::http::header::HOST)
@@ -893,9 +790,8 @@ fn request_host(headers: &HeaderMap) -> String {
 
 /// `POST /logout`.
 ///
-/// A form rather than a `fetch`, so signing out works with JavaScript off. It
-/// is a POST because it changes state — a `GET /logout` would be followed by
-/// any link prefetcher that happened across it.
+/// A form, so it works without JavaScript; a POST, so a link prefetcher cannot
+/// sign anyone out.
 pub async fn logout_submit(
     State(state): State<AppState>,
     SsrUser(auth): SsrUser,
@@ -911,13 +807,9 @@ pub async fn logout_submit(
         return (jar, [CLEAR_SITE_DATA], Redirect::to(&url)).into_response();
     }
     if via_forward_auth {
-        // Proxy-managed with nowhere to hand off to. Clearing our cookies
-        // achieves nothing — the next request carries the same proxy header —
-        // so say where the session actually has to be ended.
-        //
-        // No `Clear-Site-Data` here, deliberately: it would take the flash
-        // cookie with it and the operator would be redirected to a page that
-        // says nothing about why logging out did not work.
+        // Proxy-managed with nowhere to hand off to: the next request carries
+        // the same header, so tell the operator where to end the session. No
+        // `Clear-Site-Data`, which would also wipe the flash explaining this.
         return (set_flash(jar, Flash::ProxyLogout), Redirect::to("/")).into_response();
     }
     // No `next`: the session just ended is not somewhere to return to.
@@ -954,10 +846,8 @@ pub struct LoginForm {
 
 /// `POST /login`.
 ///
-/// A refusal re-renders the form rather than redirecting to it, so the message
-/// and the typed username survive. The status code still says what happened —
-/// 401 for a bad credential, 429 for the rate limit — because a form that
-/// answers 200 to a rejected sign-in is lying to everything except the eye.
+/// A refusal re-renders the form (keeping the message and username) with a
+/// real status: 401 for a bad credential, 429 for the rate limit, never 200.
 pub async fn login_submit(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -1027,14 +917,9 @@ pub struct SetupForm {
 
 /// `POST /setup`.
 ///
-/// The confirm field is checked here and nowhere else: it exists only in the
-/// form, so `create_first_operator` — which the JSON endpoint shares — has no
-/// business knowing about it.
-///
-/// A successful setup signs the operator in on the spot. Making them type the
-/// password they just chose into a second form would be pure ceremony, and the
-/// JSON path already does the same thing (its client posts login straight
-/// after setup).
+/// The confirm field exists only in the form, so it is checked here rather than
+/// in the shared `create_first_operator`. A successful setup signs the operator
+/// straight in.
 pub async fn setup_submit(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -1090,19 +975,14 @@ pub async fn setup_submit(
     )
     .await
     {
-        // The welcome strip rides a flash cookie rather than the URL: a
-        // `?welcome=1` would survive a refresh, a bookmark and a shared link,
-        // and greet the operator again each time.
         Ok(jar) => (set_flash(jar, Flash::Welcome), Redirect::to("/")).into_response(),
-        // The account exists; only the automatic sign-in failed. Sending them
-        // to `/login` is recoverable, where re-rendering the wizard would ask
-        // them to create an account that is already there.
+        // The account exists; only the automatic sign-in failed, so `/login`
+        // rather than a wizard that would refuse to run again.
         Err(_) => Redirect::to("/login").into_response(),
     }
 }
 
-/// How many rows a page of the log holds. Matches what `app.js` asks for, so
-/// paging means the same thing whichever half of the UI is doing it.
+/// Rows per page of the log; matches `app.js`'s `limit`.
 const LOGS_PAGE_SIZE: i64 = 50;
 
 #[derive(Deserialize)]
@@ -1116,8 +996,7 @@ pub struct LogsQuery {
     query_type: Option<String>,
     /// A `DoH` URL token.
     token: Option<String>,
-    /// 1-based. Parsed leniently — a hand-edited value lands on page one rather
-    /// than 400-ing a page that otherwise renders.
+    /// 1-based. Parsed leniently: a bad value means page one, not a 400.
     page: Option<String>,
 }
 
@@ -1137,8 +1016,7 @@ impl LogsQuery {
 
 /// Rebuild the page's query string, with `page` replaced.
 ///
-/// The pager has to carry every filter or paging would silently drop them,
-/// which is the sort of thing that looks like the filter stopped working.
+/// The pager must carry every filter, or paging silently drops them.
 fn logs_query_string(q: &str, action: &str, query_type: &str, token: &str, page: i64) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut push = |key: &str, value: &str| {
@@ -1199,8 +1077,7 @@ pub async fn logs_page(
     let token_filter = as_filter(&token);
 
     let offset = (page - 1) * LOGS_PAGE_SIZE;
-    // Both reads take the same filters; running them together keeps a filtered
-    // page from costing two round trips to the database in sequence.
+    // Run concurrently rather than as two sequential round trips.
     let (entries, total) = tokio::join!(
         state.db.query_logs(
             LOGS_PAGE_SIZE,
@@ -1230,8 +1107,7 @@ pub async fn logs_page(
                 time_text: time_ago(entry.timestamp / 1000),
                 timestamp_ms: entry.timestamp,
                 blocked,
-                // A blocked query is already blocked, so its one-click action
-                // is the allow rule, and vice versa.
+                // The one-click action is the opposite of the verdict.
                 action_rule: if blocked {
                     format!("@@||{domain}^")
                 } else {
@@ -1270,7 +1146,7 @@ pub async fn logs_page(
         })
         .collect();
 
-    // `div_ceil` on an integer is still unstable at this crate's MSRV.
+    // `i64::div_ceil` is unstable (only the unsigned one is stable).
     let total_pages = ((total + LOGS_PAGE_SIZE - 1) / LOGS_PAGE_SIZE).max(1);
     let href_for =
         |page: i64| logs_href(&logs_query_string(&q, &action, &query_type, &token, page));
@@ -1314,16 +1190,14 @@ const LOG_QUERY_TYPES: &[&str] = &[
 #[derive(Deserialize)]
 pub struct LogRuleForm {
     rule: String,
-    /// The view to return to, so acting on a row does not throw away the
-    /// filters and the page the operator was looking at.
+    /// The view to return to, keeping the filters and page.
     next: Option<String>,
 }
 
 /// `POST /logs/rules`.
 ///
-/// The one-click Allow/Block on a row. It goes through `create_custom_rule`,
-/// the same path `POST /api/rules` and the filters page use, so a rule added
-/// from here is parsed, de-duplicated and audited identically.
+/// The one-click Allow/Block on a row, through the same `create_custom_rule`
+/// as `POST /api/rules` and the filters page.
 pub async fn logs_rule_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -1342,10 +1216,8 @@ pub async fn logs_rule_submit(
 
 /// `POST /logs/clear`.
 ///
-/// Answers on an unfiltered first page whatever view it was invoked from:
-/// every filter the operator had applied now matches nothing, and a page
-/// reading "No logs found" would look like the filter broke rather than like
-/// the log being empty.
+/// Always answers on the unfiltered first page: a filtered view would read "No
+/// logs found", as if the filter broke.
 pub async fn logs_clear_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -1357,18 +1229,15 @@ pub async fn logs_clear_submit(
 
 /// Full digits below a million, abbreviated above it.
 ///
-/// Mirrors `formatNumAdaptive` in `app.js`, which draws the same cards every
-/// ten seconds: a count that changed its own notation when the poll landed
-/// would read as a change in the number.
+/// Mirrors `formatNumAdaptive` in `app.js`, which redraws the same cards from
+/// each pushed snapshot; a count that switched notation would look like it
+/// changed.
 fn format_num_adaptive(n: i64) -> String {
     format_num_adaptive_at(n, 1_000_000)
 }
 
-/// The same, for the cells `app.js` gives a different threshold.
-///
-/// A total log count runs to eight digits on a busy resolver and reads fine as
-/// digits until it does, so those cards hold off abbreviating until ten
-/// million. The threshold is the only thing that differs.
+/// The same with a custom threshold — the statistics tiles for totals that
+/// run to eight digits hold off until ten million.
 fn format_num_adaptive_at(n: i64, threshold: i64) -> String {
     if n < threshold {
         thousands(n)
@@ -1377,14 +1246,12 @@ fn format_num_adaptive_at(n: i64, threshold: i64) -> String {
     }
 }
 
-/// A fraction as a one-decimal percentage, the way every rate on the page is
-/// written.
+/// A fraction as a one-decimal percentage.
 fn percent1(value: f64) -> String {
     format!("{:.1}", value * 100.0)
 }
 
-/// One row's share of the visible total. Empty when there is no total to take
-/// a share of.
+/// One row's share of the visible total; empty when there is none.
 fn share_percent(count: i64, sum: i64) -> String {
     if sum <= 0 || count <= 0 {
         return String::new();
@@ -1394,10 +1261,8 @@ fn share_percent(count: i64, sum: i64) -> String {
     format!("{pct:.1}%")
 }
 
-/// Queries per second, with the precision the size of the number deserves.
-///
-/// Two decimals on a trickle and none on a flood: `0.03 q/s` says something
-/// `0 q/s` does not, and `1,234.00 q/s` says nothing `1234` does not.
+/// Queries per second: two decimals on a trickle, none on a flood. Matches
+/// `fmtQps` in `app.js`.
 fn format_qps(value: f64) -> String {
     if value >= 100.0 {
         format!("{:.0}", value.round())
@@ -1410,10 +1275,8 @@ fn format_qps(value: f64) -> String {
 
 /// Where to point a device's DNS, for the onboarding notice.
 ///
-/// The host comes from the request and the port from the configured DNS
-/// listener: the browser reached us on a name that resolves, and the DNS
-/// listener's own bind address is frequently `0.0.0.0`, which is not something
-/// to tell anyone to type in.
+/// Host from the request (a name that resolves), port from the DNS listener —
+/// whose bind address is often `0.0.0.0`, useless to type in.
 fn dns_target(headers: &HeaderMap, dns_addr: &str) -> String {
     let host = request_host(headers);
     // Strip the HTTP port; the DNS one is what belongs here.
@@ -1434,14 +1297,12 @@ pub async fn dashboard_page(
     let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let now = crate::now_unix();
 
-    // The same five reads `app.js` makes on its poll, in one request. A failure
-    // renders zeroes rather than an error page: the dashboard is a reading, and
-    // a page that says nothing is more useful than one that will not load.
+    // The same reads as the pushed `stats` snapshot, minus the chart's timeline.
+    // A failure renders zeroes rather than an error page.
     let summary = crate::admin::stats::compute_summary(&state.db, now)
         .await
         .unwrap_or_default();
-    // Ten rows each, which is what the page shows — the API's larger default is
-    // for callers who want to do their own slicing.
+    // Ten rows each, what the page shows.
     let (domains, clients) =
         crate::admin::stats::compute_top_domains_and_clients(&state.db, now, 10)
             .await
@@ -1528,8 +1389,7 @@ pub struct StatsQuery {
     range: Option<String>,
 }
 
-/// Bytes at the precision the size deserves, matching `_formatBytes` in
-/// `app.js` so the database-health grid reads the same in both halves.
+/// Bytes at the precision the size deserves, for the database-health grid.
 fn format_bytes(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -1547,8 +1407,7 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
-/// The same, for the cells where a zero means "not enough data to say" rather
-/// than "zero bytes" — an average over no rows at all.
+/// The same, with a dash where zero means "no data" rather than "zero bytes".
 fn format_bytes_or_dash(value: f64) -> String {
     if value > 0.0 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -1560,10 +1419,8 @@ fn format_bytes_or_dash(value: f64) -> String {
 
 /// A date the way the server can write one: an ISO day, in UTC.
 ///
-/// The cell carries its timestamp as well, and `app.js` rewrites it in the
-/// browser's locale — the same division as the query log's relative times. The
-/// server does not know the viewer's locale, and the alternative is shipping no
-/// date at all without scripting.
+/// The cell also carries its timestamp for `app.js` to restate in the browser's
+/// locale, which the server cannot know.
 fn iso_date(ts: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp(ts).map_or_else(
         |_err| "—".to_string(),
@@ -1580,9 +1437,8 @@ fn iso_date(ts: i64) -> String {
 
 /// Turn counted labels into a bar list, largest first.
 ///
-/// The widest bar is the largest count rather than the total, which is what
-/// makes a list of near-equal rows readable; the percentage next to it is the
-/// share of the total, which is the question a reader actually has.
+/// Bars are scaled to the largest count, so near-equal rows stay readable; the
+/// percentage is the share of the total.
 fn bar_rows(entries: Vec<(String, i64)>) -> Vec<BarRowView> {
     let mut entries = entries;
     entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
@@ -1628,22 +1484,15 @@ fn stat_card(label: &str, value: String, value_class: &'static str) -> StatCardV
     }
 }
 
-/// How many rows the two ranged bar lists show, matching what the API's
-/// callers get for the same question.
+/// How many rows the two ranged bar lists show. (The `/api/stats/v2` lists
+/// default to 15.)
 const STATS_TOP_N: i64 = 10;
 
 /// The statistics page.
 ///
-/// Five of the seven reads land in this response. The three that do not are the
-/// timeline, the rate trend drawn from it and the heatmap — the same three that
-/// take a `tz_offset`, because they are the only ones that put a query into a
-/// calendar rather than into a plain `now - range` window. A calendar needs the
-/// viewer's offset, which arrives with the browser and not with the request, so
-/// those cards say they are drawn in the browser and `app.js` fetches them.
-///
-/// A read that fails renders as an empty list or a dash, the way the dashboard
-/// renders zeroes: a page of readings that is missing one is more useful than
-/// one that will not load.
+/// Every reading is in this response, charts included: they ship as a UTC
+/// quarter-hour `series` that `app.js` folds into the viewer's calendar, with
+/// no request of its own. A failed read renders as an empty list or a dash.
 pub async fn stats_page(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -1656,17 +1505,14 @@ pub async fn stats_page(
 
     let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
     let now = crate::now_unix();
-    // An unrecognised range falls back to the default rather than refusing the
-    // page. This one is a link an operator can edit, and every window the page
-    // supports is spelled in the switcher right above it.
+    // An unrecognised range renders the default rather than a 400.
     let range = query
         .range
         .as_deref()
         .and_then(stats::StatsRange::parse)
         .unwrap_or(stats::StatsRange::Days7);
 
-    // Two independent reads; running them together keeps the page at one
-    // round trip to the database rather than two in sequence.
+    // Independent reads, run concurrently.
     let (range_stats, health) = tokio::join!(
         stats::compute_range_stats(&state.db, now, range, STATS_TOP_N),
         stats::compute_db_health(&state.db, now),
@@ -1674,8 +1520,7 @@ pub async fn stats_page(
 
     let range_stats = range_stats.ok();
     let latency = range_stats.as_ref().map(|s| &s.metrics.latency);
-    // A resolver that has answered nothing has no percentiles to report, and a
-    // zero would read as an impossibly fast one.
+    // No samples means no percentiles; a zero would read as impossibly fast.
     let has_latency = latency.is_some_and(|l| l.sample_count > 0);
     let latency_card = |label: &str, value: i64, class: &'static str| StatCardView {
         unit: if has_latency { "ms" } else { "" },
@@ -1728,9 +1573,8 @@ pub async fn stats_page(
                         .map(|d| (d.domain, d.count))
                         .collect(),
                 ),
-                // A client that came in over `DoH` is named by both, the way the
-                // client draws it — the IP alone would collapse every token
-                // behind one proxy.
+                // Name a `DoH` client by IP and token; the IP alone would merge
+                // every token behind one proxy.
                 bar_rows(
                     s.clients
                         .into_iter()
@@ -1861,9 +1705,7 @@ fn build_health_cards(health: crate::admin::stats::DbHealth) -> Vec<StatCardView
 
 /// When an API key stops working.
 ///
-/// Three states in one column: no expiry, one still ahead, one already past.
-/// "in 30 days" and "expired" say which without the reader having to work out
-/// whether a relative time is in the future.
+/// `never`, `in 30 days`, or `expired`.
 fn expiry_text(ts: Option<i64>) -> String {
     let Some(ts) = ts.filter(|t| *t != 0) else {
         return "never".to_string();
@@ -1881,8 +1723,7 @@ fn expiry_text(ts: Option<i64>) -> String {
     }
 }
 
-/// A timestamp that may not be set, for the columns where "never used" and
-/// "used at the epoch" are different answers.
+/// A timestamp that may be unset (`0` or `None`), rendered as a dash.
 fn maybe_time_ago(ts: Option<i64>) -> String {
     match ts.filter(|t| *t != 0) {
         Some(ts) => time_ago(ts),
@@ -1908,11 +1749,9 @@ struct AccountView {
 
 /// Phrase what removing one list would cost, from the engine's per-list counts.
 ///
-/// The answers are deliberately different sentences rather than one number with
-/// edge cases: a disabled list is not being asked the question, a list the
-/// engine never loaded has nothing to compare, and only a list actually in the
-/// engine gets a count. A zero would read as "redundant" in every one of those
-/// cases, which is true in exactly one of them.
+/// Distinct phrases rather than one number: only a list in the engine gets a
+/// count, and a zero anywhere else would falsely read as "redundant". Must
+/// phrase it the same as `listImpact` in `app.js`.
 pub fn list_impact<S: std::hash::BuildHasher>(
     unique: &std::collections::HashMap<i64, u32, S>,
     list: &crate::db::FilterListRow,
@@ -1922,11 +1761,8 @@ pub fn list_impact<S: std::hash::BuildHasher>(
         Some(&1) => ("1 rule".to_string(), false),
         Some(&count) => (format!("{} rules", thousands(i64::from(count))), false),
         None if !list.enabled => ("Disabled".to_string(), false),
-        // Enabled and still not in the engine. Rules it parsed but did not
-        // contribute are allow rules, which block nothing and so have no impact
-        // to report; none at all means the download failed or parsed to
-        // nothing, which looks identical to a healthy list in every other
-        // column on this row.
+        // Enabled but not in the engine: its rules are all allow rules, or it
+        // has none (failed download or empty parse) — say which.
         None if list.rule_count > 0 => ("No block rules".to_string(), false),
         None => ("No rules".to_string(), false),
     }
@@ -1934,9 +1770,8 @@ pub fn list_impact<S: std::hash::BuildHasher>(
 
 /// Build the page from live storage plus whatever the caller is carrying.
 ///
-/// The shell comes in already built — by `ShellData::build_for("/account", …)`
-/// on the POST paths, so a rejected `POST /account/operators` still renders
-/// with the account tab active.
+/// The shell comes in built — via `ShellData::build_for("/account", …)` on the
+/// POST paths, so the account tab stays active.
 async fn render_account(
     state: &AppState,
     auth: &AuthedUser,
@@ -1975,8 +1810,7 @@ async fn render_account(
         .find(|o| o.id == view.confirm_operator_id)
         .map(|o| o.username.clone())
         .unwrap_or_default();
-    // An id that names nobody expands nothing, rather than showing a
-    // confirmation for an operator who is not there.
+    // An id naming nobody expands nothing.
     let confirm_operator_id = if confirm_operator_name.is_empty() {
         0
     } else {
@@ -2042,8 +1876,7 @@ async fn render_account(
 #[derive(Deserialize)]
 pub struct AccountQuery {
     /// The operator whose row is expanded into a delete confirmation. Parsed
-    /// leniently: a hand-edited value expands nothing rather than 400-ing a
-    /// page that otherwise renders.
+    /// leniently: a bad value expands nothing rather than 400ing.
     confirm_delete: Option<String>,
 }
 
@@ -2077,13 +1910,10 @@ pub struct PasswordForm {
 
 /// `POST /account/password`.
 ///
-/// The confirmation field is checked here and nowhere else — it exists only in
-/// the form, so `change_password_for_session`, which the JSON endpoint shares,
-/// has no business knowing about it.
-///
-/// A success redirects. It has to: the shared path rotates the session cookie,
-/// and re-rendering would leave the operator on a page whose form still holds
-/// the password they just replaced.
+/// The confirmation field exists only in the form, so it is checked here, not
+/// in the shared `change_password_for_session`. A success redirects: the
+/// session cookie was rotated, and a re-render would keep the old password in
+/// the form.
 pub async fn account_password_submit(
     SsrUser(auth): SsrUser,
     State(state): State<AppState>,
@@ -2114,9 +1944,8 @@ pub async fn account_password_submit(
         )
         .await;
     }
-    // Cookie-only, like the JSON endpoint: an API-key or forward-auth caller
-    // holds no session to rotate, and `SsrUser` alone does not prove which
-    // session is being changed.
+    // Cookie-only, like the JSON endpoint: API-key and forward-auth callers
+    // hold no session to rotate.
     let Some(token_hash) = auth.session_token_hash.clone() else {
         return reject(
             StatusCode::UNAUTHORIZED,
@@ -2160,33 +1989,26 @@ pub async fn account_password_submit(
                     "Could not change the password — check the server log".to_string(),
                 ),
             };
-            // The jar was consumed by the failed attempt; a fresh one is fine
-            // because nothing was set on it.
+            // The failed attempt consumed the jar without setting anything on it.
             reject(status, message, CookieJar::new()).await
         }
     }
 }
 
-/// Everything that changed the account answers the same way: redirect back with
-/// a notice, so a refresh cannot resubmit it.
+/// Redirect back with a notice, so a refresh cannot resubmit the change.
 fn account_saved(jar: CookieJar, flash: Flash) -> Response {
     (set_flash(jar, flash), Redirect::to("/account")).into_response()
 }
 
-/// Check the password a sensitive form carried, mapping the shared verdict onto
-/// what the form has to show.
-///
-/// Every one of the three sensitive forms starts here, and none of them reaches
-/// its action if this does not return `Ok` — which is the whole of the reauth
-/// mechanism now that the dialog is gone.
+/// Check the password a sensitive form carried, mapped onto the form's message.
+/// All three sensitive forms gate their action on this returning `Ok`.
 async fn confirm_form_password(
     state: &AppState,
     auth: &AuthedUser,
     ip: std::net::IpAddr,
     password: &str,
 ) -> Result<(), (StatusCode, String)> {
-    // A proxy-managed operator has no password to check — the proxy already
-    // vouched for them, which is the same exemption `ReauthedUser` makes.
+    // The proxy already vouched for a forward-auth operator, as in `ReauthedUser`.
     if auth.via_forward_auth {
         return Ok(());
     }
@@ -2218,8 +2040,7 @@ pub struct AddOperatorForm {
     username: String,
     password: String,
     confirm: String,
-    /// The acting operator's own password. In the form rather than behind a
-    /// dialog, so this works identically with and without JavaScript.
+    /// The acting operator's own password.
     your_password: String,
 }
 
@@ -2233,9 +2054,8 @@ pub async fn account_operator_add_submit(
     Form(form): Form<AddOperatorForm>,
 ) -> Response {
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
-    // The username is kept across a rejection; neither password is. Re-rendering
-    // a password field with its value in the markup would put it in the page
-    // source, the browser's cache and any proxy along the way.
+    // Keep the username across a rejection, never a password (it would land in
+    // the page source and caches).
     let reject = async |status: StatusCode, message: String, jar: CookieJar| {
         let (shell, jar) = ShellData::build_for(&state, "/account", &headers, jar).await;
         let view = AccountView {
@@ -2291,9 +2111,8 @@ pub struct DeleteOperatorForm {
 
 /// `POST /account/operators/{id}/delete`.
 ///
-/// The row is expanded into this form by `?confirm_delete={id}`, so the
-/// password field belongs to one named operator rather than sitting on every
-/// row at once.
+/// The form appears on the row expanded by `?confirm_delete={id}`, so the
+/// password field belongs to one named operator.
 pub async fn account_operator_delete_submit(
     SsrUser(auth): SsrUser,
     State(state): State<AppState>,
@@ -2349,9 +2168,8 @@ pub async fn account_operator_delete_submit(
 
 /// `POST /account/sessions/{id}/revoke`.
 ///
-/// No password: any operator can already revoke any session through the API,
-/// and a session that has to be killed in a hurry is exactly the one nobody
-/// should have to stop and authenticate for.
+/// No password, like `DELETE /api/sessions/{id}`: a session killed in a hurry
+/// should not wait on authentication.
 pub async fn account_session_revoke_submit(
     SsrUser(auth): SsrUser,
     State(state): State<AppState>,
@@ -2370,17 +2188,14 @@ pub async fn account_session_revoke_submit(
     )
     .await
     {
-        // Revoking your own session signs you out; there is no page left to
-        // send a notice to, so the browser goes to sign-in with its cookies
-        // cleared.
+        // Revoking your own session signs you out: go to sign-in, cookies cleared.
         Ok(true) => (
             crate::admin::api::clear_session_cookies(jar),
             [crate::admin::api::CLEAR_SITE_DATA],
             Redirect::to("/login"),
         )
             .into_response(),
-        // A session that was already gone is the state the operator asked for,
-        // so it reports the same as one this request took down.
+        // Already gone is the state asked for, so it reports the same.
         Ok(false) | Err(_) => account_saved(jar, Flash::SessionsRevoked),
     }
 }
@@ -2406,32 +2221,26 @@ pub async fn account_sessions_revoke_others_submit(
 
 #[derive(Deserialize)]
 pub struct DismissNextStepForm {
-    /// The page the notice was dismissed from, so the operator lands back on
-    /// it. Validated by `safe_next` like every other one on these pages.
+    /// The page to return to, validated by `safe_next`.
     next: String,
 }
 
 /// `POST /onboarding/dismiss`.
 ///
-/// The notice is server-rendered, so it exists without JavaScript and its one
-/// control has to work without it too. The dismissal is the same stored setting
-/// the JSON API writes, so a browser and an API caller still turn off the same
-/// thing.
+/// A real form, so dismissal works without JavaScript. Writes the same setting
+/// as the JSON API.
 pub async fn onboarding_dismiss_submit(
     _user: SsrUser,
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<DismissNextStepForm>,
 ) -> Response {
-    // Failing to record it hides the notice for this response and offers it
-    // again on the next: an aside the operator has to dismiss twice beats a
-    // 500 over one.
+    // On failure the notice just comes back later, which beats a 500.
     let _ = state
         .db
         .set_setting("onboarding_banner_dismissed", "true")
         .await;
-    // No flash: the operator asked for one less thing on the page, and
-    // answering with another notice is not that.
+    // No flash: the operator asked for one less notice, not another.
     let target = safe_next(&form.next).unwrap_or("/");
     (jar, Redirect::to(target)).into_response()
 }
@@ -2446,11 +2255,9 @@ pub struct CreateApiKeyForm {
 
 /// `POST /account/api-keys`.
 ///
-/// The one success on this page that does **not** redirect. The token exists
-/// in this response and nowhere else — it is not stored — so a redirect would
-/// throw away the only copy. The form is re-rendered empty, which is what stops
-/// a refresh looking like it lost something; a refresh does re-post, and mints
-/// a second key the operator can see and delete.
+/// The one success here that does **not** redirect: the token is not stored,
+/// so a redirect would discard the only copy. A refresh re-posts and mints a
+/// second key, which the operator can see and delete.
 pub async fn account_api_key_create_submit(
     SsrUser(auth): SsrUser,
     State(state): State<AppState>,
@@ -2510,10 +2317,8 @@ pub async fn account_api_key_create_submit(
 
 /// Turn a `YYYY-MM-DD` date into the instant that day ends.
 ///
-/// End of day rather than start: an operator who types today's date means the
-/// key should last until today is over, not that it expired this morning. UTC,
-/// because the server has no way to know the browser's zone and a key's expiry
-/// is not worth guessing about.
+/// End of day, so today's date means "until today is over". UTC, since the
+/// server does not know the browser's zone.
 fn parse_expiry_date(raw: &str) -> Result<Option<i64>, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -2543,9 +2348,6 @@ fn parse_expiry_date(raw: &str) -> Result<Option<i64>, String> {
 }
 
 /// Days since the Unix epoch for a civil date, by Howard Hinnant's `days_from_civil`.
-///
-/// Written out rather than pulled in: this is the only date arithmetic in the
-/// codebase, and a dependency for one function is a dependency to audit forever.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -2569,8 +2371,7 @@ pub async fn account_api_key_delete_submit(
     account_saved(jar, Flash::AccountSaved)
 }
 
-/// The settings the page renders. Absent keys come back as empty strings, which
-/// is what an unset setting means to every input on the page.
+/// The settings the page renders; absent keys are simply missing (read as empty).
 async fn current_settings(state: &AppState) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for key in [
@@ -2593,9 +2394,8 @@ async fn current_settings(state: &AppState) -> std::collections::HashMap<String,
 
 /// Build the page from a set of values, whatever their source.
 ///
-/// Called with the persisted settings on a GET and with the *submitted* ones on
-/// a rejected save, which is what lets the operator correct the one field that
-/// was wrong instead of retyping the seven that were fine.
+/// The persisted settings on a GET, the *submitted* ones on a rejected save, so
+/// only the wrong field needs correcting.
 fn settings_template(
     shell: ShellData,
     values: &std::collections::HashMap<String, String>,
@@ -2607,9 +2407,7 @@ fn settings_template(
     SettingsTemplate {
         shell,
         upstream_servers: get("upstream_servers"),
-        // The defaults mirror what the DNS layer falls back to for an unset
-        // value, so the page never shows a blank select for a setting that is
-        // in fact in effect.
+        // Defaults mirror the DNS layer's fallbacks for an unset value.
         upstream_strategy: match get("upstream_strategy").as_str() {
             "" => "sequential".to_string(),
             other => other.to_string(),
@@ -2656,8 +2454,7 @@ pub async fn settings_page(
 pub struct SettingsForm {
     upstream_servers: String,
     upstream_strategy: String,
-    /// `on` / `off`, the inverse of the stored `dnssec_disabled`. The form says
-    /// what the operator sees; the storage key predates it.
+    /// `on` / `off`, the inverse of the stored `dnssec_disabled`.
     dnssec: String,
     block_mode: String,
     block_custom_ipv4: String,
@@ -2693,12 +2490,9 @@ impl SettingsForm {
 
 /// `POST /settings`.
 ///
-/// One submit for every scalar setting, rather than one endpoint per field.
-/// Without JavaScript that is what makes the page usable; with it, `app.js`
-/// removes the button and restores per-field autosave against `/api/settings`.
-///
-/// A successful save redirects rather than rendering: a POST left in the
-/// browser's history is one refresh away from being submitted again.
+/// One submit for every scalar setting, for use without JavaScript; `app.js`
+/// removes the button and autosaves per field against `/api/settings`. Success
+/// redirects so a refresh cannot resubmit.
 pub async fn settings_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -2725,9 +2519,7 @@ pub async fn settings_submit(
                     "Could not save — check the server log".to_string(),
                 ),
             };
-            // Re-render with what was submitted, not what is stored: the whole
-            // point is that the seven fields the operator got right survive the
-            // one they did not.
+            // Re-render with what was submitted, not what is stored.
             let (shell, jar) = ShellData::build(&state, &uri, &headers, jar).await;
             (
                 status,
@@ -2757,8 +2549,6 @@ fn thousands(n: i64) -> String {
 }
 
 /// Abbreviate a count to at most one decimal (`12.3K`, `1.2M`).
-///
-/// The mobile card has room for a number, not for seven digits of one.
 fn compact(n: i64) -> String {
     let scaled = |value: f64, suffix: &str| {
         let rounded = (value * 10.0).round() / 10.0;
@@ -2776,8 +2566,8 @@ fn compact(n: i64) -> String {
     }
 }
 
-/// How long ago a timestamp was, in the wording `app.js` uses for the same
-/// column, so a row does not change its phrasing when the client redraws it.
+/// How long ago a timestamp was, worded as `app.js` words it, so a redrawn row
+/// keeps its phrasing.
 fn time_ago(ts: i64) -> String {
     if ts == 0 {
         return "never".to_string();
@@ -2794,9 +2584,6 @@ fn time_ago(ts: i64) -> String {
 }
 
 /// The page's mutable bits: what was typed, what was rejected, what is expanded.
-///
-/// One struct rather than a dozen arguments, because every handler that
-/// re-renders sets one or two of these and leaves the rest alone.
 #[derive(Default)]
 struct FiltersView {
     test_domain: String,
@@ -2814,9 +2601,8 @@ struct FiltersView {
 
 /// Build the page from live storage plus whatever the caller is carrying.
 ///
-/// `shell.current_path` is forced to `/filters`: a rejected POST arrives on
-/// `/filters/lists` or `/filters/rules`, and the navigation would otherwise
-/// render with nothing active on a page the operator is very much looking at.
+/// `shell.current_path` is forced to `/filters`, since a rejected POST arrives
+/// on a sub-path and the navigation must still mark the page.
 async fn render_filters(
     state: &AppState,
     mut shell: ShellData,
@@ -2826,9 +2612,8 @@ async fn render_filters(
 
     let rows = state.db.get_filter_lists().await.unwrap_or_default();
     let all_disabled = !rows.is_empty() && rows.iter().all(|l| !l.enabled);
-    // Read from the live engine rather than storage: what a list uniquely
-    // provides is a fact about the rule set currently loaded, and it is
-    // recomputed by the rebuild that every change to any list already triggers.
+    // From the live engine, not storage: it describes the loaded rule set, and
+    // every list change already triggers the rebuild that recomputes it.
     let unique = state.filter.load().unique_rules_by_list();
     let lists = rows
         .into_iter()
@@ -2863,9 +2648,7 @@ async fn render_filters(
         })
         .collect();
 
-    // The test runs against the live engine, which is what `POST
-    // /api/filter/check` does; sharing the check itself would be sharing one
-    // line, and the two answer in different shapes.
+    // Checked against the live engine, as `POST /api/filter/check` does.
     let domain = view.test_domain.trim().trim_end_matches('.');
     let tested = !domain.is_empty();
     let (verdict_blocked, verdict_rule, verdict_list) = if tested {
@@ -2908,11 +2691,10 @@ async fn render_filters(
 
 #[derive(Deserialize)]
 pub struct FiltersQuery {
-    /// A domain to test. In the query string rather than a POST body so the
-    /// verdict survives a refresh and can be linked to.
+    /// A domain to test; in the URL so the verdict survives refresh and links.
     test: Option<String>,
-    /// The list to expand into an edit form. Parsed leniently — a hand-edited
-    /// value expands nothing rather than 400-ing a page that otherwise renders.
+    /// The list to expand into an edit form. Parsed leniently: a bad value
+    /// expands nothing rather than 400ing.
     edit: Option<String>,
 }
 
@@ -2931,8 +2713,7 @@ pub async fn filters_page(
         .and_then(|raw| raw.parse::<i64>().ok())
         .unwrap_or_default();
 
-    // The expanded row is filled from storage, not from the URL: the operator
-    // asked to edit a list, not to pre-fill a form with values a link carried.
+    // Filled from storage, never the URL, so a link cannot pre-fill the form.
     let (edit_name, edit_url) = if edit_id == 0 {
         (String::new(), String::new())
     } else {
@@ -2959,8 +2740,7 @@ pub async fn filters_page(
     (jar, render_filters(&state, shell, view).await)
 }
 
-/// Everything that changed a filter answers the same way: redirect back to the
-/// page with a notice, so a refresh cannot resubmit it.
+/// Redirect back with a notice, so a refresh cannot resubmit the change.
 fn filters_saved(jar: CookieJar, flash: Flash) -> Response {
     (set_flash(jar, flash), Redirect::to("/filters")).into_response()
 }
@@ -2982,8 +2762,7 @@ pub async fn filters_list_add_submit(
 ) -> Response {
     match create_filter_list(&state, &form.name, &form.url).await {
         Ok(_id) => {
-            // Adding a list does not fetch it, so there is nothing to rebuild
-            // yet — but the row appearing is the confirmation that matters.
+            // Adding does not fetch the list, so there is nothing to rebuild yet.
             filters_saved(jar, Flash::FiltersSaved)
         }
         Err(err) => {
@@ -3022,9 +2801,7 @@ pub struct EditListForm {
 
 /// `POST /filters/lists/{id}/edit`.
 ///
-/// A rejected edit re-renders with the row still expanded and the submitted
-/// values in it, which is the only way the operator gets to correct the one
-/// field that was wrong.
+/// A rejected edit re-renders the row expanded with the submitted values.
 pub async fn filters_list_edit_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -3056,9 +2833,7 @@ pub async fn filters_list_edit_submit(
 
 #[derive(Deserialize)]
 pub struct ToggleListForm {
-    /// Absent when the checkbox is unticked — that is how a browser posts an
-    /// unchecked box, and it is the only signal that the list is being turned
-    /// off.
+    /// Absent when unticked: a browser does not post an unchecked box.
     enabled: Option<String>,
 }
 
@@ -3096,9 +2871,8 @@ pub async fn filters_list_delete_submit(
 
 /// `POST /filters/lists/update`.
 ///
-/// Downloads every list before answering, exactly as `POST /api/lists/update`
-/// does. Without JavaScript there is nowhere to report progress to, so the
-/// request is the progress indicator.
+/// Downloads every list before answering, as `POST /api/lists/update` does; the
+/// pending request is the progress indicator.
 pub async fn filters_lists_update_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -3117,8 +2891,8 @@ pub async fn filters_lists_update_submit(
 
 /// `POST /filters/lists/enable-recommended`.
 ///
-/// The escape hatch from the state where every list is off: turn one back on
-/// without making the operator work out which. Same pick as `app.js` makes.
+/// The escape hatch when every list is off: re-enable one. Same pick as
+/// `app.js`.
 pub async fn filters_enable_recommended_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -3156,8 +2930,7 @@ pub async fn filters_rule_add_submit(
     Form(form): Form<AddRuleForm>,
 ) -> Response {
     match create_custom_rule(&state, &form.rule).await {
-        // A duplicate is not worth an error: the rule the operator wanted is
-        // there, which is what they asked for.
+        // A duplicate is not an error: the wanted rule is there.
         Ok(_) => filters_saved(jar, Flash::FiltersSaved),
         Err(err) => {
             let (status, message) = match err {
@@ -3196,11 +2969,10 @@ pub async fn filters_rule_delete_submit(
 
 /// A link that is safe to put in an `href`.
 ///
-/// Escaping keeps a value inside its attribute; it does not make the value safe
-/// to navigate to. Registry entries are fetched from a third-party URL at
-/// runtime, so a `javascript:` homepage would run on click however well the
-/// string was escaped. Only absolute `http(s)` survives; everything else yields
-/// an empty string and renders no link at all.
+/// Escaping keeps a value inside its attribute but does not make it safe to
+/// navigate to: a third-party registry could supply a `javascript:` homepage.
+/// Only absolute `http(s)` survives; anything else yields an empty string and
+/// no link.
 fn safe_url(raw: Option<&str>) -> String {
     let candidate = raw.unwrap_or_default().trim();
     let lowered = candidate.to_ascii_lowercase();
@@ -3258,19 +3030,17 @@ impl RegistryQuery {
 /// One registry entry as the list shows it.
 pub struct RegistryRowView {
     filter_id: i64,
-    /// The group this entry belongs to, for the client's in-place filtering —
-    /// the same id the `<select>` carries, so the two cannot disagree.
+    /// The entry's group, for the client's in-place filtering; the same id the
+    /// `<select>` carries.
     group_id: i64,
     name: String,
     description: String,
-    /// The list's own page, when it has one that is safe to link. Empty
-    /// otherwise, and the template renders no link.
+    /// The list's own page if safe to link; empty renders no link.
     homepage: String,
     group_name: String,
-    /// The pill's colour class, matching what the client used to pick.
+    /// The pill's colour class.
     group_class: &'static str,
-    /// Already among the operator's lists, so the row is checked off and
-    /// disabled rather than hidden — "you have this" is worth saying.
+    /// Already among the operator's lists: shown checked and disabled, not hidden.
     already_added: bool,
     deprecated: bool,
 }
@@ -3290,14 +3060,9 @@ pub struct RegistryFailureView {
 
 /// The registry browser.
 ///
-/// This was a modal `app.js` mounted on `document.body`, which made it the one
-/// control on the filters page that did nothing without JavaScript. It is a
-/// page now, with the same three filters in the URL that every other list view
-/// here puts there, and one form that posts what is ticked.
-///
-/// The registry is fetched from a third party at runtime, so `load_failed` is a
-/// state the page has to render rather than an error to fail on: the retry is
-/// an ordinary link back to the same URL.
+/// A page (not a modal) so it works without JavaScript: three filters in the
+/// URL and one form posting what is ticked. The registry is a third party, so
+/// `load_failed` is a rendered state whose retry is a link to the same URL.
 #[derive(Template, WebTemplate)]
 #[template(path = "registry.html")]
 pub struct RegistryTemplate {
@@ -3307,8 +3072,7 @@ pub struct RegistryTemplate {
     groups: Vec<RegistryGroupView>,
     show_deprecated: bool,
     rows: Vec<RegistryRowView>,
-    /// The registry itself could not be fetched — a third-party outage, not a
-    /// bad request.
+    /// The registry could not be fetched (a third-party outage).
     load_failed: bool,
     /// How many entries the filters let through, and how many exist.
     shown: usize,
@@ -3323,8 +3087,7 @@ pub struct RegistryTemplate {
     limit: usize,
 }
 
-/// Which colour a group's pill gets, matching what the client used to derive
-/// from the same names.
+/// Which colour class a group's pill gets, from its name.
 fn registry_group_class(group_name: &str) -> &'static str {
     let lowered = group_name.to_ascii_lowercase();
     if lowered.contains("security") {
@@ -3370,8 +3133,7 @@ async fn build_registry(
         return template;
     };
 
-    // What the operator already has, so a row can say so instead of offering to
-    // add it twice.
+    // What the operator already has, so a row is not offered twice.
     let existing: std::collections::HashSet<String> = state
         .db
         .get_filter_lists()
@@ -3440,8 +3202,7 @@ pub async fn registry_page(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    // The registry is a view of the filters page's subject, and it is reached
-    // from there, so the navigation keeps marking Filters.
+    // Reached from the filters page, so the navigation keeps marking Filters.
     let (shell, jar) = ShellData::build_for(&state, "/filters", &headers, jar).await;
     (
         jar,
@@ -3451,9 +3212,8 @@ pub async fn registry_page(
 
 /// `POST /filters/registry/add` — add every ticked list.
 ///
-/// A browser sends only the boxes that are ticked, each carrying its own id, so
-/// the body is however many `filter_id` fields the operator chose. `Vec<(String,
-/// String)>` is the one shape `Form` deserialises that keeps repeated keys.
+/// The body is one `filter_id` per ticked box. `Vec<(String, String)>` is the
+/// one shape `Form` deserialises that keeps repeated keys.
 pub async fn registry_add_submit(
     _user: SsrUser,
     State(state): State<AppState>,
@@ -3468,8 +3228,7 @@ pub async fn registry_add_submit(
         .filter_map(|(_, value)| value.parse().ok())
         .collect();
 
-    // One failure shape for every way this can go wrong, so the response is
-    // built once at the end rather than in four places.
+    // One failure shape for every error path, so the response is built once.
     let one = |name: &str, error: String| {
         vec![RegistryFailureView {
             name: name.to_string(),
@@ -3478,8 +3237,7 @@ pub async fn registry_add_submit(
     };
 
     let outcome = if picked.is_empty() {
-        // Nothing ticked. Say so where the boxes are rather than redirecting to
-        // a page that would look like it had done something.
+        // Nothing ticked: say so here rather than redirect as if it worked.
         Err((
             0,
             one(
@@ -3488,8 +3246,8 @@ pub async fn registry_add_submit(
             ),
         ))
     } else {
-        // Names and URLs come from the registry rather than from the form: the
-        // browser sends an id, and what that id means is the server's to decide.
+        // Names and URLs come from the registry, not the form: the server
+        // decides what an id means.
         match state.registry.list().await {
             Err(_err) => Err((
                 0,
@@ -3509,12 +3267,9 @@ pub async fn registry_add_submit(
                     })
                     .collect();
                 match crate::admin::api::add_lists_batch(&state, items).await {
-                    // Everything landed, and what there is to see is on the
-                    // filters page. Redirect so a refresh cannot add it twice.
+                    // All added: redirect, so a refresh cannot add them twice.
                     Ok(result) if result.failed.is_empty() => Ok(()),
-                    // A partial failure is the one thing a redirect would
-                    // discard: the reasons exist in this response and nowhere
-                    // else.
+                    // Partial failure renders: a redirect would lose the reasons.
                     Ok(result) => Err((
                         result.added.len(),
                         result
@@ -3581,8 +3336,7 @@ mod tests {
 
     #[test]
     fn query_value_encoding_keeps_the_destination_whole() {
-        // `?` and `&` would otherwise end the value early, silently truncating
-        // the destination rather than failing where anyone would notice.
+        // `?` and `&` would otherwise silently truncate the value.
         assert_eq!(
             encode_query_value("/logs?page=2&type=blocked"),
             "/logs%3Fpage%3D2%26type%3Dblocked"
@@ -3615,9 +3369,7 @@ mod tests {
 
     #[test]
     fn counts_switch_notation_only_above_a_million() {
-        // The client draws these same cards every ten seconds; a count that
-        // changed its own notation on the poll would read as a change in the
-        // number.
+        // Must match the client's redraws, or the notation would flip.
         assert_eq!(format_num_adaptive(999_999), "999,999");
         assert_eq!(format_num_adaptive(1_000_000), "1M");
         assert_eq!(format_num_adaptive(1_250_000), "1.3M");
@@ -3633,8 +3385,7 @@ mod tests {
         // Case is not a disguise.
         assert_eq!(safe_url(Some("HTTPS://example.com")), "HTTPS://example.com");
 
-        // Everything a third party could put in `homepage` to get something to
-        // run on click.
+        // What a third party could put in `homepage` to run code on click.
         assert_eq!(safe_url(Some("javascript:alert(1)")), "");
         assert_eq!(safe_url(Some("JaVaScRiPt:alert(1)")), "");
         assert_eq!(safe_url(Some("data:text/html,<script>")), "");
@@ -3677,8 +3428,6 @@ mod tests {
 
     #[test]
     fn the_health_grid_holds_off_abbreviating_until_ten_million() {
-        // A log count runs to eight digits on a busy resolver and reads fine as
-        // digits until it does.
         assert_eq!(format_num_adaptive_at(9_999_999, 10_000_000), "9,999,999");
         assert_eq!(format_num_adaptive_at(10_000_000, 10_000_000), "10M");
     }
@@ -3699,8 +3448,7 @@ mod tests {
 
     #[test]
     fn a_date_the_server_writes_is_an_unambiguous_one() {
-        // 2026-08-13T00:00:00Z. The browser restates it in its own locale; what
-        // the server ships has to be readable when it does not.
+        // 2026-08-13T00:00:00Z; readable even when no script restates it.
         assert_eq!(iso_date(1_786_579_200), "2026-08-13");
     }
 
@@ -3725,7 +3473,7 @@ mod tests {
         assert!(bar_rows(vec![]).is_empty());
         let rows = bar_rows(vec![("none".to_string(), 0)]);
         assert_eq!(rows[0].width, "0.0");
-        // No total to take a share of, so the cell says nothing rather than 0%.
+        // No total, so no share rather than 0%.
         assert_eq!(rows[0].share, "");
         assert_eq!(rows[0].count_title, "0");
     }
@@ -3741,7 +3489,7 @@ mod tests {
     fn a_share_of_nothing_is_not_a_share() {
         assert_eq!(share_percent(0, 0), "");
         assert_eq!(share_percent(5, 0), "");
-        // A row with no count takes no share, rather than "0.0%".
+        // No count, no share, rather than "0.0%".
         assert_eq!(share_percent(0, 10), "");
         assert_eq!(share_percent(3, 4), "75.0%");
     }
@@ -3752,7 +3500,7 @@ mod tests {
         assert_eq!(format_qps(0.0333), "0.03");
         assert_eq!(format_qps(9.99), "9.99");
         assert_eq!(format_qps(12.34), "12.3");
-        // And two decimals on a flood say nothing the integer does not.
+        // No decimals on a flood.
         assert_eq!(format_qps(1234.56), "1235");
     }
 
@@ -3760,11 +3508,10 @@ mod tests {
     fn the_dns_target_pairs_the_browsers_host_with_the_dns_port() {
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "noadd.lan:8080".parse().unwrap());
-        // The HTTP port is dropped and the DNS listener's is used — that is the
-        // one a device has to be told about.
+        // The HTTP port is swapped for the DNS listener's.
         assert_eq!(dns_target(&headers, "0.0.0.0:53"), "noadd.lan:53");
         assert_eq!(dns_target(&headers, "127.0.0.1:5353"), "noadd.lan:5353");
-        // Nothing port-shaped to take: the host alone is still useful.
+        // No port to take: the host alone.
         assert_eq!(dns_target(&headers, "53"), "noadd.lan");
     }
 
@@ -3773,8 +3520,7 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(1970, 1, 2), 1);
         assert_eq!(days_from_civil(1969, 12, 31), -1);
-        // 2000 is a leap year (the 400 rule) and 2100 is not (the 100 rule);
-        // both land the day after a February that differs in length.
+        // 2000 is a leap year (the 400 rule), 2100 is not (the 100 rule).
         assert_eq!(days_from_civil(2000, 3, 1), 11_017);
         assert_eq!(days_from_civil(2100, 3, 1), 47_541);
     }
@@ -3785,9 +3531,7 @@ mod tests {
         assert_eq!(parse_expiry_date(""), Ok(None));
         assert_eq!(parse_expiry_date("   "), Ok(None));
 
-        // 1970-01-01 ends one second before the second day begins. An operator
-        // who types today's date means "until today is over", not "this
-        // morning".
+        // A date lasts until the end of that day.
         assert_eq!(parse_expiry_date("1970-01-01"), Ok(Some(86_399)));
         assert_eq!(parse_expiry_date("1970-01-02"), Ok(Some(86_400 + 86_399)));
 
@@ -3811,7 +3555,7 @@ mod tests {
         assert_eq!(expiry_text(Some(now - 60)), "expired");
         assert_eq!(expiry_text(Some(now + 86_400 * 30 + 10)), "in 30 days");
         assert_eq!(expiry_text(Some(now + 7_200 + 10)), "in 2 hours");
-        // Under a minute still reads as time remaining rather than as "in 0".
+        // Under a minute reads as "in 1 minute", not "in 0".
         assert_eq!(expiry_text(Some(now + 5)), "in 1 minute");
     }
 

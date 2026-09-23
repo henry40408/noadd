@@ -1,9 +1,5 @@
-//! End-to-end coverage for the TCP DNS listener's wire behavior:
-//! length-prefixed framing (RFC 1035 §4.2.2) and connection reuse (RFC 7766).
-//!
-//! These drive `serve_tcp` over a real loopback socket rather than exercising
-//! the handler in isolation, so the 2-byte framing and the accept/read loop
-//! are verified the way a real DNS client sees them.
+//! The TCP DNS listener over a real loopback socket: length-prefixed framing
+//! (RFC 1035 §4.2.2) and connection reuse (RFC 7766), as a client sees them.
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;
@@ -36,8 +32,7 @@ fn make_query_bytes(id: u16, domain: &str, record_type: RecordType) -> Vec<u8> {
     msg.to_vec().unwrap()
 }
 
-/// A handler that blocks `ads.example.com`, so queries resolve locally to a
-/// synthesized `0.0.0.0` and never touch a real upstream.
+/// A handler that blocks `ads.example.com`, so queries never leave the host.
 async fn build_blocking_handler() -> (Arc<DnsHandler>, mpsc::Receiver<QueryContext>) {
     let block_rules = vec![(
         ParsedRule {
@@ -55,9 +50,8 @@ async fn build_blocking_handler() -> (Arc<DnsHandler>, mpsc::Receiver<QueryConte
     (Arc::new(DnsHandler::new(filter, cache, forwarder, tx)), rx)
 }
 
-/// Bind an ephemeral loopback port and spawn `serve_tcp` on it, returning a
-/// connected client stream. Binding here (not inside `serve_tcp`) lets the test
-/// learn the port without a bind-drop-rebind race.
+/// Spawn `serve_tcp` on an ephemeral port and return a connected client.
+/// Binding here avoids a bind-drop-rebind race.
 async fn connect_to_listener(handler: Arc<DnsHandler>) -> TcpStream {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -67,8 +61,7 @@ async fn connect_to_listener(handler: Arc<DnsHandler>) -> TcpStream {
     TcpStream::connect(addr).await.unwrap()
 }
 
-/// Send one length-prefixed query and read one length-prefixed response,
-/// asserting the declared 2-byte length matches the bytes that follow.
+/// One length-prefixed round trip, asserting the declared length matches.
 async fn query_over_tcp(stream: &mut TcpStream, query: &[u8]) -> Message {
     stream
         .write_u16(u16::try_from(query.len()).unwrap())
@@ -88,8 +81,7 @@ async fn query_over_tcp(stream: &mut TcpStream, query: &[u8]) -> Message {
     Message::from_bytes(&buf).unwrap()
 }
 
-/// RFC 1035 §4.2.2: a TCP query is a 2-byte length prefix followed by the
-/// message, and the response is framed the same way.
+/// RFC 1035 §4.2.2: query and response are each a 2-byte length plus message.
 #[tokio::test]
 async fn tcp_length_prefixed_framing() {
     let (handler, _rx) = build_blocking_handler().await;
@@ -111,8 +103,8 @@ async fn tcp_length_prefixed_framing() {
     }
 }
 
-/// RFC 7766: multiple queries may be sent over a single reused connection; the
-/// server must answer each without closing the stream between them.
+/// RFC 7766: several queries over one connection, each answered without
+/// closing it.
 #[tokio::test]
 async fn tcp_connection_reuse_serves_multiple_queries() {
     let (handler, _rx) = build_blocking_handler().await;

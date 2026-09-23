@@ -1,6 +1,4 @@
-/// Adblock/hosts rule parser.
-///
-/// Supports AdGuard/ABP, hosts-file, and plain-domain formats.
+//! Adblock/hosts rule parser: AdGuard/ABP, hosts-file, and plain-domain formats.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleAction {
