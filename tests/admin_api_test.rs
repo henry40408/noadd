@@ -36,9 +36,7 @@ async fn setup_inner(registry_url: &str) -> (axum::Router, String) {
     (app, token)
 }
 
-/// Build a router whose admin password is NOT set, so `/api/auth/setup`
-/// does not short-circuit with 409. Returns only the router (no session
-/// token is meaningful before setup).
+/// A router with no operator, so `/api/auth/setup` does not answer 409.
 #[allow(dead_code)]
 async fn unconfigured_app() -> axum::Router {
     build_app("http://127.0.0.1:1/filters.json", false).await.0
@@ -58,11 +56,9 @@ async fn build_app(
     (router, token, cache, log_events)
 }
 
-/// `build_app` with control over `AppState::cookie_secure`, for the tests that
-/// assert the `Secure` attribute on the session cookie. Also hands back the
-/// `Database` and `SessionStore` backing the router, so tests can seed extra
-/// sessions directly into the same state the app queries, plus the
-/// `invalid_session_limiter` the router counts unknown session cookies into.
+/// `build_app` with control over `AppState::cookie_secure`, also handing back the
+/// `Database`, `SessionStore` and `invalid_session_limiter` behind the router so
+/// tests can seed sessions and inspect the limiter directly.
 async fn build_app_opts(
     registry_url: &str,
     set_password: bool,
@@ -105,7 +101,7 @@ async fn build_app_opts(
     ));
 
     let token = generate_token();
-    // Create an operator user + bound session (skipped for unconfigured apps that test setup)
+    // An operator and a bound session, unless testing setup.
     if set_password {
         let hash = hash_password("admin").unwrap();
         let uid = db
@@ -177,14 +173,9 @@ async fn build_app_opts(
     )
 }
 
-/// The `value` of the `<input>` carrying `id`, or `None` if there is no such
-/// input.
-///
-/// Worth the twenty lines: a bare `html.contains(r#"value="30""#)` also matches
-/// the `<option>`s inside the settings page's datalists, so a field asserted
-/// that way passes whether or not it holds the value — and passes hardest when
-/// the number is a common one, which is exactly what a suggestion list is made
-/// of. Anchoring to the input's own tag keeps the assertion about the field.
+/// The `value` of the `<input>` carrying `id`, if any. A bare
+/// `html.contains(r#"value="30""#)` would also match the settings page's
+/// datalist `<option>`s, so this anchors to the input's own tag.
 fn input_value<'a>(html: &'a str, id: &str) -> Option<&'a str> {
     let id_at = html.find(&format!(r#"id="{id}""#))?;
     let tag_start = html[..id_at].rfind('<')?;
@@ -194,10 +185,8 @@ fn input_value<'a>(html: &'a str, id: &str) -> Option<&'a str> {
     Some(&rest[..rest.find('"')?])
 }
 
-/// Splits `buf` into whole SSE frames, leaving any partial one behind.
-///
-/// A frame can straddle two chunks, so a test that inspects one has to
-/// reassemble before it parses.
+/// Splits `buf` into whole SSE frames, leaving any partial one (split across
+/// chunks) behind.
 fn drain_sse_frames(buf: &mut String) -> Vec<String> {
     let mut frames = Vec::new();
     while let Some(end) = buf.find("\n\n") {
@@ -220,13 +209,9 @@ fn sse_event_data(frame: &str, name: &str) -> Option<serde_json::Value> {
     matched.then_some(data).flatten()
 }
 
-/// Waits for the rebuild that began at or after `before` to finish.
-///
-/// The state is published on the event stream and nowhere else, so this reads
-/// one. What makes that safe for a caller arriving after the fact is the
-/// opening `rebuild` event every connection is handed: a rebuild that finished
-/// while this test was asserting on the response body is reported as settled
-/// straight away, rather than being waited on for an edge that has passed.
+/// Waits for the rebuild that began at or after `before` to finish, via the
+/// event stream. Every connection opens with a `rebuild` event, so a rebuild
+/// that already finished is reported as settled straight away.
 async fn wait_for_rebuild(app: &axum::Router, token: &str, before: i64) {
     let req = Request::builder()
         .uri("/api/events")
@@ -435,10 +420,8 @@ async fn registry_filters_returns_cached_data() {
     assert_eq!(body["groups"][0]["groupName"], "General");
 }
 
-/// The stream is the only place rebuild state is published, so it has to
-/// answer "what is happening right now" as well as "what changed" — otherwise
-/// a page loaded while a rebuild ran would show nothing until the next one,
-/// and a client that connected just after one finished would wait forever.
+/// The stream is the only place rebuild state is published, so it must answer
+/// "what is happening now", not only "what changed".
 #[tokio::test]
 async fn event_stream_opens_with_the_current_rebuild_state() {
     let (app, token) = setup().await;
@@ -467,8 +450,7 @@ async fn event_stream_opens_with_the_current_rebuild_state() {
     .expect("timed out waiting for the opening rebuild event")
     .expect("the stream closed without an opening rebuild event");
 
-    // An appliance that has never rebuilt still says so, rather than staying
-    // silent until something happens.
+    // An appliance that has never rebuilt still reports it.
     assert_eq!(opening["rebuilding"].as_bool(), Some(false));
     assert_eq!(opening["started_at"].as_i64(), Some(0));
     assert_eq!(opening["last_duration_ms"].as_u64(), Some(0));
@@ -478,8 +460,7 @@ async fn event_stream_opens_with_the_current_rebuild_state() {
     );
 }
 
-/// A rebuild is an edge, not a reading: it can start and finish between two
-/// ticks of any clock, so both ends are published as they happen.
+/// A rebuild can start and finish between two ticks, so both edges are published.
 #[tokio::test]
 async fn event_stream_reports_both_edges_of_a_rebuild() {
     let (app, token) = setup().await;
@@ -533,11 +514,8 @@ async fn event_stream_reports_both_edges_of_a_rebuild() {
 
 #[tokio::test]
 async fn test_health_endpoint_reports_no_drop_counter() {
-    // Dropped query-log events are reported by an error-level log line, not
-    // by a counter on this endpoint: a cumulative per-process number carries
-    // neither a time nor a denominator, so it cannot tell an operator whether
-    // loss is happening now or mattered at all. Pinned so the field is not
-    // reintroduced as an apparently-free addition.
+    // Dropped query-log events are reported by an error-level log line, not a
+    // counter here: a cumulative number has neither a time nor a denominator.
     let (app, _token) = setup().await;
 
     let response = app
@@ -708,9 +686,8 @@ async fn login_set_cookie(app: axum::Router) -> String {
         .to_string()
 }
 
-/// The stored identifier must not *be* the credential. A copy of the database
-/// — a backup, a stray WAL file, a discarded SD card — must not hand over a
-/// live session the way it did while `sessions.token` held plaintext.
+/// The stored identifier must not be the credential: a copy of the database
+/// (backup, stray WAL, discarded SD card) must not hand over a live session.
 #[tokio::test]
 async fn login_persists_a_hash_never_the_cookie_value() {
     let (app, _token, _cache, _events, db, sessions, _invalid_session_limiter) =
@@ -736,8 +713,8 @@ async fn login_persists_a_hash_never_the_cookie_value() {
             .any(|r| r.token_hash == hash_session_token(&cookie_value)),
         "the session must be persisted under the hash of the cookie value"
     );
-    // The in-memory store is keyed the same way, which is what lets a row
-    // deleted by id be evicted from memory by the value the DELETE returned.
+    // The in-memory store is keyed the same way, so a row deleted by id can be
+    // evicted from memory by the value the DELETE returned.
     let live = sessions.lock();
     assert!(!live.contains_key(&cookie_value));
     assert!(live.contains_key(&hash_session_token(&cookie_value)));
@@ -755,8 +732,8 @@ async fn test_login_cookie_secure_when_enabled() {
     // The other attributes must survive alongside it.
     assert!(cookie.contains("HttpOnly"), "{cookie}");
     assert!(cookie.contains("SameSite=Lax"), "{cookie}");
-    // `Secure` implies the `__Host-` prefix, which gets the browser to also
-    // enforce `Path=/` and no `Domain` and blocks a subdomain override.
+    // `Secure` implies `__Host-`: the browser enforces `Path=/` and no `Domain`,
+    // blocking a subdomain override.
     assert!(
         cookie.starts_with("__Host-session="),
         "cookie_secure must emit the __Host- prefixed name: {cookie}"
@@ -765,8 +742,7 @@ async fn test_login_cookie_secure_when_enabled() {
 
 #[tokio::test]
 async fn test_login_cookie_not_secure_when_disabled() {
-    // TLS terminates upstream (or not at all): a Secure cookie would be
-    // dropped by the browser over plain HTTP and lock the operator out.
+    // Over plain HTTP a Secure cookie is dropped, locking the operator out.
     let (app, _token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let cookie = login_set_cookie(app).await;
@@ -774,8 +750,7 @@ async fn test_login_cookie_not_secure_when_disabled() {
         !cookie.contains("Secure"),
         "session cookie must not be Secure when cookie_secure is off: {cookie}"
     );
-    // A browser silently rejects `__Host-`-prefixed cookies that aren't
-    // `Secure`, so the plain-HTTP name must stay unprefixed.
+    // Browsers reject a non-`Secure` `__Host-` cookie, so it stays unprefixed.
     assert!(
         cookie.starts_with("session=") && !cookie.contains("__Host-"),
         "cookie_secure=false must keep the plain session cookie name: {cookie}"
@@ -801,8 +776,7 @@ async fn host_prefixed_cookie_is_accepted_on_read() {
 
 #[tokio::test]
 async fn legacy_cookie_name_still_accepted_when_secure() {
-    // A restart that flips `cookie_secure` on (new TLS cert, added
-    // `--cookie-secure`) must not invalidate sessions issued under the old,
+    // Turning `cookie_secure` on must not invalidate sessions issued under the
     // unprefixed name.
     let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, true).await;
@@ -849,24 +823,18 @@ async fn logout_clears_the_host_prefixed_cookie() {
         set_cookie.contains("Max-Age=0"),
         "cleared cookie must expire immediately: {set_cookie}"
     );
-    // RFC 6265bis §5.5: a browser ignores a `__Host-`-prefixed `Set-Cookie`
-    // that isn't `Secure`, so without this the removal is silently dropped
-    // and the browser keeps sending the "deleted" cookie forever.
+    // RFC 6265bis §5.5: a non-`Secure` `__Host-` `Set-Cookie` is ignored, so
+    // the removal would silently not happen.
     assert!(
         set_cookie.contains("Secure"),
         "the __Host- removal must carry Secure or browsers ignore it entirely: {set_cookie}"
     );
 }
 
-/// OWASP session-ID brute-force detection: a client presenting cookies that
-/// name no live session must be counted per source IP, so a burst becomes
-/// visible in the audit log instead of being silently 401'd forever.
-///
-/// Asserted through the limiter the router counts into rather than through the
-/// log line, which is the only observable the router exposes: after
-/// `MAX_ATTEMPTS - 1` rejected requests, the test's own attempt must be the one
-/// that crosses the threshold — which it can only be if the router counted
-/// every preceding request.
+/// OWASP session-ID brute-force detection: cookies naming no live session are
+/// counted per source IP so a burst reaches the audit log. Asserted through the
+/// limiter: after `INVALID_SESSION_MAX_ATTEMPTS - 1` rejections, the test's own
+/// attempt must be the one that crosses the threshold.
 #[tokio::test]
 async fn unknown_session_cookies_are_counted_per_source_ip() {
     let (app, _token, _cache, _events, _db, _sessions, limiter) =
@@ -899,10 +867,8 @@ async fn unknown_session_cookies_are_counted_per_source_ip() {
     );
 }
 
-/// The counter must fire only on a *presented* session cookie. An
-/// unauthenticated request that carries none (a first page load, an API client
-/// that forgot its bearer token) is not a guess and must leave no trace —
-/// otherwise ordinary 401s would drown the signal the burst warning exists for.
+/// Only a *presented* session cookie counts; ordinary cookie-less 401s would
+/// drown the signal.
 #[tokio::test]
 async fn requests_without_a_session_cookie_are_not_counted() {
     let (app, _token, _cache, _events, _db, _sessions, limiter) =
@@ -930,11 +896,9 @@ async fn requests_without_a_session_cookie_are_not_counted() {
 
 #[tokio::test]
 async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
-    // Reproduces the lockout: an operator's browser holds a stale
-    // `__Host-session` (e.g. from before TLS termination moved to a reverse
-    // proxy) alongside a freshly-issued, valid `session` cookie. Auth must
-    // fall through to the cookie that actually validates rather than getting
-    // stuck on the positionally-preferred but dead `__Host-` one.
+    // Regression: a stale `__Host-session` (e.g. from before TLS moved to a
+    // reverse proxy) alongside a valid `session`. Auth must fall through to the
+    // cookie that validates, not stick on the positionally-preferred dead one.
     let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
@@ -959,8 +923,7 @@ async fn stale_host_cookie_does_not_shadow_a_valid_legacy_cookie() {
 
 #[tokio::test]
 async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
-    // Mirror case: a valid `__Host-session` alongside a stale unprefixed
-    // `session` cookie must still authenticate via the valid one.
+    // Mirror case: valid `__Host-session`, stale `session`.
     let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
@@ -985,12 +948,9 @@ async fn stale_legacy_cookie_does_not_shadow_a_valid_host_cookie() {
 
 #[tokio::test]
 async fn logout_revokes_the_session_that_authenticated_the_request() {
-    // Reproduces the bug: a browser can hold a stale `__Host-session`
-    // alongside a live `session` cookie (see `session_cookie_hashes`).
-    // `AuthedUser` correctly authenticates via the live one, but `logout`
-    // used to act on whichever cookie was positionally first — clearing only
-    // the stale name and reporting success while the live token, the one
-    // that actually authenticated this very request, stayed valid.
+    // Regression: with a stale `__Host-session` beside a live `session` (see
+    // `session_cookie_hashes`), `logout` acted on the positionally-first cookie
+    // and left the live token that authenticated the request valid.
     let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
@@ -1045,13 +1005,9 @@ async fn logout_revokes_the_session_that_authenticated_the_request() {
 
 #[tokio::test]
 async fn logout_revokes_every_live_session_named_by_a_cookie() {
-    // Both accepted cookie names can each name a *live* session at once (log
-    // in over plain HTTP, then again once the operator turns on TLS /
-    // --cookie-secure). `logout` used to resolve a single token and revoke
-    // only that one, even though it clears both cookie names regardless —
-    // leaving the other session live server-side, still listed in
-    // `GET /api/sessions` and replayable by anyone holding its token, for up
-    // to the idle/absolute window.
+    // Both cookie names can name a live session at once (sign in over HTTP,
+    // then again after enabling --cookie-secure). `logout` clears both names,
+    // so it must revoke both sessions, not just one.
     let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let admin_id = db
@@ -1144,12 +1100,8 @@ async fn logout_revokes_every_live_session_named_by_a_cookie() {
 #[tokio::test]
 async fn revoke_others_keeps_the_authenticated_session() {
     // Same two-cookie shape as `logout_revokes_the_session_that_authenticated_the_request`:
-    // `revoke_others` used to pass the positionally-first cookie (the stale
-    // `__Host-session`) as `keep`, so `retain`/`DELETE ... WHERE token != stale`
-    // matched nothing and the caller's own live session — the one this
-    // request authenticated with — was revoked along with everyone else's,
-    // even though the endpoint is documented as "stay signed in on this
-    // device".
+    // `revoke_others` must keep the session that authenticated, not the stale
+    // positionally-first cookie, or it signs the caller out too.
     let (app, token, _cache, _events, _db, _sessions, _invalid_session_limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     let response = app
@@ -1639,8 +1591,7 @@ async fn test_invalid_block_custom_ipv4_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // Verify no partial write: block_mode must not have been persisted even
-    // though it was valid, since the request as a whole was rejected.
+    // No partial write: the valid block_mode was not persisted either.
     let response = app
         .oneshot(authed("GET", "/api/settings", &token, None))
         .await
@@ -1656,10 +1607,8 @@ async fn test_invalid_block_custom_ipv4_rejected() {
     );
 }
 
-/// The `<datalist>` promise for the two custom-IP fields: every address the
-/// settings form offers is one the save actually takes. A suggestion the form
-/// rejects is worse than none — the operator picked it out of the browser's
-/// own dropdown, so a 400 there reads as a bug rather than a typo.
+/// Every custom-IP address the settings form's `<datalist>` offers is one the
+/// save accepts — a rejected suggestion reads as a bug, not a typo.
 #[tokio::test]
 async fn block_custom_ip_suggestions_are_all_accepted() {
     use noadd::admin::api::{BLOCK_CUSTOM_IPV4_SUGGESTIONS, BLOCK_CUSTOM_IPV6_SUGGESTIONS};
@@ -1673,8 +1622,7 @@ async fn block_custom_ip_suggestions_are_all_accepted() {
         "the form shows the two lists side by side; keep them the same depth"
     );
 
-    // Pair them off so each save exercises both fields at once, which is how
-    // custom_ip mode is actually used.
+    // Paired, as custom_ip mode is actually used.
     for (v4, v6) in BLOCK_CUSTOM_IPV4_SUGGESTIONS
         .iter()
         .zip(BLOCK_CUSTOM_IPV6_SUGGESTIONS)
@@ -1707,9 +1655,8 @@ async fn block_custom_ip_suggestions_are_all_accepted() {
     }
 }
 
-/// The same promise for the retention field, which `apply_settings` does not
-/// validate: the save takes anything, so the bar is that every suggestion
-/// round-trips and reads back as the positive count the prune task needs.
+/// The same for retention, which `apply_settings` does not validate: every
+/// suggestion must round-trip.
 #[tokio::test]
 async fn log_retention_suggestions_are_all_accepted() {
     use noadd::admin::stats::LOG_RETENTION_DAYS_SUGGESTIONS;
@@ -1761,9 +1708,7 @@ async fn test_block_mode_partial_update_preserves_custom_ips() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Now send a partial update with only block_mode set again; the
-    // previously stored custom IPs must be preserved (merge-on-apply),
-    // not wiped out.
+    // A partial update with only block_mode must preserve the stored custom IPs.
     let response = app
         .clone()
         .oneshot(authed(
@@ -1998,9 +1943,7 @@ async fn test_upstream_latency_endpoint() {
 
 #[tokio::test]
 async fn test_missing_asset_returns_404_not_spa_fallback() {
-    // Regression: /favicon.ico (and any other missing asset) used to be
-    // swallowed by the SPA fallback and returned index.html with
-    // content-type text/html, which broke the browser-auto favicon.
+    // Regression: a missing asset such as /favicon.ico must 404, not return HTML.
     let (app, _token) = setup().await;
 
     let response = app
@@ -2018,7 +1961,7 @@ async fn test_missing_asset_returns_404_not_spa_fallback() {
 
 #[tokio::test]
 async fn test_existing_asset_served_with_correct_mime() {
-    // /favicon.svg is bundled by PR #34 and must be served as image/svg+xml.
+    // /favicon.svg must be served as image/svg+xml.
     let (app, _token) = setup().await;
 
     let response = app
@@ -2045,11 +1988,8 @@ async fn test_existing_asset_served_with_correct_mime() {
 
 #[tokio::test]
 async fn test_unknown_path_404s_rather_than_serving_a_shell() {
-    // The SPA fallback is gone: it existed so a client-side route the server
-    // knew nothing about still received the shell for the router to act on, and
-    // every page path is a real route now. `/dashboard` was never one of them —
-    // the dashboard is `/` — so it is exactly the stale link this must not
-    // answer with a document.
+    // There is no SPA fallback: every page is a real route, and `/dashboard`
+    // (the dashboard is `/`) is not one.
     let (app, _token) = setup().await;
 
     let response = app
@@ -2109,11 +2049,8 @@ async fn test_apple_touch_icon_served_as_png() {
     );
 }
 
-/// A `tracing` sink that keeps everything written to it, so a test can assert
-/// on the audit events a handler emitted.
-///
-/// Under nextest each test is its own process, so installing a
-/// thread-local default subscriber cannot leak into another test.
+/// A `tracing` sink that keeps everything written to it. Under nextest each test
+/// is its own process, so the thread-local default cannot leak between tests.
 #[derive(Clone)]
 struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -2127,9 +2064,8 @@ impl CapturedLogs {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 
-    /// Install as the default subscriber for as long as the returned guard
-    /// lives. JSON so a field can be matched as `"field":value` rather than
-    /// by groping through prose.
+    /// Install as the default subscriber while the guard lives. JSON, so a field
+    /// matches as `"field":value`.
     fn install(&self) -> tracing::subscriber::DefaultGuard {
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -2157,19 +2093,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
     }
 }
 
-/// Source string for the maximum-length boundary tests. It has to be long
-/// enough to slice 128 characters out of *and* score well on zxcvbn, which
-/// rules out the obvious `"a".repeat(128)` — a run of one character is scored
-/// as a repeat and rejected for guessability, which would make the test pass
-/// or fail for a reason that has nothing to do with the length boundary.
+/// Source for the maximum-length tests: long enough to slice 128 characters from
+/// and strong on zxcvbn, which would reject `"a".repeat(128)` as a repeat.
 const STRONG_LONG_PASSPHRASE: &str = concat!(
     "vermilion-thicket-marlin-quartz-nimbus-cobalt-drift-walnut-orbit-",
     "vermilion-thicket-marlin-quartz-nimbus-cobalt-drift-walnut-orbit-",
 );
 
-/// Same idea for the characters-not-bytes test: 100 *distinct* CJK characters,
-/// because `"密".repeat(100)` is a repeat and would be rejected on
-/// guessability before the length check could be observed.
+/// 100 *distinct* CJK characters, for the same reason.
 const STRONG_CJK_PASSPHRASE: &str = concat!(
     "山川河海風雲雷電花鳥魚蟲松竹梅蘭菊石泉澗谷嶺峰崖壁沙丘湖泊溪橋亭台樓閣舟車馬牛羊犬雞鴨鵝鶴鹿虎豹熊狼",
     "狐兔鼠蛇龜蛙蟬蝶蜂蟻蚊蠅蛛天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏閏餘成歲律呂調陽雲騰致雨",
@@ -2182,9 +2113,7 @@ async fn setup_rejects_short_password_with_400() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        // One character under the 12-character minimum: the boundary, not an
-        // arbitrarily short string, so a minimum accidentally applied as `<=`
-        // or read off by one still fails this.
+        // One under the 12-character minimum, so an off-by-one still fails.
         .body(Body::from(
             r#"{"username":"admin","password":"Yx7#qvLm2R!"}"#,
         ))
@@ -2210,8 +2139,7 @@ async fn setup_accepts_a_password_at_the_minimum_length_with_200() {
         .method("POST")
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
-        // Exactly the 12-character minimum — the other side of the boundary
-        // the test above guards.
+        // Exactly the 12-character minimum.
         .body(Body::from(
             r#"{"username":"admin","password":"Yx7#qvLm2Rk!"}"#,
         ))
@@ -2229,9 +2157,8 @@ async fn setup_accepts_a_password_at_the_minimum_length_with_200() {
     );
 }
 
-/// A password past the 128-character maximum must be rejected outright rather
-/// than truncated to fit: truncation would make every password sharing the
-/// first 128 characters open the same account.
+/// A password past the 128-character maximum is rejected, not truncated —
+/// truncation would let every password sharing the first 128 characters in.
 #[tokio::test]
 async fn setup_rejects_an_over_long_password_with_400() {
     let app = unconfigured_app().await;
@@ -2258,8 +2185,7 @@ async fn setup_rejects_an_over_long_password_with_400() {
     );
 }
 
-/// The maximum is a boundary, not a vibe: 128 characters exactly must still be
-/// accepted.
+/// Exactly 128 characters is still accepted.
 #[tokio::test]
 async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
     let app = unconfigured_app().await;
@@ -2276,10 +2202,7 @@ async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// The length band is counted in characters, not bytes. A 12-character CJK
-/// passphrase is 36 bytes; a byte-counting minimum would accept it for the
-/// wrong reason, and a byte-counting maximum would reject a perfectly ordinary
-/// 50-character one.
+/// The length band counts characters, not bytes (a CJK character is 3 bytes).
 #[tokio::test]
 async fn password_length_is_counted_in_characters_not_bytes() {
     // 11 characters / 33 bytes — under the minimum however many bytes it is.
@@ -2304,8 +2227,7 @@ async fn password_length_is_counted_in_characters_not_bytes() {
         "11 characters is under the minimum even though it is 33 bytes"
     );
 
-    // 100 characters / 300 bytes — comfortably inside a character-counted
-    // maximum, well past a byte-counted one.
+    // 100 characters / 300 bytes — inside the maximum only if counted in characters.
     let app = unconfigured_app().await;
     let hundred_chars: String = STRONG_CJK_PASSPHRASE.chars().take(100).collect();
     let resp = app
@@ -2352,10 +2274,8 @@ async fn setup_already_configured_returns_409() {
     );
 }
 
-/// Asks for `/app.css` rather than `/`: page routes resolve a session before
-/// they answer now, so `/` redirects an unauthenticated request instead of
-/// serving an embedded file. The revalidation contract being pinned here
-/// belongs to the embedded assets, which `/app.css` is one of.
+/// Asks for `/app.css`, an embedded asset: `/` is a page and redirects an
+/// unauthenticated request.
 #[tokio::test]
 async fn test_index_served_with_etag_and_no_cache() {
     let (app, _token) = setup().await;
@@ -2536,9 +2456,7 @@ async fn login_with_wrong_username_is_unauthorized() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// The session token a response's `Set-Cookie` hands back, if any. Used by the
-/// rotation tests, where the token a request authenticated with is no longer
-/// the token the next request must use.
+/// The session token a response's `Set-Cookie` hands back, if any (rotation tests).
 fn rotated_session_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let set_cookie = headers.get("set-cookie")?.to_str().ok()?;
     Some(
@@ -2563,14 +2481,9 @@ fn authed(method: &str, uri: &str, token: &str, body: Option<&str>) -> Request<B
         .unwrap()
 }
 
-/// A login attempt that presents `ip` as its source address.
-///
-/// The tests below use a *different* address for every attempt, which is not a
-/// trick to dodge the IP limiter but the attack the account lockout exists to
-/// stop: OWASP's reason for keying the counter on the account is precisely
-/// "to prevent an attacker from making login attempts from a large number of
-/// different IP addresses". Each of these attempts is comfortably inside its
-/// own IP budget; only the account budget sees all of them.
+/// A login attempt from source address `ip`. The tests below use a different
+/// address per attempt — the distributed attack the account lockout exists for:
+/// each stays inside its own IP budget, and only the account budget sees them all.
 fn login_from(ip: &str, username: &str, password: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -2583,9 +2496,8 @@ fn login_from(ip: &str, username: &str, password: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// Spend an account's free allowance, one attempt per source address, leaving
-/// it locked. Returns the number of addresses used, so a caller can keep
-/// picking fresh ones.
+/// Spend an account's free allowance, one address per attempt, leaving it locked.
+/// Returns the number of addresses used, so a caller can pick fresh ones.
 async fn lock_the_account(app: &axum::Router, username: &str) -> usize {
     let attempts = noadd::admin::auth::LOCKOUT_FREE_ATTEMPTS + 1;
     for i in 0..attempts {
@@ -2607,9 +2519,8 @@ async fn lock_the_account(app: &axum::Router, username: &str) -> usize {
     attempts as usize
 }
 
-/// The whole point: a thousand source addresses get a thousand IP budgets and
-/// one account budget. Once that is spent, even the *correct* password is
-/// refused.
+/// Many source addresses share one account budget; once spent, even the correct
+/// password is refused.
 #[tokio::test]
 async fn a_distributed_guessing_run_locks_the_account() {
     let (app, _token) = setup().await;
@@ -2626,10 +2537,8 @@ async fn a_distributed_guessing_run_locks_the_account() {
     );
 }
 
-/// A lockout that announced itself would re-open the user-enumeration hole
-/// the generic 401 exists to close: fail five times against a name and read
-/// off whether it exists. A locked account must be indistinguishable from one
-/// that was never there.
+/// A lockout that announced itself would reopen user enumeration, so a locked
+/// account must be indistinguishable from an unknown one.
 #[tokio::test]
 async fn a_locked_account_is_indistinguishable_from_an_unknown_one() {
     let (app, _token) = setup().await;
@@ -2669,9 +2578,8 @@ async fn a_locked_account_is_indistinguishable_from_an_unknown_one() {
     assert_eq!(locked_body, unknown_body);
 }
 
-/// Getting it right is the only evidence the failures were the real operator
-/// fumbling, so it clears the history rather than leaving them one slip from a
-/// lockout for the next hour.
+/// A correct password clears the failure history rather than leaving the operator
+/// one slip from a lockout.
 #[tokio::test]
 async fn a_successful_login_clears_the_account_budget() {
     let (app, _token) = setup().await;
@@ -2692,8 +2600,7 @@ async fn a_successful_login_clears_the_account_budget() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // The allowance is whole again: the same number of failures as before
-    // still does not lock, which it would if the counter had merely carried on.
+    // The allowance is whole again: the same failures still do not lock.
     for i in 0..free {
         let res = app
             .clone()
@@ -2713,9 +2620,8 @@ async fn a_successful_login_clears_the_account_budget() {
     );
 }
 
-/// The other two endpoints that verify this same password draw on the same
-/// account budget. Leaving either out would give an attacker who already holds
-/// a session an unmetered place to grind the credential.
+/// The other two endpoints that verify the password share the account budget,
+/// or a session holder could grind the credential there unmetered.
 #[tokio::test]
 async fn the_lockout_covers_every_endpoint_that_checks_the_password() {
     for (uri, body) in [
@@ -2749,9 +2655,8 @@ async fn the_lockout_covers_every_endpoint_that_checks_the_password() {
     }
 }
 
-/// Age a live session's password proof past the re-authentication window,
-/// leaving everything else about it untouched — the session stays valid, only
-/// the proof goes stale. Returns the number of sessions aged.
+/// Age a session's password proof past the re-authentication window, leaving the
+/// session itself valid. Returns the number of sessions aged.
 fn expire_reauth(sessions: &SessionStore, token: &str) -> usize {
     let hash = hash_session_token(token);
     let mut map = sessions.lock();
@@ -2762,14 +2667,11 @@ fn expire_reauth(sessions: &SessionStore, token: &str) -> usize {
     1
 }
 
-/// The gap #208's own doc comment called out: an attacker holding a stolen
-/// session cookie could mint a long-lived API key, and that key kept working
-/// after the victim changed their password. Minting one now needs the
-/// password again.
+/// A stolen session cookie must not mint durable access (an API key outlives a
+/// password change), so these actions need a recent password proof.
 #[tokio::test]
 async fn sensitive_actions_need_a_recent_password_proof() {
-    // Each of these hands out durable access — a key that outlives the
-    // session, or an operator account that is a second key to the whole box.
+    // Each hands out durable access: an API key or an operator account.
     let sensitive: &[(&str, &str, Option<&str>)] = &[
         ("POST", "/api/api-keys", Some(r#"{"name":"ci"}"#)),
         (
@@ -2784,8 +2686,7 @@ async fn sensitive_actions_need_a_recent_password_proof() {
         let (app, token, _cache, _events, _db, sessions, _isl) =
             build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
 
-        // Fresh out of login, the proof is current and the action goes
-        // through — an operator must not be asked twice in a row.
+        // Fresh out of login the proof is current.
         let res = app
             .clone()
             .oneshot(authed(method, uri, &token, *body))
@@ -2815,13 +2716,13 @@ async fn sensitive_actions_need_a_recent_password_proof() {
         assert_eq!(
             json.get("code").and_then(serde_json::Value::as_str),
             Some("reauth_required"),
-            "the UI keys off this code — a bare 403 is indistinguishable from the CSRF guard's"
+            "API callers key off this code — a bare 403 is indistinguishable from the CSRF guard's"
         );
     }
 }
 
-/// Re-authenticating restores the window, so the action that was just refused
-/// succeeds on retry. This is the whole loop the admin UI drives.
+/// Re-authenticating via `POST /api/auth/reauth` restores the window, so the
+/// refused action succeeds on retry.
 #[tokio::test]
 async fn reauth_reopens_the_window() {
     let (app, token, _cache, _events, _db, sessions, _isl) =
@@ -2864,8 +2765,7 @@ async fn reauth_reopens_the_window() {
     assert_eq!(res.status(), StatusCode::CREATED);
 }
 
-/// A wrong password must not reopen the window, and must be audited — this is
-/// the same guessing surface as `login`.
+/// A wrong password must not reopen the window.
 #[tokio::test]
 async fn reauth_rejects_the_wrong_password_and_leaves_the_window_shut() {
     let (app, token, _cache, _events, _db, sessions, _isl) =
@@ -2900,8 +2800,8 @@ async fn reauth_rejects_the_wrong_password_and_leaves_the_window_shut() {
     );
 }
 
-/// Verifying a password makes this a guessing surface, so it shares the login
-/// budget for the same reason `change_own_password` does.
+/// Verifying a password makes this a guessing surface, so it is rate limited
+/// like `change_own_password`.
 #[tokio::test]
 async fn reauth_is_rate_limited() {
     let (app, token) = setup().await;
@@ -2981,9 +2881,7 @@ async fn change_own_password_requires_correct_current() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// The length band applies wherever a password is *set*, not just at setup.
-/// A minimum enforced only by the setup wizard would let an operator walk
-/// their own password straight back under it.
+/// The length band applies wherever a password is set, not just at setup.
 #[tokio::test]
 async fn change_own_password_enforces_the_length_band() {
     for (label, new_password) in [
@@ -3010,8 +2908,7 @@ async fn change_own_password_enforces_the_length_band() {
     }
 }
 
-/// The username is validated on the same endpoint and with the same shape of
-/// rejection as the password, and had no coverage at all.
+/// The username is validated with the same shape of rejection as the password.
 #[tokio::test]
 async fn create_operator_rejects_an_invalid_username() {
     for (label, username) in [
@@ -3063,15 +2960,12 @@ async fn create_operator_enforces_the_length_band() {
     }
 }
 
-/// Length alone is a weak policy: `password1234` and `noadd-noadd-noadd` both
-/// clear a 12-character floor. Every endpoint that sets a password must run
-/// the guessability check too, or an operator simply routes around the floor
-/// at whichever endpoint forgot.
+/// Length alone is weak (`password1234` clears a 12-character floor), so every
+/// endpoint that sets a password also runs the guessability check.
 #[tokio::test]
 async fn every_set_password_endpoint_rejects_a_guessable_password() {
-    // Each is long enough to clear the length band and would have been
-    // accepted before: a top-N password padded out, a keyboard run, dictionary
-    // words, and one built from the account's own name.
+    // Each clears the length band: a padded top-N password, a keyboard run,
+    // dictionary words, and one built from the account's own name.
     for weak in [
         "password1234",
         "qwertyuiopasdfgh",
@@ -3134,9 +3028,8 @@ async fn every_set_password_endpoint_rejects_a_guessable_password() {
     }
 }
 
-/// A rejection has to say what to change. Without a reason in the body the
-/// admin UI can only show "400", and an operator has no way to tell a
-/// too-short password from a too-guessable one.
+/// A rejection says what to change, so a too-short password is distinguishable
+/// from a too-guessable one.
 #[tokio::test]
 async fn a_rejected_password_explains_itself() {
     let app = unconfigured_app().await;
@@ -3194,17 +3087,13 @@ async fn a_rejected_password_explains_itself() {
     );
 }
 
-/// A password containing the account's own username is the first thing anyone
-/// guessing at this particular box tries, and it sails past both a length
-/// floor and a breach blocklist. zxcvbn only catches it if the username is
-/// actually passed in as a user input.
+/// A password built from the username passes a length floor and a breach list;
+/// zxcvbn only catches it if the username is passed in as a user input.
 #[tokio::test]
 async fn the_username_is_fed_to_the_guessability_check() {
-    // `zephyrqualm-8412` is weak *only* relative to that username: zxcvbn
-    // scores it 2 when `zephyrqualm` is a user input and 4 when it is not.
-    // The second half of this test is what makes the first half mean
-    // something — without it, a password that is simply weak would pass just
-    // as well and prove nothing about the username reaching the checker.
+    // `zephyrqualm-8412` is weak *only* relative to that username (zxcvbn scores
+    // 2 with it as a user input, 4 without). The second half proves the password
+    // is not simply weak.
     let (app, token) = setup().await;
     let res = app
         .oneshot(authed(
@@ -3238,10 +3127,7 @@ async fn the_username_is_fed_to_the_guessability_check() {
     );
 }
 
-/// Provisioning an operator hands out a second key to the whole appliance, so
-/// it has to leave a trace naming who did it and who was created. Deleting one
-/// is the same event in reverse; together they answer "who can administer this
-/// box, and when did that change" from one event name.
+/// Creating and deleting an operator are audited, naming who acted and on whom.
 #[tokio::test]
 async fn operator_lifecycle_is_audited() {
     let logs = CapturedLogs::new();
@@ -3278,9 +3164,7 @@ async fn operator_lifecycle_is_audited() {
             "{what} must emit {event}; captured logs were:\n{text}"
         );
     }
-    // The acting operator (admin, id 1) and the target (bob, id 2) must both
-    // be recorded — an event naming only one of them cannot answer either
-    // half of "who did what to whom".
+    // Both the acting operator (admin, id 1) and the target (bob, id 2).
     assert!(
         text.contains(r#""user_id":1"#) && text.contains(r#""target_user_id":2"#),
         "both the acting and the target operator must be named:\n{text}"
@@ -3291,15 +3175,12 @@ async fn operator_lifecycle_is_audited() {
     );
 }
 
-/// Changing a password verifies one, so it is a password-guessing surface and
-/// must be throttled like the login endpoint. Without this an attacker sitting
-/// at a signed-in terminal can grind the current-password field indefinitely
-/// and take the account over permanently.
+/// Changing a password verifies one, so it is throttled like login — or a
+/// signed-in terminal could grind the current-password field.
 #[tokio::test]
 async fn change_own_password_is_rate_limited() {
     let (app, token) = setup().await;
-    // The router is built with the same 5-attempts-per-60s limiter `main`
-    // uses, and every request here shares the fallback client IP.
+    // Same 5-per-60s limiter as `main`; every request shares the fallback IP.
     let attempt = || {
         app.clone().oneshot(authed(
             "POST",
@@ -3324,10 +3205,8 @@ async fn change_own_password_is_rate_limited() {
     );
 }
 
-/// The throttle counts against the same budget `login` uses, deliberately:
-/// both are the same credential being guessed from the same address. This
-/// pins that down so nobody "fixes" it into a separate limiter without
-/// meaning to.
+/// Deliberately the same budget as `login`: the same credential guessed from the
+/// same address.
 #[tokio::test]
 async fn change_own_password_shares_the_login_budget() {
     let (app, token) = setup().await;
@@ -3399,10 +3278,9 @@ async fn unknown_user_and_wrong_password_return_identical_401s() {
     assert_eq!(unknown_body, wrong_body);
 }
 
-/// A password longer than any human types is refused before it ever reaches
-/// Argon2. The cap is far above `MAX_PASSWORD_LENGTH` on purpose so an
-/// operator whose password predates that limit is not locked out — this only
-/// bounds the work an unauthenticated caller can demand.
+/// An absurdly long password is refused before Argon2. The cap
+/// (`MAX_LOGIN_PASSWORD_LENGTH`) is far above `MAX_PASSWORD_LENGTH` so a password
+/// predating that limit still works; it only bounds unauthenticated work.
 #[tokio::test]
 async fn login_rejects_an_absurdly_long_password() {
     let (app, _token) = setup().await;
@@ -3482,8 +3360,8 @@ async fn change_password_revokes_other_sessions_of_same_user() {
         .unwrap();
     assert_eq!(res_b.status(), StatusCode::UNAUTHORIZED);
 
-    // Token A (the device that made the change) stays signed in — but under
-    // the rotated token, not the one it arrived with.
+    // Token A (the device that made the change) stays signed in, under the
+    // rotated token.
     let rotated = rotated_session_token(res.headers()).expect("rotation must set a cookie");
     let res_a = app
         .clone()
@@ -3502,10 +3380,8 @@ async fn change_password_revokes_other_sessions_of_same_user() {
     assert_eq!(res_rotated.status(), StatusCode::OK);
 }
 
-/// OWASP: renew the session ID after a privilege level change. Revoking the
-/// *other* sessions is not enough on its own — it does nothing about a token
-/// that leaked through a channel needing no ongoing browser access (a proxy
-/// log, a shared terminal's history), which is exactly what rotation covers.
+/// OWASP: renew the session ID after a privilege change. Revoking other sessions
+/// does nothing about a token leaked out-of-band (a proxy log); rotation does.
 #[tokio::test]
 async fn change_password_rotates_the_callers_own_token() {
     let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
@@ -3533,9 +3409,7 @@ async fn change_password_rotates_the_callers_own_token() {
     let rotated = rotated_session_token(res.headers()).unwrap();
     assert_ne!(rotated, token_a, "the token must actually change");
 
-    // The replacement must carry the same protections as the one login
-    // issues; a rotation that silently dropped one would downgrade the very
-    // session it was issued to protect.
+    // The replacement carries the same cookie protections login issues.
     assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
     assert!(set_cookie.contains("SameSite=Lax"), "{set_cookie}");
     assert!(set_cookie.contains("Path=/"), "{set_cookie}");
@@ -3553,9 +3427,8 @@ async fn change_password_rotates_the_callers_own_token() {
         .unwrap();
     assert_eq!(new.status(), StatusCode::OK);
 
-    // Exactly one session survives, stored as a hash and reachable from both
-    // views — the superseded row must not linger, or a restart would restore
-    // it as a live session.
+    // Exactly one session survives, stored as a hash, in memory and on disk — a
+    // lingering superseded row would be restored live by a restart.
     let rows = db.list_sessions().await.unwrap();
     assert_eq!(rows.len(), 1, "the superseded row must be deleted");
     assert_eq!(rows[0].token_hash, hash_session_token(&rotated));
@@ -3564,9 +3437,8 @@ async fn change_password_rotates_the_callers_own_token() {
     assert!(live.contains_key(&hash_session_token(&rotated)));
 }
 
-/// Regression guard: `change_own_password` must revoke only the caller's own
-/// sessions via `revoke_user_sessions_except`, never the global
-/// `revoke_other_sessions` (which would log out every operator).
+/// Changing a password revokes only the caller's own sessions
+/// (`revoke_user_sessions_except`), never every operator's (`revoke_other_sessions`).
 #[tokio::test]
 async fn change_password_keeps_other_operators_signed_in() {
     let (app, token_a, _cache, _events, db, sessions, _invalid_session_limiter) =
@@ -3894,10 +3766,8 @@ async fn delete_operator_succeeds_and_missing_returns_404() {
 async fn test_logs_stream_sse_delivers_published_entry() {
     let (app, token, _cache, events) = build_app("http://127.0.0.1:1/filters.json", true).await;
 
-    // The tail rides the shared stream now, so it is `?logs=1` rather than an
-    // endpoint of its own. The handler subscribes to the broadcast channel
-    // while producing the response, so a publish after oneshot() returns is
-    // guaranteed to be delivered to this subscriber.
+    // The tail is `?logs=1` on the shared stream. The handler subscribes while
+    // producing the response, so a publish after oneshot() returns is delivered.
     let req = Request::builder()
         .uri("/api/events?logs=1")
         .header("cookie", format!("session={token}"))
@@ -3915,8 +3785,6 @@ async fn test_logs_stream_sse_delivers_published_entry() {
         "unexpected content-type: {ctype}"
     );
 
-    // Publish one entry through the broadcast sender the handler is now
-    // subscribed to.
     let entry = QueryLogEntry {
         timestamp: 1234,
         domain: "live.example.com".to_string(),
@@ -3932,9 +3800,8 @@ async fn test_logs_stream_sse_delivers_published_entry() {
     };
     events.send(Arc::new(entry)).unwrap();
 
-    // Read SSE frames until the JSON data line for our entry arrives
-    // (keep-alive comments may interleave). Bound with a timeout so a
-    // regression can't hang the suite.
+    // Read frames until our entry arrives (keep-alives may interleave), bounded
+    // so a regression cannot hang the suite.
     let mut stream = resp.into_body().into_data_stream();
     let mut seen = String::new();
     let found = tokio::time::timeout(Duration::from_secs(5), async {
@@ -3953,17 +3820,15 @@ async fn test_logs_stream_sse_delivers_published_entry() {
         found,
         "SSE stream did not deliver the published entry; got: {seen}"
     );
-    // Named, not the default event: an unnamed one reaches `onmessage` and
-    // never the `log` listener the page registers.
+    // Named: an unnamed event reaches `onmessage`, not the page's `log` listener.
     assert!(
         seen.contains("event: log"),
         "the entry did not arrive as a `log` event; got: {seen}"
     );
 }
 
-/// Every page holds this stream open for the status indicator. A tail that is
-/// switched off — the state the query log ships in — must not be handed every
-/// query the appliance answers.
+/// Every page holds this stream open, so without `?logs=1` it must not carry
+/// every query answered.
 #[tokio::test]
 async fn event_stream_sends_no_logs_when_they_are_not_asked_for() {
     let (app, token, _cache, events) = build_app("http://127.0.0.1:1/filters.json", true).await;
@@ -4005,8 +3870,7 @@ async fn event_stream_sends_no_logs_when_they_are_not_asked_for() {
     );
 }
 
-/// The stream is the shell's status indicator, which is on every page, so an
-/// unauthenticated one would be a pre-auth handle on the appliance.
+/// An unauthenticated stream would be a pre-auth handle on the appliance.
 #[tokio::test]
 async fn event_stream_refuses_an_unauthenticated_client() {
     let (app, _token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
@@ -4023,9 +3887,7 @@ async fn event_stream_refuses_an_unauthenticated_client() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// A dashboard must not sit on server-rendered markup for a whole tick waiting
-/// for the first push, so the snapshot goes out as the stream opens rather than
-/// on the ticker.
+/// A `stats=1` stream gets a snapshot as it opens, not a tick later.
 #[tokio::test]
 async fn event_stream_opens_with_a_snapshot_when_stats_are_asked_for() {
     let (app, token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
@@ -4067,8 +3929,7 @@ async fn event_stream_opens_with_a_snapshot_when_stats_are_asked_for() {
     .expect("timed out waiting for the opening snapshot");
     assert!(found, "no stats event on connect; got: {seen}");
 
-    // The five fields are the shapes `app.js` renders; a rename here is a blank
-    // dashboard, which nothing else in the suite would catch.
+    // The five fields `app.js` renders; a rename here is a blank dashboard.
     for field in [
         "summary",
         "timeline",
@@ -4083,9 +3944,8 @@ async fn event_stream_opens_with_a_snapshot_when_stats_are_asked_for() {
     }
 }
 
-/// Every page holds this stream open for the status indicator alone. Sending
-/// them a dashboard snapshot would make an idle settings page cost five
-/// aggregate queries every tick.
+/// Without `?stats=1` no snapshot is sent, or an idle page would cost five
+/// aggregate queries a tick.
 #[tokio::test]
 async fn event_stream_sends_no_snapshot_when_stats_are_not_asked_for() {
     let (app, token, _cache, _events) = build_app("http://127.0.0.1:1/filters.json", true).await;
@@ -4102,8 +3962,7 @@ async fn event_stream_sends_no_snapshot_when_stats_are_not_asked_for() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Bounded negative: read whatever arrives in the window an opening snapshot
-    // would have used, and require that none of it is one.
+    // Bounded negative: nothing arriving in the window may be a snapshot.
     let mut stream = resp.into_body().into_data_stream();
     let mut seen = String::new();
     let _ = tokio::time::timeout(Duration::from_secs(1), async {
@@ -4153,10 +4012,9 @@ async fn logout_cookie_session_revokes_and_clears_cookie() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Logout must ask the browser to drop cookies/cache/storage for this
-/// origin, so "log out, then press Back" cannot show the admin screen
-/// again. `executionContexts` is deliberately excluded (it would reload the
-/// SPA before it can read `redirect_to` and hand off to forward-auth logout).
+/// Logout asks the browser to drop cookies/cache/storage, so Back cannot show
+/// the admin screen. `executionContexts` is excluded: it would tear down the
+/// page before a JSON caller reads `redirect_to`.
 #[tokio::test]
 async fn logout_sends_clear_site_data() {
     let (app, token) = setup().await;
@@ -4174,7 +4032,7 @@ async fn logout_sends_clear_site_data() {
     assert_eq!(header, r#""cache", "cookies", "storage""#);
     assert!(
         !header.contains("executionContexts"),
-        "Clear-Site-Data must not include executionContexts, it would kill the SPA before it reads redirect_to: {header}"
+        "Clear-Site-Data must not include executionContexts, it would kill a page before it reads redirect_to: {header}"
     );
 }
 
@@ -4194,9 +4052,8 @@ async fn logout_without_any_auth_returns_401() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Every authenticated admin JSON response carries a caching policy that
-/// forbids storage — nothing in `/api/*` sets its own `Cache-Control`, so the
-/// `no_store` layer must be the one stamping it (see `src/headers.rs`).
+/// Admin JSON responses are not stored: nothing in `/api/*` sets its own
+/// `Cache-Control`, so `no_store` (`src/headers.rs`) stamps it.
 #[tokio::test]
 async fn api_responses_are_not_stored() {
     let (app, token) = setup().await;
@@ -4220,8 +4077,7 @@ async fn api_responses_are_not_stored() {
     );
 }
 
-/// The `no_store` layer sits outside the `AuthedUser` extractor, so even a
-/// bare 401 rejection (no handler ever ran) carries the no-store headers.
+/// `no_store` wraps the `AuthedUser` extractor, so even a bare 401 carries it.
 #[tokio::test]
 async fn unauthenticated_rejections_are_not_stored() {
     let (app, _token) = setup().await;
@@ -4242,14 +4098,9 @@ async fn unauthenticated_rejections_are_not_stored() {
     );
 }
 
-/// Regression guard: the `no_store` layer keys on "response already declares
-/// a `Cache-Control`" and must not clobber the embedded assets' existing
-/// `no-cache` + `ETag` revalidation headers.
-///
-/// `/app.css` rather than `/` — see `test_index_served_with_etag_and_no_cache`.
-/// The distinction matters more now than it reads: a server-rendered page gets
-/// `no-store` from that same layer, which is what keeps operator data out of
-/// the browser cache, and only the static assets are meant to escape it.
+/// `no_store` skips responses that already declare a `Cache-Control`, so it must
+/// not clobber the assets' `no-cache` + `ETag`. (Pages, which declare none, do
+/// get `no-store`.)
 #[tokio::test]
 async fn static_assets_keep_no_cache_and_etag() {
     let (app, _token) = setup().await;
@@ -4268,10 +4119,8 @@ async fn static_assets_keep_no_cache_and_etag() {
     assert!(res.headers().contains_key("etag"));
 }
 
-/// `Strict-Transport-Security` is layered onto the *merged* app in
-/// `src/main.rs`, not inside `admin_router` — a `DoH`-only deployment must
-/// get the header too, so it cannot live on the admin router alone. Pin that
-/// by asserting `admin_router` in isolation never emits it.
+/// HSTS is layered onto the merged app in `src/main.rs` so `DoH`-only
+/// deployments get it too; `admin_router` alone must not emit it.
 #[tokio::test]
 async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
     let (app, token) = setup().await;
@@ -4283,10 +4132,8 @@ async fn hsts_header_is_not_sent_by_the_admin_router_alone() {
     assert!(!res.headers().contains_key("strict-transport-security"));
 }
 
-/// The mirror of the HSTS test above: clickjacking defence *does* belong on
-/// the admin router, since the admin UI is the only browser-rendered surface
-/// here, so a dropped `.layer(...)` must fail the suite. The unit test in
-/// `src/headers.rs` only proves the middleware works when attached.
+/// Conversely, `security_headers` belongs on the admin router (the only
+/// browser-rendered surface), so a dropped `.layer(...)` must fail here.
 #[tokio::test]
 async fn security_headers_are_sent_by_the_admin_router() {
     let (app, token) = setup().await;
@@ -4306,8 +4153,7 @@ async fn security_headers_are_sent_by_the_admin_router() {
     );
 }
 
-/// The mobileconfig download carries authenticated DNS-over-HTTPS config
-/// (the token in the URL is itself the credential), so it must not be stored.
+/// The mobileconfig carries a `DoH` token (a credential), so it must not be stored.
 #[tokio::test]
 async fn mobileconfig_is_not_stored() {
     let (app, token, _cache, _log_events, db, _sessions, _invalid_session_limiter) =
@@ -4346,9 +4192,8 @@ async fn mobileconfig_is_not_stored() {
     );
 }
 
-/// macOS 26.1 (Tahoe) rejects a DNS Settings profile that omits the top-level
-/// `PayloadScope`, reporting "The 'VPN Service' payload could not be
-/// installed". The key is what keeps the profile installable there.
+/// macOS 26.1 (Tahoe) rejects a DNS Settings profile without a top-level
+/// `PayloadScope` ("The 'VPN Service' payload could not be installed").
 #[tokio::test]
 async fn mobileconfig_declares_system_payload_scope() {
     let (app, token, _cache, _log_events, db, _sessions, _invalid_session_limiter) =
@@ -4397,9 +4242,8 @@ async fn mobileconfig_declares_system_payload_scope() {
 
 #[tokio::test]
 async fn check_list_url_unknown_id_returns_404() {
-    // Covers the DB-lookup branch without reaching the network: with no URL in
-    // the body the handler resolves the list's own URL by id, and an id that
-    // matches no row must 404 rather than fall through to another list's URL.
+    // With no URL in the body the handler looks the list up by id; an unknown
+    // id must 404 without touching the network.
     let (app, token) = setup().await;
     let req = Request::builder()
         .method("POST")
@@ -4411,11 +4255,8 @@ async fn check_list_url_unknown_id_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// A browser asking for a page it has no session for is redirected to the
-/// sign-in form, carrying where it was trying to go. The API answers the same
-/// situation with a 401; the two are halves of one guard, and they share the
-/// extractor underneath precisely so they cannot disagree about who is signed
-/// in.
+/// A page request without a session redirects to sign-in carrying `next`; the
+/// API answers 401 from the same extractor.
 #[tokio::test]
 async fn a_page_request_without_a_session_is_redirected_to_sign_in() {
     let (app, _token) = setup().await;
@@ -4435,8 +4276,7 @@ async fn a_page_request_without_a_session_is_redirected_to_sign_in() {
     );
 }
 
-/// The rendered HTML of a page, for the assertions that are about markup the
-/// server decided to emit.
+/// The rendered HTML of a page.
 async fn page_body(app: &axum::Router, uri: &str, token: &str) -> String {
     let req = Request::builder()
         .uri(uri)
@@ -4451,9 +4291,7 @@ async fn page_body(app: &axum::Router, uri: &str, token: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// The onboarding notice is decided by the server: the dismissal, the DNS
-/// address and whether anything has ever been answered are all facts it holds,
-/// so the markup arrives rendered instead of being fetched in three calls.
+/// The onboarding notice is rendered by the server.
 #[tokio::test]
 async fn the_onboarding_notice_is_rendered_on_a_fresh_appliance() {
     let (app, token) = setup().await;
@@ -4462,13 +4300,12 @@ async fn the_onboarding_notice_is_rendered_on_a_fresh_appliance() {
         body.contains(r#"data-testid="next-step-banner""#),
         "a fresh appliance should be told how to point a device at it"
     );
-    // Its one control is a real form, so it works without a client.
+    // Its one control is a real form.
     assert!(body.contains(r#"action="/onboarding/dismiss""#));
     assert!(body.contains(r#"name="next" value="/settings""#));
 }
 
-/// The dashboard makes this point at length in its own empty state. Two
-/// notices on one page read as two different messages.
+/// Not on the dashboard, whose empty state already makes the point.
 #[tokio::test]
 async fn the_onboarding_notice_stays_off_the_dashboard() {
     let (app, token) = setup().await;
@@ -4483,8 +4320,7 @@ async fn the_onboarding_notice_stays_off_the_dashboard() {
     );
 }
 
-/// What used to take a poll every three seconds: once a query has been
-/// answered, the notice is not rendered again.
+/// Once a query has been answered, the notice is not rendered again.
 #[tokio::test]
 async fn the_onboarding_notice_goes_away_once_a_query_has_been_answered() {
     let (app, token, _cache, _events, db, _sessions, _limiter) =
@@ -4536,8 +4372,7 @@ async fn dismissing_the_onboarding_notice_persists_and_returns_to_the_page() {
     );
 }
 
-/// The same `safe_next` every other form on these pages is validated by: a
-/// `next` that points off-origin is a redirect an attacker chose.
+/// `next` goes through `safe_next` like every other form: off-origin is refused.
 #[tokio::test]
 async fn dismissing_the_onboarding_notice_refuses_an_off_origin_return() {
     let (app, token) = setup().await;
@@ -4556,8 +4391,7 @@ async fn dismissing_the_onboarding_notice_refuses_an_off_origin_return() {
     );
 }
 
-/// Before any operator exists every page routes to the wizard, not to a sign-in
-/// form nobody could satisfy.
+/// Before any operator exists every page routes to the wizard, not sign-in.
 #[tokio::test]
 async fn a_page_request_before_setup_is_redirected_to_the_wizard() {
     let app = unconfigured_app().await;
@@ -4572,13 +4406,9 @@ async fn a_page_request_before_setup_is_redirected_to_the_wizard() {
     );
 }
 
-/// An off-origin `next` is dropped rather than honoured.
-///
-/// The sign-in page is exactly what a phishing link points at, and a redirect
-/// it performs *after* authentication wears noadd's own URL as the bait. All
-/// three spellings are covered because a browser honours all three: the
-/// absolute URL, the protocol-relative form, and the backslash variant that
-/// several browsers normalise into it.
+/// An off-origin `next` is dropped: a post-sign-in redirect is prime phishing
+/// bait. All three spellings a browser honours are covered: absolute,
+/// protocol-relative, and the backslash variant browsers normalise into it.
 #[tokio::test]
 async fn sign_in_refuses_to_carry_an_off_origin_destination() {
     let (app, _token) = setup().await;
@@ -4605,8 +4435,7 @@ async fn sign_in_refuses_to_carry_an_off_origin_destination() {
     }
 }
 
-/// A form sign-in mints the session and sends the browser where it was headed,
-/// rather than answering with a body the way the JSON endpoint does.
+/// A form sign-in mints the session and redirects to where it was headed.
 #[tokio::test]
 async fn a_form_sign_in_mints_a_session_and_redirects() {
     let (app, _token) = setup().await;
@@ -4632,9 +4461,7 @@ async fn a_form_sign_in_mints_a_session_and_redirects() {
     );
 }
 
-/// A refused sign-in re-renders the form so the typed username survives, but
-/// still answers 401. A form that returns 200 on a rejected credential is lying
-/// to everything except the eye.
+/// A refused sign-in re-renders the form with the username, at 401 — not 200.
 #[tokio::test]
 async fn a_refused_form_sign_in_answers_401_and_keeps_the_username() {
     let (app, _token) = setup().await;
@@ -4661,11 +4488,8 @@ async fn a_refused_form_sign_in_answers_401_and_keeps_the_username() {
     );
 }
 
-/// A server-rendered page must never reach the browser's disk cache: an
-/// operator's dashboard is not a cacheable representation, and the appliance is
-/// commonly reached from a shared machine. The `no_store` layer gives it that
-/// by keying on responses that declare no policy of their own — this pins that
-/// a page is one of them, where the static assets deliberately are not.
+/// A server-rendered page must never reach the disk cache (shared machines).
+/// `no_store` applies because a page declares no policy of its own.
 #[tokio::test]
 async fn a_server_rendered_page_is_never_stored() {
     let (app, token) = setup().await;
@@ -4679,10 +4503,8 @@ async fn a_server_rendered_page_is_never_stored() {
     assert!(cc.contains("no-store"), "page cache-control was {cc:?}");
 }
 
-/// Every signed-in page path answers with the shell. Asserted as a set rather
-/// than one representative path: they are registered individually, so a route
-/// dropped from the table is exactly the kind of mistake a single-path test
-/// sails past.
+/// Every signed-in page path answers with the shell — all of them, since each
+/// route is registered individually.
 #[tokio::test]
 async fn every_page_path_is_served_to_an_authenticated_browser() {
     let (app, token) = setup().await;
@@ -4729,8 +4551,7 @@ async fn the_sign_in_page_renders_for_an_anonymous_browser() {
     );
 }
 
-/// An already-authenticated browser asking for the sign-in page is sent onward
-/// rather than shown a second form to fill in.
+/// An authenticated browser asking for sign-in is sent onward.
 #[tokio::test]
 async fn the_sign_in_page_sends_an_authenticated_browser_onward() {
     let (app, token) = setup().await;
@@ -4766,8 +4587,7 @@ async fn the_wizard_renders_before_the_first_operator_exists() {
     assert!(html.contains("data-testid=\"setup-submit\""));
 }
 
-/// Once an operator exists the wizard is a dead end, so it redirects to sign-in
-/// instead of offering to create a second first account.
+/// Once an operator exists the wizard redirects to sign-in.
 #[tokio::test]
 async fn the_wizard_sends_an_already_configured_appliance_to_sign_in() {
     let (app, _token) = setup().await;
@@ -4807,13 +4627,8 @@ fn form_post(uri: &str, body: &'static str) -> Request<Body> {
         .unwrap()
 }
 
-/// Completing the wizard creates the operator and signs them in on the spot —
-/// asking them to retype the password they just chose would be pure ceremony.
-///
-/// The welcome strip rides a flash cookie rather than the redirect target. A
-/// `?welcome=1` would survive a refresh, a bookmark and a shared link, greeting
-/// the operator again each time; the flash is read and cleared by the response
-/// that renders it.
+/// Completing the wizard creates the operator and signs them in. The welcome
+/// rides a flash cookie, not `?welcome=1`, which would survive refreshes and links.
 #[tokio::test]
 async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     let app = unconfigured_app().await;
@@ -4845,9 +4660,8 @@ async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     );
 }
 
-/// The confirmation field exists only in the form, so it is checked in the page
-/// handler and nowhere else — `create_first_operator`, which the JSON endpoint
-/// shares, has no business knowing about it.
+/// The confirmation field is the form's own, so the page handler checks it —
+/// not `create_first_operator`, which the JSON endpoint shares.
 #[tokio::test]
 async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
     let app = unconfigured_app().await;
@@ -4870,11 +4684,8 @@ async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
     );
 }
 
-/// The shell is rendered by the server, active navigation item and all.
-///
-/// The active class is asserted on the path being served *and* its absence on
-/// another: a template that marked every item active, or none, would satisfy
-/// half of this and look fine in a screenshot.
+/// The server renders the shell and marks the active nav item — asserted present
+/// on this path and absent on another, so "all" or "none" both fail.
 #[tokio::test]
 async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     let (app, token) = setup().await;
@@ -4895,13 +4706,10 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
         !html.contains(r#"class="nav-item active" href="/logs""#),
         "an item for another path was marked active"
     );
-    // The shell, not a client-side stand-in for it.
     assert!(html.contains(r#"action="/logout""#));
     assert!(html.contains("statusbar"));
-    // The status badge ships hidden. It used to be a hardcoded ONLINE, which
-    // said the server was up on a page the server could no longer answer for —
-    // without a client there is nothing to sense liveness with, so it shows
-    // nothing at all rather than something untrue.
+    // The status badge ships hidden: without a client nothing can sense
+    // liveness, so it must not claim ONLINE.
     assert!(
         html.contains("<server-status"),
         "the status bar is missing its indicator element"
@@ -4918,8 +4726,7 @@ async fn the_shell_marks_the_navigation_item_for_the_path_it_serves() {
     );
 }
 
-/// The render half of the `<datalist>` contract — the API tests prove the save
-/// takes every suggestion, this proves the page actually offers them.
+/// The page offers the `<datalist>` suggestions the API tests prove are accepted.
 #[tokio::test]
 async fn the_settings_page_offers_suggestions_for_its_free_text_fields() {
     use noadd::admin::api::{BLOCK_CUSTOM_IPV4_SUGGESTIONS, BLOCK_CUSTOM_IPV6_SUGGESTIONS};
@@ -4969,7 +4776,7 @@ async fn the_settings_page_offers_suggestions_for_its_free_text_fields() {
     }
 }
 
-/// The account page names who is signed in without the client asking.
+/// The account page renders who is signed in.
 #[tokio::test]
 async fn the_account_page_renders_who_is_signed_in() {
     let (app, token) = setup().await;
@@ -4987,8 +4794,8 @@ async fn the_account_page_renders_who_is_signed_in() {
     assert!(html.contains(r#"action="/account/password""#));
 }
 
-/// The confirmation field is the form's own, so it is checked in the page
-/// handler and never reaches the shared password path.
+/// The form's own confirmation field is checked in the page handler, before the
+/// shared password path.
 #[tokio::test]
 async fn a_mismatched_confirmation_never_reaches_the_password_change() {
     let (app, token) = setup().await;
@@ -5007,9 +4814,8 @@ async fn a_mismatched_confirmation_never_reaches_the_password_change() {
     assert!(String::from_utf8_lossy(&bytes).contains("do not match"));
 }
 
-/// A wrong current password is refused with 401 and says so — distinct from a
-/// rejected *new* password, which would send the operator fixing the wrong
-/// field.
+/// A wrong current password answers 401 and says so, distinct from a rejected
+/// new password.
 #[tokio::test]
 async fn a_wrong_current_password_is_reported_as_such() {
     let (app, token) = setup().await;
@@ -5032,9 +4838,7 @@ async fn a_wrong_current_password_is_reported_as_such() {
     );
 }
 
-/// A successful change redirects and issues a fresh session cookie — the shared
-/// path rotates it, and re-rendering would leave the form holding the password
-/// that was just replaced.
+/// A successful change redirects and issues the rotated session cookie.
 #[tokio::test]
 async fn a_password_change_redirects_and_rotates_the_session() {
     let (app, token) = setup().await;
@@ -5070,8 +4874,7 @@ async fn a_password_change_redirects_and_rotates_the_session() {
     );
 }
 
-/// The settings page renders every scalar setting at its current value, so the
-/// form is usable without a round trip to fill it in.
+/// The settings page renders every scalar setting at its current value.
 #[tokio::test]
 async fn the_settings_page_renders_current_values() {
     let (app, token) = setup().await;
@@ -5105,8 +4908,7 @@ async fn the_settings_page_renders_current_values() {
     );
 }
 
-/// A settings save redirects rather than rendering: a POST left in the
-/// browser's history is one refresh away from being submitted again.
+/// A settings save redirects (PRG), so a refresh cannot resubmit it.
 #[tokio::test]
 async fn a_settings_save_redirects_and_persists() {
     let (app, token) = setup().await;
@@ -5139,11 +4941,9 @@ async fn a_settings_save_redirects_and_persists() {
     assert_eq!(input_value(&html, "s-retention"), Some("14"));
 }
 
-/// A rejected value re-renders the form with everything the operator typed —
-/// including the seven fields that were fine — and writes nothing.
-///
-/// The no-partial-write half is the one worth pinning: validation runs before
-/// any `set_setting`, so a bad IP must not leave the retention change applied.
+/// A rejected value re-renders the form with everything typed and writes
+/// nothing: validation runs before any `set_setting`, so a bad IP must not leave
+/// the retention change applied.
 #[tokio::test]
 async fn a_rejected_setting_keeps_the_whole_form_and_writes_nothing() {
     let (app, token) = setup().await;
@@ -5178,7 +4978,7 @@ async fn a_rejected_setting_keeps_the_whole_form_and_writes_nothing() {
         "the operator's input was discarded"
     );
 
-    // Nothing was written: the retention change rode along with the bad IP.
+    // Nothing was written, including the retention change.
     let page = app
         .oneshot(authed("GET", "/settings", &token, None))
         .await
@@ -5223,9 +5023,7 @@ async fn the_logout_form_revokes_the_session_and_redirects() {
     );
 }
 
-/// A flash is shown once and then gone. It is cleared by the very response that
-/// renders it, so the second request must not repeat it — the failure this
-/// mechanism exists to prevent is a notice that reappears on every page.
+/// A flash is cleared by the response that renders it, so it is shown once.
 #[tokio::test]
 async fn a_flash_notice_is_shown_once_and_cleared() {
     let app = unconfigured_app().await;
@@ -5237,7 +5035,7 @@ async fn a_flash_notice_is_shown_once_and_cleared() {
         ))
         .await
         .unwrap();
-    // Carry every cookie the wizard set — the session and the flash both.
+    // Carry both cookies the wizard set: the session and the flash.
     let cookie_header = created
         .headers()
         .get_all("set-cookie")
@@ -5292,9 +5090,8 @@ async fn a_flash_notice_is_shown_once_and_cleared() {
     );
 }
 
-/// A password the shared validator rejects comes back verbatim in the form. The
-/// operator has to be told *which* rule they missed; a generic failure would
-/// leave them guessing at a length they cannot see.
+/// The shared validator's rejection reason reaches the form verbatim, so the
+/// operator learns which rule they missed.
 #[tokio::test]
 async fn the_wizard_reports_why_a_password_was_rejected() {
     let app = unconfigured_app().await;
@@ -5316,8 +5113,7 @@ async fn the_wizard_reports_why_a_password_was_rejected() {
     );
 }
 
-/// A form post to a path built at runtime, which `authed_form`'s `&'static str`
-/// body cannot express.
+/// [`authed_form`] with an owned body.
 fn authed_form_owned(uri: &str, token: &str, body: String) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -5345,12 +5141,10 @@ async fn filters_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
-/// The id of the first list on the page, read out of the markup the page itself
-/// rendered — the same value a browser would post back.
+/// The id of the first list on the page, read from the rendered markup.
 fn first_list_id(html: &str) -> i64 {
-    // Off the row's own toggle rather than a form action: `/filters/lists/update`
-    // and `/filters/lists/enable-recommended` are also list actions, and both
-    // appear above the table.
+    // Off the row's toggle: `/filters/lists/update` and
+    // `/filters/lists/enable-recommended` are list actions above the table.
     let marker = r#"data-testid="filter-list-toggle" data-id=""#;
     let start = html.find(marker).expect("no list row on the page") + marker.len();
     let rest = &html[start..];
@@ -5358,7 +5152,7 @@ fn first_list_id(html: &str) -> i64 {
     rest[..end].parse().expect("list id was not a number")
 }
 
-/// The id of the row for `name`, read out of the markup the page rendered.
+/// The id of the row for `name`, read from the rendered markup.
 fn list_id_by_name(html: &str, name: &str) -> i64 {
     let start = html
         .find(&format!(r#"data-name="{name}""#))
@@ -5387,8 +5181,7 @@ async fn add_list(app: &axum::Router, token: &str, name: &str, url: &str) -> i64
     first_list_id(&filters_html(app, token, "").await)
 }
 
-/// The page arrives with the lists and rules already in it — the whole point of
-/// rendering it on the server is that nothing has to be fetched to see them.
+/// The page arrives with the lists and rules already in it.
 #[tokio::test]
 async fn the_filters_page_renders_lists_and_rules() {
     let (app, token) = setup().await;
@@ -5411,13 +5204,11 @@ async fn the_filters_page_renders_lists_and_rules() {
         html.contains("rendered.example.com") && html.contains(r#"data-type="block""#),
         "the rule was not rendered"
     );
-    // The client mounts a page component only into an empty `#page-content`;
-    // shipping the element is what makes it upgrade in place instead.
+    // The page's custom element ships in the markup and upgrades in place.
     assert!(html.contains("<filters-page>"), "the body was not wrapped");
 }
 
-/// The domain test is a GET, so its verdict is in the URL: refreshable, and
-/// answerable without JavaScript.
+/// The domain test is a GET, so its verdict is refreshable and needs no script.
 #[tokio::test]
 async fn a_domain_test_is_answered_in_the_page() {
     let (app, token) = setup().await;
@@ -5455,8 +5246,7 @@ async fn a_page_with_no_test_renders_no_verdict() {
     );
 }
 
-/// Adding a list redirects rather than rendering, so a refresh cannot add it
-/// twice.
+/// Adding a list redirects, so a refresh cannot add it twice.
 #[tokio::test]
 async fn adding_a_list_through_the_form_redirects_and_persists() {
     let (app, token) = setup().await;
@@ -5479,8 +5269,7 @@ async fn adding_a_list_through_the_form_redirects_and_persists() {
     assert!(html.contains(r#"data-name="Added By Form""#));
 }
 
-/// A rejected list re-renders with what was typed and writes nothing. Retyping
-/// the field that was fine is the failure this avoids.
+/// A rejected list re-renders with what was typed and writes nothing.
 #[tokio::test]
 async fn a_rejected_list_keeps_what_was_typed() {
     let (app, token) = setup().await;
@@ -5511,8 +5300,7 @@ async fn a_rejected_list_keeps_what_was_typed() {
     );
 }
 
-/// The JSON endpoint shares that validation, so the two cannot drift into
-/// disagreeing about what a usable list is.
+/// The JSON endpoint shares that validation.
 #[tokio::test]
 async fn the_json_endpoint_refuses_the_same_list_the_form_does() {
     let (app, token) = setup().await;
@@ -5528,8 +5316,8 @@ async fn the_json_endpoint_refuses_the_same_list_the_form_does() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
-/// A checkbox posts nothing when it is unticked, which is the only signal that
-/// a list is being turned off — so both directions are pinned here.
+/// An unticked checkbox posts nothing, which is the only "off" signal — so both
+/// directions are pinned.
 #[tokio::test]
 async fn toggling_a_list_through_the_form_persists_both_ways() {
     let (app, token) = setup().await;
@@ -5547,7 +5335,7 @@ async fn toggling_a_list_through_the_form_persists_both_ways() {
     assert_eq!(off.status(), StatusCode::SEE_OTHER);
     let html = filters_html(&app, &token, "").await;
     assert!(!html.contains("checked"), "the list stayed enabled");
-    // Nothing is enabled now, which the page has to say out loud.
+    // Nothing is enabled now, so the warning shows.
     assert!(
         !html.contains(r#"data-testid="filters-all-disabled-warning" style="display:none""#),
         "the all-disabled warning stayed hidden"
@@ -5569,10 +5357,8 @@ async fn toggling_a_list_through_the_form_persists_both_ways() {
     );
 }
 
-/// The Impact column answers one question: what stops being blocked if this
-/// list goes away. Two lists holding the same rule each answer "nothing",
-/// because removing either one on its own changes nothing — which is exactly
-/// why the page tells the operator to turn them off one at a time.
+/// Impact is what stops being blocked if this list alone goes away, so two lists
+/// holding the same rule each report "nothing".
 #[tokio::test]
 async fn the_filters_page_says_what_each_list_uniquely_provides() {
     let (app, token, _cache, _events, db, _sessions, _limiter) =
@@ -5587,14 +5373,11 @@ async fn the_filters_page_says_what_each_list_uniquely_provides() {
         )
         .await;
     }
-    // `add_list` hands back the id of the *first* row, which is the same list
-    // every time once there is more than one — so each id is read off its own
-    // row here instead.
+    // `add_list` returns the *first* row's id, so read each off its own row.
     let page = filters_html(&app, &token, "").await;
     let id_of = |name: &str| list_id_by_name(&page, name);
     let (shared, overlapping, alone) = (id_of("Shared"), id_of("Overlapping"), id_of("Alone"));
-    // The download could not have succeeded against 127.0.0.1:1, so the content
-    // is seeded directly — this test is about the comparison, not the fetch.
+    // Downloads fail against 127.0.0.1:1, so the content is seeded directly.
     db.set_filter_list_content(shared, "||ads.example^\n")
         .await
         .unwrap();
@@ -5605,10 +5388,8 @@ async fn the_filters_page_says_what_each_list_uniquely_provides() {
         .await
         .unwrap();
 
-    // Any list change rebuilds the engine, and the engine is where the counts
-    // come from. Posting the state a list is already in is the smallest thing
-    // that triggers one — turning it off and on again would leave a window
-    // where the engine is a rebuild that excluded it.
+    // The counts come from the engine. Re-posting a list's current state is the
+    // smallest change that triggers a rebuild, without a window that excludes it.
     let before = noadd::now_unix();
     let res = app
         .clone()
@@ -5647,8 +5428,7 @@ async fn the_filters_page_says_what_each_list_uniquely_provides() {
     );
 }
 
-/// The same numbers reach `/api/lists`, because `app.js` redraws these rows
-/// from it and a redrawn row has to be the row the server would have sent.
+/// The same numbers reach `/api/lists`, which `app.js` redraws these rows from.
 #[tokio::test]
 async fn the_lists_api_carries_what_each_list_uniquely_provides() {
     let (app, token, _cache, _events, db, _sessions, _limiter) =
@@ -5686,17 +5466,15 @@ async fn the_lists_api_carries_what_each_list_uniquely_provides() {
     assert_eq!(list["unique_rules"], 1);
 }
 
-/// A list the engine never loaded has nothing to compare, and saying so beats
-/// printing a zero that would read as "safe to remove". A failed download looks
-/// identical to a healthy list in every other column on the row.
+/// A list the engine never loaded says "No rules", not a zero that reads as
+/// "safe to remove" — elsewhere on the row it looks healthy.
 #[tokio::test]
 async fn a_list_that_never_downloaded_reports_no_rules_rather_than_no_impact() {
     let (app, token) = setup().await;
     add_list(&app, &token, "Never fetched", "https://example.com/a.txt").await;
 
     let html = filters_html(&app, &token, "").await;
-    // Scoped to the row: the sentence above the table explains what "No impact"
-    // means, so the phrase is on the page whether or not any list carries it.
+    // Scoped to the row: the text above the table also says "No impact".
     let row = {
         let start = html
             .find(r#"data-name="Never fetched""#)
@@ -5711,8 +5489,7 @@ async fn a_list_that_never_downloaded_reports_no_rules_rather_than_no_impact() {
     );
 }
 
-/// Turning everything off and asking for the recommendation back is the escape
-/// hatch from a noadd that looks healthy and blocks nothing.
+/// The escape hatch from an appliance with every list turned off.
 #[tokio::test]
 async fn enable_recommended_turns_a_list_back_on() {
     let (app, token) = setup().await;
@@ -5738,8 +5515,7 @@ async fn enable_recommended_turns_a_list_back_on() {
     );
 }
 
-/// `?edit=` expands a row into a form filled from storage — not from the URL,
-/// which is what stops a link pre-filling the form with values it carried.
+/// `?edit=` expands a row into a form filled from storage, never from the URL.
 #[tokio::test]
 async fn expanding_a_list_for_editing_fills_the_form_from_storage() {
     let (app, token) = setup().await;
@@ -5761,8 +5537,7 @@ async fn expanding_a_list_for_editing_fills_the_form_from_storage() {
     assert_eq!(html.matches("filter-list-edit-row").count(), 0);
 }
 
-/// A rejected edit keeps the row expanded with the submitted values, which is
-/// the only way the operator gets to correct the field that was wrong.
+/// A rejected edit keeps the row expanded with the submitted values.
 #[tokio::test]
 async fn editing_a_list_persists_and_a_rejection_keeps_the_row_open() {
     let (app, token) = setup().await;
@@ -5802,8 +5577,7 @@ async fn editing_a_list_persists_and_a_rejection_keeps_the_row_open() {
     );
 }
 
-/// Deleting a list is a POST — a GET would be followed by any link prefetcher
-/// that happened across it.
+/// Deleting a list is a POST — a link prefetcher would follow a GET.
 #[tokio::test]
 async fn deleting_a_list_through_the_form_persists() {
     let (app, token) = setup().await;
@@ -5885,15 +5659,14 @@ async fn an_unparseable_rule_re_renders_with_what_was_typed() {
         html.contains("Not a rule noadd understands"),
         "the reason did not reach the form"
     );
-    // The navigation still knows which page this is, even though the POST
-    // arrived on `/filters/rules`.
+    // The navigation still marks Filters, though the POST hit `/filters/rules`.
     assert!(
         html.contains(r#"class="nav-item active" href="/filters""#),
         "the rejected post rendered with no active nav item"
     );
 }
 
-/// Every filters form is behind the session, like the page itself.
+/// Every filters form is behind the session.
 #[tokio::test]
 async fn the_filters_forms_refuse_an_anonymous_browser() {
     let (app, _token) = setup().await;
@@ -5945,13 +5718,8 @@ async fn logs_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
-/// Just the log table's rows.
-///
-/// Which queries survived a filter is a question about the rows, and asking it
-/// of the whole document asks something else: the search box's `<datalist>`
-/// offers every domain seen in the past week whatever the filter says, so
-/// `!html.contains(domain)` on the full page would fail for a row that is
-/// correctly absent.
+/// Just the log table's rows. The search box's `<datalist>` lists the past
+/// week's domains whatever the filter, so the whole page is the wrong haystack.
 fn log_rows(html: &str) -> &str {
     let start = html
         .find(r#"<tbody id="log-body">"#)
@@ -5963,8 +5731,7 @@ fn log_rows(html: &str) -> &str {
     &html[start..end]
 }
 
-/// Rows and the pager arrive rendered, and the filters come back showing what
-/// is applied — the whole page's state is in the URL.
+/// Rows and pager arrive rendered, and the filters show what the URL applied.
 #[tokio::test]
 async fn the_logs_page_renders_rows_and_keeps_its_filters() {
     let (app, token, db) = setup_with_db().await;
@@ -6002,9 +5769,8 @@ async fn the_logs_page_renders_rows_and_keeps_its_filters() {
     );
 }
 
-/// Both boxes an operator types a domain into offer what the resolver has
-/// actually seen, most-queried first. The two pages share one source, so this
-/// covers both.
+/// Both domain boxes (filters tester, logs search) suggest recently queried
+/// domains, most-queried first.
 #[tokio::test]
 async fn the_domain_boxes_suggest_recently_queried_domains() {
     let (app, token, db) = setup_with_db().await;
@@ -6042,8 +5808,7 @@ async fn the_domain_boxes_suggest_recently_queried_domains() {
     }
 }
 
-/// A fresh install has seen nothing, so neither box gets a `<datalist>` — an
-/// empty one would open a dropdown with nothing in it.
+/// A fresh install gets no `<datalist>` rather than an empty dropdown.
 #[tokio::test]
 async fn the_domain_boxes_offer_no_list_before_anything_is_queried() {
     let (app, token) = setup().await;
@@ -6068,8 +5833,7 @@ async fn the_domain_boxes_offer_no_list_before_anything_is_queried() {
     }
 }
 
-/// Paging carries every filter. Dropping them would look like the filter
-/// stopped working rather than like the page changed.
+/// Paging carries every filter; dropping them would look like a broken filter.
 #[tokio::test]
 async fn paging_keeps_the_filters_in_the_link() {
     let (app, token, db) = setup_with_db().await;
@@ -6122,8 +5886,7 @@ async fn an_empty_log_is_told_apart_from_an_empty_filter() {
     );
 }
 
-/// A row's one-click action goes through the same rule path the filters page
-/// uses, and returns to the view it was invoked from.
+/// A row action uses the filters page's rule path and returns to its view.
 #[tokio::test]
 async fn a_row_action_adds_the_rule_and_returns_to_the_same_view() {
     let (app, token, db) = setup_with_db().await;
@@ -6153,8 +5916,7 @@ async fn a_row_action_adds_the_rule_and_returns_to_the_same_view() {
     assert!(body_text(filters).await.contains("tracker.example.com"));
 }
 
-/// `next` is attacker-controlled, so it gets the same treatment as `?next=` on
-/// the sign-in page: same-origin paths only.
+/// `next` is attacker-controlled: same-origin paths only, as on sign-in.
 #[tokio::test]
 async fn a_row_action_refuses_an_off_origin_return() {
     let (app, token) = setup().await;
@@ -6174,9 +5936,8 @@ async fn a_row_action_refuses_an_off_origin_return() {
     );
 }
 
-/// Clearing answers on an unfiltered first page, whatever view it came from:
-/// every filter now matches nothing, and "No logs found" would read as the
-/// filter breaking rather than the log being empty.
+/// Clearing lands on an unfiltered first page: a filtered "No logs found" would
+/// read as a broken filter.
 #[tokio::test]
 async fn clearing_the_log_lands_on_an_unfiltered_first_page() {
     let (app, token, db) = setup_with_db().await;
@@ -6198,8 +5959,7 @@ async fn clearing_the_log_lands_on_an_unfiltered_first_page() {
     assert!(html.contains(r#"data-testid="logs-empty-state""#));
 }
 
-/// A hand-edited page number lands on page one rather than 400-ing a page that
-/// would otherwise render.
+/// A nonsense page number renders page one rather than 400.
 #[tokio::test]
 async fn a_nonsense_page_number_renders_page_one() {
     let (app, token, db) = setup_with_db().await;
@@ -6214,7 +5974,7 @@ async fn a_nonsense_page_number_renders_page_one() {
     }
 }
 
-/// Both logs forms are behind the session, like the page itself.
+/// Both logs forms are behind the session.
 #[tokio::test]
 async fn the_logs_forms_refuse_an_anonymous_browser() {
     let (app, _token) = setup().await;
@@ -6247,17 +6007,15 @@ async fn the_logs_forms_refuse_an_anonymous_browser() {
     }
 }
 
-/// A router plus the database behind it, so a test can seed the query log the
-/// dashboard reads.
+/// A router plus its database, for seeding the query log.
 async fn setup_with_db() -> (axum::Router, String, Database) {
     let (router, token, _cache, _events, db, _sessions, _limiter) =
         build_app_opts("http://127.0.0.1:1/filters.json", true, false).await;
     (router, token, db)
 }
 
-/// Seed `count` queries for one domain, timestamped now. `query_logs.timestamp`
-/// is milliseconds, which is exactly the sort of thing a test gets wrong once
-/// and then never again.
+/// Seed `count` queries for one domain, timestamped now (`query_logs.timestamp`
+/// is milliseconds).
 async fn seed_queries(db: &Database, domain: &str, client: &str, count: usize, blocked: bool) {
     let now_ms = noadd::now_unix_ms();
     let entries: Vec<QueryLogEntry> = (0..count)
@@ -6278,9 +6036,7 @@ async fn seed_queries(db: &Database, domain: &str, client: &str, count: usize, b
     db.insert_query_logs(&entries).await.unwrap();
 }
 
-/// The numbers are in the first response. That is the whole point of rendering
-/// this page on the server: it used to arrive empty and fill in over five API
-/// calls.
+/// The dashboard's numbers are in the first response.
 #[tokio::test]
 async fn the_dashboard_renders_its_numbers_and_tables() {
     let (app, token, db) = setup_with_db().await;
@@ -6291,8 +6047,8 @@ async fn the_dashboard_renders_its_numbers_and_tables() {
     assert_eq!(res.status(), StatusCode::OK);
     let html = body_text(res).await;
 
-    // Four queries, three of them blocked: 75.0%. Matched with the surrounding
-    // markup so a stray "4" elsewhere on the page cannot pass for the count.
+    // Four queries, three blocked: 75.0%. Matched with surrounding markup so a
+    // stray "4" cannot pass.
     assert!(
         html.contains(r#"title="4">4</div>"#),
         "the query count was not rendered"
@@ -6323,8 +6079,7 @@ async fn the_dashboard_renders_its_numbers_and_tables() {
     );
 }
 
-/// With no traffic at all the page explains what to do about it, and hides the
-/// chart it would otherwise draw an empty axis for.
+/// With no traffic the page shows its empty-state guide and hides the chart.
 #[tokio::test]
 async fn an_appliance_with_no_queries_is_told_how_to_start() {
     let (app, token) = setup().await;
@@ -6339,22 +6094,19 @@ async fn an_appliance_with_no_queries_is_told_how_to_start() {
         !html.contains(r#"data-testid="dashboard-empty-state" style="display:none""#),
         "the onboarding notice was rendered hidden"
     );
-    // The chart card carries one `style`, animation delay and all — a second
-    // attribute would be dropped by the parser and the card would stay visible.
+    // One merged `style`: a second attribute would be dropped, leaving it visible.
     assert!(
         html.contains(r#"id="chart-card" style="animation-delay:0.1s;display:none""#),
         "the chart card was not hidden"
     );
-    // Zeroes, not blanks: an appliance that has answered nothing has answered
-    // nothing, and the cards say so.
+    // Zeroes, not blanks.
     assert!(
         html.contains(">0.0%<"),
         "the rates were not rendered as zero"
     );
 }
 
-/// The controls that only work with a client ship hidden rather than sitting
-/// there doing nothing.
+/// Client-only controls ship hidden.
 #[tokio::test]
 async fn the_live_toggle_and_chart_are_marked_client_only() {
     let (app, token) = setup().await;
@@ -6371,9 +6123,8 @@ async fn the_live_toggle_and_chart_are_marked_client_only() {
     );
 }
 
-/// A registry with one entry per case the page has to render: a plain one, a
-/// deprecated one, one in a second group, and one whose homepage is a
-/// `javascript:` URL that must never become a link.
+/// A registry covering each case the page renders: plain, deprecated, a second
+/// group, and a `javascript:` homepage that must never become a link.
 fn registry_json(download_base: &str) -> String {
     let entry = |id: i64, group: i64, name: &str, desc: &str, homepage: &str, deprecated: bool| {
         format!(
@@ -6454,8 +6205,7 @@ async fn registry_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
-/// The whole registry arrives rendered, with the filters in the URL — the modal
-/// this replaced had none of it without JavaScript.
+/// The whole registry arrives rendered.
 #[tokio::test]
 async fn the_registry_page_renders_its_entries() {
     let base = common::spawn_fake_upstream(
@@ -6487,8 +6237,8 @@ async fn the_registry_page_renders_its_entries() {
     assert!(html.contains(r#"name="filter_id" value="1""#));
 }
 
-/// Escaping keeps a value in its attribute; it does not make it safe to
-/// navigate to. A `javascript:` homepage renders no link at all.
+/// Escaping does not make a value safe to navigate to: a `javascript:` homepage
+/// renders no link at all.
 #[tokio::test]
 async fn a_hostile_homepage_never_becomes_a_link() {
     let base = common::spawn_fake_upstream(
@@ -6509,8 +6259,7 @@ async fn a_hostile_homepage_never_becomes_a_link() {
     assert!(html.contains(r#"href="https://alpha.example""#));
 }
 
-/// Search, group and the deprecated toggle all live in the URL and come back
-/// showing what is applied.
+/// Search, group and the deprecated toggle live in the URL and show what is applied.
 #[tokio::test]
 async fn the_registry_filters_live_in_the_url() {
     let base = common::spawn_fake_upstream(
@@ -6543,7 +6292,7 @@ async fn the_registry_filters_live_in_the_url() {
     );
     assert!(html.contains(r#"name="deprecated" value="1" checked"#));
 
-    // A filter that matches nothing says so rather than rendering an empty card.
+    // A filter matching nothing says so.
     let html = registry_html(&app, &token, "?q=nothingatall").await;
     assert!(html.contains("Showing 0 of 4"));
     assert!(
@@ -6552,8 +6301,7 @@ async fn the_registry_filters_live_in_the_url() {
     );
 }
 
-/// The form carries the current view, so adding from a filtered page comes back
-/// to that page rather than to all of it.
+/// The form carries the current view, so adding from a filtered page returns to it.
 #[tokio::test]
 async fn the_add_form_carries_the_current_view() {
     let base = common::spawn_fake_upstream(
@@ -6565,16 +6313,14 @@ async fn the_add_form_carries_the_current_view() {
     let (app, token) = setup_with_registry_url(format!("{base}/filters.json")).await;
 
     let html = registry_html(&app, &token, "?q=beta&group=2&deprecated=1").await;
-    // The separators are escaped, which is what an attribute value wants — a
-    // browser reads them back as `&`.
+    // Separators are escaped in the attribute; a browser reads them as `&`.
     assert!(
         html.contains(r#"action="/filters/registry/add?q=beta&#38;group=2&#38;deprecated=1""#),
         "the form did not carry the view it was submitted from"
     );
 }
 
-/// The third party is unreachable. That is a state the page renders — with a
-/// retry that is an ordinary link — not an error it fails on.
+/// An unreachable registry is a state the page renders, with a retry link.
 #[tokio::test]
 async fn an_unreachable_registry_renders_a_retry() {
     // The default setup points at a port nothing listens on.
@@ -6591,8 +6337,7 @@ async fn an_unreachable_registry_renders_a_retry() {
     );
 }
 
-/// Ticking nothing and pressing Add says so where the boxes are, rather than
-/// redirecting to a page that would look like it had done something.
+/// Adding with nothing ticked is answered on the page, not with a redirect.
 #[tokio::test]
 async fn adding_nothing_is_answered_on_the_page() {
     let base = common::spawn_fake_upstream(
@@ -6613,8 +6358,7 @@ async fn adding_nothing_is_answered_on_the_page() {
     assert!(html.contains(r#"data-testid="registry-failures""#));
 }
 
-/// A successful add redirects, so a refresh cannot add the same lists twice,
-/// and the lists are really there.
+/// A successful add redirects (no double add on refresh) and persists the lists.
 #[tokio::test]
 async fn adding_a_selection_redirects_to_the_filters_page() {
     let lists = common::spawn_fake_upstream(
@@ -6650,13 +6394,13 @@ async fn adding_a_selection_redirects_to_the_filters_page() {
         stored.iter().map(|l| &l.name).collect::<Vec<_>>()
     );
 
-    // And the page now says so rather than offering to add it again.
+    // And the page no longer offers to add it.
     let html = registry_html(&app, &token, "").await;
     assert!(html.contains(r#"<span class="added-pill">Added</span>"#));
 }
 
-/// A list that cannot be downloaded comes back named, on the page, with the
-/// reason — the one thing a redirect would discard.
+/// A failed download is reported on the page with its reason, which a redirect
+/// would discard.
 #[tokio::test]
 async fn a_failed_download_is_reported_on_the_page() {
     // The registry points its downloads at a port nothing listens on.
@@ -6690,9 +6434,8 @@ async fn stats_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
-/// Five of the page's seven readings arrive in the first response: the
-/// highlights, both breakdowns, both ranged lists and the health grid. Only the
-/// three calendar-aligned charts are left to the client.
+/// The highlights, both breakdowns, both ranged lists and the health grid arrive
+/// rendered; the charts' series rides along for the client to fold.
 #[tokio::test]
 async fn the_stats_page_renders_its_readings() {
     let (app, token, db) = setup_with_db().await;
@@ -6702,8 +6445,7 @@ async fn the_stats_page_renders_its_readings() {
     let html = stats_html(&app, &token, "").await;
 
     assert!(html.contains("<stats-page "), "the body was not wrapped");
-    // The charts' series rides the page, so the browser makes no request for
-    // it: every query counted once for the timeline and once for the heatmap.
+    // Every query counted once for the timeline and once for the heatmap.
     let series: serde_json::Value = {
         let start = html.find(r#"data-series=""#).expect("no data-series") + 13;
         let end = start + html[start..].find('"').unwrap();
@@ -6749,9 +6491,9 @@ async fn the_stats_page_renders_its_readings() {
         html.contains(r#"<div class="bar-row-pct">75.0%</div>"#),
         "a row's share was not rendered"
     );
-    // The bar is sized against the largest row, so the largest one is full width.
+    // Bars are sized against the largest row.
     assert!(html.contains("width:100.0%"), "the bars were not sized");
-    // And the health grid, which needs no traffic to have something to say.
+    // And the health grid.
     assert!(
         html.contains(r#"data-testid="db-health-card""#)
             && html.contains(r#"<div class="stat-label">Database Size</div>"#),
@@ -6759,8 +6501,8 @@ async fn the_stats_page_renders_its_readings() {
     );
 }
 
-/// The range is the server's window, so it is in the URL: the switcher is three
-/// links, the titles say which one is showing, and the active one is marked.
+/// The range is in the URL: three links, the active one marked, the titles
+/// naming it.
 #[tokio::test]
 async fn the_range_switcher_selects_the_window() {
     let (app, token) = setup().await;
@@ -6793,9 +6535,7 @@ async fn the_range_switcher_selects_the_window() {
     );
 }
 
-/// A range someone typed themselves renders the default window rather than
-/// refusing the page. This one is a link, and every window it supports is
-/// spelled out in the switcher directly above it.
+/// An unrecognised range renders the default window rather than an error.
 #[tokio::test]
 async fn a_nonsense_range_renders_the_default_window() {
     let (app, token) = setup().await;
@@ -6806,9 +6546,7 @@ async fn a_nonsense_range_renders_the_default_window() {
     );
 }
 
-/// The three charts are the documented exception to this page working without
-/// scripting, and they say so rather than sitting empty. They are also exactly
-/// the three readings that take a `tz_offset`.
+/// The three charts need scripting, and say so rather than sitting empty.
 #[tokio::test]
 async fn the_charts_say_they_are_drawn_in_the_browser() {
     let (app, token) = setup().await;
@@ -6826,8 +6564,7 @@ async fn the_charts_say_they_are_drawn_in_the_browser() {
     }
 }
 
-/// An appliance that has answered nothing still renders every card, saying so,
-/// rather than failing to load.
+/// With no traffic every card still renders, saying so.
 #[tokio::test]
 async fn a_stats_page_with_no_traffic_renders_empty_lists() {
     let (app, token) = setup().await;
@@ -6839,8 +6576,7 @@ async fn a_stats_page_with_no_traffic_renders_empty_lists() {
             == 4,
         "the four bar lists did not all report an empty window"
     );
-    // No samples means no percentiles, and a zero would read as an impossibly
-    // fast one.
+    // No samples, no percentile: a zero would read as impossibly fast.
     assert!(
         html.contains(
             r#"<div class="stat-label">Latency p50</div><div class="stat-value text-green">—</div>"#
@@ -6849,8 +6585,7 @@ async fn a_stats_page_with_no_traffic_renders_empty_lists() {
     );
 }
 
-/// The admin password `build_app` provisions. Every form below that needs a
-/// password proof presents this one.
+/// The admin password `build_app` provisions, for the forms needing a proof.
 const ACCOUNT_PASSWORD: &str = "admin";
 
 async fn account_html(app: &axum::Router, token: &str, query: &str) -> String {
@@ -6863,12 +6598,12 @@ async fn account_html(app: &axum::Router, token: &str, query: &str) -> String {
     body_text(res).await
 }
 
-/// The id of the operator with this username, read out of the page's markup.
+/// The id of the operator with this username, read from the page's markup.
 fn operator_id(html: &str, username: &str) -> i64 {
     let row = format!(r#"data-testid="operator-row" data-name="{username}""#);
     let start = html.find(&row).expect("no such operator row");
-    // The row's delete control is the link that expands it, not a form action —
-    // the form only exists once the row is expanded.
+    // The delete control is the link that expands the row; the form exists only
+    // once expanded.
     let marker = "?confirm_delete=";
     let rest = &html[start..];
     let at = rest.find(marker).expect("no delete link on the row") + marker.len();
@@ -6878,7 +6613,7 @@ fn operator_id(html: &str, username: &str) -> i64 {
         .expect("operator id was not a number")
 }
 
-/// The tables are the page now: nothing is fetched to fill them in.
+/// The account page's tables arrive rendered.
 #[tokio::test]
 async fn the_account_page_renders_its_three_tables() {
     let (app, token) = setup().await;
@@ -6902,8 +6637,8 @@ async fn the_account_page_renders_its_three_tables() {
     assert!(html.contains("<account-page>"), "the body was not wrapped");
 }
 
-/// The last operator standing cannot be deleted, and neither can you delete
-/// yourself — so no row offers a link that only exists to be refused.
+/// Neither the last operator nor yourself can be deleted, so no row offers a
+/// link that would only be refused.
 #[tokio::test]
 async fn the_only_operator_has_no_delete_link() {
     let (app, token) = setup().await;
@@ -6945,8 +6680,7 @@ async fn adding_an_operator_needs_the_password_and_redirects() {
     );
 }
 
-/// A wrong proof creates nothing and keeps the username, so only the password
-/// has to be retyped.
+/// A wrong proof creates nothing and keeps the username.
 #[tokio::test]
 async fn a_wrong_proof_refuses_to_add_an_operator() {
     let (app, token) = setup().await;
@@ -6970,13 +6704,12 @@ async fn a_wrong_proof_refuses_to_add_an_operator() {
         html.contains(r#"value="nope""#),
         "the typed username was discarded"
     );
-    // No password is echoed back into the markup, ever.
+    // No password is ever echoed back.
     assert!(
         !html.contains("another-long-passphrase") && !html.contains(">wrong<"),
         "a password was rendered into the page"
     );
-    // The navigation still knows this is the account page, though the POST
-    // arrived on /account/operators.
+    // The navigation still marks Account, though the POST hit /account/operators.
     assert!(html.contains(r#"class="nav-item active" href="/account""#));
 
     let html = account_html(&app, &token, "").await;
@@ -6986,8 +6719,7 @@ async fn a_wrong_proof_refuses_to_add_an_operator() {
     );
 }
 
-/// The mismatch is caught before the password is even checked, so a typo in the
-/// new password does not spend an attempt from the shared budget.
+/// A mismatch is caught before the password check, spending no attempt.
 #[tokio::test]
 async fn a_mismatched_new_password_is_refused_without_spending_an_attempt() {
     let (app, token) = setup().await;
@@ -7004,8 +6736,8 @@ async fn a_mismatched_new_password_is_refused_without_spending_an_attempt() {
     assert!(body_text(res).await.contains("Passwords do not match"));
 }
 
-/// `?confirm_delete=` expands the row into a named confirmation with its own
-/// password field — the whole of the delete prompt, on the server.
+/// `?confirm_delete=` expands the row into a named confirmation with a password
+/// field.
 #[tokio::test]
 async fn deleting_an_operator_confirms_by_name_then_goes_through() {
     let (app, token) = setup().await;
@@ -7026,8 +6758,7 @@ async fn deleting_an_operator_confirms_by_name_then_goes_through() {
         "the confirmation did not name the operator"
     );
 
-    // An id naming nobody expands nothing rather than confirming a delete of
-    // someone who is not there.
+    // An id naming nobody expands nothing.
     let none = account_html(&app, &token, "?confirm_delete=999999").await;
     assert!(!none.contains(r#"data-testid="operator-confirm-row""#));
 
@@ -7049,8 +6780,7 @@ async fn deleting_an_operator_confirms_by_name_then_goes_through() {
     );
 }
 
-/// A wrong proof leaves the operator in place, with the row still expanded so
-/// the password can simply be retyped.
+/// A wrong proof leaves the operator in place and the row expanded.
 #[tokio::test]
 async fn a_wrong_proof_refuses_to_delete_an_operator() {
     let (app, token) = setup().await;
@@ -7087,8 +6817,8 @@ async fn a_wrong_proof_refuses_to_delete_an_operator() {
     );
 }
 
-/// The API key form is the one success that renders rather than redirecting:
-/// the token exists in that response and nowhere else.
+/// Minting an API key renders rather than redirecting: the token exists in that
+/// response only.
 #[tokio::test]
 async fn creating_an_api_key_shows_the_token_once() {
     let (app, token) = setup().await;
@@ -7112,8 +6842,7 @@ async fn creating_an_api_key_shows_the_token_once() {
         "the key is not in the table"
     );
 
-    // And it is gone from the next render — the secret is not stored, so the
-    // page cannot show it again even if it wanted to.
+    // Gone from the next render: the secret is not stored.
     let later = account_html(&app, &token, "").await;
     assert!(later.contains(r#"data-name="ci""#));
     assert!(
@@ -7198,9 +6927,7 @@ async fn an_api_key_can_be_revoked_from_the_page() {
     );
 }
 
-/// Revoking someone else's session leaves you signed in; revoking your own
-/// signs you out, which is a redirect to the sign-in page rather than a notice
-/// on a page you can no longer see.
+/// Revoking your own session signs you out, redirecting to sign-in.
 #[tokio::test]
 async fn revoking_your_own_session_signs_you_out() {
     let (app, token) = setup().await;
@@ -7233,8 +6960,7 @@ async fn revoking_your_own_session_signs_you_out() {
     assert_eq!(after.status(), StatusCode::SEE_OTHER);
 }
 
-/// Signing the other devices out keeps this one signed in — the point of the
-/// button being separate from "log out".
+/// Signing the other devices out keeps this one signed in.
 #[tokio::test]
 async fn revoking_other_sessions_keeps_this_one() {
     let (app, token) = setup().await;
@@ -7260,7 +6986,7 @@ async fn revoking_other_sessions_keeps_this_one() {
     );
 }
 
-/// Every account form is behind the session, like the page itself.
+/// Every account form is behind the session.
 #[tokio::test]
 async fn the_account_forms_refuse_an_anonymous_browser() {
     let (app, _token) = setup().await;

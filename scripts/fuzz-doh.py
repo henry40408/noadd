@@ -173,8 +173,7 @@ def main():
     for i in range(1, args.count + 1):
         is_blocked = random.random() < args.blocked_ratio
         domain = random.choice(BLOCKED_DOMAINS if is_blocked else DOMAINS)
-        # For blocked probes only A makes sense (the block answer synthesises
-        # 0.0.0.0 for A and :: for AAAA; other types return empty).
+        # Blocked probes use A only (AAAA gets ::, other types an empty answer).
         qtype = "A" if is_blocked else random.choice(QUERY_TYPES)
 
         label = f"[{i:3d}/{args.count}] {qtype:5s} {domain:40s}"
@@ -211,8 +210,7 @@ def main():
         r2 = run_doggo(url, domain, qtype)
         if "_error" in r2:
             print(f"PART  first ok; repeat: {r2['_error']}")
-            # Count as pass — first query was fine; repeat failures are
-            # distinct from "query broken" so don't treat as a hard fail.
+            # Pass: the first query was fine; a failed repeat is not a broken query.
             passes += 1
             if args.pause:
                 time.sleep(args.pause)

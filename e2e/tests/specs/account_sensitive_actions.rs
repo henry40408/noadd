@@ -1,24 +1,16 @@
-//! The three account actions that need a password proof — mint an API key, add
-//! an operator, delete one — carry a "your password" field in their own form.
-//! There is no dialog: the password posts with the action, so the path is the
-//! same whether or not there is JavaScript, and there is no stale-proof state
-//! to fake.
+//! The account actions that need a password proof — mint an API key, add an
+//! operator, delete one — carry a "your password" field in their own form, so
+//! the path is the same with or without JavaScript. (`POST /api/auth/reauth`
+//! is covered in `tests/admin_api_test.rs`.)
 //!
-//! (`POST /api/auth/reauth` still exists for API callers and is covered in
-//! `tests/admin_api_test.rs`.)
-//!
-//! Self-contained instance on dedicated ports: it mints API keys, provisions
-//! and deletes operators, and spends password attempts against the
-//! five-per-minute budget the shared `@auth` instance has already used up.
-//! Every password confirmation here draws on that same budget, which is why
-//! there are exactly three of them plus the one sign-in.
+//! Own instance: password confirmations share the five-per-minute login
+//! budget, which is why there are exactly three of them plus the one sign-in.
 
 use anyhow::Result;
 use noadd_e2e::dom::Page;
 use noadd_e2e::{ADMIN_PASSWORD, Api, Profile, Server, Suite, ports};
 
-/// One login for the whole file, replayed as a cookie: a UI sign-in per case
-/// would spend the budget these cases are actually here to exercise.
+/// Replays the file's one login as a cookie, sparing the login budget.
 async fn open_account(page: &Page, session: &str, query: &str) -> Result<()> {
     page.adopt_session(session).await?;
     page.goto(&format!("/account{query}")).await?;
@@ -50,17 +42,11 @@ pub async fn run() -> Result<Vec<String>> {
                 page.testid("api-key-your-password")
                     .fill(ADMIN_PASSWORD)
                     .await?;
-                // Submitting from the password field, which is how HTML submits
-                // a form that has a submit button in it. It is also independent
-                // of where the button ended up: the status bar is fixed to the
-                // bottom of the viewport and the account page is long, so a
-                // click on a button near the fold can land on the status bar.
+                // Enter, not a click: on this long page the fixed status bar can
+                // cover a button near the fold.
                 page.testid("api-key-your-password").press_enter().await?;
 
-                // The token is shown once, on this response — creating a key is
-                // the one action here that renders rather than redirecting,
-                // because a redirect would throw away the only copy there will
-                // ever be.
+                // Rendered, not redirected: this response holds the only copy.
                 page.testid("api-key-reveal").expect_visible().await?;
                 page.testid("api-key-token")
                     .expect_value_starts_with("noadd_")
@@ -68,7 +54,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc(r#"[data-testid="api-key-row"][data-name="ci"]"#)
                     .expect_visible()
                     .await?;
-                // No dialog was involved, and there is none to involve.
+                // No reauth dialog exists.
                 page.testid("reauth-password").expect_count(0).await
             },
         )
@@ -121,14 +107,11 @@ pub async fn run() -> Result<Vec<String>> {
 
                 let row = page.loc(r#"[data-testid="operator-row"][data-name="second-operator"]"#);
                 row.expect_visible().await?;
-                // A successful add redirects, so a refresh cannot provision a
-                // second one.
+                // Redirected, so a refresh cannot add a second one.
                 page.expect_url_ends_with("/account").await?;
 
-                // Deleting expands that row into a confirmation naming the
-                // operator, with its own password field — a better prompt than
-                // a `confirm()`, and one that is there without any JavaScript.
-                // No password is spent: this is a GET.
+                // Delete expands a confirmation naming the operator, with its own
+                // password field. It is a GET, so no password is spent.
                 row.loc(".del-op").click_js().await?;
                 page.testid("operator-confirm-row").expect_visible().await?;
                 page.testid("operator-confirm-row")

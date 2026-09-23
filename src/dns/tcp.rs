@@ -20,11 +20,8 @@ pub async fn run_tcp_listener(addr: SocketAddr, handler: Arc<DnsHandler>) -> std
     serve_tcp(listener, handler).await
 }
 
-/// Serve length-prefixed DNS over an already-bound listener.
-///
-/// Split out from [`run_tcp_listener`] so tests can bind an ephemeral port,
-/// learn its actual address, and then drive the accept loop — avoiding the
-/// bind-drop-rebind race a `SocketAddr`-only entry point would force.
+/// Serve length-prefixed DNS over an already-bound listener, so tests can bind
+/// an ephemeral port without a bind-drop-rebind race.
 pub async fn serve_tcp(listener: TcpListener, handler: Arc<DnsHandler>) -> std::io::Result<()> {
     loop {
         let (stream, peer_addr) = match listener.accept().await {

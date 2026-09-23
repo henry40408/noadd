@@ -6,12 +6,9 @@ use tokio::sync::broadcast;
 
 /// Supervise a DNS listener so a fatal failure brings the whole process down.
 ///
-/// The UDP/TCP listeners run in their own tasks; without supervision a bind or
-/// accept-loop failure would only end that task, leaving the HTTP/DoH server
-/// happily serving with dead plain-DNS — and the container's health check still
-/// green. On error this records the failure (so `main` can exit non-zero) and
-/// broadcasts a shutdown so the HTTP server and background tasks wind down
-/// gracefully. `name` labels the listener in the log.
+/// Otherwise a failed listener task would leave HTTP/DoH serving with dead
+/// plain DNS and a green health check. On error, sets `failed` (so `main` exits
+/// non-zero) and broadcasts shutdown. `name` labels the listener in the log.
 pub async fn supervise_listener<F>(
     name: &'static str,
     listener: F,
@@ -32,12 +29,8 @@ pub async fn supervise_listener<F>(
     }
 }
 
-/// Create a shutdown signal handler.
-///
-/// Returns a broadcast sender and a future that completes when a shutdown
-/// signal (SIGTERM/SIGINT on Unix, Ctrl+C on other platforms) is received.
-/// When the signal fires, a message is sent on the broadcast channel so
-/// that all receivers can initiate graceful shutdown.
+/// Returns a broadcast sender and a future that, on SIGTERM/SIGINT (Ctrl+C
+/// elsewhere), broadcasts shutdown to every receiver.
 pub fn shutdown_signal() -> (broadcast::Sender<()>, impl std::future::Future<Output = ()>) {
     let (tx, _rx) = broadcast::channel::<()>(1);
     let tx_clone = tx.clone();

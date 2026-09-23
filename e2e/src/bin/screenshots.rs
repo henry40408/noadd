@@ -5,25 +5,12 @@
 //!   -> sqlite3 seed (backdated 90d traffic) -> boot #2 -> login -> capture
 //! ```
 //!
-//! Run it from `e2e/` with `cargo run --bin screenshots`. It writes the same
-//! seven PNGs into `docs/screenshots/` that `npm run screenshots` did, at the
-//! same sizes and in the same order.
+//! Run it from `e2e/` with `cargo run --bin screenshots`; it writes seven PNGs
+//! into `docs/screenshots/`.
 //!
-//! Two things changed in the port, both deliberate:
-//!
-//! * **The routes are paths.** The JavaScript version still asked for
-//!   `#dashboard`, `#stats`, `#logs` and `#filters` — fragments from the
-//!   client-routed era, which arrived at the right page only because `app.js`
-//!   opens with a `LEGACY_HASH_ROUTES` rewrite for exactly those bookmarks.
-//!   Asking for the real path skips the redirect, and stops these shots being
-//!   the reason that shim cannot be retired.
-//! * **`networkidle` and `document.fonts.ready` are gone**, because neither was
-//!   the signal. What each page is waited for is its own rendered content,
-//!   which is what the `WAITS` table already spelled out. The fonts wait in
-//!   particular could never have done anything: `app.css` declares no
-//!   `@font-face` at all — the whole UI is `--font-mono` and `--font-sans`
-//!   resolved to system faces — so there is nothing to load and nothing to
-//!   await. Reimplemented faithfully, it timed out on every capture.
+//! Each shot waits for its page's own rendered content, not network idle or
+//! `document.fonts.ready`: `app.css` declares no `@font-face`, so there is no
+//! font to await.
 
 use std::path::Path;
 
@@ -52,9 +39,7 @@ const MOBILE: Viewport = Viewport {
 
 /// Freezes fade-in animations and carets so re-runs are pixel-stable.
 ///
-/// Both `animation-duration` *and* `animation-delay` collapse to zero: the
-/// staggered `.fade-in` cards would otherwise be caught mid-delay at their
-/// `opacity: 0` start rather than at the end state the shot is meant to show.
+/// The delay is zeroed too, or staggered `.fade-in` cards are caught at `opacity: 0`.
 const FREEZE: &str = "*{animation-duration:0s !important;animation-delay:0s !important;\
                       transition:none !important;caret-color:transparent !important}";
 
@@ -77,11 +62,8 @@ struct Shot {
     viewport: Viewport,
 }
 
-/// Viewport-only captures: each shot is exactly the visible viewport (a clean
-/// "above the fold" single-screen composition), not the entire scrolling page.
-/// The `position: fixed` status bar legitimately sits at the bottom edge — it
-/// is part of the aesthetic and exactly how the live app renders — so it stays
-/// visible.
+/// Viewport-only captures, not the full scrolling page; the fixed status bar
+/// stays in shot, as in the live app.
 const SHOTS: &[Shot] = &[
     Shot {
         file: "dashboard-dark.png",
@@ -139,8 +121,7 @@ async fn main() -> Result<()> {
     let out = server::repo_root().join("docs/screenshots");
     tokio::fs::create_dir_all(&out).await?;
 
-    // Phase 1: boot fresh, create the operator through the product's own setup
-    // flow, stop.
+    // Phase 1: boot fresh, create the operator, stop.
     let mut noadd =
         Server::fresh("screenshots", ports::SCREENSHOTS.0, ports::SCREENSHOTS.1).await?;
     let api = Api::new(noadd.base_url());
@@ -150,10 +131,8 @@ async fn main() -> Result<()> {
     // Phase 2: backdated seed against the stopped database.
     noadd.seed(&seed::screenshots(seed::now_ms())).await?;
 
-    // Phase 3: boot with the seeded data. Retention is 180 days in the fixture,
-    // which is what protects the backdate from the prune that fires at boot,
-    // and the seeded list content is what lets the rebuild yield a live engine
-    // without touching the network.
+    // Phase 3: boot with the seeded data (see `seed::screenshots` for why it
+    // survives the boot-time prune and rebuilds offline).
     noadd.start().await?;
     let session = api.login(ADMIN_USERNAME, ADMIN_PASSWORD).await?;
 
@@ -172,8 +151,7 @@ async fn capture(base: &str, session: &str, shot: &Shot, out: &Path) -> Result<(
         .with_viewport(shot.viewport)
         .with_color_scheme(shot.scheme)
         .with_reduced_motion()
-        // UTC keeps the heatmap on the seed's diurnal curve; the locale keeps
-        // number and date formatting stable wherever this is run.
+        // UTC matches the seed's diurnal curve; a fixed locale keeps formatting stable.
         .with_clock("UTC", "en-US");
     let browser = Browser::open(&profile).await?;
     let page = Page::new(browser.driver(), base);

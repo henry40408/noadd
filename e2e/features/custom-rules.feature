@@ -4,10 +4,8 @@ Feature: Custom rules and domain test
   I want to add custom allow/block rules and test domains
   So that I can control exactly which domains are blocked or allowed
 
-  # Each scenario uses a unique domain so it does not collide with other
-  # scenarios running against the shared instance. Adding a rule triggers
-  # an asynchronous filter rebuild, so steps that depend on the rule taking
-  # effect wait for the rebuild to settle.
+  # Each scenario uses a unique domain on the shared instance. Adding a rule
+  # triggers an async rebuild, so steps that need it applied wait for it.
 
   Background:
     Given I am signed in to the admin UI

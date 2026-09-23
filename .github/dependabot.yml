@@ -29,8 +29,7 @@ updates:
     cooldown:
       default-days: 7
 
-  # e2e is its own cargo workspace, so its manifest is not covered by the "/"
-  # entry above and needs naming separately.
+  # e2e is its own cargo workspace, not covered by "/" above.
   - package-ecosystem: "cargo"
     directory: "/e2e"
     schedule:

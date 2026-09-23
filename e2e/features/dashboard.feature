@@ -4,8 +4,7 @@ Feature: Dashboard and statistics
   I want to see DNS query statistics
   So that I can understand what noadd is blocking and forwarding
 
-  # These scenarios are read-only. They run against the shared, already
-  # authenticated noadd instance (session restored from storageState).
+  # Read-only, against the shared instance with a pre-provisioned session.
 
   Background:
     Given I am signed in to the admin UI
@@ -23,9 +22,7 @@ Feature: Dashboard and statistics
     And I see the "Total Logs" metric
 
   Scenario: The status bar reports the server as reachable
-    # It reads ONLINE because the event stream connected, not because the
-    # markup said so — the hardcoded badge this replaced could not tell the
-    # difference between a live appliance and one that died after rendering.
+    # ONLINE comes from the event stream connecting, not from the markup.
     Given I am on the "Dashboard" tab
     Then the status bar reports the server is online
 
@@ -38,20 +35,16 @@ Feature: Dashboard and statistics
     Then live updates are active
 
   Scenario: Stat card markers stay tinted by their value's colour
-    # The ▌ before each stat label is tinted by a :has() rule that reads the
-    # value's class. It once read the inline style attribute instead, so moving
-    # a colour to a utility class silently reverted the marker to green with
-    # nothing else changing and no test noticing.
+    # The ▌ marker is tinted by a :has() rule on the value's class; a rule keyed
+    # on the inline style once silently reverted it to green.
     Given I am on the "Dashboard" tab
     Then every stat card marker matches its value colour
     When I go to the "Statistics" tab
     Then every stat card marker matches its value colour
 
   Scenario: The Throughput card shows the live rate, not the 24-hour mean
-    # The card is labelled Throughput and flashes on change, both of which
-    # promise a current reading. It derived q/s from total_today / 86400, so a
-    # traffic spike could never move it, while queries_1m — fetched on every
-    # summary refresh at the cost of its own DB round-trip — was discarded.
+    # Throughput promises a current reading: q/s comes from queries_1m, with
+    # total_today / 86400 shown only as the 24h mean.
     Given I am on the "Settings" tab
     And the summary reports 120 queries in the last minute and 86400 today
     When I go to the "Dashboard" tab
@@ -59,9 +52,7 @@ Feature: Dashboard and statistics
     And the Throughput card shows a 24h mean of "1.00"
 
   Scenario: No tab renders markup as escaped text
-    # A fragment that should be Markup but reaches html`` as a plain string is
-    # escaped and shows up as visible source — `<span class="timeago" …>` filling
-    # the Time column, say. Assertions on specific elements sail straight past
-    # that, so sweep every tab for text nodes that look like tags.
+    # A fragment reaching html`` as a plain string instead of Markup shows up as
+    # visible source (e.g. `<span class="timeago" …>`); sweep every tab for it.
     When I visit every tab
     Then no tab showed raw markup as text

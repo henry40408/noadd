@@ -1,19 +1,10 @@
-//! Mobile touch interaction for the statistics charts. CSS `:hover` and the
-//! `pointermove`-driven tooltips never fire on a tap, so on mobile the charts
-//! looked dead. These cases run in a touch-enabled Pixel 5 context and assert
-//! that a tap reveals the tooltip, it persists after the finger lifts, and a
-//! tap elsewhere dismisses it — while mouse hover keeps working unchanged.
+//! Touch on the statistics charts: `:hover` and `pointermove` tooltips never
+//! fire on a tap. On a touch-enabled Pixel 5, a tap reveals the tooltip, it
+//! persists after the finger lifts, and a tap elsewhere dismisses it — while
+//! mouse hover keeps working.
 //!
-//! `locator.tap()` and `page.touchscreen` become `Input.dispatchTouchEvent`,
-//! and `page.mouse.move` becomes `Input.dispatchMouseEvent`. Both are plain
-//! CDP commands rather than event streams, which is why this file ports
-//! without `BiDi`; Chrome turns the touch points into `pointerdown` /
-//! `pointerup` carrying `pointerType: 'touch'`, which is exactly what
-//! `addChartTouch` in `app.js` keys on.
-//!
-//! Self-contained server: this file seeds a backdated 90-day traffic database
-//! so every chart renders a real multi-point series, and drives its own noadd
-//! instance.
+//! Own instance, seeded with the 90-day screenshot traffic so every chart has
+//! a real multi-point series.
 
 use std::time::Duration;
 
@@ -25,14 +16,12 @@ use noadd_e2e::{ADMIN_PASSWORD, ADMIN_USERNAME, Api, Profile, Server, Suite, por
 /// A point outside every chart, for the "tap outside dismisses" half.
 const OUTSIDE: (f64, f64) = (10.0, 10.0);
 
-/// How long the finger stays lifted before the persistence check — long enough
-/// for the synthetic mouse sequence that follows a tap to have arrived.
+/// Wait after lifting, long enough for the synthetic mouse events a tap triggers.
 const AFTER_LIFT: Duration = Duration::from_millis(400);
 
 /// Signs in and lands on the statistics page with all three charts drawn.
 ///
-/// Navigates by URL: the desktop nav strip is hidden at mobile widths (replaced
-/// by an F-key bar), so there is nothing to click here.
+/// Navigates by URL: the desktop nav strip is hidden at mobile widths.
 async fn goto_stats(page: &Page) -> Result<()> {
     page.goto("/").await?;
     page.testid("login-username").fill(ADMIN_USERNAME).await?;
@@ -87,8 +76,7 @@ pub async fn run() -> Result<Vec<String>> {
                 tap(browser, page, "#timeline-chart .tl-svg").await?;
                 tooltip.expect_visible().await?;
 
-                // Persists after the finger lifts (unlike desktop hover, which
-                // dismisses).
+                // Persists after the finger lifts.
                 tokio::time::sleep(AFTER_LIFT).await;
                 tooltip.expect_visible().await?;
 
@@ -131,8 +119,7 @@ pub async fn run() -> Result<Vec<String>> {
                 first.expect_class("touch-active").await?;
                 first.loc(".heatmap-tooltip").expect_visible().await?;
 
-                // Tapping another cell moves the active tooltip rather than
-                // stacking.
+                // Another tap moves the active tooltip rather than stacking.
                 let (x, y) = second.viewport_center().await?;
                 browser.tap(x, y).await?;
                 second.expect_class("touch-active").await?;
@@ -159,8 +146,7 @@ pub async fn run() -> Result<Vec<String>> {
                     .await?;
                 tooltip.expect_visible().await?;
 
-                // Moving the mouse off the chart dismisses immediately (no
-                // outside tap needed).
+                // Moving off the chart dismisses; no outside tap needed.
                 browser.mouse_move(x + width / 2.0, y - 40.0).await?;
                 tooltip.expect_hidden().await
             },

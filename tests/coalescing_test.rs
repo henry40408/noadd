@@ -1,7 +1,5 @@
-//! Tests for cold-miss upstream coalescing (single-flight).
-//!
-//! Verifies that N concurrent queries for the same uncached
-//! `(domain, qtype)` produce exactly 1 upstream request — not N.
+//! Cold-miss upstream coalescing (single-flight): N concurrent queries for the
+//! same uncached `(domain, qtype)` make one upstream request.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -96,11 +94,9 @@ async fn make_test_handler(
 /// a single upstream request.
 #[tokio::test]
 async fn test_cold_miss_coalesces_concurrent_queries() {
-    // Upstream delay holds the fetcher's future open long enough for every
-    // concurrent query to arrive while the fetch is still in progress. Keep it
-    // under hickory's ~333ms UDP retransmit floor (proto's DEFAULT_RETRY_FLOOR)
-    // so a single logical query isn't retransmitted and double-counted; a few
-    // hundred ms is ample for 50 already-spawned tasks to coalesce.
+    // The delay keeps the fetch open while every query arrives. Keep it under
+    // hickory's 333ms UDP retransmit floor (`DEFAULT_RETRY_FLOOR`) so no query
+    // is retransmitted and double-counted.
     let (upstream_addr, upstream_counter) = spawn_mock_upstream(Duration::from_millis(200)).await;
     let (handler, _log_rx) = make_test_handler(upstream_addr).await;
 
@@ -174,8 +170,8 @@ async fn test_slot_released_after_fetcher_completes() {
     handler.handle(&query, client_ip, None).await.unwrap();
     assert_eq!(upstream_counter.load(Ordering::SeqCst), 1);
 
-    // A second handler shares the upstream but starts with an empty cache, so
-    // the slot is exercised again without waiting out the 60s cached TTL.
+    // A second handler with an empty cache reuses the upstream without waiting
+    // out the cached TTL.
     let (handler2, _rx2) = make_test_handler(upstream_addr).await;
     handler2.handle(&query, client_ip, None).await.unwrap();
     assert_eq!(

@@ -1,5 +1,5 @@
-//! The heartbeat's `traffic` bit: how the onboarding notice learns that the
-//! appliance has started answering queries without anything polling for it.
+//! The heartbeat's `traffic` bit, which tells the onboarding notice the
+//! appliance has started answering queries.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,15 +42,13 @@ async fn next_tick(
         .expect("the ticker stopped")
 }
 
-/// The notice asks one question — has this machine ever answered anything — and
-/// the answer rides the heartbeat every connection already receives, rather
-/// than a page polling an endpoint to find out.
+/// Whether the appliance has ever answered anything rides the heartbeat every
+/// connection already receives.
 #[tokio::test]
 async fn the_tick_reports_traffic_once_the_appliance_has_answered_something() {
     let db = test_db().await;
     let hub = Arc::new(EventHub::new(8));
-    // Subscribing is also what makes the ticker run: it skips the whole cycle
-    // while nothing is connected.
+    // Subscribe first: the ticker skips its cycle while nothing is connected.
     let mut rx = hub.subscribe();
     let ticker = tokio::spawn(run(db.clone(), hub.clone(), TICK));
 
@@ -74,8 +72,8 @@ async fn the_tick_reports_traffic_once_the_appliance_has_answered_something() {
     ticker.abort();
 }
 
-/// The latch is one-way, and deliberately so: it exists to stop an appliance
-/// that is plainly working from paying for the question on every tick.
+/// The latch is one-way, so a working appliance stops paying for the question
+/// every tick.
 #[tokio::test]
 async fn the_traffic_latch_does_not_clear_when_the_logs_are_emptied() {
     let db = test_db().await;

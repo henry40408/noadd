@@ -1,13 +1,8 @@
-//! The HTTP calls the suite makes on its own behalf, outside a browser.
+//! The HTTP calls the suite makes on its own behalf, outside a browser: creating
+//! the operator, minting sessions, waiting for a filter rebuild.
 //!
-//! Replaces Playwright's `page.request` / `APIRequestContext`: the fixtures
-//! that create the operator account, mint a second session, or ask whether a
-//! filter rebuild has settled are ordinary requests, not things a user does.
-//!
-//! The CSRF guard (`CsrfLayer`, see `src/admin/csrf.rs`) classifies a request with neither
-//! `Sec-Fetch-Site` nor `Origin` as a non-browser caller and lets it through,
-//! which is what makes these POSTs work without a token — the same reason
-//! `page.request.post` worked before.
+//! These POSTs pass the CSRF guard (`src/admin/csrf.rs`) because a request with
+//! neither `Sec-Fetch-Site` nor `Origin` counts as a non-browser caller.
 
 use std::time::Duration;
 
@@ -17,8 +12,7 @@ use serde_json::{Value, json};
 /// The operator these tests create and sign in as.
 pub const ADMIN_USERNAME: &str = "testuser";
 
-/// Its password. Long enough to clear `MIN_PASSWORD_LENGTH`, and the same
-/// string the setup-and-auth scenarios spell out in their Gherkin.
+/// Its password: clears `MIN_PASSWORD_LENGTH`, and matches the Gherkin.
 pub const ADMIN_PASSWORD: &str = "correct horse battery staple";
 
 /// The name of the session cookie noadd sets.
@@ -67,8 +61,7 @@ impl Api {
             .unwrap_or(false))
     }
 
-    /// Creates the first operator. Idempotent: a 409 means one already exists,
-    /// which every caller here is happy with.
+    /// Creates the first operator. Idempotent: a 409 (one exists) is success.
     ///
     /// # Errors
     ///
@@ -90,10 +83,8 @@ impl Api {
 
     /// Signs in and returns the session cookie's value.
     ///
-    /// Handing the raw token back rather than a cookie jar is deliberate: it is
-    /// replayed into the *browser* with `add_cookie`, which is how a spec skips
-    /// a UI sign-in it is not there to test — and, more to the point, how it
-    /// avoids spending the five-per-minute login budget on setup.
+    /// The raw token is replayed into the browser with `add_cookie`, so a spec
+    /// skips the UI sign-in without spending the five-per-minute login budget.
     ///
     /// # Errors
     ///
@@ -156,12 +147,9 @@ impl Api {
 
     /// Blocks until no filter rebuild is in flight.
     ///
-    /// The appliance publishes rebuild state only on `GET /api/events`, so this
-    /// reads the stream rather than polling a status endpoint. What makes that
-    /// safe for a caller that may have arrived late is the opening `rebuild`
-    /// event every connection is handed: a rebuild that finished before this
-    /// call is reported as settled immediately, instead of leaving it waiting
-    /// for an edge that has already passed.
+    /// Rebuild state is published only on `GET /api/events`. Every connection
+    /// opens with a `rebuild` event, so a rebuild that already finished is
+    /// reported as settled at once rather than waited for.
     ///
     /// # Errors
     ///
@@ -190,8 +178,7 @@ impl Api {
             bail!("GET /api/events answered {}", res.status());
         }
 
-        // Frames are separated by a blank line and can split across chunks, so
-        // they are reassembled here rather than parsed a chunk at a time.
+        // Frames end at a blank line and can split across chunks.
         let mut buf = String::new();
         while let Some(chunk) = res.chunk().await.context("reading /api/events")? {
             buf.push_str(&String::from_utf8_lossy(&chunk));

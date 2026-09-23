@@ -146,8 +146,8 @@ async fn test_logger_publishes_to_event_broadcast() {
     let db_path = dir.path().join("test.db");
     let db = Database::open(db_path.to_str().unwrap()).await.unwrap();
 
-    // High threshold/interval so the DB flush doesn't race the assertion below;
-    // the broadcast event fires independently of the DB flush anyway.
+    // High threshold/interval so the DB flush cannot race the assertion; the
+    // broadcast fires independently of it.
     let (logger, tx) = QueryLogger::new(db.clone(), 1000, 300);
     let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(16);
     let logger = logger.with_event_sender(events_tx);

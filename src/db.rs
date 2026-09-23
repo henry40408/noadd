@@ -18,10 +18,8 @@ pub enum DbError {
 }
 
 impl DbError {
-    /// True when the error is a `SQLite` constraint violation (e.g. inserting a
-    /// duplicate `users.username`, which is the only UNIQUE constraint on that
-    /// table). Callers use this to distinguish a duplicate-key conflict (HTTP
-    /// 409) from a genuine database failure (HTTP 500).
+    /// True for a `SQLite` constraint violation (e.g. a duplicate
+    /// `users.username`), so callers can answer 409 rather than 500.
     pub fn is_unique_violation(&self) -> bool {
         let inner = match self {
             DbError::Rusqlite(e)
@@ -38,14 +36,12 @@ impl DbError {
     }
 }
 
-/// Number of read-only `SQLite` connections in the pool. Each connection owns
-/// its own tokio-rusqlite worker thread, so this is the parallelism cap for
-/// admin/stats queries. WAL lets readers proceed without blocking each other.
+/// Read-only connections in the pool; each owns a worker thread, so this caps
+/// admin/stats query parallelism.
 const READ_POOL_SIZE: usize = 4;
 
-/// `run_maintenance` only triggers a full `VACUUM` once free pages reach this
-/// fraction of the database file. Below it, reclaiming space is not worth the
-/// whole-file rewrite and the write lock VACUUM holds.
+/// Free-page fraction at which `run_maintenance` runs a full `VACUUM`; below
+/// it the whole-file rewrite and write lock are not worth it.
 const VACUUM_FREELIST_RATIO: f64 = 0.2;
 
 #[derive(Clone)]
@@ -152,10 +148,8 @@ pub struct SessionRow {
     pub last_seen: i64,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
-    /// `BLAKE2b` digest of the session token, never the token itself — see
-    /// `crate::admin::auth::hash_session_token`. Doubles as the in-memory
-    /// `SessionStore` key, so it is what identifies a session everywhere
-    /// except the cookie on the wire.
+    /// `BLAKE2b` digest of the session token, never the token itself (see
+    /// `crate::admin::auth::hash_session_token`); also the `SessionStore` key.
     pub token_hash: String,
 }
 
@@ -210,10 +204,8 @@ pub struct TopClient {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelinePoint {
-    /// Start of the bucket, in **Unix seconds** — the same unit as
-    /// [`TimelineMultiPoint::timestamp`] and the rest of the API's timestamps.
-    /// The underlying `query_logs.timestamp` column is milliseconds; the
-    /// conversion happens in [`Database::timeline_since`].
+    /// Start of the bucket in **Unix seconds**, like the rest of the API
+    /// (`query_logs.timestamp` is milliseconds; see [`Database::timeline_since`]).
     pub timestamp: i64,
     pub total: i64,
     pub blocked: i64,
@@ -221,39 +213,33 @@ pub struct TimelinePoint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TimelineMultiPoint {
-    /// Start of the bucket, in **Unix seconds** — the same unit as
-    /// [`TimelinePoint::timestamp`]. The underlying `query_logs.timestamp`
-    /// column is milliseconds; the conversion happens in
-    /// [`Database::timeline_multi_since`].
+    /// Start of the bucket in **Unix seconds**, like [`TimelinePoint::timestamp`].
     pub timestamp: i64,
     pub total: i64,
     pub blocked: i64,
     pub cached: i64,
 }
 
-/// One grain of [`Database::metrics_by_bucket_since`]: how many queries fell in
-/// a time bucket, blocked and cached counted separately. The timeline is a
-/// folding of these.
+/// One grain of [`Database::metrics_by_bucket_since`]: queries per time bucket
+/// and (blocked, cached) pair; the timeline folds these.
 #[derive(Debug, Clone)]
 pub struct MetricsBucket {
-    /// Start of the bucket, in **Unix seconds** — the same unit as
-    /// [`TimelineMultiPoint::timestamp`].
+    /// Start of the bucket in **Unix seconds**.
     pub timestamp: i64,
     pub blocked: bool,
     pub cached: bool,
     pub count: i64,
 }
 
-/// One grain of [`Database::metrics_window_since`]: how many queries in the
-/// window carried a given outcome classification, query type and response time.
-/// The outcome breakdown, the query-type breakdown and the latency percentiles
-/// are all foldings of these.
+/// One grain of [`Database::metrics_window_since`]: queries per outcome, query
+/// type and response time. The outcome and query-type breakdowns and the
+/// latency percentiles all fold these.
 #[derive(Debug, Clone)]
 pub struct WindowMetricsRow {
     pub blocked: bool,
     pub cached: bool,
-    /// Whether `result` held an answer. Carried by `query_stats_metrics_hour`
-    /// so classifying an outcome never reads the table.
+    /// Whether `result` held an answer; carried by the rollup so classifying an
+    /// outcome never reads `query_logs`.
     pub has_result: bool,
     pub query_type: String,
     pub response_ms: i64,
@@ -288,14 +274,11 @@ pub const QUARTER_SECS: i64 = 900;
 /// Query counts per quarter hour on UTC-epoch boundaries, dense from the first
 /// quarter that held a query to the last.
 ///
-/// This is what lets the Statistics page draw its calendar-aligned charts
-/// without a scan of their own. A viewer's UTC offset is a whole number of
-/// quarter hours in every zone in use, so every quarter lies wholly inside one
-/// of that viewer's local hours, and the browser can fold these into its own
-/// hours and days exactly — the server never needs to know the offset.
-/// `timelineFromQuarters` and `heatmapFromQuarters` in `app.js` are those
-/// folds, and answer what [`Database::timeline_multi_since`] and
-/// [`Database::hourly_heatmap_since`] answer for API callers.
+/// Every UTC offset in use is a whole number of quarter hours, so the browser
+/// folds these exactly into local hours and days (`timelineFromQuarters`,
+/// `heatmapFromQuarters` in `app.js`) without the server knowing the offset.
+/// [`Database::timeline_multi_since`] and [`Database::hourly_heatmap_since`]
+/// answer the same for API callers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct QuarterSeries {
     /// Start of the first quarter, in Unix seconds. 0 when there are none.
@@ -304,8 +287,7 @@ pub struct QuarterSeries {
     pub total: Vec<i64>,
     pub blocked: Vec<i64>,
     pub cached: Vec<i64>,
-    /// Queries in the heatmap's window, by quarter. That window is not the
-    /// range's, so a quarter can count here and not in `total`, or the reverse.
+    /// Queries in the heatmap's window (not the range's), by quarter.
     pub heatmap: Vec<i64>,
 }
 
@@ -351,16 +333,13 @@ pub struct HeatmapCell {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LatencySummary {
     pub sample_count: i64,
-    /// Percentiles only. A mean was dropped as superseded by p50, and a max as
-    /// an outlier the highlights grid never rendered; neither reached the UI.
     pub p50_ms: i64,
     pub p95_ms: i64,
     pub p99_ms: i64,
 }
 
-/// `settings` key holding the `query_logs` row count. Not an operator-facing
-/// setting — nothing enumerates this table, so it is simply the one row-shaped
-/// place a counter can live without a table of its own.
+/// `settings` key holding the maintained `query_logs` row count (internal, not
+/// an operator setting).
 const QUERY_LOG_COUNT_KEY: &str = "query_log_count";
 
 /// Width of one `query_stats_quarter` row, in milliseconds.
@@ -371,39 +350,31 @@ const ROLLUP_HOUR_MS: i64 = 3_600_000;
 
 /// The first rollup unit wholly inside a window that starts at `since_ms`.
 ///
-/// A reader takes that unit and every later one from the rollup, and
-/// `[since_ms, first * unit_ms)` — the rest of the unit the window starts
-/// inside, empty when it starts on a boundary — from `query_logs`. Nothing is
-/// needed at the other end: the rollups are written in the same transaction as
-/// the rows, so even the unit still filling up is complete.
+/// Readers take that unit onward from the rollup and `[since_ms, first *
+/// unit_ms)` from `query_logs`. The open end needs nothing: rollups are written
+/// in the rows' transaction, so even the current unit is complete.
 fn first_whole_unit(since_ms: i64, unit_ms: i64) -> i64 {
     since_ms.div_euclid(unit_ms) + i64::from(since_ms.rem_euclid(unit_ms) != 0)
 }
 
 /// Pre-aggregated counts of `query_logs`, one table per grain a reader folds.
 ///
-/// Every statistic the dashboard and the Statistics page show is a count, a
-/// sum or a histogram over a time window, and answering one from the table
-/// reads an index entry per logged query: with the default retention the
-/// window is the whole table, so no index can narrow it. A rollup row stands
-/// for every query that shares its key within its unit of time, so the same
-/// window reads a few thousand rows instead of a few million.
+/// Every dashboard/Statistics reading is a count, sum or histogram over a
+/// window that, at default retention, spans the whole table; a rollup row
+/// stands for every query sharing its key and unit, so a window reads thousands
+/// of rows instead of millions.
 ///
-/// The grains are the coarsest that still answer every reader exactly. The
-/// quarter hour is the finest bucket any chart draws and the unit every UTC
-/// offset in use is a whole number of; lists and histograms need no finer than
-/// the hour. `doh_token` is stored as `''` for plain DNS because a primary key
-/// column cannot hold `NULL`, and `has_result` is spelled out rather than read
-/// from the generated column so the trigger does not depend on migration 12.
+/// Grains are the coarsest that answer every reader exactly: the quarter hour
+/// (finest chart bucket, and every UTC offset in use is a whole number of them)
+/// and the hour for lists and histograms. `doh_token` is `''` for plain DNS
+/// since a primary key column cannot be `NULL`; `has_result` is spelled out so
+/// the trigger does not depend on the generated column from migration 12.
 ///
-/// Inserts are kept here by a trigger rather than by the logger, so rows that
-/// reach the table any other way — the e2e fixtures write theirs with the
-/// `sqlite3` CLI — are counted too. Measured by replaying 1.48 M logged
-/// queries in the logger's 500-row batches, the trigger writes the same pages
-/// as one grouped upsert per batch (886 480 against 885 858). Deletes are not a
-/// trigger: a `DELETE` trigger would cost a row-by-row unwind on every prune
-/// and switch off `SQLite`'s truncate optimisation for Clear All, so
-/// [`unwind_stats_rollups`] does it in the statement's own transaction.
+/// Inserts are maintained by trigger, so rows written any other way (the e2e
+/// fixtures use the `sqlite3` CLI) count too; it writes the same pages as a
+/// per-batch grouped upsert. Deletes are not a trigger — it would unwind row by
+/// row and disable the truncate optimisation for Clear All — so
+/// [`unwind_stats_rollups`] runs in the deleting statement's transaction.
 const STATS_ROLLUP_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS query_stats_quarter (
         quarter INTEGER NOT NULL,
@@ -466,12 +437,9 @@ const STATS_ROLLUP_SCHEMA: &str = "
     END;
 ";
 
-/// Fills the rollups from what `query_logs` already holds. An upsert that
-/// replaces rather than adds, so a migration interrupted after this ran and
-/// before `user_version` moved can run it again without doubling anything.
-///
-/// `WHERE true` is what lets an upsert follow a `SELECT` — without it the
-/// parser reads `ON CONFLICT` as part of the `SELECT`.
+/// Fills the rollups from existing `query_logs`. The upsert replaces rather
+/// than adds, so an interrupted migration can re-run it without doubling.
+/// `WHERE true` stops the parser reading `ON CONFLICT` as part of the `SELECT`.
 const STATS_ROLLUP_BACKFILL: &str = "
     INSERT INTO query_stats_quarter (quarter, blocked, cached, count, sum_ms)
         SELECT timestamp / 900000, blocked, cached, COUNT(*), SUM(response_ms)
@@ -497,44 +465,34 @@ const STATS_ROLLUP_BACKFILL: &str = "
         ON CONFLICT DO UPDATE SET count = excluded.count;
 ";
 
-/// Default rusqlite cache is 16 statements; the read connection alone has
-/// ~20 distinct hot SQL strings (settings, stats, filter, token lookup),
-/// so anything below ~32 starts evicting on every admin poll.
+/// rusqlite's default of 16 statements is fewer than the read connections' hot
+/// SQL strings, which would evict on every admin request.
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
 
 /// Turn off `SQLite`'s global memory accounting, once per process, before any
 /// connection exists.
 ///
-/// `SQLITE_CONFIG_MEMSTATUS` defaults to on, and it makes every
-/// `sqlite3_malloc`/`sqlite3_free` update a set of process-global counters
-/// behind a single static mutex. The read pool's aggregation queries allocate
-/// hard — every `GROUP BY` in `src/admin/stats.rs` builds a temp b-tree — so
-/// with four readers running the Statistics page's fan-out concurrently, they
-/// spend more time queueing on that mutex than scanning. Measured against a
-/// 447 k-row production database, the page's seven endpoints under
-/// `tokio::join!` went from a 1.69 s median to 283 ms, and the pool stopped
-/// being *slower* than running the same queries one after another.
-/// `tests/stats_contention_bench.rs` isolates the effect.
+/// `SQLITE_CONFIG_MEMSTATUS` (on by default) makes every allocation update
+/// process-global counters behind one static mutex. The read pool's
+/// aggregations allocate hard (each `GROUP BY` builds a temp b-tree), so
+/// concurrent readers queued on that mutex and the pool ran slower than serial
+/// queries; `tests/stats_contention_bench.rs` isolates the effect.
 ///
-/// Nothing here reads the counters back: the statistics this disables are
-/// `sqlite3_memory_used`, `sqlite3_status` and the `soft_heap_limit` machinery,
-/// none of which appear in this crate. Thread safety is untouched — that is
-/// governed by `bCoreMutex`/`bFullMutex`, which this does not alter.
+/// Nothing in this crate reads those counters (`sqlite3_memory_used`,
+/// `sqlite3_status`, `soft_heap_limit`), and thread safety is governed by
+/// separate mutexes this does not touch.
 fn disable_sqlite_memstatus() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // SAFETY: `sqlite3_config` is variadic; `SQLITE_CONFIG_MEMSTATUS` takes
-        // a single `int`. Called from a `Once` before this process opens any
-        // connection, which is the documented requirement (it returns
-        // SQLITE_MISUSE once SQLite has initialized).
-        // FFI: no safe rusqlite wrapper exists for sqlite3_config
+        // SAFETY: `SQLITE_CONFIG_MEMSTATUS` takes a single `int`, and this runs
+        // from a `Once` before any connection opens, as `sqlite3_config`
+        // requires (it returns SQLITE_MISUSE once SQLite has initialized).
+        // No safe rusqlite wrapper exists for it.
         #[allow(unsafe_code)]
         let rc =
             unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0_i32) };
         if rc != rusqlite::ffi::SQLITE_OK {
-            // Not fatal: the database still works, it just keeps the slow
-            // global accounting. Worth knowing about, since it means something
-            // initialized SQLite before us.
+            // Not fatal, but means something initialized SQLite before us.
             tracing::warn!(
                 event = "db.memstatus_config_failed",
                 rc,
@@ -544,9 +502,8 @@ fn disable_sqlite_memstatus() {
     });
 }
 
-/// Open a second connection to the same `SQLite` file in read-only mode.
-/// Used for admin SELECT queries so they run concurrently with the writer
-/// under WAL without blocking on a single worker thread.
+/// Open a read-only connection for admin SELECTs, which under WAL run
+/// concurrently with the writer.
 async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -570,8 +527,7 @@ async fn open_read_conn(path: &str) -> Result<Connection, DbError> {
 
 impl Database {
     pub async fn open(path: &str) -> Result<Self, DbError> {
-        // Must precede the first connection in the process — see the function's
-        // own docs for why the read pool depends on it.
+        // Must precede the process's first connection.
         disable_sqlite_memstatus();
         let conn = Connection::open(path).await?;
         let placeholder_pool = Arc::new(ReadPool {
@@ -580,14 +536,13 @@ impl Database {
         });
         let db_init = Self {
             conn: conn.clone(),
-            // Placeholder — replaced below. We need schema init to run on
-            // the write conn before opening readers so WAL is in effect.
+            // Placeholder: schema init must run on the writer before readers
+            // open, so WAL is in effect.
             read_pool: placeholder_pool,
         };
         db_init.init_schema().await?;
-        // SQLite in-memory databases are per-connection; a second OPEN_READ_ONLY
-        // connection to ":memory:" would be an empty, unrelated database. Fall
-        // back to sharing the writer connection so tests using ":memory:" work.
+        // Each ":memory:" connection is its own empty database, so readers
+        // share the writer there.
         let read_pool = if path == ":memory:" {
             Arc::new(ReadPool {
                 conns: vec![conn.clone()],
@@ -610,16 +565,10 @@ impl Database {
         self.read_pool.pick()
     }
 
-    /// Pages the read pool has had to fetch from the database file, summed
-    /// across its connections, and the pages it answered from its own cache.
-    ///
-    /// This is `SQLITE_DBSTATUS_CACHE_MISS`, a running count of pager-level
-    /// reads. It is the unit `tests/stats_page_miss_bench.rs` reports, and it
-    /// is deliberately not a duration: the appliance runs off an SD card and
-    /// development runs off an SSD, so the same query costs wildly different
-    /// wall time on each while fetching exactly the same pages. Counting pages
-    /// compares across both. The counter is unaffected by `mmap_size` —
-    /// memory-mapped reads are counted the same as `read()` ones.
+    /// Running page-cache hits and misses (`SQLITE_DBSTATUS_CACHE_*`) summed
+    /// across the read pool — the unit the `*_page_miss_bench` tests report.
+    /// Pages, not time, because they compare across an SSD and the appliance's
+    /// SD card. Only meaningful after [`Self::reset_read_page_accounting`].
     pub async fn read_page_cache_stats(&self) -> Result<PageCacheStats, DbError> {
         let mut total = PageCacheStats { hits: 0, misses: 0 };
         for conn in &self.read_pool.conns {
@@ -653,18 +602,12 @@ impl Database {
         Ok(total)
     }
 
-    /// Put the read pool in the state [`Self::read_page_cache_stats`] can
-    /// account for, and drop what it has cached so the next query is measured
-    /// cold. The running counters are untouched — callers take a delta around
-    /// the query they care about.
+    /// Make [`Self::read_page_cache_stats`] meaningful and drop the pool's cache
+    /// so the next query runs cold. Counters are not reset; callers take a delta.
     ///
-    /// Turning `mmap_size` off is what makes the counter usable: pages the
-    /// pager takes from a memory mapping never pass through its cache, so a
-    /// connection running with the configured 256 MiB mapping reports almost no
-    /// misses however much of the file it reads. The appliance still fetches
-    /// those pages — as page faults against the SD card rather than `read()`
-    /// calls — so the count with mmap off is the count either way; only the
-    /// accounting differs.
+    /// Turns `mmap_size` off: pages read through a memory mapping bypass the
+    /// pager cache and would report almost no misses. The pages fetched are the
+    /// same either way, only the accounting differs.
     pub async fn reset_read_page_accounting(&self) -> Result<(), DbError> {
         for conn in &self.read_pool.conns {
             conn.call(|conn| {
@@ -679,12 +622,8 @@ impl Database {
     /// Flush the WAL back into the main database file and close every
     /// connection so `SQLite` can remove the `-wal`/`-shm` sidecar files.
     ///
-    /// Read connections are closed first so the writer is the sole open
-    /// connection when the truncating checkpoint runs; closing that final
-    /// connection is what lets `SQLite` delete the sidecars. Errors are ignored
-    /// because this only runs on shutdown — there is nothing left to recover,
-    /// and an in-memory database (where readers share the writer connection)
-    /// has no files to clean up regardless.
+    /// Readers close first so the writer is the sole connection at the
+    /// truncating checkpoint. Errors are ignored: this only runs on shutdown.
     pub async fn close(self) {
         for c in &self.read_pool.conns {
             let _ = c.clone().close().await;
@@ -771,11 +710,7 @@ impl Database {
                     CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT NOT NULL UNIQUE,
-                        -- An account provisioned by forward auth (a trusted
-                        -- reverse proxy vouching for the username) stores
-                        -- NO_PASSWORD_SENTINEL here instead of a real hash,
-                        -- so it can never authenticate with a password. The
-                        -- sentinel keeps this column NOT NULL.
+                        -- NO_PASSWORD_SENTINEL for forward-auth accounts.
                         password_hash TEXT NOT NULL,
                         created_at INTEGER NOT NULL
                     );
@@ -800,12 +735,9 @@ impl Database {
         Ok(())
     }
 
-    /// Run forward-only migrations using PRAGMA `user_version` to track schema version.
-    /// New databases start at the latest version (tables already have all columns).
-    /// Existing databases get migrated incrementally.
-    //
-    // `add_column_if_missing` keeps each step idempotent, so the same migration
-    // runs against a fresh database and a pre-existing one alike.
+    /// Run forward-only migrations, tracked by PRAGMA `user_version`. A fresh
+    /// database (version 0) runs every step too, so each must be idempotent
+    /// against the schema batch above (hence `add_column_if_missing`).
     fn run_migrations(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
@@ -832,13 +764,8 @@ impl Database {
         }
 
         if version < 5 {
-            // Replace the single-column domain index with a composite
-            // (domain, timestamp) index: dashboard aggregations (top_domains,
-            // unique_domains) are then served by a covering index with the
-            // timestamp filter pushed in, instead of scanning the whole domain
-            // index and looking up rows. ANALYZE is REQUIRED here — without
-            // fresh sqlite_stat1 the planner keeps the old plan and the new
-            // index yields no benefit.
+            // ANALYZE is required after every index change here: with stale
+            // sqlite_stat1 the planner keeps the old plan.
             conn.execute_batch(
                 "DROP INDEX IF EXISTS idx_query_logs_domain;
                  CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
@@ -894,17 +821,9 @@ impl Database {
         }
 
         if version < 9 {
-            // Session tokens are now stored as a BLAKE2b digest, the way API
-            // keys always have been, so a copy of the database — a backup, a
-            // stray WAL file — no longer hands over every live session.
-            //
-            // Existing rows hold raw tokens and are dropped rather than
-            // rehashed: SQLite has no BLAKE2b to do it in SQL, and doing it in
-            // Rust would rewrite the rows while leaving the plaintext behind
-            // in freelist pages and the WAL regardless, so the migration would
-            // claim a protection it had not actually delivered. Sessions are
-            // short-lived by construction; the cost is that every operator
-            // signs in once more after the upgrade.
+            // Session tokens become BLAKE2b digests. Existing raw-token rows are
+            // dropped, not rehashed: rehashing would leave the plaintext in
+            // freelist pages and the WAL anyway. Operators sign in once more.
             conn.execute_batch(
                 "DELETE FROM sessions;
                  ALTER TABLE sessions RENAME COLUMN token TO token_hash;",
@@ -912,23 +831,8 @@ impl Database {
         }
 
         if version < 10 {
-            // "Top Clients" groups by (client_ip, doh_token) over a timestamp
-            // range, which had no index to serve it: the planner fell back to
-            // idx_query_logs_timestamp and then built a temp b-tree over every
-            // row in the window. Ordering the columns group-first makes this a
-            // covering index, so the scan reads the index alone. Measured on a
-            // 447 k-row production database, the 7-day query went from 143 ms
-            // to 20 ms; `dbstat` puts the index itself at ~18 MiB against a
-            // 103 MiB database, though that scales with how many distinct
-            // client_ip/doh_token pairs a deployment actually sees.
-            //
-            // Contrast idx_query_logs_domain_ts, which is why the equivalent
-            // "Top Domains" query was already fast.
-            //
-            // ANALYZE for the same reason the version-5 migration runs it, and
-            // because the hourly `PRAGMA optimize` had let sqlite_stat1 drift
-            // badly on real databases — one 447 k-row instance still described
-            // itself as holding 232 k.
+            // Versions 10, 11, 12, 14 and 15 add indexes for statistics that
+            // now read the rollups; version 17 drops them again.
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts \
                  ON query_logs(client_ip, doh_token, timestamp);
@@ -937,18 +841,6 @@ impl Database {
         }
 
         if version < 11 {
-            // The remaining Statistics aggregations — the timeline, the
-            // query-type breakdown, the latency histogram — all filter on
-            // timestamp and then read a few narrow columns. They were served
-            // by idx_query_logs_timestamp, which meant a row lookup per match
-            // into a table whose rows average ~84 bytes of strings (domain,
-            // client_ip, upstream, result) that none of them want. Carrying
-            // those narrow columns in the index makes all three covering.
-            //
-            // Measured on a 447 k-row database over a 7-day window: timeline
-            // 78 -> 60 ms, query_type 75 -> 62 ms, latency 60 -> 45 ms, for
-            // ~9 MiB of index against a 103 MiB database.
-            //
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
                  ON query_logs(timestamp, blocked, cached, response_ms, query_type);
@@ -957,22 +849,8 @@ impl Database {
         }
 
         if version < 12 {
-            // Version 11 left `outcome_breakdown_since` uncovered on the
-            // strength of a wall-clock measurement, which on an SSD hides what
-            // the query actually costs: classifying an outcome needs `result`
-            // tested for emptiness, so every matching row took a rowid lookup
-            // into the table. Counted in pages fetched from the file
-            // (`SQLITE_DBSTATUS_CACHE_MISS`, the unit `stats_page_miss_bench`
-            // reports) that is the whole 10 784-page table on a 370 k-row
-            // database — 12 173 pages against 2 157 for the same answer read
-            // out of the index. On the SD card these appliances run from,
-            // those 40 MiB are the page's single largest cost.
-            //
-            // The emptiness test rides the index as a VIRTUAL generated
-            // column, which occupies no table space and added 65 pages (3%) to
-            // the index. An index on the bare expression was tried first and
-            // the planner would not treat it as covering; a named column it
-            // does.
+            // A VIRTUAL generated column costs no table space; the planner
+            // would not treat an index on the bare expression as covering.
             add_column_if_missing(
                 conn,
                 "query_logs",
@@ -988,14 +866,8 @@ impl Database {
         }
 
         if version < 13 {
-            // `SELECT COUNT(*)` has no shortcut in `SQLite`: it walks the
-            // smallest index end to end, 1 386 pages on a 370 k-row database,
-            // and the Database Health card asks for it on every Statistics
-            // page load. The count lives in `settings` from here, seeded once
-            // and then moved by the three statements that change it.
-            //
-            // `WHERE true` is what lets an upsert follow a SELECT — without it
-            // the parser reads `ON CONFLICT` as part of the SELECT.
+            // Seed the maintained row count (`QUERY_LOG_COUNT_KEY`); `COUNT(*)`
+            // walks a whole index. `WHERE true`: see `STATS_ROLLUP_BACKFILL`.
             conn.execute_batch(
                 "INSERT INTO settings (key, value) \
                  SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
@@ -1004,21 +876,6 @@ impl Database {
         }
 
         if version < 14 {
-            // The dashboard's top upstreams read `upstream` and `response_ms`,
-            // which no index carried, so every tick paid a rowid lookup into the
-            // table per forwarded query in the last 24 hours: 1 608 pages on a
-            // 370 k-row database, against 211 read out of this index.
-            //
-            // Partial, because blocked and cached answers never reach an
-            // upstream — 56% of that table's rows are NULL here, and the query
-            // excludes them anyway. Timestamp first, because the logger appends
-            // at the newest end: an upstream-first index spreads each batch
-            // across one insertion point per upstream, and measured 65 pages
-            // written per 500-row batch against 56 for this one and 53 with no
-            // index at all.
-            //
-            // The schema batch above already creates it on every open; this
-            // step exists for the `ANALYZE`, like every other index migration.
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream \
                  ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
@@ -1027,19 +884,8 @@ impl Database {
         }
 
         if version < 15 {
-            // Top domains and top clients are asked together — once by the
-            // Statistics page, once per dashboard tick — and read two indexes
-            // for it: `(domain, timestamp)` and `(client_ip, doh_token,
-            // timestamp)`, each group-first so neither could be restricted by
-            // the window. On a 370 k-row database that was 7 589 pages for a
-            // window covering the table and 2 389 for the dashboard's 24 hours.
-            // One timestamp-first index carrying both answers both lists from
-            // one scan: 5 769 and 747.
-            //
-            // It replaces the client index, which served nothing else. The
-            // domain index stays: the query log's domain search seeks it by
-            // prefix, and without it a search for a prefix nobody queried read
-            // the whole table — 12 170 pages against 3.
+            // The domain index stays: the query log's domain search seeks it
+            // by prefix.
             conn.execute_batch(
                 "DROP INDEX IF EXISTS idx_query_logs_client_ts;
                  CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client \
@@ -1049,38 +895,20 @@ impl Database {
         }
 
         if version < 16 {
-            // The rollups the dashboard and the Statistics page will fold
-            // instead of scanning the table; see `STATS_ROLLUP_SCHEMA`. Filled
-            // from the rows already logged, which on a 1.48 M-row database
-            // read 101 420 pages and wrote 3 714.
+            // Statistics rollups (see `STATS_ROLLUP_SCHEMA`), backfilled from
+            // the rows already logged.
             conn.execute_batch(STATS_ROLLUP_SCHEMA)?;
             conn.execute_batch(STATS_ROLLUP_BACKFILL)?;
         }
 
         if version < 17 {
-            // Every statistic now folds the rollups, which left three indexes
-            // with no statistic to serve: the metrics, upstream and
-            // domain/client indexes were timestamp-first scans for readings
-            // that no longer scan. The query log's filters are what is left to
-            // index, and a timestamp-first index can only filter them by
-            // walking the window: a quiet token or record type walked the whole
-            // table for its first page and again for its count. Each filter
-            // gets an index that leads with what it matches instead — see
-            // `query_logs` for why the type index carries `blocked`.
-            //
-            // The blocked filter used to be answered off the metrics index
-            // without a table lookup, so dropping that index alone made its
-            // deep pages three times the cost; `(blocked, timestamp)` puts them
-            // below where they were. Replaying 1.48 M logged queries in the
-            // logger's batches, the five indexes this leaves write 957 160
-            // pages against 885 858 before, in a file of 92 224 pages against
-            // 111 291.
-            //
-            // A database from before version 17 also carries the indexes the
-            // earlier steps created on the way here, so they are dropped rather
-            // than never made. On a 1.48 M-row database the freed pages put
-            // the freelist past `VACUUM_FREELIST_RATIO`, so the first hourly
-            // maintenance after upgrading rewrites the file once.
+            // Statistics read the rollups, so the timestamp-first statistics
+            // indexes go. What is left to index is the query log's filters, and
+            // each gets an index leading with what it matches, so a quiet token
+            // or record type no longer walks the whole window (see
+            // `Database::query_logs` for why the type index carries `blocked`).
+            // On large databases the freed pages cross `VACUUM_FREELIST_RATIO`,
+            // so the first maintenance after upgrading rewrites the file once.
             conn.execute_batch(
                 "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
                  DROP INDEX IF EXISTS idx_query_logs_ts_upstream;
@@ -1208,21 +1036,13 @@ impl Database {
                     query_type.as_deref(),
                 );
                 if let (Some(qt), [_]) = (&query_type, param_values.as_slice()) {
-                    // A query type on its own reads `(query_type, blocked,
-                    // timestamp)` as two runs already in timestamp order, one
-                    // per verdict, and merges the newest of each. `blocked`
-                    // sits in the middle of that index for the blocked filter's
-                    // sake, and it is what stops a single seek from returning
-                    // rows in page order: asked as one range, the planner reads
-                    // every row of the type and sorts them. Each run only has
-                    // to reach the end of the page, so neither reads more than
-                    // `offset + limit` index entries.
-                    //
-                    // The runs carry only `id` and `timestamp`, which the index
-                    // holds, and the table is read for the page's rows alone.
-                    // Carrying every column instead looked up each row the runs
-                    // passed over: 290 pages for page 20 of a busy type on a
-                    // 1.48 M-row database, against 26.
+                    // A query type alone reads `(query_type, blocked, timestamp)`
+                    // as two timestamp-ordered runs, one per verdict, and merges
+                    // them. `blocked` in the middle of the index (there for the
+                    // blocked filter) means one range would read every row of
+                    // the type and sort it; each run stops at `offset + limit`.
+                    // The runs carry only indexed `id`/`timestamp`, so the table
+                    // is read for the page's rows alone.
                     sql = format!(
                         "SELECT {COLUMNS} FROM query_logs WHERE id IN ( \
                          SELECT id FROM ( \
@@ -1236,9 +1056,8 @@ impl Database {
                          ORDER BY timestamp DESC LIMIT ?3 OFFSET ?4)) \
                          ORDER BY timestamp DESC"
                     );
-                    // `SQLite` reads a negative `LIMIT` as none and a negative
-                    // `OFFSET` as zero, and `/api/logs` passes both through, so
-                    // the runs follow the same rules the outer page does.
+                    // Mirror `SQLite`: negative `LIMIT` is none, negative
+                    // `OFFSET` is zero (`/api/logs` passes both through).
                     let run = if limit < 0 {
                         -1
                     } else {
@@ -1283,13 +1102,7 @@ impl Database {
         Ok(rows)
     }
 
-    /// Has this appliance ever logged a query?
-    ///
-    /// `EXISTS` rather than a count or a windowed sum: the only caller asks
-    /// whether the machine has ever served traffic — to decide whether to tell
-    /// an operator how to point a device at it — and that question stops at the
-    /// first row. A count would read every one of them on a busy appliance to
-    /// answer something a single row settles.
+    /// Has this appliance ever logged a query? `EXISTS` stops at the first row.
     ///
     /// # Errors
     ///
@@ -1326,9 +1139,7 @@ impl Database {
                     token.as_deref(),
                     query_type.as_deref(),
                 );
-                // Nothing narrowed the count, so it is the table's row count,
-                // which the write paths maintain. Counting it walks the smallest
-                // index end to end on every load of an unfiltered query log.
+                // Unfiltered: use the maintained count instead of walking an index.
                 if param_values.is_empty() {
                     return read_log_count(conn);
                 }
@@ -1387,17 +1198,10 @@ impl Database {
 
     /// Periodic database maintenance, run after the hourly retention prune.
     ///
-    /// - `PRAGMA optimize` refreshes the query planner's statistics so index
-    ///   choices stay sane as the data distribution shifts (also what keeps
-    ///   the composite `(domain, timestamp)` index getting picked).
-    /// - A `VACUUM` reclaims pages freed by pruning, but only when the free
-    ///   list has grown past [`VACUUM_FREELIST_RATIO`] of the file — VACUUM
-    ///   rewrites the whole database and briefly holds a write lock, so it is
-    ///   not worth doing for the handful of pages a typical hourly prune frees.
-    /// - A `wal_checkpoint(TRUNCATE)` truncates the WAL, which a large prune
-    ///   (or the VACUUM) can otherwise inflate until the next checkpoint.
-    ///
-    /// All three are individually cheap (~10ms) except the gated VACUUM.
+    /// - `PRAGMA optimize` keeps planner statistics current.
+    /// - `VACUUM` only past [`VACUUM_FREELIST_RATIO`], since it rewrites the
+    ///   whole file under a write lock.
+    /// - `wal_checkpoint(TRUNCATE)` shrinks a WAL a large prune or VACUUM grew.
     pub async fn run_maintenance(&self) -> Result<(), DbError> {
         self.conn
             .call(|conn| {
@@ -1439,8 +1243,7 @@ impl Database {
         Ok(id)
     }
 
-    /// Fetch one list's URL by id, without materialising every column of every
-    /// row the way `get_filter_lists` does for callers that need a single field.
+    /// One list's URL by id, without loading every list.
     pub async fn filter_list_url(&self, id: i64) -> Result<Option<String>, DbError> {
         let url = self
             .reader()
@@ -1797,12 +1600,9 @@ impl Database {
         Ok(n > 0)
     }
 
-    /// Resolve a presented key hash to its owner. Rejects expired keys and
-    /// refreshes `last_used_at` at most once per 60s to avoid a write per call.
-    ///
-    /// The lookup runs on a reader connection so authenticated reads never
-    /// contend with the single writer; the writer is only taken when the
-    /// throttled `last_used_at` update actually needs to fire.
+    /// Resolve a presented key hash to its owner, rejecting expired keys.
+    /// Looks up on a reader; the writer is taken only for the `last_used_at`
+    /// refresh, throttled to once per 60s.
     pub async fn validate_api_key(
         &self,
         token_hash: &str,
@@ -1877,11 +1677,9 @@ impl Database {
         Ok(id)
     }
 
-    /// Create an operator with no password, as provisioned from a trusted
-    /// forward-auth header. Stores
-    /// [`NO_PASSWORD_SENTINEL`](crate::admin::auth::NO_PASSWORD_SENTINEL) in
-    /// place of a real hash, which makes password login impossible for this
-    /// account since no password can ever verify against it.
+    /// Create a passwordless operator provisioned from a trusted forward-auth
+    /// header; its hash is
+    /// [`NO_PASSWORD_SENTINEL`](crate::admin::auth::NO_PASSWORD_SENTINEL).
     pub async fn create_user_no_password(
         &self,
         username: &str,
@@ -1989,10 +1787,8 @@ impl Database {
         let outcome = self
             .conn
             .call(move |conn| {
-                // Guard and delete in one writer closure so the count and the
-                // delete cannot interleave with a concurrent deletion — that
-                // race could otherwise remove the last two operators at once and
-                // lock everyone out of the instance.
+                // Count and delete in one writer closure, so two concurrent
+                // deletions cannot remove the last two operators.
                 let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
                 if count <= 1 {
                     return Ok(DeleteUserOutcome::LastOperator);
@@ -2070,10 +1866,8 @@ impl Database {
         let token_hash = self
             .conn
             .call(move |conn| {
-                // Single atomic statement: DELETE ... RETURNING removes the row and
-                // yields its token hash in one step, so there is no
-                // SELECT-then-DELETE window where a concurrent revoke of the same
-                // id could double-fire.
+                // DELETE ... RETURNING: no SELECT-then-DELETE window for a
+                // concurrent revoke of the same id to double-fire.
                 let hash: Option<String> = conn
                     .query_row(
                         "DELETE FROM sessions WHERE id = ?1 RETURNING token_hash",
@@ -2096,9 +1890,8 @@ impl Database {
         Ok(n)
     }
 
-    /// Delete every session except the one identified by `keep_token_hash`
-    /// (log out other devices while keeping the caller signed in). Returns the
-    /// number of rows removed.
+    /// Delete every session except `keep_token_hash` (log out other devices).
+    /// Returns the number of rows removed.
     pub async fn delete_sessions_except(&self, keep_token_hash: &str) -> Result<usize, DbError> {
         let keep_token_hash = keep_token_hash.to_string();
         let n = self
@@ -2113,10 +1906,8 @@ impl Database {
         Ok(n)
     }
 
-    /// Delete every session belonging to `user_id` except the one identified by
-    /// `keep_token_hash`. Passing `None` revokes all of that user's sessions.
-    /// Other operators' sessions are never touched. Returns the number of rows
-    /// deleted.
+    /// Delete `user_id`'s sessions except `keep_token_hash` (`None` deletes all
+    /// of them); other operators are untouched. Returns rows deleted.
     pub async fn delete_user_sessions_except(
         &self,
         user_id: i64,
@@ -2170,18 +1961,13 @@ impl Database {
 
     /// Predicate shared by `purge_expired_sessions` and `load_sessions`.
     ///
-    /// Deliberately `<=`, not `<`: `validate_session` and `prune_expired` in
-    /// `src/admin/auth.rs` expire a session with `>=` (`now - created_at >=
-    /// SESSION_MAX_AGE_SECS`, likewise for `last_seen`), so at the exact
-    /// boundary this must agree by deleting too, not by leaving the row for
-    /// the in-memory side to reject on next access.
+    /// `<=`, not `<`, to agree at the exact boundary with the `>=` expiry in
+    /// `validate_session` / `prune_expired` (`src/admin/auth.rs`).
     const PURGE_EXPIRED_SESSIONS_SQL: &str =
         "DELETE FROM sessions WHERE created_at <= ?1 OR last_seen <= ?2";
 
-    /// Delete session rows that have hit either the absolute or the idle timeout.
-    /// Returns the number of rows removed. Shared by startup restore
-    /// (`load_sessions`) and the periodic sweep so both use identical rules —
-    /// anything this deletes is already dead to `validate_session`.
+    /// Delete session rows past either timeout; returns rows removed. Shared by
+    /// startup restore (`load_sessions`) and the periodic sweep.
     pub async fn purge_expired_sessions(
         &self,
         max_age_secs: i64,
@@ -2279,8 +2065,7 @@ impl Database {
     }
 
     /// Returns the latest log timestamp in milliseconds, or None if no logs.
-    /// Paired with [`Database::earliest_log_timestamp`] it gives the actual span
-    /// of retained data ("Log Coverage").
+    /// With [`Database::earliest_log_timestamp`], the retained span.
     pub async fn latest_log_timestamp(&self) -> Result<Option<i64>, DbError> {
         let result = self
             .reader()
@@ -2296,11 +2081,7 @@ impl Database {
         Ok(result)
     }
 
-    /// Count queries logged since `since` (epoch seconds; converted to ms
-    /// internally to match stored timestamps).
-    ///
-    /// Counts only. The blocked total was selected alongside it and bound to
-    /// `_` by the sole caller, so `SQLite` summed a column nothing read.
+    /// Count queries logged since `since` (epoch seconds).
     pub async fn count_queries_since(&self, since: i64) -> Result<i64, DbError> {
         let since_ms = since * 1000;
         let result = self
@@ -2318,16 +2099,11 @@ impl Database {
     /// The dashboard summary's figures for three nested windows, folded out of
     /// `query_stats_quarter`.
     ///
-    /// Each window reads its whole quarters from the rollup and, from the table,
-    /// only the part of a quarter it starts inside — see `STATS_ROLLUP_SCHEMA`.
-    /// Answered from the table this was one scan of 30 days of
-    /// `idx_query_logs_ts_metrics` on every dashboard tick: 9 480 pages on a
-    /// 1.48 M-row database, because under the default retention those 30 days
-    /// are the whole table. The three windows are told apart by which arm a row
-    /// came from — a table row belongs to the one window whose partial quarter
-    /// it fills, and the wider windows count that quarter through the rollup.
+    /// Whole quarters come from the rollup, the partial first quarter from the
+    /// table (see `first_whole_unit`). A table row belongs to the one window
+    /// whose partial quarter it fills, told apart by the arm it came from.
     ///
-    /// All `since_*` values are in epoch seconds. Caller MUST pass the widest
+    /// All `since_*` values are epoch seconds. Caller MUST pass the widest
     /// window as `since_30d`.
     pub async fn summary_multi_since(
         &self,
@@ -2424,16 +2200,9 @@ impl Database {
     /// The busiest domains in the window and how many distinct ones there were,
     /// folded out of `query_stats_domain_hour`.
     ///
-    /// Whole hours come from the rollup and the part of an hour the window
-    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table
-    /// alone this read `idx_query_logs_domain_ts`, which a timestamp range
-    /// cannot restrict because the domain comes first: 6 192 pages for the
-    /// week of domain suggestions on a 1.48 M-row database. The CTE is
-    /// materialized once and read twice, so the count and the list share one
-    /// grouping.
-    ///
-    /// `unique` is 0 when the window is empty, which is also when `top` is: the
-    /// count rides on the rows, so there is nothing to report either way.
+    /// Whole hours from the rollup, the partial first hour from the table (see
+    /// `first_whole_unit`). The CTE is materialized once so the count and the
+    /// list share one grouping; `unique` is 0 exactly when `top` is empty.
     pub async fn domain_stats_since(&self, since: i64, limit: i64) -> Result<DomainStats, DbError> {
         let since_ms = since * 1000;
         let hour = first_whole_unit(since_ms, ROLLUP_HOUR_MS);
@@ -2486,17 +2255,10 @@ impl Database {
     /// clients, folded out of `query_stats_domain_hour` and
     /// `query_stats_client_hour`.
     ///
-    /// The Statistics page and every dashboard tick want both lists. Whole
-    /// hours come from the rollups and the part of an hour the window starts
-    /// inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table alone
-    /// this was a scan of `idx_query_logs_ts_domain_client` as long as the
-    /// window: 22 394 pages for the Statistics page's 30 days on a 1.48 M-row
-    /// database. Both lists are one statement so they read one snapshot; the
-    /// first column says which list a row belongs to.
-    ///
-    /// Ties in either list break by name, the same way
-    /// [`Self::domain_stats_since`] breaks them, so the two spellings of top
-    /// domains agree row for row.
+    /// Whole hours from the rollups, the partial first hour from the table (see
+    /// `first_whole_unit`). One statement, so both lists read one snapshot; the
+    /// first column says which list a row belongs to. Ties break by name, as in
+    /// [`Self::domain_stats_since`], so the two agree row for row.
     pub async fn traffic_lists_since(
         &self,
         since: i64,
@@ -2508,8 +2270,7 @@ impl Database {
         let lists = self
             .reader()
             .call(move |conn| {
-                // The rollup stores plain DNS's missing token as '', which a
-                // real token never is, so `NULLIF` restores the `NULL`.
+                // The rollup stores a missing token as ''; `NULLIF` restores `NULL`.
                 let mut stmt = conn.prepare_cached(
                     "SELECT 0, domain, NULL, SUM(n) FROM (
                         SELECT domain, count AS n FROM query_stats_domain_hour WHERE hour >= ?2
@@ -2576,10 +2337,9 @@ impl Database {
     /// The busiest upstreams in the window with their mean response time,
     /// folded out of `query_stats_upstream_hour`.
     ///
-    /// Whole hours come from the rollup and the part of an hour the window
-    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. The mean is the
-    /// summed response time over the count, which is exactly what `AVG` over the
-    /// same integer rows returns. Ties break by name, as the other lists do.
+    /// Whole hours from the rollup, the partial first hour from the table (see
+    /// `first_whole_unit`). Sum over count equals `AVG` exactly. Ties break by
+    /// name, as the other lists do.
     pub async fn top_upstreams_since(
         &self,
         since: i64,
@@ -2616,13 +2376,10 @@ impl Database {
         Ok(rows)
     }
 
-    /// Aggregate query counts into `bucket_secs`-wide time buckets, aligned to
-    /// the viewer's local calendar by shifting the epoch by `tz_offset_secs`
-    /// (their east-positive UTC offset) before truncating, then shifting back.
-    /// The returned `timestamp` is each bucket's start in unix seconds, which a
-    /// browser in the same zone renders as the local boundary. A single offset
-    /// approximates DST (a bucket spanning a transition can be off by the DST
-    /// delta); pass 0 for plain UTC-aligned buckets.
+    /// Query counts in `bucket_secs`-wide buckets aligned to the viewer's local
+    /// calendar via `tz_offset_secs` (east-positive; 0 for UTC). `timestamp` is
+    /// each bucket's start in Unix seconds. A single offset approximates DST: a
+    /// bucket spanning a transition can be off by the DST delta.
     pub async fn timeline_multi_since(
         &self,
         since: i64, // unix seconds
@@ -2638,17 +2395,8 @@ impl Database {
     /// The outcome breakdown, the query-type breakdown and the latency
     /// histogram, in one read of `query_stats_metrics_hour`.
     ///
-    /// The three are foldings of the same window of the same grain. When they
-    /// were read off `idx_query_logs_ts_metrics`, asking one statement each
-    /// read that index end to end three times — and the read pool round-robins them onto four connections with
-    /// 2 MiB of page cache each, so nothing is warm for the next one. The
-    /// grain below is fine enough to derive all three and costs one scan:
-    /// 2 157 pages instead of 6 471 on a 370 k-row database.
-    ///
-    /// The window carries no time bucket because the page renders no timeline
-    /// — that chart is the client's, and [`Self::timeline_multi_since`] is its
-    /// own scan. Bucketing here only multiplied the rows the folds read: at
-    /// the 7-day range's hourly grain, 68 846 of them against 4 658.
+    /// All three fold the same grain, so one scan serves them. The grain has no
+    /// time bucket, which would only multiply the rows the folds read.
     pub async fn window_metrics_since(&self, since: i64) -> Result<WindowMetrics, DbError> {
         let rows = self.metrics_window_since(since).await?;
         Ok(WindowMetrics {
@@ -2661,24 +2409,17 @@ impl Database {
     /// The Statistics page's window readings and its charts' series, folded out
     /// of `query_stats_quarter` and `query_stats_metrics_hour`.
     ///
-    /// Whole units come from the rollups and the part of a unit each window
-    /// starts inside from the table — see `STATS_ROLLUP_SCHEMA`. From the table
-    /// alone this was a scan of `idx_query_logs_ts_metrics` from the earlier of
-    /// the two windows: 9 476 pages for the 30-day range on a 1.48 M-row
-    /// database, because under the default retention that is the whole table.
-    /// The charts come out of the same statement as a [`QuarterSeries`], which
-    /// the browser folds into its own calendar.
+    /// Whole units from the rollups, each window's partial first unit from the
+    /// table (see `first_whole_unit`); the charts come out as a
+    /// [`QuarterSeries`] for the browser to fold.
     ///
-    /// `range_since` bounds the metrics and the timeline, `heatmap_since` the
-    /// heatmap, each exactly. The first column says which arm a row came from:
-    /// the two rollups, then the table rows the range starts inside (the rest of
-    /// its first hour, which also holds the rest of its first quarter), then
-    /// those the heatmap starts inside. When both windows start at the same
-    /// instant a table row arrives once per arm, and each arm counts it only for
-    /// its own window.
+    /// `range_since` bounds the metrics and timeline, `heatmap_since` the
+    /// heatmap, each exactly. The first column names the arm: the two rollups,
+    /// then the range's partial first hour (which contains its partial first
+    /// quarter), then the heatmap's partial first quarter. A table row in both
+    /// windows arrives once per arm, and each arm counts it only for its own.
     ///
-    /// Rows are folded here rather than grouped in SQL, so the metrics grain is
-    /// held once per distinct value rather than sorted into a temp b-tree.
+    /// Folded in Rust rather than grouped in SQL, avoiding a temp b-tree.
     pub async fn stats_scan_since(
         &self,
         range_since: i64,   // unix seconds
@@ -2707,8 +2448,8 @@ impl Database {
                         FROM query_logs INDEXED BY idx_query_logs_timestamp
                         WHERE timestamp >= ?2 AND timestamp < ?5 * 900000",
                 )?;
-                // Keyed by query type first so a row that repeats a type — nearly
-                // all of them — is looked up by `&str` without allocating.
+                // Keyed by query type first so a repeat type is looked up by
+                // `&str` without allocating.
                 // (blocked, cached, has_result, response_ms) → count
                 type Grains = HashMap<(bool, bool, bool, i64), i64>;
                 let mut grains: HashMap<String, Grains> = HashMap::new();
@@ -2747,9 +2488,8 @@ impl Database {
                                 .or_default()[3] += 1;
                             continue;
                         }
-                        // The range's table rows run to the end of its first
-                        // hour, and only the first quarter of that is not in
-                        // `query_stats_quarter`'s arm.
+                        // Arm 2 spans the partial first hour; only its partial
+                        // first quarter is missing from arm 0.
                         2 if at < range_quarter * ROLLUP_QUARTER_MS => {
                             let slot = quarters
                                 .entry(at.div_euclid(ROLLUP_QUARTER_MS))
@@ -2803,12 +2543,10 @@ impl Database {
 
     /// Query counts by time bucket, folded out of `query_stats_quarter`.
     ///
-    /// A bucket and an offset that are both whole numbers of quarters put every
-    /// quarter wholly inside one bucket, so the quarter's rows can be counted
-    /// together; the table supplies the quarter the window starts inside — see
-    /// `STATS_ROLLUP_SCHEMA`. The API rounds `tz_offset` to a quarter hour for
-    /// this reason. Anything finer — a bucket under a quarter, which no range
-    /// asks for — counts the table directly.
+    /// When bucket and offset are whole quarters, each quarter lies inside one
+    /// bucket (the API rounds `tz_offset` to a quarter hour for this); the
+    /// partial first quarter comes from the table (see `first_whole_unit`).
+    /// Anything finer counts the table directly.
     async fn metrics_by_bucket_since(
         &self,
         since: i64, // unix seconds
@@ -2863,11 +2601,8 @@ impl Database {
         Ok(result)
     }
 
-    /// Query counts by outcome class, type and response time — the grain the
-    /// outcome breakdown, the query-type breakdown and the latency histogram
-    /// all fold out of — from `query_stats_metrics_hour`, and from the table
-    /// for the part of an hour the window starts inside (see
-    /// `STATS_ROLLUP_SCHEMA`).
+    /// Query counts by outcome class, type and response time, from
+    /// `query_stats_metrics_hour` plus the table for the partial first hour.
     async fn metrics_window_since(
         &self,
         since: i64, // unix seconds
@@ -2905,18 +2640,13 @@ impl Database {
         Ok(rows)
     }
 
-    /// Bucket queries by weekday and hour-of-day in the viewer's local calendar,
-    /// shifting each timestamp by `tz_offset_secs` (their east-positive UTC
-    /// offset) before extracting the fields. Mirrors the alignment
-    /// [`Self::timeline_multi_since`] applies, and carries the same DST caveat:
-    /// a single offset can misplace rows recorded under the other DST phase.
-    /// Pass 0 for plain UTC buckets.
+    /// Query counts by weekday and hour in the viewer's local calendar, via
+    /// `tz_offset_secs` (east-positive; 0 for UTC), with the same DST caveat as
+    /// [`Self::timeline_multi_since`].
     ///
-    /// An offset that is a whole number of quarters — every zone in use, and
-    /// every offset the API passes — puts each quarter wholly inside one local
-    /// hour, so this folds `query_stats_quarter` and reads the table only for
-    /// the quarter the window starts inside (see `STATS_ROLLUP_SCHEMA`). Any
-    /// other offset counts the table directly.
+    /// A whole-quarter offset (every zone in use, every offset the API passes)
+    /// folds `query_stats_quarter` plus the table for the partial first
+    /// quarter; any other offset counts the table directly.
     pub async fn hourly_heatmap_since(
         &self,
         since: i64, // unix seconds
@@ -2927,18 +2657,10 @@ impl Database {
         let result = self
             .reader()
             .call(move |conn| {
-                // Weekday and hour by integer arithmetic rather than
-                // `strftime`, which would format two strings per row — ~894 k
-                // calls for a 30-day window on a busy resolver, and the single
-                // most expensive thing the Statistics page did (155 ms, versus
-                // 61 ms for this form on a 447 k-row database).
-                //
-                // The `+ 4` is because Unix day 0 (1970-01-01) was a Thursday
-                // and `strftime('%w')` counts from Sunday = 0. Truncating
-                // division is only equal to flooring for non-negative inputs,
-                // which is what the shifted seconds always are here:
-                // timestamps come from the system clock and the offset is at
-                // most ±14 h.
+                // Integer arithmetic rather than `strftime`, which formats two
+                // strings per row. `+ 4`: 1970-01-01 was a Thursday and
+                // `strftime('%w')` counts from Sunday = 0. Truncating division
+                // equals flooring here since shifted seconds are non-negative.
                 let cell = |row: &rusqlite::Row<'_>| {
                     Ok(HeatmapCell {
                         weekday: row.get(0)?,
@@ -2960,9 +2682,8 @@ impl Database {
                     .query_map(params![since_ms, tz_offset_secs, quarter], cell)?
                     .collect::<Result<Vec<_>, _>>()?
                 } else {
-                    // `INDEXED BY` because this reads nothing but `timestamp`,
-                    // and left to itself the planner takes a wider index that
-                    // also covers it.
+                    // Reads only `timestamp`; otherwise the planner picks a
+                    // wider index.
                     conn.prepare_cached(
                         "SELECT ((timestamp / 1000 + ?2) / 86400 + 4) % 7 AS wday, \
                                 (timestamp / 1000 + ?2) % 86400 / 3600 AS hr, \
@@ -2998,27 +2719,20 @@ impl Database {
         Ok(self.domain_stats_since(since, 1).await?.unique)
     }
 
-    /// Percentiles over `response_ms`, derived in Rust from the histogram
-    /// [`Self::metrics_window_since`] returns.
-    ///
-    /// The first implementation ran a window function
-    /// (`ROW_NUMBER() OVER (ORDER BY response_ms)`), which forced `SQLite` to
-    /// sort every matching row. A histogram is exact here because `response_ms`
-    /// is integer milliseconds, and it costs one aggregate over the range.
+    /// Percentiles over `response_ms`, derived from the histogram
+    /// [`Self::metrics_window_since`] returns — exact, since `response_ms` is
+    /// integer milliseconds, and no sort of every row.
     pub async fn latency_summary_since(&self, since: i64) -> Result<LatencySummary, DbError> {
         let rows = self.metrics_window_since(since).await?;
         Ok(latency_from_window(&rows))
     }
 
-    /// On-disk storage breakdown for the Database Health card. Both figures come
-    /// from built-in PRAGMAs (no filesystem stat), so they work uniformly for
-    /// file-backed and in-memory databases.
+    /// Storage breakdown for the Database Health card, from PRAGMAs (no
+    /// filesystem stat, so in-memory databases work too).
     ///
-    /// - `main_bytes`: the main database file (`page_count * page_size`).
-    /// - `reclaimable_bytes`: free pages `SQLite` holds but is not using
-    ///   (`freelist_count * page_size`); a `VACUUM` would return these to the
-    ///   OS. This mirrors the freelist ratio that gates
-    ///   [`Database::run_maintenance`].
+    /// - `main_bytes`: `page_count * page_size`.
+    /// - `reclaimable_bytes`: `freelist_count * page_size`, what a `VACUUM`
+    ///   would return (see [`Database::run_maintenance`]).
     pub async fn db_storage_stats(&self) -> Result<StorageStats, DbError> {
         let stats = self
             .reader()
@@ -3036,19 +2750,10 @@ impl Database {
         Ok(stats)
     }
 
-    /// How many rows `query_logs` holds, read from the counter the write paths
-    /// maintain rather than counted.
-    ///
-    /// `SELECT COUNT(*)` has no shortcut in `SQLite` — it walks the smallest
-    /// index end to end, 1 386 pages on a 370 k-row database — and the Database
-    /// Health card asks for it on every Statistics page load, for a number it
-    /// prints and two of its estimates divide by. The counter is one row of
-    /// `settings`, written inside the same transaction as every insert, prune
-    /// and clear, so it cannot report a total the table does not hold.
-    /// [`Self::count_logs`] reads the same counter when no filter is applied.
-    ///
-    /// A database with no counter row counts, which is what the migration
-    /// seeded it from.
+    /// How many rows `query_logs` holds, from the maintained counter rather
+    /// than `COUNT(*)` (which walks a whole index). The counter moves inside the
+    /// transaction of every insert, prune and clear; [`Self::count_logs`] reads
+    /// it too when unfiltered. With no counter row, it counts.
     pub async fn total_log_count(&self) -> Result<i64, DbError> {
         let result = self.reader().call(|conn| read_log_count(conn)).await?;
         Ok(result)
@@ -3056,9 +2761,8 @@ impl Database {
 
     /// Bucket queries into a total/blocked timeline on UTC-epoch boundaries.
     ///
-    /// Takes and returns Unix **seconds**, matching
-    /// [`Self::timeline_multi_since`]; milliseconds exist only inside the
-    /// query, because that is the unit the `query_logs.timestamp` column uses.
+    /// Takes and returns Unix **seconds**; milliseconds exist only inside the
+    /// query.
     pub async fn timeline_since(
         &self,
         since: i64, // unix seconds
@@ -3070,11 +2774,9 @@ impl Database {
         let rows = self
             .reader()
             .call(move |conn| {
-                // A bucket that is a whole number of quarters is a sum of
-                // `query_stats_quarter` rows, plus the table for the quarter the
-                // window starts inside. A finer bucket only happens while the
-                // log is younger than a few hours, when the table is small
-                // enough to count directly.
+                // Whole-quarter buckets fold the rollup. Finer buckets only
+                // occur while the log is a few hours old, so counting the table
+                // directly is cheap.
                 let point = |row: &rusqlite::Row<'_>| {
                     Ok(TimelinePoint {
                         timestamp: row.get::<_, i64>(0)? / 1000, // return seconds
@@ -3112,16 +2814,6 @@ impl Database {
     }
 }
 
-/// Derive a `LatencySummary` from a sorted-ascending response-time histogram.
-///
-/// The histogram is the list of `(response_ms, count)` pairs returned by the
-/// `GROUP BY response_ms` query: each entry says "there were `count` rows with
-/// this `response_ms` value." Because `response_ms` is integer milliseconds, the
-/// histogram is loss-free (no bucket rounding), so the derived percentiles are
-/// bit-identical to those produced by the old `ROW_NUMBER()` SQL.
-///
-/// Percentile semantics match the SQL version: `p_k` is the value at rank
-/// `max(1, floor(total * k))` when rows are sorted ascending by `response_ms`.
 /// Sum each bucket's classifications back into one point per bucket. Input is
 /// ordered by bucket, so the output is too.
 fn timeline_from_buckets(buckets: &[MetricsBucket]) -> Vec<TimelineMultiPoint> {
@@ -3150,8 +2842,8 @@ fn timeline_from_buckets(buckets: &[MetricsBucket]) -> Vec<TimelineMultiPoint> {
     out
 }
 
-/// Lay sparse quarter counts out densely, so the page ships four arrays of
-/// integers rather than an object per quarter.
+/// Lay sparse quarter counts out densely: four integer arrays rather than an
+/// object per quarter.
 fn series_from_quarters(quarters: &BTreeMap<i64, [i64; 4]>) -> QuarterSeries {
     let (Some((&first, _)), Some((&last, _))) =
         (quarters.first_key_value(), quarters.last_key_value())
@@ -3176,9 +2868,8 @@ fn series_from_quarters(quarters: &BTreeMap<i64, [i64; 4]>) -> QuarterSeries {
     series
 }
 
-/// Classify each grain and total across the whole window. The precedence —
-/// blocked, then cached, then whether an answer came back — is the one the
-/// query log's Verdict column shows, so a row cannot be counted twice.
+/// Total each outcome across the window. Precedence (blocked, cached, answered)
+/// matches the query log's Verdict column, so no row counts twice.
 fn outcomes_from_window(rows: &[WindowMetricsRow]) -> Vec<(String, i64)> {
     let (mut blocked, mut cached, mut resolved, mut empty) = (0i64, 0i64, 0i64, 0i64);
     for b in rows {
@@ -3207,8 +2898,7 @@ fn outcomes_from_window(rows: &[WindowMetricsRow]) -> Vec<(String, i64)> {
     rows
 }
 
-/// Counts per query type, busiest first — the same order the single-purpose
-/// `GROUP BY query_type ORDER BY cnt DESC` returned.
+/// Counts per query type, busiest first.
 fn query_types_from_window(rows: &[WindowMetricsRow]) -> Vec<(String, i64)> {
     let mut totals: HashMap<&str, i64> = HashMap::new();
     for row in rows {
@@ -3233,6 +2923,8 @@ fn latency_from_window(rows: &[WindowMetricsRow]) -> LatencySummary {
     latency_summary_from_histogram(&hist)
 }
 
+/// Derive a `LatencySummary` from an ascending `(response_ms, count)`
+/// histogram. `p_k` is the value at rank `max(1, floor(total * k))`.
 fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     let total: i64 = hist.iter().map(|(_, c)| *c).sum();
     if total == 0 {
@@ -3243,11 +2935,10 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
             p99_ms: 0,
         };
     }
-    // Still needed as the pick() fallback, even though it is no longer reported.
+    // pick()'s fallback.
     let max_ms = hist.last().map_or(0, |(ms, _)| *ms);
 
-    // Mirror SQL's `MAX(1, CAST(total * p AS INTEGER))` — CAST truncates toward
-    // zero, so this is `max(1, floor(total * p))` for non-negative inputs.
+    // Truncation equals floor for non-negative inputs.
     let rank_for = |p: f64| ((total as f64 * p) as i64).max(1);
     let pick = |target: i64| -> i64 {
         let mut cum = 0i64;
@@ -3268,17 +2959,15 @@ fn latency_summary_from_histogram(hist: &[(i64, i64)]) -> LatencySummary {
     }
 }
 
-/// Move the maintained `query_logs` row count by `delta`. Takes the connection
-/// the write is on so it lands in that write's transaction: a counter updated
-/// beside its table rather than inside it is a counter that can disagree.
+/// Move the maintained `query_logs` row count by `delta`, on the write's own
+/// connection so it lands in that transaction.
 fn bump_log_count(conn: &rusqlite::Connection, delta: i64) -> rusqlite::Result<()> {
     conn.prepare_cached("UPDATE settings SET value = CAST(value AS INTEGER) + ?1 WHERE key = ?2")?
         .execute(params![delta, QUERY_LOG_COUNT_KEY])?;
     Ok(())
 }
 
-/// Set the maintained `query_logs` row count outright, for the write that
-/// leaves a known number of rows behind rather than a known change.
+/// Set the maintained `query_logs` row count outright (e.g. Clear All).
 fn set_log_count(conn: &rusqlite::Connection, count: i64) -> rusqlite::Result<()> {
     conn.prepare_cached("UPDATE settings SET value = ?1 WHERE key = ?2")?
         .execute(params![count, QUERY_LOG_COUNT_KEY])?;
@@ -3289,12 +2978,9 @@ fn set_log_count(conn: &rusqlite::Connection, count: i64) -> rusqlite::Result<()
 /// cutoff_ms` is about to remove. Must run before that delete, in its
 /// transaction.
 ///
-/// Whole units before the cutoff are dropped. The unit the cutoff falls inside
-/// loses only the rows before it, which are recounted from the table and
-/// subtracted — so the prune keeps its exact cutoff and the rollups still agree
-/// with the table afterwards, instead of either rounding the retention to the
-/// hour or keeping counts for rows that are gone. That recount reads at most one
-/// quarter's and one hour's worth of rows.
+/// Whole units before the cutoff are dropped; the unit containing it has the
+/// earlier rows recounted from the table and subtracted, so the prune keeps its
+/// exact cutoff and the rollups still equal the table.
 fn unwind_stats_rollups(conn: &rusqlite::Connection, cutoff_ms: i64) -> rusqlite::Result<()> {
     let quarter_start = cutoff_ms.div_euclid(ROLLUP_QUARTER_MS) * ROLLUP_QUARTER_MS;
     let hour_start = cutoff_ms.div_euclid(ROLLUP_HOUR_MS) * ROLLUP_HOUR_MS;
@@ -3368,14 +3054,9 @@ fn read_log_count(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
 
 /// Add a column to `table` if it doesn't already exist.
 ///
-/// `SQLite` doesn't support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
-/// probe the table's columns first. The `table` argument is interpolated into
-/// the SQL — only call this from migration code with trusted table names.
-///
-/// `pragma_table_xinfo` rather than `pragma_table_info`, because the latter
-/// omits generated columns: a fresh database, whose `CREATE TABLE` already
-/// declared `query_logs.has_result`, would be told the column was missing and
-/// fail the migration on `duplicate column name`.
+/// `table` is interpolated into the SQL: trusted migration names only.
+/// `pragma_table_xinfo`, not `_info`, because the latter omits generated
+/// columns such as `query_logs.has_result`.
 fn add_column_if_missing(
     conn: &rusqlite::Connection,
     table: &str,
@@ -3400,17 +3081,12 @@ fn add_column_if_missing(
 
 /// Append the shared log-filter clauses to `sql` and return matching parameters.
 ///
-/// Both `query_logs` and `count_logs` share the same four optional filters
-/// (search, blocked, `doh_token`, `query_type`); centralising the builder keeps
-/// the two code paths from drifting.
+/// Shared by `query_logs` and `count_logs` so their filters cannot drift.
 ///
-/// Search semantics: a plain term (no wildcard metachars) does an index-backed
-/// prefix match via `GLOB 'term*'`. A term containing `%`, `_`, `*`, or `?`
-/// is treated as a user-supplied pattern: glob-style `*`/`?` are translated
-/// to LIKE's `%`/`_`, then matched with `LIKE` directly (no auto-wrap), so
-/// `*foo*` and `%foo%` both mean "contains foo". Domains are stored
-/// lowercase, so the term is lowercased to keep both branches
-/// case-insensitive against the column.
+/// Search: a plain term is an index-backed prefix match (`GLOB 'term*'`). A
+/// term containing `%`, `_`, `*` or `?` is a pattern: `*`/`?` become `%`/`_`
+/// and it is matched with `LIKE` as-is, so `*foo*` means "contains foo".
+/// Domains are stored lowercase, so the term is lowercased.
 fn append_log_filters(
     sql: &mut String,
     search: Option<&str>,
@@ -3464,10 +3140,8 @@ mod tests {
         let path = dir.path().join("v7.db");
         let path_str = path.to_str().unwrap().to_string();
 
-        // Simulate a v7 database with a user and unrelated data. `sessions` is
-        // part of the fixture because a real v7 database has one — it is created
-        // by the v6 step, which does not re-run for a database already stamped
-        // v7 — and the v9 step below rewrites that table.
+        // A v7 database with a user and unrelated data. It needs `sessions`
+        // (created by the v6 step, which will not re-run) for the v9 step.
         {
             let conn = rusqlite::Connection::open(&path_str).unwrap();
             conn.execute_batch(
@@ -3514,9 +3188,7 @@ mod tests {
 
         let db = Database::open(&path_str).await.unwrap();
 
-        // The plaintext row is gone rather than carried forward: keeping it
-        // would leave a usable credential sitting in the file, which is the
-        // whole point of the migration.
+        // The plaintext credential is gone, not carried forward.
         assert!(db.list_sessions().await.unwrap().is_empty());
 
         // And the renamed column is what the queries now use end to end.
@@ -3742,12 +3414,9 @@ mod tests {
         );
     }
 
-    /// The `query_logs` indexes a database ends up with, whichever version it
-    /// opened at. Versions 10 to 15 each added or reshaped an index that
-    /// version 17 drops, so a legacy database carries indexes a fresh one never
-    /// keeps, and every one of them has to be gone once it opens — and the
-    /// statements that used to name them with `INDEXED BY` still have to
-    /// prepare, which is only proved by running them.
+    /// Every starting version opens to the same `query_logs` indexes: those
+    /// versions 10–15 created are gone after version 17, and every statement
+    /// that names an index with `INDEXED BY` still prepares (proved by running).
     #[tokio::test]
     async fn every_database_opens_to_the_same_query_log_indexes() {
         const LEGACY_TABLE: &str = "CREATE TABLE query_logs (
@@ -3796,7 +3465,7 @@ mod tests {
             drop(conn);
             databases.push((label, path));
         }
-        // Version 16 as it shipped: every index the steps up to it created.
+        // Reshaped into version 16 as it shipped, with every index it had.
         let v16 = dir.path().join("v16.db");
         {
             let db = Database::open(v16.to_str().unwrap()).await.unwrap();
@@ -3883,11 +3552,8 @@ mod tests {
         }
     }
 
-    /// The counter has to arrive holding what the table already holds. A
-    /// database that upgrades with a million rows in it and a counter seeded at
-    /// zero would report zero for as long as it kept those rows, and the
-    /// fallback in `total_log_count` would never fire to correct it — the row
-    /// exists, it is just wrong.
+    /// The counter must be seeded from the table: a counter row seeded at zero
+    /// would never trigger `read_log_count`'s fallback.
     #[tokio::test]
     async fn migration_v13_seeds_the_log_count_from_the_table() {
         let dir = tempfile::tempdir().unwrap();
@@ -4020,8 +3686,8 @@ mod tests {
             .collect();
         db.insert_query_logs(&entries).await.unwrap();
 
-        // Nothing is old enough to prune; maintenance should still succeed
-        // (PRAGMA optimize + WAL checkpoint; VACUUM stays below threshold).
+        // Nothing to prune; maintenance still succeeds (VACUUM stays below
+        // threshold).
         db.prune_logs_before(0).await.unwrap();
         db.run_maintenance().await.unwrap();
 
@@ -4120,11 +3786,9 @@ mod tests {
         }
     }
 
-    /// The rollups are only as good as their agreement with `query_logs`: a
-    /// reader that folds them answers for the table, so every write that changes
-    /// the table has to change them identically — including a prune whose
-    /// cutoff falls inside a quarter and an hour, which leaves those units half
-    /// deleted, and rows written straight into the table as the e2e fixtures do.
+    /// Every write to `query_logs` must change the rollups identically,
+    /// including a prune cutting through a quarter and an hour, and rows
+    /// written straight into the table as the e2e fixtures do.
     #[tokio::test]
     async fn rollups_follow_every_write_that_changes_query_logs() {
         const HOUR: i64 = 3_600_000;
@@ -4193,10 +3857,8 @@ mod tests {
         assert_rollups_match(&path_str, "a batch after clearing");
     }
 
-    /// A database from before version 16 has to come out of `open` with its
-    /// rollups already holding what its table holds, and with the trigger that
-    /// keeps them there — a reader folding an empty rollup would report no
-    /// traffic for the whole retention window.
+    /// A pre-v16 database opens with its rollups backfilled and the trigger in
+    /// place; empty rollups would report no traffic for the whole retention.
     #[tokio::test]
     async fn migration_v16_backfills_the_rollups() {
         const HOUR: i64 = 3_600_000;

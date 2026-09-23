@@ -26,8 +26,7 @@ fn make_query_bytes(domain: &str, record_type: RecordType) -> Vec<u8> {
     msg.to_vec().unwrap()
 }
 
-/// End-to-end test: a blocked domain flows through the full pipeline and
-/// produces the correct DNS response and a query log entry in the database.
+/// A blocked domain through the full pipeline: DNS response and log row.
 #[tokio::test]
 async fn test_full_query_pipeline_block() {
     let tmp = NamedTempFile::new().unwrap();
@@ -79,8 +78,7 @@ async fn test_full_query_pipeline_block() {
     assert!(log.blocked, "log entry should be marked as blocked");
 }
 
-/// End-to-end test: an allowed domain is forwarded upstream and returns a real
-/// DNS response. Requires network access to upstream resolvers.
+/// An allowed domain is forwarded upstream. Needs network access.
 #[tokio::test]
 async fn test_full_query_pipeline_allow() {
     let tmp = NamedTempFile::new().unwrap();

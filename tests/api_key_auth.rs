@@ -14,10 +14,9 @@ use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
-/// Build the admin router with a seeded operator (`user_id` 1) and return the
-/// router, the backing Database, and the session store. Mirrors `build_app` in
-/// `admin_api_test.rs`. The store is handed back so a test can seed a browser
-/// session, which is now the only way to reach `POST /api/api-keys`.
+/// The admin router with a seeded operator (`user_id` 1), its Database, and the
+/// session store — returned so a test can seed a browser session, the only way
+/// to reach `POST /api/api-keys`.
 async fn build_app() -> (axum::Router, Database, noadd::admin::auth::SessionStore) {
     let dir = tempfile::tempdir().unwrap();
     // Persist the tempdir (no Drop cleanup) so the DB file lives for the test.
@@ -87,8 +86,7 @@ async fn build_app() -> (axum::Router, Database, noadd::admin::auth::SessionStor
     (admin_router(state), db, sessions)
 }
 
-/// Seed a live browser session for operator 1 and return its raw token, for
-/// the endpoints that no longer accept an API key.
+/// Seed a browser session for operator 1 and return its raw token.
 fn seed_session(sessions: &noadd::admin::auth::SessionStore) -> String {
     use noadd::admin::auth::{SessionInfo, generate_token, hash_session_token, store_session};
     let token = generate_token();
@@ -170,9 +168,8 @@ async fn api_key_lifecycle_over_http() {
         .unwrap();
     let auth = format!("Bearer {boot}");
 
-    // Create returns the full token exactly once. Minting a key is a
-    // sensitive action, so it goes through a freshly-authenticated browser
-    // session rather than the bootstrap key — see `key_cannot_mint_a_key`.
+    // Create returns the full token exactly once. Minting needs a browser
+    // session, not a key — see `an_api_key_cannot_mint_another_api_key`.
     let session = seed_session(&sessions);
     let res = app
         .clone()
@@ -232,10 +229,8 @@ async fn api_key_lifecycle_over_http() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
-/// An API key can read and revoke keys, but it cannot mint one. A key holds
-/// no password, so it can never satisfy the re-authentication requirement —
-/// and allowing it would let a short-lived key quietly issue itself a
-/// permanent successor.
+/// An API key can read and revoke keys but not mint one: it holds no password
+/// to re-authenticate with, and could otherwise issue itself a permanent successor.
 #[tokio::test]
 async fn an_api_key_cannot_mint_another_api_key() {
     use serde_json::json;
@@ -263,8 +258,7 @@ async fn an_api_key_cannot_mint_another_api_key() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // A distinct code from `reauth_required`: no password the caller could
-    // type would help here, so a client must not prompt for one.
+    // Not `reauth_required`: no password would help, so a client must not prompt.
     assert_eq!(
         body.get("code").and_then(serde_json::Value::as_str),
         Some("password_required"),

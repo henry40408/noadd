@@ -1,17 +1,16 @@
-//! The Statistics page's cost expressed in pages fetched from the database
-//! file, which is the only unit that transfers from a developer's SSD to the SD
-//! card an appliance runs from.
+//! Admin page costs in pages fetched from the database file — the only unit
+//! that transfers from a developer's SSD to an appliance's SD card.
 //!
-//! `stats_page_miss_bench` reports these numbers against a real database;
-//! these assert the two properties that produce them, so a planner change or a
-//! re-split query cannot quietly give them back.
+//! The `*_page_miss_bench` files report the numbers against a real database;
+//! these assert the properties behind them, so a planner change or a re-split
+//! query cannot quietly give them back.
 
 use noadd::admin::stats::{self, StatsRange};
 use noadd::db::{Database, QueryLogEntry};
 use tempfile::tempdir;
 
-/// Fat enough that the table dwarfs the indexes over it, which is what makes a
-/// stray rowid lookup per row visible in the page count.
+/// Fat enough that the table dwarfs its indexes, so a stray rowid lookup per
+/// row shows in the page count.
 const RESULT_PADDING: usize = 240;
 const ROWS: i64 = 20_000;
 
@@ -29,8 +28,7 @@ async fn seeded_db() -> Database {
             client_ip: format!("10.0.0.{}", i % 20),
             blocked: i % 7 == 0,
             cached: i % 5 == 0,
-            // About half forwarded, as on a real resolver: blocked and cached
-            // answers never reach an upstream.
+            // About half forwarded, as on a real resolver.
             upstream: (i % 2 == 0).then(|| format!("tls://1.1.1.{}:853", i % 4)),
             doh_token: None,
             result: if i % 11 == 0 {
@@ -59,9 +57,8 @@ where
     db.read_page_cache_stats().await.unwrap().misses - before.misses
 }
 
-/// Classifying an outcome needs to know whether `result` held an answer. Read
-/// off the table that is a rowid lookup per row and so the whole file;
-/// `query_stats_metrics_hour` carries the answer, so it never has to be.
+/// Classifying an outcome needs whether `result` held an answer; from the table
+/// that is a rowid lookup per row, but `query_stats_metrics_hour` carries it.
 #[tokio::test]
 async fn the_outcome_breakdown_never_reads_the_log_table() {
     let db = seeded_db().await;
@@ -81,9 +78,8 @@ async fn the_outcome_breakdown_never_reads_the_log_table() {
     );
 }
 
-/// The page's readings are foldings of two index scans. Asked one at a time
-/// they re-walk indexes each other has just walked, and the read pool spreads
-/// them over connections with separate caches, so nothing is warm for the next.
+/// Asked one at a time, the page's readings re-walk what each other walked, on
+/// pool connections with separate caches.
 #[tokio::test]
 async fn the_page_reads_less_than_its_readings_do_separately() {
     let db = seeded_db().await;
@@ -109,7 +105,7 @@ async fn the_page_reads_less_than_its_readings_do_separately() {
     );
 }
 
-/// The saving has to be a saving in what is read, not in what is answered.
+/// The saving must be in what is read, not in what is answered.
 #[tokio::test]
 async fn the_shared_scans_answer_what_the_separate_ones_did() {
     let db = seeded_db().await;
@@ -142,10 +138,8 @@ async fn the_shared_scans_answer_what_the_separate_ones_did() {
     assert_eq!(combined.domains.top, top);
 }
 
-/// The outcome breakdown, the query-type breakdown and the latency percentiles
-/// are three foldings of one statement. Asked together they must cost one read
-/// of `query_stats_metrics_hour`, not one each — which is what a page whose
-/// numbers were re-split across statements would pay.
+/// Outcomes, query types and latency percentiles are three foldings of one
+/// statement: together they cost one read of `query_stats_metrics_hour`.
 #[tokio::test]
 async fn the_window_readings_are_one_scan_between_them() {
     let db = seeded_db().await;
@@ -167,9 +161,8 @@ async fn the_window_readings_are_one_scan_between_them() {
     );
 }
 
-/// Twenty thousand queries inside one hour, from fifty domains and twenty
-/// clients: the rollups hold a few hundred rows for what the table holds in
-/// twenty thousand, which is the shape a busy resolver's hour takes.
+/// Twenty thousand queries inside one hour from fifty domains and twenty
+/// clients — a busy resolver's hour, a few hundred rollup rows.
 async fn dense_db() -> Database {
     let dir = tempdir().unwrap();
     let path = dir.keep().join("dense.db");
@@ -196,17 +189,15 @@ async fn dense_db() -> Database {
     db
 }
 
-/// Every reading a dashboard tick makes folds the rollups, and reads the table
-/// only for the part of a unit its window starts inside — none here, because
-/// every window below starts on a unit boundary. Before the rollups each of
-/// these was a scan of an index as long as the window, and the window is the
-/// whole table under the default retention, every ten seconds.
+/// Every dashboard-tick reading folds the rollups, reading the table only for
+/// a partial unit at its window's start (none here: windows start on a unit
+/// boundary). Otherwise each would walk an index the length of the window,
+/// every tick.
 #[tokio::test]
 async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
     let db = dense_db().await;
 
-    // For scale: counting with a search that matches every domain walks an
-    // index over every row, which is what each reading used to cost.
+    // For scale: a search matching every domain walks an index over every row.
     let scan = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
     let readings = [
         (
@@ -245,9 +236,7 @@ async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
 }
 
 /// The Statistics page's scan and the API's timeline, heatmap and window
-/// readings fold the rollups too. Before, the page's scan and each of these was
-/// a walk of an index as long as the window — the whole table under the
-/// default retention.
+/// readings fold the rollups too.
 #[tokio::test]
 async fn the_statistics_readings_fold_rollups_rather_than_the_table() {
     let db = dense_db().await;
@@ -285,16 +274,14 @@ async fn the_statistics_readings_fold_rollups_rather_than_the_table() {
     }
 }
 
-/// The Database Health card's row count is read from one row of `settings`,
-/// not counted. `SELECT COUNT(*)` has no shortcut in SQLite: it walks the
-/// smallest index end to end, for a number the page prints and two of its
-/// estimates divide by.
+/// The Database Health card's row count is read from `settings`, not counted:
+/// `SELECT COUNT(*)` walks the smallest index end to end.
 #[tokio::test]
 async fn the_total_log_count_is_read_rather_than_counted() {
     let db = seeded_db().await;
 
     let read = page_misses(&db, || db.total_log_count()).await;
-    // `*` matches every domain, so this is the same total arrived at by counting.
+    // `*` matches every domain: the same total, counted.
     let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
 
     assert!(
@@ -308,16 +295,14 @@ async fn the_total_log_count_is_read_rather_than_counted() {
     );
 }
 
-/// The query log's pager asks for its total on every load, and with no filter
-/// applied that total is the table's row count — the number the write paths
-/// already maintain. Counting it walks the smallest index end to end, which on
-/// an unfiltered first page is nearly the whole cost of the load.
+/// With no filter, the log pager's total is the maintained row count; counting
+/// it would be nearly the whole cost of an unfiltered first page.
 #[tokio::test]
 async fn the_unfiltered_query_log_count_is_read_rather_than_counted() {
     let db = seeded_db().await;
 
     let unfiltered = page_misses(&db, || db.count_logs(None, None, None, None)).await;
-    // A blank search box is no filter at all, so it must take the same path.
+    // A blank search box is no filter, so it takes the same path.
     let blank = page_misses(&db, || db.count_logs(Some("  "), None, None, None)).await;
     let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
 
@@ -334,9 +319,8 @@ async fn the_unfiltered_query_log_count_is_read_rather_than_counted() {
     }
 }
 
-/// Twenty thousand queries where one in four hundred came from a quiet `DoH`
-/// token and one in four hundred asked for a quiet record type — the filters
-/// an operator reaches for to find the few rows a busy log buries.
+/// Twenty thousand queries, one in four hundred from a quiet `DoH` token and one
+/// in four hundred of a quiet record type.
 async fn quiet_filters_db() -> Database {
     let dir = tempdir().unwrap();
     let path = dir.keep().join("filters.db");
@@ -363,11 +347,9 @@ async fn quiet_filters_db() -> Database {
     db
 }
 
-/// Filtering the query log by a token, a record type or a verdict seeks an
-/// index. With nothing to seek, the newest page of a quiet token walks the
-/// table back until it has fifty rows — here, all of it — counting the matches
-/// walks all of it every time, and a deep page of blocked queries looks up
-/// every row it passes over to learn its verdict.
+/// Filtering the log by token, record type or verdict seeks an index. Without
+/// one, a quiet token's page and count walk the whole table, and a deep page of
+/// blocked queries looks up every row it skips to learn its verdict.
 #[tokio::test]
 async fn the_query_log_filters_seek_their_indexes() {
     let db = quiet_filters_db().await;

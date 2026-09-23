@@ -16,9 +16,7 @@ pub struct QueryLogger {
 }
 
 impl QueryLogger {
-    /// Create a new `QueryLogger` and its corresponding sender.
-    ///
-    /// The channel has a capacity of 10,000 entries.
+    /// Create a `QueryLogger` and its sender (channel capacity 10,000).
     pub fn new(
         db: Database,
         flush_threshold: usize,
@@ -35,8 +33,7 @@ impl QueryLogger {
         (logger, tx)
     }
 
-    /// Attach a broadcast sender so each newly-logged entry is also published
-    /// live (for the admin UI SSE tail). Events fire before the DB batch flush.
+    /// Also publish each entry live, before the DB flush (the admin UI tail).
     pub fn with_event_sender(
         mut self,
         tx: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
@@ -45,18 +42,13 @@ impl QueryLogger {
         self
     }
 
-    /// Run the logger loop. Consumes self. Call in a `tokio::spawn`.
-    ///
-    /// Buffers incoming `QueryContext` entries and flushes to the database when:
-    /// - The buffer reaches `flush_threshold`, or
-    /// - The flush interval timer fires
-    ///
-    /// On channel close (all senders dropped), flushes remaining entries and exits.
+    /// Run the logger loop: flush at `flush_threshold` entries or on the
+    /// interval, and flush the remainder once every sender is dropped.
     pub async fn run(mut self) {
         let mut buffer: Vec<QueryLogEntry> = Vec::new();
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(self.flush_interval_secs));
-        // The first tick completes immediately; consume it so we don't flush an empty buffer.
+        // Skip the immediate first tick.
         interval.tick().await;
 
         loop {
@@ -64,9 +56,7 @@ impl QueryLogger {
                 maybe_ctx = self.rx.recv() => {
                     if let Some(ctx) = maybe_ctx {
                         let entry = query_context_to_entry(ctx);
-                        // Publish a live copy for SSE subscribers *before* the DB flush, so the
-                        // admin UI tail is real-time. Gated on receiver_count so there is zero
-                        // clone/alloc cost when nobody is watching.
+                        // Gated on receiver_count: no clone when nobody is watching.
                         if let Some(events) = &self.events
                             && events.receiver_count() > 0
                         {
@@ -96,9 +86,7 @@ impl QueryLogger {
 
 /// Convert a `QueryContext` to a `QueryLogEntry` for database storage.
 ///
-/// The hot path keeps `client_ip` and `query_type` in their native types
-/// (`IpAddr`, `u16`); stringification is amortised here, once per logger
-/// flush rather than once per query.
+/// Stringifying here keeps it off the query hot path.
 fn query_context_to_entry(ctx: QueryContext) -> QueryLogEntry {
     QueryLogEntry {
         timestamp: ctx.timestamp,

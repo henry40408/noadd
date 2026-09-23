@@ -1,14 +1,11 @@
-//! Throughput measurement for the inflight-coalescing map under
-//! cold-miss stampede. Not an assertion — meant to be run manually
-//! against different implementations of `InflightUpstream::pending` to
-//! compare contention behavior:
+//! Contention of the inflight-coalescing map (`InflightUpstream::pending`)
+//! under a cold-miss stampede, run manually:
 //!
-//!   cargo nextest run --no-capture --release `inflight_contention`
+//!   cargo nextest run --no-capture --release \
+//!     --run-ignored only `inflight_contention`
 //!
-//! Each worker issues N distinct (uncached, unique) queries; the mock
-//! upstream replies immediately so the bench is bounded by handler
-//! work — primarily the inflight map's begin/end pair, the moka cache,
-//! and the logger send.
+//! Each worker issues distinct uncached queries to an instant mock upstream, so
+//! handler work bounds it: the inflight map, the moka cache, the logger send.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -116,8 +113,7 @@ async fn inflight_contention_bench() {
         let started = started.clone();
         let gate = start_gate.clone();
         handles.push(tokio::spawn(async move {
-            // Wait at the gate so all workers begin in lockstep — mimics
-            // a real concurrency burst rather than a staggered ramp-up.
+            // Start in lockstep, like a real burst.
             started.fetch_add(1, Ordering::SeqCst);
             gate.notified().await;
             for q in 0..per_worker {

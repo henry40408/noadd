@@ -1,21 +1,12 @@
-//! Parallel-load wall time of the statistics page's 7 endpoints against a
-//! realistic DB. Manual-only — gated by `#[ignore]`.
+//! Wall time of the seven per-reading statistics functions against a realistic
+//! DB, sequential vs under `tokio::join!` — how well the read pool overlaps
+//! them. Manual-only.
 //!
-//! Wall time answers how well the read pool overlaps these queries on *this*
-//! machine. It does not answer what they cost, because this machine has an
-//! SSD and the appliance has an SD card — `stats_page_miss_bench` counts the
-//! pages, and is the one to believe when the two disagree.
+//! Wall time is this machine's (SSD), not the appliance's (SD card);
+//! `stats_page_miss_bench` counts pages and wins when the two disagree.
 //!
 //!   BENCH_DB=/tmp/noadd-bench.db cargo nextest run --release \
 //!     --no-capture --run-ignored only `stats_parallel_bench`
-//!
-//! Defaults to `/tmp/noadd-bench.db`. Times two scenarios:
-//!   - sequential: 7 stats fns awaited one after the other (sum of latencies)
-//!   - parallel:   7 stats fns under `tokio::join`! (what the admin UI actually does)
-//!
-//! Pre-pool, sequential and parallel should be ~identical (single read worker
-//! serializes both). Post-pool, parallel drops noticeably while sequential
-//! is unchanged.
 
 use std::time::{Duration, Instant};
 
@@ -97,10 +88,9 @@ async fn stats_parallel_bench() {
         "BENCH_DB={db_path} not found — copy production DB to a scratch path before running"
     );
 
-    // `SQLITE_CONFIG_MEMSTATUS` (op 9) is on by default and makes every
-    // sqlite3_malloc/free update global counters under a shared mutex, which
-    // serializes the read pool — see `stats_mmap_bench` for the isolated
-    // measurement. Set BENCH_MEMSTATUS=0 to measure the pool without it.
+    // Disables `SQLITE_CONFIG_MEMSTATUS` (op 9), whose global mutex serializes
+    // the read pool (see `stats_contention_bench`). Redundant now:
+    // `Database::open` disables it too, so the pool never runs with it on here.
     if std::env::var("BENCH_MEMSTATUS").as_deref() == Ok("0") {
         // SAFETY: variadic C call with the documented (int) argument for this
         // op, issued before any connection exists and so before SQLite
@@ -116,15 +106,14 @@ async fn stats_parallel_bench() {
 
     let db = Database::open(&db_path).await.unwrap();
     let now = now_unix();
-    // sanity: ensure stats compile + return non-empty heatmap
+    // Sanity check that the DB answers.
     let cells = stats::compute_heatmap(&db, now, 0).await.unwrap();
     eprintln!(
         "stats_parallel_bench: db={db_path} range={range:?} iters={iters} heatmap_cells={}",
         cells.len()
     );
 
-    // Warmup so OS page cache and SQLite cache are populated for both
-    // scenarios; we're measuring steady-state, not first-load.
+    // Warm the OS and SQLite caches: this measures steady state.
     for _ in 0..3 {
         run_sequential(&db, now, range).await;
         run_parallel(&db, now, range).await;

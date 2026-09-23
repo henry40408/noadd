@@ -13,9 +13,7 @@ opt-level = "s"
 anyhow = "1"
 arc-swap = "1"
 argon2 = "0.6"
-# Compile-time templates for the server-rendered admin pages. `askama_web`
-# supplies the axum `IntoResponse` bridge; its `axum-0.8` feature must track the
-# axum version below.
+# `askama_web`'s `axum-0.8` feature must track the axum version below.
 askama = "0.16"
 askama_web = { version = "0.16", default-features = false, features = ["derive", "axum-0.8"] }
 axum = "0.8"
@@ -54,9 +52,7 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 blake2 = "0.11"
 utoipa = "5"
 utoipa-scalar = { version = "0.3", features = ["axum"] }
-# Offline password-guessability estimation. `default-features = false` drops the
-# `builder` feature and with it `derive_builder`; noadd only calls `zxcvbn()`
-# and reads the score back.
+# No default features: drops `builder` (and `derive_builder`); only `zxcvbn()` is used.
 zxcvbn = { version = "3.1", default-features = false }
 
 [build-dependencies]
@@ -65,14 +61,9 @@ resvg = { version = "0.48", default-features = false }
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"
-# Already a runtime dependency; repeated here so integration tests can install
-# a capturing subscriber and assert on emitted audit events.
+# Integration tests install a capturing subscriber to assert on audit events.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json"] }
-# Self-maintained lint set (originally seeded from Embark Studios' rust-ecosystem
-# list). The bulk of the old itemised pedantic lints are now covered by the
-# `pedantic` group; only the noisy/low-signal ones are opted back out, plus the
-# restriction and nursery lints that have no safe umbrella group.
 [lints.rust]
 unexpected_cfgs = "deny"
 unsafe_code = "deny"

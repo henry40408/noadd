@@ -1,11 +1,8 @@
 //! Single-flight coalescing of concurrent cache-miss queries.
 //!
-//! When N clients simultaneously miss the cache for the same
-//! cache key, we want exactly one upstream query — not N
-//! identical ones. This module tracks which keys have an in-flight upstream
-//! fetch. The first arrival becomes the "fetcher"; subsequent arrivals
-//! subscribe to a `Notify` and re-check the cache after the fetcher stores
-//! its result.
+//! N concurrent misses on one cache key make one upstream query: the first
+//! arrival fetches, the rest wait on a `Notify` and re-check the cache after
+//! the fetcher stores its result.
 
 use std::sync::Arc;
 
@@ -14,10 +11,8 @@ use tokio::sync::Notify;
 
 use crate::cache::CacheKey;
 
-/// Map of cache keys currently being resolved upstream.
-///
-/// `DashMap` shards entries across multiple internal locks, so concurrent
-/// `begin()` calls for different keys don't serialise on a single mutex.
+/// Cache keys currently being resolved upstream. Sharded (`DashMap`) so
+/// different keys do not serialise on one lock.
 #[derive(Default)]
 pub struct InflightUpstream {
     pending: DashMap<CacheKey, Arc<Notify>>,
@@ -25,12 +20,11 @@ pub struct InflightUpstream {
 
 /// Outcome of registering interest in a key.
 pub enum BeginResult {
-    /// We are the first caller for this key. Hold the guard until the
-    /// upstream response has been written to the cache; dropping the guard
-    /// wakes everyone waiting.
+    /// First caller for this key. Hold the guard until the response is in the
+    /// cache; dropping it wakes the waiters.
     Fetcher(FetchGuard),
-    /// Another task is already fetching this key. Subscribe to this notify
-    /// and re-check the cache once it fires.
+    /// Another task is fetching. Subscribe, then re-check the cache once it
+    /// fires.
     Waiter(Arc<Notify>),
 }
 
@@ -39,12 +33,9 @@ impl InflightUpstream {
         Self::default()
     }
 
-    /// Register interest in `key`. At most one caller can hold a
-    /// `FetchGuard` for a given key at a time.
+    /// Register interest in `key`; at most one `FetchGuard` exists per key.
     pub fn begin(self: &Arc<Self>, key: &CacheKey) -> BeginResult {
-        // `entry()` holds the per-shard lock for the duration of the match,
-        // so the vacant→insert path is atomic with respect to other tasks
-        // racing on the same key.
+        // `entry()` holds the shard lock, making vacant→insert atomic.
         match self.pending.entry(key.clone()) {
             dashmap::Entry::Occupied(o) => BeginResult::Waiter(o.get().clone()),
             dashmap::Entry::Vacant(v) => {
@@ -62,9 +53,8 @@ impl InflightUpstream {
     /// Remove a key and notify any waiters. Called by `FetchGuard::drop`.
     fn finish(&self, key: &CacheKey, notify: &Arc<Notify>) {
         self.pending.remove(key);
-        // Notify *after* dropping the entry so waiters don't wake into
-        // shard contention and so the cache-write (performed before this
-        // drop) is observable on their re-check.
+        // Notify after removing the entry, so waiters do not wake into shard
+        // contention; the cache write already happened before the guard drop.
         notify.notify_waiters();
     }
 
@@ -75,10 +65,8 @@ impl InflightUpstream {
     }
 }
 
-/// RAII guard held by the caller that is actually doing the upstream
-/// fetch. On drop, removes the map entry and notifies waiters — even on
-/// panic or early return via `?`, preventing a single bad fetch from
-/// permanently wedging coalescing for this key.
+/// Held by the fetcher. Drop removes the entry and wakes waiters even on panic
+/// or early return, so one bad fetch cannot wedge the key.
 pub struct FetchGuard {
     owner: Arc<InflightUpstream>,
     key: CacheKey,
@@ -149,10 +137,7 @@ mod tests {
             BeginResult::Fetcher(_) => panic!("second caller should be waiter"),
         };
 
-        // `Notify::notify_waiters` only wakes currently-subscribed waiters,
-        // so the test must subscribe before the drop fires. Spawning the
-        // drop in a delayed task models the real-world case where the
-        // waiter starts awaiting and the fetcher completes later.
+        // `notify_waiters` only wakes current subscribers, so drop later.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
             drop(g);

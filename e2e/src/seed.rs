@@ -1,14 +1,7 @@
-//! Fixture SQL, written against a stopped database.
+//! Fixture SQL, written against a stopped database: history that real DNS
+//! traffic would be slow to produce and would need an upstream for.
 //!
-//! Three suites need history noadd cannot be made to produce quickly: the
-//! screenshot pipeline wants ninety days of plausible traffic, the query log
-//! wants several pages of it, and the statistics page wants rows on both sides
-//! of the default retention window. Sending that as real DNS traffic would be
-//! slow and would depend on an upstream answering, so it is inserted directly —
-//! exactly as `screenshots/seed.mjs` and the two spec files did.
-//!
-//! Every `query_logs.timestamp` is epoch **milliseconds**, matching the readers
-//! in `src/db.rs`.
+//! Every `query_logs.timestamp` is epoch **milliseconds**, matching `src/db.rs`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,11 +19,8 @@ pub fn now_ms() -> i64 {
     .unwrap_or(0)
 }
 
-/// The `mulberry32` PRNG `seed.mjs` used, bit for bit.
-///
-/// Ported rather than replaced so a re-run of the screenshot pipeline produces
-/// the same traffic it always did: the committed PNGs are a diff every time the
-/// shape of the data moves, and "the seed changed" is a poor reason for one.
+/// The `mulberry32` PRNG, bit for bit, so the screenshot traffic stays stable
+/// and the committed PNGs only change when the UI does.
 struct Mulberry32(u32);
 
 impl Mulberry32 {
@@ -140,10 +130,8 @@ fn utc_weekday(ms: i64) -> i64 {
 /// Ninety days of plausible traffic, plus the filter lists, custom rules and
 /// settings that make every screen in the screenshots look lived-in.
 ///
-/// The diurnal and weekly shape is anchored to **UTC** hours, not to
-/// hours-since-run: the statistics heatmap buckets against the viewer's clock,
-/// and the capture pins the browser to UTC, so anchoring it anywhere else would
-/// smear the pattern the screenshot is there to show.
+/// The diurnal and weekly shape is anchored to **UTC** hours, matching the
+/// capture's UTC browser clock, so the heatmap shows the pattern unsmeared.
 pub fn screenshots(now: i64) -> String {
     let mut rand = Mulberry32::new(42);
     const HOURS: i64 = 90 * 24;
@@ -174,8 +162,7 @@ pub fn screenshots(now: i64) -> String {
             let (cached, response_ms, upstream, result) = if blocked {
                 (0, 0, None, Some("0.0.0.0"))
             } else if rand.next() < 0.35 {
-                // Cache hits are not free: a small realistic latency keeps the
-                // statistics p50 off 0 ms. Blocked rows stay at 0 (instant).
+                // A small cache-hit latency keeps the statistics p50 off 0 ms.
                 (1, 1 + (rand.next() * 3.0) as i64, None, ip)
             } else {
                 let upstream = if rand.next() < 0.7 {
@@ -206,8 +193,7 @@ pub fn screenshots(now: i64) -> String {
     let mut parts = vec![
         "PRAGMA busy_timeout = 5000;".to_string(),
         "BEGIN;".to_string(),
-        // Retention MUST cover the 90-day backdate — the prune task fires
-        // immediately at boot.
+        // Retention must cover the 90-day backdate: the prune fires at boot.
         "INSERT INTO settings (key, value) VALUES ('log_retention_days','180')
            ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
             .to_string(),
@@ -231,11 +217,9 @@ pub fn screenshots(now: i64) -> String {
                 0,{},3284);",
             lu - 90000
         ),
-        // Content for the enabled lists so the second boot's rebuild yields a
-        // live engine without touching the network. `rule_count` above has to
-        // match what is seeded here: the filters page's Impact column is
-        // computed from the loaded rules, so a list claiming 59,842 rules and
-        // contributing seven would read as a bug in the screenshots.
+        // Content for the enabled lists, so the rebuild needs no network.
+        // `rule_count` above must match it: the Impact column is computed from
+        // the loaded rules, and a mismatch reads as a bug in the screenshots.
         "INSERT INTO filter_list_content (list_id, content)
            SELECT id, '||doubleclick.net^' || char(10) || '||googlesyndication.com^' || char(10) ||
                       '||app-measurement.com^' || char(10) || '||graph.facebook.com^' || char(10) ||
@@ -270,9 +254,9 @@ pub fn screenshots(now: i64) -> String {
 
 /// How many rows the query-log fixture inserts.
 ///
-/// Two full pages and a bit: enough that page 2 exists and page 3 does not, so
-/// both edges of the pager are exercised. Every row's domain, type and outcome
-/// is predictable, which is what makes the filter assertions exact.
+/// Three pages at 50 rows a page (50, 50, 20); a third are blocked, which fits
+/// on one. Every row's domain, type and outcome is predictable, so the filter
+/// assertions are exact.
 pub const LOG_ROWS: usize = 120;
 
 /// The query-log fixture.
@@ -308,8 +292,7 @@ pub const STATS_RECENT_ALLOWED: i64 = 10;
 pub const STATS_OLD: i64 = 20;
 
 /// The statistics fixture: two domains inside the 7-day window and a third only
-/// reachable from a wider one, which is what makes switching the range visibly
-/// change the page rather than just re-render it.
+/// reachable from a wider one, so switching the range visibly changes the page.
 pub fn stats(now: i64) -> String {
     let row = |ts: i64, domain: &str, qtype: &str, blocked: i32| {
         format!(
@@ -337,11 +320,8 @@ pub fn stats(now: i64) -> String {
     for i in 0..STATS_OLD {
         rows.push(row(now - 10 * DAY_MS - i * 1000, "old.example", "A", 0));
     }
-    // Retention defaults to seven days and the hourly prune fires its first
-    // tick immediately, so ten-day-old rows would delete themselves before the
-    // first request. Widen it here: without traffic outside the default window
-    // there is nothing for a wider range to find, and the switcher would only
-    // be redrawing the same numbers under a different title.
+    // Retention defaults to seven days and the prune fires at boot, so widen it
+    // or the ten-day-old rows delete themselves before the first request.
     format!(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('log_retention_days', '60');\n\
          INSERT INTO query_logs (timestamp, domain, query_type, client_ip, blocked, cached, \

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Latency + throughput benchmark for a locally-running noadd DoH endpoint.
 
-Uses raw DNS wire-format queries over a keep-alive HTTPS connection so the
-timing reflects server latency rather than tool overhead. Measures three
-separate paths:
+Raw wire-format queries over keep-alive HTTPS, so timing reflects the server,
+not tool overhead. Each phase runs serially, then across N workers (one
+connection each, aggregate QPS):
 
-  * cache-hit   — repeated (domain, type) queries; exercises filter check +
-                  cache fetch + TTL-decrement + ID patch. Warm-up populates
-                  the cache before timing starts.
-  * blocked     — known-blocked domains; exercises filter check + synthesised
-                  0.0.0.0 answer (no cache, no upstream).
-  * parallel    — same cache-hit queries across N worker threads, each on
-                  its own connection. Reports aggregate QPS.
+  * cache-hit   — warmed (domain, type) pairs: filter + cache fetch + TTL
+                  rewrite + ID patch.
+  * blocked     — known-blocked domains: filter + synthesised 0.0.0.0.
+  * cold-miss   — optional (--stampede-iters): unique random subdomains, each
+                  through the inflight-coalescing map.
 
 Usage:
   scripts/bench-doh.py --token iphone
@@ -156,12 +154,8 @@ def run_parallel(make_conn, path, pairs, iters, workers):
 
 
 def run_stampede(make_conn, path, base_domains, total, workers):
-    """Cold-miss flood: each worker issues unique random-subdomain queries.
-
-    Every query is guaranteed to miss the cache (the subdomain has never been
-    seen), so every request flows through the inflight-coalescing map. Used
-    to surface contention on that map under concurrent load.
-    """
+    """Cold-miss flood of unique random subdomains, each through the
+    inflight-coalescing map, to surface contention on it."""
     per = max(1, total // workers)
 
     def worker(wid):
@@ -251,8 +245,8 @@ def main():
                          "map insert/remove, surfacing contention on that map.")
     ap.add_argument("--stampede-workers", type=int, default=64,
                     help="Workers for stampede phase (default: %(default)s). "
-                         "Higher than --workers to push the map past the "
-                         "DashMap default shard count of 32.")
+                         "Higher than --workers to push the map past "
+                         "DashMap's default shard count (4x CPUs).")
     ap.add_argument("--insecure", action="store_true",
                     help="Skip TLS verification (for untrusted self-signed certs)")
     args = ap.parse_args()
@@ -285,10 +279,8 @@ def main():
         print(f"probe failed: {e}", file=sys.stderr)
         sys.exit(2)
 
-    # Warm + filter: drop (domain, qtype) pairs that don't return NoError so
-    # the timing phase isn't polluted by upstream-bound SERVFAIL/NXDomain
-    # responses (those never enter the cache). Run twice so a one-shot upstream
-    # hiccup doesn't permanently exclude an otherwise-cacheable pair.
+    # Drop pairs that never return NoError (they would not be cache hits). Two
+    # tries, so a one-off upstream hiccup does not exclude a pair.
     print("Warming cache + filtering non-cacheable pairs...", flush=True)
     conn = make()
     surviving = []
@@ -330,8 +322,7 @@ def main():
     print(f"  {'':12s}   elapsed={elapsed * 1000:.0f}ms  aggregate-qps={qps:.0f}")
 
     if args.stampede_iters > 0:
-        # Use only the surviving cacheable domains as bases — a known-bad
-        # domain would just SERVFAIL and never reach the inflight path.
+        # Surviving domains only: a known-bad base would just SERVFAIL.
         bases = sorted({d for d, _ in pairs}) or DOMAINS
         print(
             f"\nCold-miss stampede ({args.stampede_workers} workers, "

@@ -46,29 +46,22 @@ pub struct AppState {
     pub filter: Arc<ArcSwap<FilterEngine>>,
     pub cache: DnsCache,
     pub rate_limiter: Arc<RateLimiter>,
-    /// Counts unknown session tokens per source IP, so a client guessing
-    /// session IDs is reported (see [`note_invalid_session_cookie`]). A
-    /// separate instance from `rate_limiter` on purpose: sharing one would let
-    /// cookie guessing burn a legitimate operator's login budget from behind
-    /// the same NAT address.
+    /// Counts unknown session tokens per source IP (see [`note_invalid_session_cookie`]).
+    /// Separate from `rate_limiter` so cookie guessing cannot burn the login budget of an
+    /// operator behind the same NAT address.
     pub invalid_session_limiter: Arc<RateLimiter>,
-    /// Per-account password-failure backoff, the account-keyed counterpart to
-    /// the IP-keyed `rate_limiter`. Both are needed: one bounds a single
-    /// source address, the other a single account across every address an
-    /// attacker can reach it from.
+    /// Per-account password-failure backoff: `rate_limiter` bounds one source address, this
+    /// bounds one account across every address.
     pub lockout: Arc<crate::admin::auth::AccountLockout>,
     pub forwarder: Arc<UpstreamForwarder>,
     pub handler: Arc<DnsHandler>,
     pub log_events: tokio::sync::broadcast::Sender<std::sync::Arc<QueryLogEntry>>,
-    /// Hub behind `GET /api/events`, the one stream the shell's status
-    /// indicator and the dashboard share.
+    /// Hub behind `GET /api/events`, the admin UI's one push stream.
     pub events: std::sync::Arc<crate::admin::events::EventHub>,
     pub server_info: ServerInfo,
-    /// Whether to set `Secure` on the admin session cookie. Resolved once at
-    /// startup by [`crate::config::resolve_cookie_secure`]. Kept off
-    /// [`ServerInfo`] deliberately — that struct is serialized to
-    /// `/api/server-info`, and this is a cookie-emission detail, not part of
-    /// the public API surface.
+    /// Whether to set `Secure` on the session cookie, from
+    /// [`crate::config::resolve_cookie_secure`]. Not on [`ServerInfo`], which is serialized
+    /// to `/api/server-info`.
     pub cookie_secure: bool,
     pub list_manager: Arc<ListManager>,
     pub rebuild: Arc<RebuildCoordinator>,
@@ -78,13 +71,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Spawn a background filter-engine rebuild via the coordinator.
-    /// Handlers that mutate rules or lists use this so the HTTP response
-    /// returns immediately while rebuilds are serialized in the background.
-    ///
-    /// Visible to [`crate::admin::pages`] too: the filters form mutates the
-    /// same lists and rules the JSON endpoints do, and a change that never
-    /// reaches the engine is not a change.
+    /// Spawn a serialized background filter-engine rebuild, so a handler that mutates rules
+    /// or lists can respond immediately. Also used by [`crate::admin::pages`].
     pub(crate) fn trigger_rebuild(&self) {
         let manager = self.list_manager.clone();
         self.rebuild
@@ -103,9 +91,8 @@ pub struct ServerInfo {
     pub tls_enabled: bool,
 }
 
-/// `OpenAPI` document for the core programmatic subset of the admin API. Only the
-/// endpoints a script would drive (health, settings, lists, rules, filter check,
-/// stats summary, API keys) are annotated — the browser-only endpoints are not.
+/// `OpenAPI` document for the programmatic subset of the admin API; browser-only endpoints
+/// are not annotated.
 #[derive(utoipa::OpenApi)]
 #[openapi(
     info(title = "noadd API", description = "Programmatic access to noadd."),
@@ -152,38 +139,28 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
-/// Serve the raw `OpenAPI` document.
-///
-/// Requires an operator (session or API key). It exposes only the schema
-/// shape, never any data, but recon of the API surface itself is still
-/// gated on this security appliance.
+/// Serve the raw `OpenAPI` document. Operator-only: it holds no data, but pre-auth recon of
+/// the API surface is still denied.
 async fn openapi_json(_auth: AuthedUser) -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
-/// Serve the interactive Scalar API reference.
-///
-/// Requires an operator (session or API key), for the same reason as
-/// `GET /api/openapi.json`.
+/// Serve the interactive Scalar API reference. Operator-only, like [`openapi_json`].
 async fn scalar_docs(_auth: AuthedUser) -> axum::response::Html<String> {
     axum::response::Html(Scalar::new(ApiDoc::openapi()).to_html())
 }
 
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
-        // Server-rendered pages (see `crate::admin::pages`). Each signed-in
-        // route resolves the session before any HTML is written, so an
-        // unauthenticated browser is redirected rather than served a shell that
-        // has to discover the same thing for itself.
+        // Server-rendered pages (`crate::admin::pages`); each resolves the session before
+        // writing HTML, redirecting an unauthenticated browser.
         .route("/", get(crate::admin::pages::dashboard_page))
         .route("/stats", get(crate::admin::pages::stats_page))
         .route("/logs", get(crate::admin::pages::logs_page))
         .route("/logs/rules", post(crate::admin::pages::logs_rule_submit))
         .route("/logs/clear", post(crate::admin::pages::logs_clear_submit))
         .route("/filters", get(crate::admin::pages::filters_page))
-        // Every filter change is its own POST rather than one endpoint taking an
-        // action name: a form's target is the clearest statement of what it
-        // does, and the router is where that stays checkable.
+        // One POST route per filter change rather than one endpoint switching on an action.
         .route(
             "/filters/lists",
             post(crate::admin::pages::filters_list_add_submit),
@@ -266,11 +243,9 @@ pub fn admin_router(state: AppState) -> Router {
             "/setup",
             get(crate::admin::pages::setup_page).post(crate::admin::pages::setup_submit),
         )
-        // POST, not GET: signing out changes state, and a `GET /logout` is
-        // something a link prefetcher would happily follow on the operator's
-        // behalf.
+        // POST, not GET: a link prefetcher would follow a `GET /logout`.
         .route("/logout", post(crate::admin::pages::logout_submit))
-        // No auth required.
+        // Sign-in and setup need no auth; the other three below do.
         .route("/api/auth/login", post(login))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/reauth", post(reauth))
@@ -322,16 +297,14 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/api/mobileconfig/{token}", get(get_mobileconfig))
         // Rendered from favicon.svg at build time.
         .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
-        // OpenAPI spec + Scalar docs UI (schema only, no data — but still
-        // gated: this is a security appliance and we minimize pre-auth recon)
+        // OpenAPI spec + Scalar docs UI (operator-only, see `openapi_json`).
         .route("/api/openapi.json", get(openapi_json))
         .route("/api/docs", get(scalar_docs))
         .fallback(serve_static)
         .with_state(state)
         .layer(tower_http::csrf::CsrfLayer::new())
-        // Directly outside the guard: it reads the `ProtectionError` the guard
-        // attaches to its 403, the only way to log a rejection alongside the
-        // request it rejected.
+        // Directly outside the guard: it logs the `ProtectionError` the guard attaches to its
+        // 403.
         .layer(axum::middleware::from_fn(crate::admin::csrf::log_rejection))
         .layer(axum::middleware::from_fn(crate::headers::no_store))
         .layer(axum::middleware::from_fn(crate::headers::security_headers))
@@ -339,18 +312,15 @@ pub fn admin_router(state: AppState) -> Router {
 
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
 
-/// Strong, quoted `ETag` derived from a content hash. `DefaultHasher` seeds with
-/// fixed keys, so the digest is deterministic across process restarts of the
-/// same binary — exactly what a content-addressed validator needs, and with no
-/// extra dependency.
+/// Strong, quoted `ETag` from a content hash. `DefaultHasher` uses fixed keys, so the digest
+/// is stable across restarts of the same binary.
 fn etag_for(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     format!("\"{:016x}\"", hasher.finish())
 }
 
-/// Per-path `ETags` for the embedded admin UI, computed once. Assets are fixed at
-/// compile time, so the map never needs invalidation.
+/// Per-path `ETags` for the embedded admin UI, computed once (assets are compile-time).
 fn ui_etags() -> &'static HashMap<PathBuf, String> {
     static ETAGS: OnceLock<HashMap<PathBuf, String>> = OnceLock::new();
     ETAGS.get_or_init(|| {
@@ -361,8 +331,7 @@ fn ui_etags() -> &'static HashMap<PathBuf, String> {
     })
 }
 
-/// True when `If-None-Match` lists the given `ETag` (browsers echo back exactly
-/// what we sent; we also tolerate a comma-separated list).
+/// True when `If-None-Match` lists the given `ETag` (a comma-separated list is tolerated).
 fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(axum::http::header::IF_NONE_MATCH)
@@ -370,8 +339,7 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
         .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
 }
 
-/// Build a `200` (with body) or `304` response for an embedded file, always
-/// carrying an `ETag` and `Cache-Control: no-cache`.
+/// `200` or `304` for an embedded file, always with an `ETag` and `Cache-Control: no-cache`.
 fn static_response(file: &File<'_>, headers: &HeaderMap) -> Response {
     let etag = ui_etags()
         .get(file.path())
@@ -427,14 +395,8 @@ async fn serve_apple_touch_icon(headers: HeaderMap) -> impl IntoResponse {
         .into_response()
 }
 
-/// Serve an embedded asset, or 404.
-///
-/// There is no SPA fallback any more. It existed so that a client-side route
-/// like `/settings` — a path the server knew nothing about — still received the
-/// shell for the router to act on. Every page path is a real route now, so a
-/// request that reaches here and matches no file is simply not a thing noadd
-/// serves, and answering it with HTML would hand the browser a document at an
-/// address that has no page.
+/// Serve an embedded asset, or 404. No SPA fallback: every page path is a real route, so an
+/// unmatched path has no page.
 async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
     match ADMIN_UI.get_file(path) {
@@ -443,11 +405,8 @@ async fn serve_static(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
     }
 }
 
-/// Resolve the client IP for rate-limiting and audit purposes via the shared
-/// `extract_client_ip` helper. Headers (`X-Forwarded-For`, `X-Real-IP`) are
-/// trusted only when the TCP peer is loopback or matches a configured CIDR
-/// in [`TrustedProxies`]; otherwise headers are client-controlled and would
-/// let a remote caller spoof source IPs to evade per-IP rate limits.
+/// Client IP for rate limiting and audit. Forwarding headers are trusted only from loopback
+/// or a [`TrustedProxies`] CIDR; otherwise a caller could spoof its IP past per-IP limits.
 pub(crate) fn client_ip(
     state: &AppState,
     connect: Option<&ConnectInfo<SocketAddr>>,
@@ -456,13 +415,10 @@ pub(crate) fn client_ip(
     extract_client_ip(connect, headers, &state.trusted_proxies)
 }
 
-/// Bound on the client-controlled `User-Agent` / API-key-prefix text written
-/// to an audit log line, so a hostile client cannot inflate log volume.
+/// Bound on client-controlled text (`User-Agent`, key prefix) written to a log line.
 pub(crate) const LOG_SAFE_MAX: usize = 256;
 
-/// Truncate a client-controlled string to a bounded, UTF-8-safe prefix before
-/// it reaches a log line, cutting on a `char` boundary so multi-byte UTF-8 is
-/// never split mid-sequence.
+/// Truncate a client-controlled string to at most `max` bytes, on a `char` boundary.
 pub(crate) fn log_safe(value: &str, max: usize) -> &str {
     if value.len() <= max {
         return value;
@@ -474,15 +430,8 @@ pub(crate) fn log_safe(value: &str, max: usize) -> &str {
     &value[..end]
 }
 
-/// The value of `name` to log, distinguishing an absent header (`<none>`)
-/// from one present but not representable as ASCII (`<non-ascii>`).
-/// Collapsing both into a single `Option<&str>` — as
-/// `headers.get(...).and_then(|v| v.to_str().ok())` does — loses that
-/// distinction, so a request that simply sent no such header at all would
-/// otherwise be logged with the false claim that it sent a garbled one.
-///
-/// The returned value is still caller-controlled text: pass it through
-/// [`log_safe`] and render it with `%` at the call site.
+/// The value of header `name` to log, telling an absent header (`<none>`) from a
+/// non-ASCII one (`<non-ascii>`). Still caller-controlled: pass it through [`log_safe`].
 pub(crate) fn header_log_value(headers: &HeaderMap, name: impl AsHeaderName) -> &str {
     match headers.get(name) {
         None => "<none>",
@@ -495,21 +444,15 @@ fn user_agent_log_value(headers: &HeaderMap) -> &str {
     header_log_value(headers, axum::http::header::USER_AGENT)
 }
 
-/// The **token hashes** of the session cookies on this request, innermost
-/// name first. Both names are accepted so a deployment that gains or loses
-/// `Secure` mid-session keeps working; the caller must try them **in order and
-/// keep the first that validates**, not merely the first that is present. A
-/// browser can hold both at once — a `__Host-` cookie set while noadd
-/// terminated TLS survives a move to a TLS-terminating proxy, where the origin
-/// is still https:// so the browser keeps sending it — and a stale one would
-/// otherwise shadow the live cookie on every request with no way to clear it.
+/// The **token hashes** of this request's session cookies, `__Host-` name first. Both names
+/// are accepted so a deployment that gains or loses `Secure` keeps working. A browser can
+/// hold both (a `__Host-` cookie survives a move behind a TLS-terminating proxy), so callers
+/// must keep the first that **validates**, not the first present, or a stale cookie shadows
+/// the live one.
 ///
-/// Hashing here rather than at each call site is what confines the raw token
-/// to the cookie boundary: this function and `login`'s `Set-Cookie` are the
-/// only places in noadd that ever hold one, and everything downstream — the
-/// [`SessionStore`] key, `sessions.token_hash`, `session_log_id` — speaks only
-/// in hashes. A future call site that reaches for `jar.get(SESSION_COOKIE)`
-/// directly would quietly reintroduce a plaintext token; go through here.
+/// Hashing here confines the raw token to the cookie boundary: downstream ([`SessionStore`],
+/// `sessions.token_hash`, `session_log_id`) sees only hashes. Do not read the session cookie
+/// from the jar directly.
 fn session_cookie_hashes(jar: &CookieJar) -> impl Iterator<Item = String> {
     [
         crate::admin::auth::SESSION_COOKIE_HOST,
@@ -522,18 +465,11 @@ fn session_cookie_hashes(jar: &CookieJar) -> impl Iterator<Item = String> {
     })
 }
 
-/// Expire one cookie per accepted session-cookie name **present in the
-/// jar**, not just the positionally-first. A browser can hold both accepted
-/// names at once (see [`session_cookie_hashes`]) — the very case this
-/// whole mechanism exists for — and clearing only one leaves the other
-/// sitting in the browser with no later request able to clear it, since the
-/// removal is driven by what *this* request's cookie header contains.
+/// Expire **every** session cookie present in the jar, not just the first: a browser can
+/// hold both names (see [`session_cookie_hashes`]).
 ///
-/// A `__Host-`-prefixed `Set-Cookie` is silently ignored by the browser
-/// unless it also carries `Secure` (RFC 6265bis §5.5: a `__Host-` cookie can
-/// only be overwritten — or cleared — by a cookie that itself satisfies the
-/// prefix's conditions), so the `__Host-session` removal carries `Secure`
-/// even when the plain `session` removal alongside it does not.
+/// The `__Host-` removal always carries `Secure`, because a browser ignores a `__Host-`
+/// `Set-Cookie` without it (RFC 6265bis §5.5).
 pub(crate) fn clear_session_cookies(jar: CookieJar) -> CookieJar {
     let present: Vec<&str> = [
         crate::admin::auth::SESSION_COOKIE_HOST,
@@ -553,34 +489,20 @@ pub(crate) fn clear_session_cookies(jar: CookieJar) -> CookieJar {
         .fold(jar, CookieJar::remove)
 }
 
-/// The token hash of the session this request is actually authenticated by,
-/// for handlers that act on "my current session" rather than merely reading a
-/// cookie.
+/// The token hash of the session that actually authenticated this request, not merely the
+/// first cookie present (see [`session_cookie_hashes`]); otherwise logout could revoke
+/// nothing, or revoke-others could treat the caller's session as someone else's.
 ///
-/// Naively taking the positionally-first present cookie answers "which
-/// cookie is present", which is a different question: a browser can carry
-/// both accepted names at once (see [`session_cookie_hashes`]), and
-/// acting on the wrong one means logout revoking nothing while reporting
-/// success, or revoke-others treating the caller's own session as somebody
-/// else's. Membership in the store is checked rather than `validate_session`
-/// because the authenticating token
-/// was already validated for this request by `AuthedUser`, and a second
-/// validation would refresh `last_seen` and evict entries as a side effect.
+/// Checks store membership rather than calling `validate_session`: `AuthedUser` already
+/// validated, and a second call would refresh `last_seen` and evict entries.
 fn live_session_token_hash(state: &AppState, jar: &CookieJar) -> Option<String> {
     let sessions = state.sessions.lock();
     session_cookie_hashes(jar).find(|hash| sessions.contains_key(hash))
 }
 
-/// Returns `(user_id, token_hash)` for the current authenticated session, or
-/// 401.
-///
-/// Walks [`session_cookie_hashes`] in order and keeps the first that
-/// actually validates, rather than the positionally-first cookie
-/// present — see that function's doc comment for why a stale `__Host-`
-/// cookie must not be allowed to shadow a live `session` cookie.
-///
-/// `connect`/`headers` are only used to attribute a failed lookup to a source
-/// IP; see [`note_invalid_session_cookie`].
+/// `(user_id, token_hash)` of the first session cookie that validates (see
+/// [`session_cookie_hashes`]), or 401. `connect`/`headers` only attribute a failure to a
+/// source IP for [`note_invalid_session_cookie`].
 fn current_session(
     state: &AppState,
     connect: Option<&ConnectInfo<SocketAddr>>,
@@ -597,24 +519,14 @@ fn current_session(
     found.ok_or(StatusCode::UNAUTHORIZED)
 }
 
-/// Count one presentation of a session cookie that names no live session, and
-/// warn once when a single source crosses
-/// [`INVALID_SESSION_MAX_ATTEMPTS`] within the window.
+/// Count a session cookie naming no live session, warning once when one source crosses
+/// [`crate::admin::auth::INVALID_SESSION_MAX_ATTEMPTS`] within the window (OWASP session-ID
+/// guessing detection).
 ///
-/// This is the detection half of OWASP's "session ID guessing and brute force
-/// detection": until now only `POST /api/auth/login` was counted, so guessing
-/// session cookies directly was neither limited nor visible anywhere.
+/// **Detect-only**, no blocking: a tab left open past its session's expiry keeps
+/// requesting with the stale cookie, and blocking would lock the operator out.
 ///
-/// Deliberately **detect-only** — no 429, no blocking. The same code path is
-/// walked by an entirely legitimate browser whose session expired while its
-/// tab stayed open: the page's components keep polling with the stale cookie, so
-/// blocking on this counter would lock operators out of their own appliance
-/// on the strength of a benign event. The threshold exists for the same
-/// reason (see [`INVALID_SESSION_MAX_ATTEMPTS`]).
-///
-/// Reported as `auth.failed` with a `method` field rather than a new event
-/// name, matching how the password and API-key failures are already recorded,
-/// so "every authentication failure" stays a single query.
+/// Logged as `auth.failed` with a `method` field, like the other authentication failures.
 fn note_invalid_session_cookie(
     state: &AppState,
     connect: Option<&ConnectInfo<SocketAddr>>,
@@ -644,23 +556,15 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
 }
 
-/// An authenticated operator, resolved from either the browser `session` cookie,
-/// an `Authorization: Bearer <api key>` header, or a reverse-proxy forward-auth
-/// header. Most handlers depend only on `user_id`; `via_forward_auth` lets the
-/// account page tell the operator their session is proxy-managed (SSO).
+/// An authenticated operator, from a session cookie, an `Authorization: Bearer <api key>`
+/// header, or a reverse-proxy forward-auth header.
 pub struct AuthedUser {
     pub user_id: i64,
-    /// True only when the request was authenticated by the forward-auth header
-    /// (SSO), i.e. neither a session cookie nor an API key.
+    /// True only when the forward-auth header (SSO) authenticated the request.
     pub via_forward_auth: bool,
-    /// The session's token hash when a browser cookie authenticated this
-    /// request, `None` for an API key or forward auth.
-    ///
-    /// It is what [`ReauthedUser`] needs to find the re-authentication stamp,
-    /// and carrying it here means that check does not have to re-walk the
-    /// cookie jar and risk disagreeing with the extractor about *which*
-    /// session authenticated — the two cookie names make that a real
-    /// possibility, not a theoretical one (see [`session_cookie_hashes`]).
+    /// The token hash when a session cookie authenticated the request, else `None`. Carried
+    /// so [`ReauthedUser`] reads the stamp off the session this extractor chose rather than
+    /// re-walking two cookie names (see [`session_cookie_hashes`]).
     pub session_token_hash: Option<String>,
 }
 
@@ -671,10 +575,7 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Session cookie (browser path). Walk both candidate names,
-        // in-order, and keep the first that validates — see
-        // `session_cookie_hashes` for why a stale `__Host-` cookie must
-        // not be allowed to shadow a live `session` cookie.
+        // 1. Session cookie: the first that validates (see `session_cookie_hashes`).
         let jar = CookieJar::from_headers(&parts.headers);
         let mut candidates = session_cookie_hashes(&jar).peekable();
         let presented_a_cookie = candidates.peek().is_some();
@@ -687,11 +588,8 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 session_token_hash: Some(token_hash),
             });
         }
-        // Counted here rather than deferred to the terminal rejection below
-        // (the way `failed_key_prefix` is): the signal is "an unknown session
-        // ID was presented", which is a fact about this request regardless of
-        // whether a bearer token or forward-auth header later authenticates
-        // it, and deferring would couple two unrelated detections.
+        // Counted now, not deferred like `failed_key_prefix`: an unknown session ID was
+        // presented whether or not a later credential authenticates the request.
         if presented_a_cookie {
             note_invalid_session_cookie(
                 state,
@@ -699,18 +597,8 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                 &parts.headers,
             );
         }
-        // 2. Bearer API key (programmatic path).
-        //
-        // Emission of the `auth.failed` warning is deferred to the terminal
-        // rejection below rather than fired inline here: the rule is to warn
-        // whenever the request as a whole does not end up authenticated, not
-        // whenever this one step fails. A bearer token that fails against the
-        // API-key table may still go on to authenticate via step 3's
-        // forward-auth header, and logging inline would emit a spurious
-        // `auth.failed` on every such request even though authentication
-        // ultimately succeeds. `failed_key_prefix` is only populated for a
-        // token that actually looks like a noadd key (`noadd_` prefix), so it
-        // is never `Some` on the request's eventual success path.
+        // 2. Bearer API key. Its `auth.failed` is deferred to the rejection below, since
+        // step 3 may still authenticate the request. Only set for `noadd_`-prefixed tokens.
         let mut failed_key_prefix: Option<String> = None;
         if let Some(token) = bearer_token(&parts.headers) {
             let hash = hash_api_key(&token);
@@ -722,17 +610,13 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                     session_token_hash: None,
                 });
             }
-            // Not logged via `hash_api_key`'s output (that would still allow
-            // reconstructing which key was tried offline against a known
-            // set); the prefix is the same non-secret identifier already
-            // shown to the operator when the key was created.
+            // Log the non-secret prefix shown at creation, not the hash (which could be
+            // matched offline against a known key set).
             if token.starts_with("noadd_") {
                 failed_key_prefix = Some(log_safe(&token, 10).to_string());
             }
         }
-        // 3. Reverse-proxy forward auth: a username header injected by a proxy
-        //    whose TCP peer matches --forward-auth-trusted-proxies. Last in the
-        //    chain so an explicit cookie/API key always wins.
+        // 3. Forward auth from a trusted proxy peer. Last, so a cookie or API key wins.
         if let Some(cfg) = &state.forward_auth {
             let peer = parts
                 .extensions
@@ -751,12 +635,7 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
                             error = %err,
                             "forward-auth operator lookup failed"
                         );
-                        // This exit bypasses the shared tail below, so the
-                        // pending `auth.failed` warning must be emitted here
-                        // too — otherwise a bad `noadd_…` key alongside a
-                        // forward-auth header whose operator lookup hits a DB
-                        // error drops the failed key attempt from the audit
-                        // trail entirely.
+                        // This exit skips the tail below, so emit the pending key failure here.
                         emit_failed_key_warning(parts, state, failed_key_prefix.as_deref());
                         Err(StatusCode::INTERNAL_SERVER_ERROR)
                     }
@@ -768,12 +647,8 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
     }
 }
 
-/// Count a password failure against `user_id`, and record the crossing into
-/// (or extension of) a lockout in the audit log.
-///
-/// The event carries no username: an operator reading the log has `user_id`,
-/// and anyone who has obtained the log has no business being handed the
-/// account names alongside evidence of which ones are under attack.
+/// Count a password failure against `user_id`, logging a lockout when one starts or extends.
+/// The event carries `user_id`, never the username.
 fn note_account_failure(state: &AppState, user_id: i64, ip: std::net::IpAddr, endpoint: &str) {
     if let Some(lock) = state.lockout.record_failure(user_id) {
         tracing::warn!(
@@ -787,37 +662,25 @@ fn note_account_failure(state: &AppState, user_id: i64, ip: std::net::IpAddr, en
     }
 }
 
-/// Error body for the two ways a sensitive action can be refused for want of
-/// a recent password proof. `code` is what the admin UI keys off: a bare 403
-/// is indistinguishable from the CSRF guard's, and the two cases need
-/// different handling — one is fixed by typing a password, the other cannot
-/// be fixed by this caller at all.
+/// Error body for a sensitive action refused for want of a recent password proof. `code`
+/// tells its two cases apart from each other and from the CSRF guard's bare 403.
 #[derive(Serialize)]
 struct ReauthErrorResponse {
     error: String,
     code: &'static str,
 }
 
-/// An operator who has proved the account's password recently enough to
-/// perform a sensitive action — minting an API key, or adding or removing an
-/// operator. Anything that hands out durable access, in other words, which is
-/// exactly what an attacker holding a stolen cookie wants before the theft is
-/// noticed.
+/// An operator who proved the password recently enough for an action that hands out durable
+/// access (minting an API key, adding or removing an operator) — what a stolen cookie is
+/// after.
 ///
-/// The three authentication methods are treated differently because they can
-/// prove different things:
-///
-/// - **Session cookie** — the case this exists for. Requires a password proof
-///   within [`REAUTH_WINDOW_SECS`]; login counts as one.
-/// - **Forward auth (SSO)** — exempt. The proxy authenticated *this very
-///   request*, which is a stronger claim than a stamp from minutes ago, and
-///   these accounts store [`NO_PASSWORD_SENTINEL`] so there is no password
-///   they could ever prove. Requiring one would lock SSO deployments out of
-///   their own operator management.
-/// - **API key** — refused outright. A key cannot present a password, and
-///   letting one mint another would mean a short-lived key could quietly issue
-///   itself a permanent successor. This matches the existing carve-out where
-///   session management and password change are already cookie-only.
+/// - **Session cookie**: needs a password proof within
+///   [`crate::admin::auth::REAUTH_WINDOW_SECS`]; login counts as one.
+/// - **Forward auth (SSO)**: exempt. The proxy authenticated this very request, and these
+///   accounts store [`crate::admin::auth::NO_PASSWORD_SENTINEL`], so there is no password
+///   to prove.
+/// - **API key**: refused. A key cannot present a password, and could otherwise mint
+///   itself a permanent successor.
 pub struct ReauthedUser(pub AuthedUser);
 
 impl axum::extract::FromRequestParts<AppState> for ReauthedUser {
@@ -859,12 +722,8 @@ impl axum::extract::FromRequestParts<AppState> for ReauthedUser {
     }
 }
 
-/// Emit the deferred `auth.failed` warning for a bearer token that looked
-/// like a noadd API key (`failed_key_prefix`, see the comment at its
-/// declaration in `from_request_parts`) but did not validate — a no-op when
-/// `prefix` is `None`. Factored out so every non-success exit of
-/// `from_request_parts` emits through the same call rather than each exit
-/// needing its own copy of the lookup-and-log logic.
+/// Emit the deferred `auth.failed` for a `noadd_` bearer token that did not validate; a
+/// no-op when `prefix` is `None`. Called from every failing exit of `AuthedUser`'s extractor.
 fn emit_failed_key_warning(
     parts: &axum::http::request::Parts,
     state: &AppState,
@@ -887,10 +746,8 @@ fn emit_failed_key_warning(
     );
 }
 
-/// Map a forward-auth username to an operator id, provisioning the account on
-/// first sight. A concurrent first request can win the INSERT race, so a
-/// UNIQUE violation is resolved by re-reading rather than failing the
-/// request.
+/// Map a forward-auth username to an operator id, provisioning it on first sight. A UNIQUE
+/// violation means a concurrent request won the insert, so re-read.
 async fn resolve_forward_auth_user(
     state: &AppState,
     username: &str,
@@ -930,29 +787,21 @@ pub struct LoginResponse {
     pub success: bool,
 }
 
-/// Why a password sign-in was refused.
-///
-/// The API and the HTML form answer the same three outcomes in their own idiom
-/// — a status code for `POST /api/auth/login`, a re-rendered form for `POST
-/// /login` — so the decision is made once, here, and each caller phrases it.
+/// Why a password sign-in was refused; `POST /api/auth/login` and `POST /login` each phrase
+/// it in their own idiom.
 pub(crate) enum LoginError {
     RateLimited,
-    /// Unknown username, wrong password, a forward-auth account, or a locked
-    /// one. Deliberately a single variant: a caller must not be able to tell
-    /// these apart, which is why the API answers all four with the same 401.
+    /// Unknown username, wrong password, forward-auth account, or locked account. One
+    /// variant so a caller cannot tell them apart.
     Invalid,
     Internal,
 }
 
-/// Verify a username and password and, on success, mint a session — returning
-/// the jar carrying its `Set-Cookie`.
+/// Verify a username and password and mint a session, returning the jar with its
+/// `Set-Cookie`.
 ///
-/// This is the whole of noadd's password sign-in: the rate limit, the constant
-/// Argon2 cost that keeps an unknown username indistinguishable from a wrong
-/// password, the per-account lockout, and the audit events. Both the JSON
-/// endpoint and the HTML form go through here rather than each implementing it.
-/// A second copy is how one of the two paths ends up missing the timing padding
-/// or the lockout check, and that gap stays invisible until someone attacks it.
+/// The only password sign-in path — rate limit, constant Argon2 cost, per-account lockout,
+/// audit events — shared by the JSON endpoint and the HTML form. Do not add a second copy.
 pub(crate) async fn start_password_session(
     state: &AppState,
     connect: Option<&ConnectInfo<SocketAddr>>,
@@ -977,11 +826,8 @@ pub(crate) async fn start_password_session(
     }
     state.rate_limiter.record(ip);
 
-    // Every 401 out of this handler is an authentication failure worth
-    // auditing, not just the wrong-password one: an unknown username is the
-    // ordinary shape of a brute-force attempt, and a password login against a
-    // forward-auth account is the same signal. The event deliberately carries
-    // no username — the response does not distinguish these cases either.
+    // Every `Invalid` is audited, unknown usernames included. No username in the event,
+    // matching the undistinguished response.
     let log_failed = || {
         tracing::warn!(
             event = "auth.failed",
@@ -992,10 +838,8 @@ pub(crate) async fn start_password_session(
         );
     };
 
-    // Bound the input handed to Argon2 before any hashing happens. The cap is
-    // far looser than `MAX_PASSWORD_LENGTH` on purpose — see that constant —
-    // and rejecting here leaks nothing, since the verdict does not depend on
-    // which username was presented.
+    // Bound Argon2's input before hashing (see `MAX_LOGIN_PASSWORD_LENGTH`). Leaks nothing:
+    // the verdict does not depend on the username.
     if password.len() > MAX_LOGIN_PASSWORD_LENGTH {
         log_failed();
         return Err(LoginError::Invalid);
@@ -1008,34 +852,23 @@ pub(crate) async fn start_password_session(
         .await
         .map_err(|_err| LoginError::Internal)?
     else {
-        // Same Argon2 cost a real account would have incurred, so the two
-        // paths cannot be told apart by response time. See `spend_verify_cost`.
+        // Same Argon2 cost as a real account, so timing does not reveal the username.
         spend_verify_cost(password);
         log_failed();
         return Err(LoginError::Invalid);
     };
 
-    // Forward-auth-provisioned accounts store a sentinel in place of a hash and
-    // can never authenticate with a password — same generic 401 as any other
-    // failed login. This must precede `verify_password`, which would otherwise
-    // fail to parse the sentinel and surface it as a 500, leaking which accounts
-    // are forward-auth-provisioned. The sentinel is not a hash, so there is
-    // nothing to verify against and this path needs the same padding an
-    // unknown username gets — otherwise it returns early and becomes its own
-    // oracle for which accounts are proxy-provisioned.
+    // Forward-auth accounts store a sentinel, not a hash, and can never sign in with a
+    // password. Must precede `verify_password` (which would 500 on the sentinel), and pads
+    // the Argon2 cost so neither status nor timing reveals a proxy-provisioned account.
     if has_no_password(&auth.password_hash) {
         spend_verify_cost(password);
         log_failed();
         return Err(LoginError::Invalid);
     }
 
-    // Checked only once a username has resolved, which is what stops the
-    // lockout becoming the enumeration oracle the generic 401 exists to
-    // prevent: an unknown username is never counted, so it can never be
-    // locked, so the two cases cannot be told apart by whether a lock
-    // appears. The Argon2 cost is spent here too, for the same reason it is
-    // spent above — a locked account that answered faster than a wrong
-    // password would leak just as loudly.
+    // Only for a resolved username: an unknown one is never counted, so it can never be
+    // locked, and the lockout cannot become an enumeration oracle. Padded for timing too.
     if state.lockout.is_locked(auth.id) {
         spend_verify_cost(password);
         log_failed();
@@ -1052,9 +885,8 @@ pub(crate) async fn start_password_session(
     state.lockout.record_success(auth.id);
 
     let now = crate::now_unix();
-    // The one place a raw session token exists. It goes into the `Set-Cookie`
-    // below and nowhere else: what is persisted, stored in memory and logged
-    // is the hash, so a copy of the database yields no usable credential.
+    // The raw token goes only into the `Set-Cookie`; everything persisted, held in memory
+    // or logged is its hash, so a database copy yields no usable credential.
     let token = generate_token();
     let token_hash = crate::admin::auth::hash_session_token(&token);
     let session_id = state
@@ -1077,10 +909,7 @@ pub(crate) async fn start_password_session(
             user_id: auth.id,
             created_at: now,
             last_seen: now,
-            // Typing the password *is* the proof, so a login satisfies
-            // `ReauthedUser` on its own. Without this an operator would be
-            // asked for the password twice in a row to do anything sensitive
-            // straight after signing in.
+            // Signing in is a password proof, so it satisfies `ReauthedUser`.
             last_reauth_at: now,
         },
     );
@@ -1097,11 +926,7 @@ pub(crate) async fn start_password_session(
     Ok(jar.add(build_session_cookie(token, state.cookie_secure)))
 }
 
-/// `POST /api/auth/login` — the JSON face of [`start_password_session`].
-///
-/// Every outcome it can report is decided there; this only chooses the status
-/// code. The 401 covers an unknown username, a wrong password, a forward-auth
-/// account and a locked one alike, so none of them can be told apart.
+/// `POST /api/auth/login`: [`start_password_session`] mapped to status codes.
 async fn login(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -1126,12 +951,8 @@ async fn login(
     Ok((jar, Json(LoginResponse { success: true })))
 }
 
-/// The `Set-Cookie` carrying a freshly minted session token.
-///
-/// Shared by `login` and `change_own_password` rather than written out twice:
-/// the two must agree on every attribute, and a rotation that quietly dropped
-/// `HttpOnly` or `Secure` would downgrade the session it was issued to protect
-/// — the failure would be invisible until someone read the header by hand.
+/// The `Set-Cookie` for a freshly minted session token, shared by sign-in and password
+/// rotation so both agree on every attribute (`HttpOnly`, `Secure`, ...).
 fn build_session_cookie(token: String, cookie_secure: bool) -> Cookie<'static> {
     Cookie::build((
         crate::admin::auth::session_cookie_name(cookie_secure),
@@ -1140,12 +961,8 @@ fn build_session_cookie(token: String, cookie_secure: bool) -> Cookie<'static> {
     .path("/")
     .http_only(true)
     .secure(cookie_secure)
-    // Lax rather than Strict: Lax already withholds the cookie from every
-    // cross-site POST / PUT / DELETE, which covers every mutation this API
-    // exposes, and no GET handler writes. The only thing Strict would
-    // additionally block — a cross-site top-level GET navigation carrying
-    // the cookie — is not an attack vector here, so Strict buys no extra
-    // protection, only logged-out deep links.
+    // Lax, not Strict: Lax already withholds the cookie from cross-site unsafe methods and
+    // no GET writes, so Strict would only break deep links.
     .same_site(axum_extra::extract::cookie::SameSite::Lax)
     .max_age(time::Duration::seconds(
         crate::admin::auth::SESSION_MAX_AGE_SECS,
@@ -1166,75 +983,39 @@ pub struct SetupResponse {
 
 #[derive(Serialize)]
 pub struct LogoutResponse {
-    /// Where the SPA should send the browser to end the upstream (proxy/SSO)
-    /// session; `None` when no forward-auth logout URL is configured.
+    /// Where to send the browser to end the upstream (proxy/SSO) session; `None` when no
+    /// forward-auth logout URL is configured.
     pub redirect_to: Option<String>,
     /// Whether this request authenticated via the forward-auth proxy header.
     pub via_forward_auth: bool,
 }
 
-/// Minimum length for a password *set* through the API — `POST
-/// /api/auth/setup`, `POST /api/users`, `POST /api/users/me/password`.
+/// Minimum length for a password being *set*.
 ///
-/// NIST SP 800-63B, via the OWASP Authentication Cheat Sheet, treats anything
-/// under 15 characters as weak *when a second factor is not available*, which
-/// is noadd's situation today. 12 is a deliberate compromise: a real
-/// improvement on the 8 it replaces, and still short enough that an operator
-/// bringing an appliance up on a phone keyboard does not route around it.
-/// Raise it to 15 once a second factor exists.
-///
-/// Enforced only when a password is set. `login` deliberately does not check
-/// it, so an operator whose password predates this constant keeps signing in
-/// and meets the new floor at their next change rather than being locked out.
+/// NIST SP 800-63B asks for 15 without a second factor, which noadd lacks; 12 is a
+/// compromise for operators typing on a phone. Raise to 15 once a second factor exists.
+/// Not checked at sign-in, so older, shorter passwords keep working until changed.
 pub(crate) const MIN_PASSWORD_LENGTH: usize = 12;
 
-/// Maximum length for a password set through the API.
-///
-/// A maximum exists at all because Argon2 hashes whatever it is handed and the
-/// JSON body limit is measured in megabytes. 128 sits far above any real
-/// passphrase and far below anything that costs measurable work. Over-long
-/// passwords are rejected rather than truncated: silent truncation would make
-/// two different passwords open the same account.
+/// Maximum length for a password being set, bounding Argon2's work. Rejected rather than
+/// truncated, which would let two passwords open the same account.
 const MAX_PASSWORD_LENGTH: usize = 128;
 
-/// Upper bound on a password accepted at *login*, as opposed to
-/// [`MAX_PASSWORD_LENGTH`] when one is set.
-///
-/// Deliberately far looser, because the two bounds answer different questions.
-/// The set-time bound is a policy an operator can be asked to satisfy; this one
-/// only has to be low enough to bound the work an unauthenticated caller can
-/// make Argon2 do, while staying above any password an existing operator may
-/// already hold from before `MAX_PASSWORD_LENGTH` existed. Tightening this to
-/// `MAX_PASSWORD_LENGTH` would lock those operators out of their own appliance.
+/// Upper bound on a password at *sign-in*. Far looser than [`MAX_PASSWORD_LENGTH`]: it only
+/// bounds unauthenticated Argon2 work, and must admit passwords set before that limit
+/// existed.
 const MAX_LOGIN_PASSWORD_LENGTH: usize = 1024;
 
-/// Weakest zxcvbn score a new password may have. `Score::Three` is "safely
-/// unguessable: moderate protection from an offline slow-hash scenario"
-/// — 10^10 guesses.
-///
-/// Three rather than four because four asks for a genuinely long passphrase
-/// and this is the credential an operator types to bring a box up; a floor
-/// nobody can clear is a floor that gets removed. Three is also the level the
-/// throttling on `login` and `change_own_password` is sized for: those cap an
-/// online attacker at 5 attempts a minute, so 10^10 offline guesses is the
-/// scenario that actually matters here.
+/// Weakest zxcvbn score a new password may have. Three ("moderate protection from an
+/// offline slow-hash scenario", 10^10 guesses) rather than four, which demands a long
+/// passphrase; online guessing is already throttled to 5 attempts a minute per IP.
 const MIN_PASSWORD_SCORE: zxcvbn::Score = zxcvbn::Score::Three;
 
-/// Check a to-be-set password, returning the message to show on rejection.
+/// Check a to-be-set password, returning the rejection message. Shared by every path that
+/// sets a password so the floor cannot drift between them.
 ///
-/// Shared by all three endpoints that set a password so they cannot drift
-/// apart: a floor enforced at setup but not at change would let an operator
-/// walk their own password straight back under it.
-///
-/// Length is checked first and separately from guessability. They fail for
-/// different reasons and an operator can act on the length one immediately,
-/// whereas zxcvbn's verdict on a 4-character password would just be noise on
-/// top of "it is too short".
-///
-/// `user_inputs` carries the account's own username. zxcvbn scores a password
-/// containing it far lower, which is the point: `noadd-admin-2026` looks
-/// respectable to a length check and to a breach blocklist, and is the first
-/// thing anyone guessing at this particular box would try.
+/// Length is checked before guessability, as the more actionable message. `user_inputs`
+/// carries the username so zxcvbn penalises passwords built from it.
 fn validate_new_password(password: &str, user_inputs: &[&str]) -> Result<(), String> {
     let len = password.chars().count();
     if len < MIN_PASSWORD_LENGTH {
@@ -1252,11 +1033,7 @@ fn validate_new_password(password: &str, user_inputs: &[&str]) -> Result<(), Str
     if entropy.score() >= MIN_PASSWORD_SCORE {
         return Ok(());
     }
-    // zxcvbn's own diagnosis where it has one ("This is a top-100 password.",
-    // "Straight rows of keys are easy to guess."), because "too weak" alone
-    // tells an operator nothing about what to change. It is a fixed phrase
-    // from the crate's own enum, not anything derived from the password, so
-    // echoing it back reveals nothing a caller did not just type.
+    // zxcvbn's own diagnosis where it has one: a fixed phrase, not derived from the password.
     let reason = entropy
         .feedback()
         .and_then(zxcvbn::feedback::Feedback::warning)
@@ -1269,14 +1046,9 @@ fn validate_new_password(password: &str, user_inputs: &[&str]) -> Result<(), Str
     ))
 }
 
-/// A machine-readable reason on a 4xx, for the handful of endpoints where the
-/// status code alone leaves the caller unable to act.
-///
-/// Password rejection is the case that forces this: "400" tells an operator
-/// nothing, and the whole value of a guessability check is the sentence
-/// explaining what to change. Reserved for validation failures the caller
-/// supplied the input for — authentication failures stay bare, so no error
-/// body can become a user-enumeration oracle.
+/// A reason on an error where the status alone leaves the caller unable to act (e.g. a
+/// rejected password). Authentication failures stay bare so no body becomes a
+/// user-enumeration oracle.
 #[derive(Serialize)]
 struct ApiErrorResponse {
     error: String,
@@ -1290,9 +1062,7 @@ fn bad_request(message: String) -> (StatusCode, Json<ApiErrorResponse>) {
     )
 }
 
-/// An opaque `500`. Deliberately says nothing: the caller cannot act on the
-/// difference between a failed hash and a failed write, and naming it would
-/// only describe this server's internals to whoever provoked it.
+/// An opaque `500` that reveals nothing about the server's internals.
 fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1302,11 +1072,8 @@ fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     )
 }
 
-/// Why first-run setup was refused.
-///
-/// [`SetupError::Invalid`] carries the message because it is the only variant
-/// the operator can act on — "password must be at least 12 characters" has to
-/// reach them verbatim, whether they are looking at JSON or at the form.
+/// Why first-run setup was refused. Only [`SetupError::Invalid`] carries a message, the one
+/// the operator can act on.
 pub(crate) enum SetupError {
     /// Forward auth is configured, so the wizard does not apply.
     Disabled,
@@ -1315,23 +1082,16 @@ pub(crate) enum SetupError {
     Internal,
 }
 
-/// Create the first operator account.
-///
-/// Shared by `POST /api/auth/setup` and the HTML `POST /setup` for the same
-/// reason [`start_password_session`] is shared: the forward-auth guard and the
-/// already-configured check are what stop a second account being claimed, and a
-/// copy of them is a copy that can drift out of step.
+/// Create the first operator account. The only setup path, shared by `POST /api/auth/setup`
+/// and `POST /setup`: its guards are what stop a second account being claimed.
 pub(crate) async fn create_first_operator(
     state: &AppState,
     username: &str,
     password: &str,
 ) -> Result<(), SetupError> {
-    // Forward auth makes the setup wizard inapplicable: identity comes from
-    // the proxy, and the first proxied request provisions the operator — which
-    // is why `health` reports `needs_setup: false`. Leaving this
-    // unauthenticated path live would let anyone who can reach the listener
-    // directly, bypassing the proxy, claim the first operator account during
-    // the window before that first proxied request arrives.
+    // Under forward auth the first proxied request provisions the operator (`health`
+    // reports `needs_setup: false`); leaving setup open would let anyone bypassing the
+    // proxy claim the first account before then.
     if state.forward_auth.is_some() {
         return Err(SetupError::Disabled);
     }
@@ -1390,21 +1150,9 @@ pub struct ReauthRequest {
     pub password: String,
 }
 
-/// Prove the account's password again, refreshing this session's
-/// [`REAUTH_WINDOW_SECS`] window so it may perform a sensitive action.
-///
-/// Cookie-only, because the thing it updates is a session. A forward-auth or
-/// API-key caller reaching this endpoint has no session to stamp and gets the
-/// same 401 as any other request without one — `ReauthedUser` already answers
-/// for those two, and answering twice, differently, is how the two guards
-/// would end up disagreeing.
-///
-/// Verifying a password makes this a guessing surface, so it is throttled on
-/// the same budget as `login` and `change_own_password` — one IP, one
-/// credential, one budget.
-///
-/// Returns 204 rather than a body: the caller's next request carries the
-/// result, and there is nothing useful to say that the status does not.
+/// `POST /api/auth/reauth`: prove the password again, opening this session's
+/// [`crate::admin::auth::REAUTH_WINDOW_SECS`] window for sensitive actions. Cookie-only
+/// (it stamps a session; [`ReauthedUser`] handles the other callers). Answers 204.
 async fn reauth(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -1426,24 +1174,17 @@ async fn reauth(
 /// Why a password confirmation was refused.
 pub enum ReauthError {
     RateLimited,
-    /// Wrong password, no password to check against, or a session that went
-    /// away underneath us. One variant on purpose: they answer 401 alike, and
-    /// telling them apart would say which of the three it was.
+    /// Wrong password, no password to check, or a session gone meanwhile; one variant so
+    /// they cannot be told apart.
     Invalid,
     Internal,
 }
 
-/// Verify an operator's own password, and stamp their session as freshly
-/// re-authenticated.
+/// Verify an operator's own password and stamp their session as re-authenticated.
 ///
-/// The one place a password is checked for a *sensitive action* — `POST
-/// /api/auth/reauth` and the account page's forms both come through here, so
-/// there is a single rate limit, a single lockout, and a single audit event
-/// rather than a second path that quietly has none of them.
-///
-/// The stamp is left even for the form path, which does not need it: the
-/// operator has just proved the password, and the window it opens is the same
-/// window the dialog used to open.
+/// The only password check for a *sensitive action*, shared by `POST /api/auth/reauth` and
+/// the account page's forms: one rate limit, one lockout, one audit event. The form path
+/// gets the stamp too, though it does not need it.
 pub(crate) async fn confirm_password(
     state: &AppState,
     user_id: i64,
@@ -1464,8 +1205,7 @@ pub(crate) async fn confirm_password(
     }
     state.rate_limiter.record(ip);
 
-    // Same cap as `login`, and for the same reason: bound the work an
-    // over-long input can make Argon2 do before it reaches the hasher.
+    // Same Argon2 input bound as sign-in.
     if password.len() > MAX_LOGIN_PASSWORD_LENGTH {
         return Err(ReauthError::Invalid);
     }
@@ -1476,11 +1216,8 @@ pub(crate) async fn confirm_password(
         .await
         .map_err(|_err| ReauthError::Internal)?
         .ok_or(ReauthError::Invalid)?;
-    // A forward-auth-provisioned operator holds the sentinel rather than a
-    // hash. They cannot reach a sensitive endpoint through this path anyway —
-    // `ReauthedUser` exempts them on the strength of the proxy header — so the
-    // answer here is a plain 401, not the 500 that verifying the sentinel
-    // would produce.
+    // A forward-auth operator holds the sentinel, not a hash (and `ReauthedUser` exempts
+    // them anyway): answer 401, not the 500 verifying the sentinel would produce.
     if has_no_password(&hash) {
         return Err(ReauthError::Invalid);
     }
@@ -1503,10 +1240,7 @@ pub(crate) async fn confirm_password(
     }
     state.lockout.record_success(user_id);
     if !crate::admin::auth::mark_reauthenticated(&state.sessions, token_hash) {
-        // The session was validated moments ago, so losing it here means it
-        // expired or was revoked in between. Nothing was stamped, and the
-        // caller's next sensitive request will be rejected for want of a
-        // session rather than for want of a stamp.
+        // The session expired or was revoked since it was validated; nothing was stamped.
         return Err(ReauthError::Invalid);
     }
     tracing::info!(
@@ -1537,9 +1271,8 @@ async fn revoke_others(
     Ok(StatusCode::OK)
 }
 
-/// Revoke every session except the one named by `current_hash`.
-///
-/// Shared by `POST /api/auth/revoke-others` and the account page's form.
+/// Revoke every session except `current_hash`. Shared by `POST /api/auth/revoke-others` and
+/// the account page's form.
 pub(crate) async fn revoke_every_other_session(
     state: &AppState,
     actor_user_id: i64,
@@ -1550,12 +1283,9 @@ pub(crate) async fn revoke_every_other_session(
         crate::admin::auth::revoke_other_sessions(&state.sessions, &state.db, current_hash)
             .await
             .map_err(|_err| ())?;
-    // `revoke_other_sessions` deletes globally (every operator's sessions
-    // except `current_hash`), so `scope` and the `_rows` suffix are load
-    // bearing: without them this reads as "this operator's other sessions",
-    // and the count is DB rows, which can exceed the number of live sessions
-    // actually taken down (a session `validate_session` already evicted from
-    // memory keeps its row until the periodic sweep).
+    // `scope` and `revoked_rows` are deliberate: the delete spans every operator, and the
+    // count is DB rows, which can exceed live sessions (an evicted session keeps its row
+    // until the periodic sweep).
     tracing::info!(
         event = "session.destroyed",
         reason = "revoked_others",
@@ -1568,35 +1298,18 @@ pub(crate) async fn revoke_every_other_session(
     Ok(())
 }
 
-/// Log out the current session: revoke every session named by a cookie on
-/// this request, delete each from the DB, and expire the client's session
-/// cookies. Other devices' sessions are untouched. Also reports whether the
-/// caller authenticated via forward auth and, if so, hands back the
-/// configured proxy/SSO logout URL so the SPA can complete the handoff — a
-/// forward-auth caller holds no session for us to revoke, so that redirect
-/// is the only way for them to actually end their session.
-/// Ask the browser to drop this origin's cookies, cached responses and storage.
+/// Ask the browser to drop this origin's cookies, cached responses and storage, beyond what
+/// `Set-Cookie` expires.
 ///
-/// `Set-Cookie` already expires our own cookie; this is the belt-and-braces
-/// version that also evicts cached API responses and any storage a future UI
-/// revision might add.
-///
-/// Deliberately *not* including `executionContexts`: that directive
-/// reloads/closes the browsing context. The JSON caller has to survive long
-/// enough to read `redirect_to` out of the very response carrying this header,
-/// and the form caller is mid-redirect — neither wants its context torn down
-/// underneath it.
+/// Not `executionContexts`, which reloads the page: the JSON caller must still read
+/// `redirect_to`, and the form caller is mid-redirect.
 pub(crate) const CLEAR_SITE_DATA: (axum::http::HeaderName, &str) = (
     axum::http::HeaderName::from_static("clear-site-data"),
     r#""cache", "cookies", "storage""#,
 );
 
-/// Revoke every session this request's cookies name, clear the cookies, and
-/// report where a forward-auth operator has to go to finish signing out.
-///
-/// Shared by `POST /api/auth/logout` and the HTML `POST /logout` for the same
-/// reason [`start_password_session`] is shared — the revoke-both-cookies rule
-/// below is subtle enough that a second copy would get it wrong.
+/// Revoke every session this request's cookies name, clear the cookies, and return the
+/// forward-auth logout URL, if any. Shared by `POST /api/auth/logout` and `POST /logout`.
 pub(crate) async fn end_session(
     state: &AppState,
     auth: &AuthedUser,
@@ -1605,23 +1318,14 @@ pub(crate) async fn end_session(
     jar: CookieJar,
 ) -> (CookieJar, Option<String>) {
     let ip = client_ip(state, connect, headers);
-    // Revoke *every* token named by a cookie on this request, not just the
-    // one that authenticated it. A browser can hold both accepted cookie
-    // names at once, each naming a live session (log in over plain HTTP,
-    // then again once the operator turns on TLS / `--cookie-secure`), and
-    // `clear_session_cookies` below clears both regardless — so revoking
-    // only one would expire a cookie whose session stays live server-side,
-    // orphaned and replayable, for up to the idle/absolute window.
+    // Revoke every token a cookie names, not just the authenticating one: both cookies are
+    // cleared below, and an unrevoked one would leave a live, replayable session behind.
     let candidates: Vec<String> = session_cookie_hashes(&jar).collect();
     for token_hash in &candidates {
         let revoked = crate::admin::auth::revoke_session(&state.sessions, token_hash);
         let _ = state.db.delete_session_by_token_hash(token_hash).await;
-        // Only log a destruction event when a session actually existed under
-        // this token. The cookie value is unvalidated client input and
-        // `AuthedUser` may have resolved via API key or forward-auth, so a
-        // stale or fabricated cookie must not be able to inject an arbitrary
-        // `session.destroyed` event — nor be attributed to `auth.user_id`,
-        // which may not even be the owner of whatever token was sent.
+        // Log only a session that existed: the cookie is unvalidated input, and a fabricated
+        // one must not inject a `session.destroyed` event.
         if let Some(info) = revoked {
             tracing::info!(
                 event = "session.destroyed",
@@ -1646,6 +1350,8 @@ pub(crate) async fn end_session(
     (jar, redirect_to)
 }
 
+/// `POST /api/auth/logout`: see [`end_session`]. A forward-auth caller has no session here,
+/// so `redirect_to` (the proxy/SSO logout URL) is how it actually signs out.
 async fn logout(
     State(state): State<AppState>,
     auth: AuthedUser,
@@ -1676,9 +1382,7 @@ async fn logout(
 struct MeResponse {
     id: i64,
     username: String,
-    /// True when this request was authenticated by the reverse-proxy
-    /// forward-auth header (SSO), so the UI can note the session is
-    /// proxy-managed and not listed/revocable here.
+    /// True when the forward-auth header (SSO) authenticated this request.
     via_sso: bool,
 }
 
@@ -1717,11 +1421,7 @@ struct CreateUserRequest {
     password: String,
 }
 
-/// Provision another operator.
-///
-/// Every operator has full admin access, so this is the most privileged thing
-/// the API does: it hands out a second key to the whole appliance. That is why
-/// it is audited — see the `user.created` event below.
+/// `POST /api/users`: see [`create_operator`].
 async fn create_user_handler(
     State(state): State<AppState>,
     ReauthedUser(auth): ReauthedUser,
@@ -1739,8 +1439,7 @@ async fn create_user_handler(
                 error: "username already exists".to_string(),
             }),
         )),
-        // `LastOperator` and `NotFound` belong to deletion and cannot come out
-        // of a create, so they land here with the genuine failures.
+        // `LastOperator` and `NotFound` cannot come out of a create.
         Err(_) => Err(internal_error()),
     }
 }
@@ -1757,13 +1456,9 @@ pub enum OperatorError {
     Internal,
 }
 
-/// Provision another operator.
-///
-/// Shared by `POST /api/users` and the account page's form so the validation,
-/// the password policy and the `user.created` audit event are one path. Both
-/// callers prove a password first — the API through `ReauthedUser`, the form
-/// through [`confirm_password`] — because this hands out a second key to the
-/// whole appliance.
+/// Provision another operator, with full admin access. Shared by `POST /api/users` and the
+/// account page's form; both prove a password first ([`ReauthedUser`] /
+/// [`confirm_password`]).
 pub(crate) async fn create_operator(
     state: &AppState,
     actor_user_id: i64,
@@ -1785,16 +1480,8 @@ pub(crate) async fn create_operator(
         .await
     {
         Ok(id) => {
-            // The counterpart to `user.deleted`: between them, every change to
-            // who can administer this box is one query. `user_id` is the
-            // operator who did it and `target_user_id` the account created,
-            // matching the convention `delete_user_handler` already follows.
-            //
-            // The username is logged because an audit of "who was provisioned"
-            // is unreadable without it, and it is bounded first — it is
-            // caller-controlled text on a path that only a signed-in operator
-            // can reach, but the 64-character limit above is a validation
-            // rule, not a logging guarantee.
+            // Pairs with `user.deleted`. `user_id` is the actor, `target_user_id` the new
+            // account; the username is bounded, being caller-controlled.
             tracing::info!(
                 event = "user.created",
                 user_id = actor_user_id,
@@ -1805,15 +1492,8 @@ pub(crate) async fn create_operator(
             );
             Ok(id)
         }
-        // A UNIQUE violation means the username is taken (409); any other
-        // database error is a genuine failure (500).
-        //
-        // Naming the reason is fine here even though the cheat sheet asks
-        // registration to stay generic: that guidance is about *public*
-        // sign-up, where the response is an enumeration oracle. This endpoint
-        // is admin-only and the same caller can simply `GET /api/users`, so a
-        // generic message would withhold nothing and only make a taken
-        // username harder to diagnose.
+        // Naming a taken username is safe: the caller is an operator who can already
+        // `GET /api/users`.
         Err(e) if e.is_unique_violation() => Err(OperatorError::Conflict),
         Err(_) => Err(OperatorError::Internal),
     }
@@ -1835,19 +1515,16 @@ async fn delete_user_handler(
     }
 }
 
-/// Delete an operator and take their sessions down with them.
-///
-/// Shared by `DELETE /api/users/{id}` and the account page's form, so the
-/// last-operator guard, the session eviction and both audit events happen once
-/// however the request arrived.
+/// Delete an operator and their sessions. Shared by `DELETE /api/users/{id}` and the account
+/// page's form.
 pub(crate) async fn remove_operator(
     state: &AppState,
     actor_user_id: i64,
     ip: std::net::IpAddr,
     id: i64,
 ) -> Result<(), OperatorError> {
-    // The last-operator guard and the delete run atomically inside the DB layer,
-    // so two concurrent deletes can never drop the instance to zero operators.
+    // The last-operator guard and the delete are atomic in the DB layer, so concurrent
+    // deletes cannot reach zero operators.
     match state
         .db
         .delete_user(id)
@@ -1857,9 +1534,8 @@ pub(crate) async fn remove_operator(
         crate::db::DeleteUserOutcome::LastOperator => Err(OperatorError::LastOperator),
         crate::db::DeleteUserOutcome::NotFound => Err(OperatorError::NotFound),
         crate::db::DeleteUserOutcome::Deleted => {
-            // The DB `ON DELETE CASCADE` removed this operator's session rows;
-            // evict the matching in-memory entries now that the durable delete
-            // has succeeded (so a failed delete never logs a live user out).
+            // `ON DELETE CASCADE` removed the session rows; evict the in-memory entries only
+            // now, so a failed delete never logs anyone out.
             let tokens: Vec<String> = state
                 .sessions
                 .lock()
@@ -1870,10 +1546,7 @@ pub(crate) async fn remove_operator(
             for t in &tokens {
                 crate::admin::auth::revoke_session(&state.sessions, t);
             }
-            // `user_id` is the acting operator, matching every other event on
-            // this branch; the deleted operator is `target_user_id`. Logging
-            // `id` under `user_id` here would name the wrong user and discard
-            // the only thing that makes this event auditable — who did it.
+            // `user_id` is the actor; the deleted operator is `target_user_id`.
             tracing::info!(
                 event = "session.destroyed",
                 reason = "user_deleted",
@@ -1883,10 +1556,7 @@ pub(crate) async fn remove_operator(
                 revoked = tokens.len(),
                 "revoked sessions for deleted user"
             );
-            // Separate from the session event above, which records what
-            // happened to the sessions rather than to the account. Pairing
-            // this with `user.created` makes every change to who can
-            // administer this box answerable from one event name.
+            // The account's own event, pairing with `user.created`.
             tracing::info!(
                 event = "user.deleted",
                 user_id = actor_user_id,
@@ -1904,77 +1574,33 @@ struct ChangePasswordRequest {
     current_password: String,
     new_password: String,
 }
-/// Why a password change was refused.
-///
-/// `Rejected` carries the reason because it is the only outcome the operator
-/// can act on — "at least 12 characters" or a zxcvbn verdict has to reach them
-/// verbatim, whether they are looking at JSON or at the account page's form.
+/// Why a password change was refused. `Rejected` carries the policy message verbatim.
 pub(crate) enum PasswordChangeError {
     RateLimited,
     Rejected(String),
-    /// The current password did not match. Deliberately distinct from
-    /// `Rejected`: one means "try a better new password", the other "you got
-    /// your existing one wrong", and telling an operator the wrong one of those
-    /// sends them fixing the field that was fine.
+    /// The current password did not match (distinct from `Rejected`, so the operator fixes
+    /// the right field).
     WrongPassword,
     Internal,
 }
 
-/// Change the caller's own password, invalidate that operator's *other*
-/// sessions, and rotate the caller's own session token (OWASP: renew the
-/// session ID after any privilege level change, and invalidate other sessions).
+/// Change the signed-in operator's password, revoke their *other* sessions, and rotate the
+/// caller's own token (OWASP). Revocation ejects a live stolen cookie elsewhere; rotation
+/// covers a token leaked out of band (a proxy log, a screenshot). Shared by
+/// `POST /api/users/me/password` and the account page's form; its rate limit, lockout and
+/// `auth.failed` line are what stop a stolen session grinding the password.
 ///
-/// The two halves defend against different things and neither substitutes for
-/// the other. Revoking the other sessions ejects an attacker who is holding a
-/// live cookie in a browser. Rotating this session's own token is what covers
-/// a token that leaked through a channel needing no ongoing browser access — a
-/// proxy log, a shared terminal's history, a screenshot — since such a leak is
-/// entirely unaffected by revoking *other* sessions.
+/// The replacement session is stored *before* the old one is destroyed, so a failure
+/// leaves a working session. Once the password write commits, a revocation or rotation
+/// failure is only logged: the change cannot be undone, and a 500 would invite a retry.
 ///
-/// The rotation is ordered deliberately: the replacement session is minted and
-/// stored *before* the old one is destroyed, so a failure anywhere in the
-/// sequence leaves the caller holding a session that still works rather than
-/// signed out with no replacement. The two destructions are also kept separate
-/// — `reason = "password_change"` counts the other devices, `reason =
-/// "rotated"` names this one — so an auditor summing the counts does not count
-/// the caller's own session twice.
+/// API keys are **not** revoked: one minted with a stolen cookie survives a password
+/// change and must be deleted separately.
 ///
-/// API keys are **not** touched by this endpoint. `revoke_user_sessions_except`
-/// only deletes rows from `sessions`; `POST /api/api-keys` is gated by
-/// `AuthedUser` alone and `validate_api_key` never consults the password
-/// hash. So an attacker who already holds a stolen session cookie can mint a
-/// long-lived `noadd_`-prefixed key before the victim reacts, and that key
-/// keeps working after this call returns 204. An operator responding to a
-/// suspected compromise must revoke their API keys separately — changing
-/// the password alone does not lock out an attacker holding a session
-/// cookie or a minted key.
-///
-/// This endpoint is cookie-only today, so `keep` passed to
-/// [`revoke_user_sessions_except`] is always `Some` — the caller's own device
-/// stays signed in. If this ever grows an `AuthedUser`-based path (API key /
-/// forward-auth callers changing their own password), `keep` must become
-/// `None` there and still go through `revoke_user_sessions_except`, never
-/// `revoke_other_sessions` — the latter is global across all operators and
-/// would log out unrelated accounts. Similarly, an admin-resets-another-user
-/// password endpoint (none exists yet) must call
-/// `revoke_user_sessions_except(store, db, target_user_id, None)` so the
-/// reset account keeps no session at all.
-///
-/// If revocation or rotation fails after the password write has already
-/// committed, the failure is logged via `tracing::error!` but the response
-/// still succeeds with 204: the password change is done and cannot be un-done,
-/// so returning 500 here would only mislead the caller into retrying. Worst
-/// case, other sessions survive until they expire naturally and the caller
-/// keeps their original token — strictly no worse than not having rotated.
-///
-/// Change the signed-in operator's password, revoke their other sessions and
-/// rotate the one they are using.
-///
-/// Shared by `POST /api/users/me/password` and the account page's form. This is
-/// the only password-verification path outside sign-in, and the one an attacker
-/// holding a stolen session cookie uses to take an account over permanently —
-/// the rate limit, the account lockout and the `auth.failed` audit line are all
-/// load-bearing, and a second copy is a second chance to omit one.
+/// Cookie-only, so `keep` is always `Some`. A future path for API-key / forward-auth
+/// callers, or an admin reset of another account, must pass `None` to
+/// [`crate::admin::auth::revoke_user_sessions_except`] — never use
+/// `revoke_other_sessions`, which spans every operator.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn change_password_for_session(
     state: &AppState,
@@ -1986,19 +1612,7 @@ pub(crate) async fn change_password_for_session(
     current_password: &str,
     new_password: &str,
 ) -> Result<CookieJar, PasswordChangeError> {
-    // This endpoint verifies a password, so it is a password-guessing surface
-    // and has to be throttled like one — the scenario being closed is the
-    // cheat sheet's own: someone walks up to a signed-in terminal and grinds
-    // the current-password field until the account is theirs permanently.
-    //
-    // It shares `rate_limiter` with `login` rather than getting its own
-    // instance. The usual objection to sharing a limiter — one signal
-    // consuming another's budget from a NAT address, which is why
-    // `invalid_session_limiter` is separate — does not apply here: both
-    // signals are the *same* credential being guessed from the same IP, so a
-    // shared budget is the behaviour you would build on purpose. The cost is
-    // that an operator who mistypes their current password five times waits a
-    // minute before signing in again from that address.
+    // Throttled on sign-in's budget: it guesses the same credential from the same IP.
     if !state.rate_limiter.check(ip) {
         tracing::warn!(
             event = "auth.failed",
@@ -2012,10 +1626,7 @@ pub(crate) async fn change_password_for_session(
     }
     state.rate_limiter.record(ip);
 
-    // The account's own username feeds zxcvbn, so `admin` cannot set
-    // `admin-admin-admin`. A failure to read it is not fatal to the change —
-    // the length band and the dictionary checks still apply — so an empty
-    // slice is the right fallback rather than a 500.
+    // The username feeds zxcvbn; failing to read it only weakens that check, not a 500.
     let username = state.db.get_username(user_id).await.ok().flatten();
     let user_inputs: Vec<&str> = username.as_deref().into_iter().collect();
     if let Err(error) = validate_new_password(new_password, &user_inputs) {
@@ -2027,15 +1638,12 @@ pub(crate) async fn change_password_for_session(
         .await
         .map_err(|_err| PasswordChangeError::Internal)?
         .ok_or(PasswordChangeError::Internal)?;
-    // Unreachable today — this endpoint is cookie-only and a passwordless
-    // account can never obtain a session — but guard anyway so the sentinel can
-    // never reach `verify_password` and turn a 401 into a 500.
+    // Unreachable (a passwordless account never holds a session), but keep the sentinel
+    // away from `verify_password`, which would 500.
     if has_no_password(&hash) {
         return Err(PasswordChangeError::WrongPassword);
     }
-    // Same account budget as `login`. This endpoint verifies the same
-    // credential, so leaving it out would hand an attacker who already holds a
-    // session an unmetered place to grind it.
+    // Same account lockout as sign-in.
     if state.lockout.is_locked(user_id) {
         spend_verify_cost(current_password);
         return Err(PasswordChangeError::WrongPassword);
@@ -2044,10 +1652,6 @@ pub(crate) async fn change_password_for_session(
         verify_password(current_password, &hash).map_err(|_err| PasswordChangeError::Internal)?;
     if !ok {
         note_account_failure(state, user_id, ip, "change_password");
-        // This is the only password-verification path outside `login`, and
-        // exactly the one an attacker holding a stolen session cookie uses to
-        // try to take the account over permanently — a rejected attempt here
-        // must not be silent the way it is today.
         tracing::warn!(
             event = "auth.failed",
             method = "password",
@@ -2091,13 +1695,7 @@ pub(crate) async fn change_password_for_session(
     Ok(rotate_own_session(state, headers, jar, user_id, token_hash, ip).await)
 }
 
-/// `POST /api/users/me/password` — the JSON face of
-/// [`change_password_for_session`].
-///
-/// Resolves the caller's session, then maps the shared outcome onto status
-/// codes. The 401 covers both "current password wrong" and a missing account
-/// for the same reason sign-in does: neither is something the caller should be
-/// able to tell apart.
+/// `POST /api/users/me/password`: [`change_password_for_session`] mapped to status codes.
 async fn change_own_password(
     State(state): State<AppState>,
     connect: Option<Extension<ConnectInfo<SocketAddr>>>,
@@ -2130,11 +1728,8 @@ async fn change_own_password(
     }
 }
 
-/// Replace the caller's session with a freshly minted one and hand back the
-/// jar carrying its `Set-Cookie`. On any failure the original session is left
-/// untouched and the unchanged jar is returned — see
-/// [`change_password_for_session`]'s doc comment for why that is the right
-/// outcome rather than a 500.
+/// Replace the caller's session with a fresh one, returning the jar with its `Set-Cookie`.
+/// On failure the original session and jar are kept (see [`change_password_for_session`]).
 async fn rotate_own_session(
     state: &AppState,
     headers: &HeaderMap,
@@ -2150,8 +1745,7 @@ async fn rotate_own_session(
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
 
-    // Minted and persisted before anything is destroyed: if this fails, the
-    // caller simply keeps the session they arrived with.
+    // Persisted before anything is destroyed.
     let session_id = match state
         .db
         .insert_session(
@@ -2183,9 +1777,7 @@ async fn rotate_own_session(
             user_id,
             created_at: now,
             last_seen: now,
-            // The rotation happens immediately after the current password was
-            // verified, so the replacement session inherits that proof rather
-            // than starting stale.
+            // The current password was just verified.
             last_reauth_at: now,
         },
     );
@@ -2200,10 +1792,8 @@ async fn rotate_own_session(
         "rotated session after password change"
     );
 
-    // Evict from memory first: that is what actually stops the old token
-    // authenticating. The row is deleted after, and a failure there is logged
-    // rather than ignored — an orphaned row would be restored as a live
-    // session by `load_sessions_from_db` on the next restart.
+    // Evicting from memory is what stops the old token. A failed row delete is logged:
+    // `load_sessions_from_db` would restore the row as live on restart.
     let revoked = crate::admin::auth::revoke_session(&state.sessions, old_token_hash);
     if let Err(err) = state.db.delete_session_by_token_hash(old_token_hash).await {
         tracing::error!(
@@ -2244,10 +1834,7 @@ async fn list_sessions(
     _auth: AuthedUser,
     jar: CookieJar,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
-    // Authorization is `AuthedUser` (cookie, API key, or forward-auth header).
-    // The session cookie is only used to flag which listed session is the
-    // caller's own device; a forward-auth / API-key caller simply has none, so
-    // no row is marked current rather than the whole request being rejected.
+    // The cookie only marks the caller's own row; API-key / forward-auth callers get none.
     let current_hash = live_session_token_hash(&state, &jar);
     sessions_snapshot(&state, current_hash.as_deref())
         .await
@@ -2255,12 +1842,8 @@ async fn list_sessions(
         .map_err(|()| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Every live session, with the caller's own marked.
-///
-/// Shared by `GET /api/sessions` and the account page, so "last seen" means the
-/// same thing in both: the in-memory value when there is one, because a session
-/// that has been active since the last DB write is fresher in the store than in
-/// the row.
+/// Every session, with the caller's own marked. Shared by `GET /api/sessions` and the
+/// account page; "last seen" prefers the in-memory value, which is fresher than the row.
 pub(crate) async fn sessions_snapshot(
     state: &AppState,
     current_hash: Option<&str>,
@@ -2292,13 +1875,9 @@ async fn revoke_session_by_id(
     jar: CookieJar,
     Path(id): Path<i64>,
 ) -> Result<(CookieJar, StatusCode), StatusCode> {
-    // Authorized via `AuthedUser`; the cookie only tells us whether the revoked
-    // session is the caller's own device (so we clear its cookie). A forward-auth
-    // / API-key caller has none and just revokes the target session.
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    // Captured before `revoke_session_row` evicts the target from the store: if
-    // the caller's own session is the one being revoked, this must still see it
-    // as live to correctly clear its cookie.
+    // Only used to clear the caller's cookie if its own session is revoked, so it must be
+    // read before `revoke_session_row` evicts that session.
     let current_hash = live_session_token_hash(&state, &jar);
     match revoke_session_row(&state, auth.user_id, ip, id, current_hash.as_deref()).await {
         Ok(true) => Ok((clear_session_cookies(jar), StatusCode::NO_CONTENT)),
@@ -2313,12 +1892,8 @@ pub enum SessionRevokeError {
     Internal,
 }
 
-/// Revoke one session by row id, reporting whether it was the caller's own.
-///
-/// Shared by `DELETE /api/sessions/{id}` and the account page's form. The
-/// caller decides what to do about the cookie — the API answers 204 and the
-/// page redirects to sign-in — but the durable delete, the in-memory eviction
-/// and the audit event are the same three steps either way.
+/// Revoke one session by row id, returning whether it was the caller's own (the caller
+/// handles the cookie). Shared by `DELETE /api/sessions/{id}` and the account page's form.
 pub(crate) async fn revoke_session_row(
     state: &AppState,
     actor_user_id: i64,
@@ -2351,35 +1926,23 @@ pub(crate) async fn revoke_session_row(
 pub struct HealthResponse {
     /// Always `"ok"` while the process is up and serving requests.
     pub status: String,
-    /// True when no operator account exists yet and `POST /api/auth/setup`
-    /// still needs to be called before the admin UI is usable. Always false
-    /// when forward auth is configured, since identity comes from the proxy
-    /// and the first proxied request provisions an operator on its own.
+    /// True when no operator exists yet and `POST /api/auth/setup` must be called first.
+    /// Always false under forward auth, where the first proxied request provisions one.
     pub needs_setup: bool,
     /// Build version string (from `git describe`).
     pub version: &'static str,
 }
 
-/// Whether this appliance still has no operator and must show the setup wizard.
-///
-/// With forward auth on, identity comes from the proxy and the wizard would be
-/// a dead end — the first proxied request provisions the operator — so it
-/// reports `false` however empty the user table is. Shared with the page
-/// handlers, which route an unauthenticated browser to `/setup` or `/login`
-/// depending on this same answer.
+/// Whether there is no operator yet and setup is needed. Always `false` under forward auth.
+/// Also decides whether the pages send a signed-out browser to `/setup` or `/login`.
 pub(crate) async fn needs_setup(state: &AppState) -> bool {
     state.forward_auth.is_none() && state.db.count_users().await.is_ok_and(|n| n == 0)
 }
 
 /// Report basic service health.
 ///
-/// Always unauthenticated so monitoring and the setup wizard can call it
-/// before any operator exists. Reports whether initial setup is still pending.
-///
-/// Dropped query-log events are deliberately not reported here. A cumulative
-/// per-process counter cannot say *when* the loss happened or how it compares
-/// to total volume, so it could not tell an operator anything actionable;
-/// each drop is logged at error level instead.
+/// Unauthenticated, so monitoring and setup can call it before any operator exists.
+/// Reports whether initial setup is still pending.
 #[utoipa::path(
     get, path = "/api/health", tag = "system",
     responses((status = 200, description = "Service health", body = HealthResponse))
@@ -2409,20 +1972,15 @@ async fn get_server_info(
 
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingsMap {
-    /// Flattened key/value pairs, e.g. `upstream_servers`,
-    /// `upstream_strategy`, `log_retention_days`, `doh_access_policy`,
-    /// `public_url`, `dnssec_disabled`, `block_mode`, `block_custom_ipv4`,
-    /// `block_custom_ipv6`.
+    /// Flattened key/value pairs, e.g. `upstream_servers`, `upstream_strategy`,
+    /// `log_retention_days`, `dnssec_disabled`, `block_mode`.
     #[serde(flatten)]
     pub settings: std::collections::HashMap<String, String>,
 }
 
 /// Get the current runtime settings.
 ///
-/// Requires an operator (session or API key). Only known setting keys
-/// (upstream servers/strategy, log retention, `DoH` access policy, public
-/// URL, DNSSEC toggle, etc.) are returned; unknown keys stored in the
-/// database are omitted.
+/// Requires an operator (session or API key). Only known setting keys are returned.
 #[utoipa::path(
     get, path = "/api/settings", tag = "settings",
     security(("api_key" = [])),
@@ -2461,29 +2019,18 @@ pub struct UpdateSettingsRequest {
     pub settings: std::collections::HashMap<String, String>,
 }
 
-/// Addresses the settings form suggests for `block_custom_ipv4`, in the order
-/// shown. `0.0.0.0` is the same answer the built-in `null_ip` mode gives, and
-/// it earns its place here anyway: the two custom fields are set
-/// independently, so pinning A records to a real host while leaving AAAA at
-/// null is a normal thing to want. `192.0.2.1` is TEST-NET-1 (RFC 5737),
-/// reserved for exactly this kind of use.
-///
-/// Every entry must parse as [`std::net::Ipv4Addr`], the same check
-/// [`apply_settings`] runs — a suggestion the form rejects is worse than none,
-/// because the operator picked it out of the browser's own dropdown. Enforced
-/// by `block_custom_ip_suggestions_are_all_accepted`.
+/// Addresses the settings form suggests for `block_custom_ipv4`, in order. `0.0.0.0` is
+/// there because the two custom fields are set independently; `192.0.2.1` is TEST-NET-1
+/// (RFC 5737). Every entry must pass [`apply_settings`]'s check
+/// (`block_custom_ip_suggestions_are_all_accepted`).
 pub const BLOCK_CUSTOM_IPV4_SUGGESTIONS: &[&str] = &["0.0.0.0", "127.0.0.1", "192.0.2.1"];
 
 /// The IPv6 half of [`BLOCK_CUSTOM_IPV4_SUGGESTIONS`], same contract against
 /// [`std::net::Ipv6Addr`]. `100::` is the discard-only prefix (RFC 6666).
 pub const BLOCK_CUSTOM_IPV6_SUGGESTIONS: &[&str] = &["::", "::1", "100::"];
 
-/// Why a settings save was refused.
-///
-/// The API answers any rejection with a bare 400. The settings page needs to
-/// say *which* field was wrong and why — the operator is looking at a form with
-/// eight of them, and "400" points at none. Same decision, two levels of
-/// detail.
+/// Why a settings save was refused. The API answers a bare 400; the page uses `field` to
+/// place the message next to the input.
 pub(crate) enum SettingsError {
     Invalid {
         field: &'static str,
@@ -2492,19 +2039,13 @@ pub(crate) enum SettingsError {
     Internal,
 }
 
-/// Validate, persist and apply a set of runtime settings.
-///
-/// Shared by `PUT /api/settings` and the settings page's form post. The order
-/// here is the substance: everything is validated before anything is written,
-/// so a malformed entry rejects the whole save rather than leaving half of it
-/// applied, and the runtime handoffs at the end run only once the values are
-/// persisted. A second copy would be a second chance to get that order wrong.
+/// Validate, persist and apply runtime settings. Shared by `PUT /api/settings` and the
+/// settings form. Everything is validated before anything is written (no partial save), and
+/// runtime changes apply only after persisting.
 pub(crate) async fn apply_settings(
     state: &AppState,
     settings: &std::collections::HashMap<String, String>,
 ) -> Result<(), SettingsError> {
-    // Validate upstream_servers before persisting anything — reject the whole
-    // save on a bad entry so a broken value is never stored.
     let upstream_servers = match settings.get("upstream_servers") {
         Some(v) => Some(
             crate::upstream::forwarder::parse_upstreams(v).map_err(|_e| {
@@ -2519,7 +2060,6 @@ pub(crate) async fn apply_settings(
         None => None,
     };
 
-    // Validate block-mode settings before persisting anything.
     if let Some(mode) = settings.get("block_mode")
         && mode.trim().parse::<crate::dns::block::BlockMode>().is_err()
     {
@@ -2567,11 +2107,8 @@ pub(crate) async fn apply_settings(
 
     if let Some(v) = settings.get("dnssec_disabled") {
         let new_enabled = v.trim() != "true";
-        // Only flush when the policy actually flips. Cached values are
-        // client-ready wire responses that may have been produced while upstream
-        // DO forcing had the opposite state, so a real toggle must not keep
-        // serving stale AD/RRSIG/OPT data. A settings save that re-sends the
-        // unchanged value must not needlessly wipe every client's cache.
+        // Flush only on a real flip: cached wire responses carry the old AD/RRSIG/OPT
+        // state, but re-saving the unchanged value must not wipe the cache.
         if state.forwarder.dnssec_enabled() != new_enabled {
             state.forwarder.set_dnssec_enabled(new_enabled);
             state.cache.invalidate_all();
@@ -2606,13 +2143,9 @@ pub(crate) async fn apply_settings(
 
 /// Update one or more runtime settings.
 ///
-/// Requires an operator (session or API key). Only the keys present in the
-/// request body are changed; others are left untouched. `upstream_servers`
-/// is validated before anything is persisted, so a malformed value rejects
-/// the whole request with no partial write. Changes to `upstream_strategy`,
-/// `dnssec_disabled`, `upstream_servers`, and `block_mode` (and its
-/// `block_custom_ipv4`/`block_custom_ipv6` companions) take effect
-/// immediately, with no restart required.
+/// Requires an operator (session or API key). Only keys in the body change; everything is
+/// validated before anything is written, so a bad value rejects the whole request.
+/// Upstream, strategy, DNSSEC and block-mode changes apply without a restart.
 #[utoipa::path(
     put, path = "/api/settings", tag = "settings",
     security(("api_key" = [])),
@@ -2629,10 +2162,7 @@ async fn put_settings(
 ) -> Result<StatusCode, StatusCode> {
     match apply_settings(&state, &body.settings).await {
         Ok(()) => Ok(StatusCode::OK),
-        // The API has always answered a rejected value with a bare 400, and the
-        // field-level detail `SettingsError` carries is for the form. Widening
-        // this to a body would change a published contract for no caller that
-        // asked.
+        // Bare 400 is the published contract; the field detail is for the form.
         Err(SettingsError::Invalid { .. }) => Err(StatusCode::BAD_REQUEST),
         Err(SettingsError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -2640,8 +2170,7 @@ async fn put_settings(
 
 /// List all configured filter lists.
 ///
-/// Requires an operator (session or API key). Includes both built-in and
-/// user-added lists, with their enabled state and last-updated rule count.
+/// Requires an operator (session or API key). Includes built-in and user-added lists.
 #[utoipa::path(
     get, path = "/api/lists", tag = "lists",
     security(("api_key" = [])),
@@ -2656,8 +2185,7 @@ async fn get_lists(
         .get_filter_lists()
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // From the live engine, not storage: what a list uniquely provides is a
-    // property of the rule set currently loaded, not of the row.
+    // From the live engine, not storage: uniqueness is a property of the loaded rule set.
     let unique = state.filter.load().unique_rules_by_list();
 
     Ok(Json(
@@ -2676,10 +2204,8 @@ async fn get_lists(
     ))
 }
 
-/// A filter list, plus what removing it would cost.
-///
-/// The fields of `FilterListRow` are spelled out rather than flattened so the
-/// `OpenAPI` document describes one flat object, which is what the response is.
+/// A filter list, plus what removing it would cost. `FilterListRow`'s fields are spelled out
+/// rather than flattened so the `OpenAPI` document shows one flat object.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct FilterListResponse {
     /// List id.
@@ -2694,9 +2220,8 @@ pub struct FilterListResponse {
     pub last_updated: i64,
     /// Number of rules parsed out of the list's content on last download.
     pub rule_count: i64,
-    /// Rules this list provides that no other loaded list does — what would
-    /// stop being blocked if it were removed. `null` when the list contributes
-    /// no rules at all: it is disabled, empty, or its download failed.
+    /// Rules no other loaded list provides: what removing this list would unblock. `null`
+    /// when it contributes no rules (disabled, empty, or failed to download).
     pub unique_rules: Option<i64>,
 }
 
@@ -2714,12 +2239,8 @@ pub struct AddListResponse {
     pub id: i64,
 }
 
-/// Why a filter list could not be created or edited.
-///
-/// `Invalid` names the field it objected to, which is what lets the filters
-/// form put the message next to the input it is about. The JSON endpoint throws
-/// that detail away and answers a bare 400 — widening its body would change a
-/// published contract no caller asked to have changed.
+/// Why a filter list could not be created or edited. `Invalid.field` places the form's
+/// message; the JSON endpoint answers a bare 400.
 pub enum ListError {
     Invalid {
         field: &'static str,
@@ -2728,12 +2249,8 @@ pub enum ListError {
     Internal,
 }
 
-/// Validate a name/URL pair for a filter list.
-///
-/// Shared by the form and the JSON endpoint so the two cannot drift into
-/// disagreeing about what a usable list looks like. The URL check is
-/// deliberately shallow — a scheme noadd can actually fetch — because whether
-/// the URL *serves* a list is what `POST /api/lists/{id}/check` is for.
+/// Validate a filter list's name/URL, for both the form and the JSON endpoint. The URL check
+/// is only the scheme; whether it *serves* a list is `POST /api/lists/{id}/check`'s job.
 fn validate_list(name: &str, url: &str) -> Result<(), ListError> {
     if name.trim().is_empty() {
         return Err(ListError::Invalid {
@@ -2757,11 +2274,8 @@ fn validate_list(name: &str, url: &str) -> Result<(), ListError> {
     Ok(())
 }
 
-/// Create a filter list, enabled, without fetching its contents.
-///
-/// The download is left to `POST /api/lists/update` or the periodic refresh:
-/// fetching here would hold the request open for as long as the remote takes,
-/// and a list that is slow to answer is not a reason to refuse to add it.
+/// Create a filter list, enabled, without fetching it (left to `POST /api/lists/update` or
+/// the periodic refresh, so a slow remote does not hold the request open).
 pub async fn create_filter_list(state: &AppState, name: &str, url: &str) -> Result<i64, ListError> {
     validate_list(name, url)?;
     state
@@ -2771,10 +2285,7 @@ pub async fn create_filter_list(state: &AppState, name: &str, url: &str) -> Resu
         .map_err(|_err| ListError::Internal)
 }
 
-/// Change a filter list's name and URL together.
-///
-/// Both at once, because a list whose URL moved usually wants renaming with it,
-/// and validating them as a pair is what keeps the two callers honest.
+/// Change a filter list's name and URL together, validated as a pair.
 pub async fn modify_filter_list(
     state: &AppState,
     id: i64,
@@ -2791,9 +2302,8 @@ pub async fn modify_filter_list(
 
 /// Add a new filter list by URL.
 ///
-/// Requires an operator (session or API key). The list is created enabled
-/// but its content is not fetched synchronously; use `POST
-/// /api/lists/update` (or wait for the periodic refresh) to download it and
+/// Requires an operator (session or API key). The list is created enabled but not fetched;
+/// call `POST /api/lists/update` (or wait for the periodic refresh) to download it and
 /// rebuild the filter engine.
 #[utoipa::path(
     post, path = "/api/lists", tag = "lists",
@@ -2816,10 +2326,7 @@ async fn add_list(
     Ok((StatusCode::CREATED, Json(AddListResponse { id })))
 }
 
-/// The status a [`ListError`] answers with over JSON.
-///
-/// The field-level detail is dropped here on purpose: it exists for the form,
-/// which has an input to put it next to.
+/// The status a [`ListError`] answers with over JSON (field detail is for the form).
 fn list_error_status(err: ListError) -> StatusCode {
     match err {
         ListError::Invalid { .. } => StatusCode::BAD_REQUEST,
@@ -2839,11 +2346,8 @@ pub struct UpdateListRequest {
 
 /// Update a filter list's enabled state, name, and/or URL.
 ///
-/// Requires an operator (session or API key). All fields are optional and
-/// independent: `enabled` toggles the list without touching name/url, and
-/// name/url are only changed if both are provided together. Triggers an
-/// async filter-engine rebuild so an enable/disable takes effect shortly
-/// after the response returns.
+/// Requires an operator (session or API key). `enabled` applies on its own; name and URL
+/// only when both are given. Triggers an async filter-engine rebuild.
 #[utoipa::path(
     put, path = "/api/lists/{id}", tag = "lists",
     security(("api_key" = [])),
@@ -2927,9 +2431,7 @@ async fn check_list_url(
 
 /// Delete a filter list.
 ///
-/// Requires an operator (session or API key). Triggers an async filter-engine
-/// rebuild so the list's rules stop applying shortly after the response
-/// returns.
+/// Requires an operator (session or API key). Triggers an async filter-engine rebuild.
 #[utoipa::path(
     delete, path = "/api/lists/{id}", tag = "lists",
     security(("api_key" = [])),
@@ -3006,8 +2508,7 @@ pub struct BatchAddResponse {
     pub failed: Vec<BatchFailedEntry>,
 }
 
-/// How many lists one batch may add. A registry page cannot tick more than
-/// this, and the JSON endpoint refuses more than this.
+/// Most lists one batch may add, on both the registry page and the JSON endpoint.
 pub const BATCH_ADD_LIMIT: usize = 50;
 
 async fn batch_add_lists(
@@ -3018,12 +2519,8 @@ async fn batch_add_lists(
     Ok(Json(add_lists_batch(&state, body.items).await?))
 }
 
-/// Add every list in one batch, downloading each and rolling back the ones that
-/// fail.
-///
-/// The only place either caller does this: `POST /api/lists/batch` for API
-/// callers and the registry page's form for browsers. The concurrency cap, the
-/// per-item rollback and the single rebuild at the end are all in here.
+/// Add a batch of lists, downloading each and rolling back the ones that fail, then rebuild
+/// once. The only batch-add path, shared by `POST /api/lists/batch` and the registry form.
 pub async fn add_lists_batch(
     state: &AppState,
     items: Vec<BatchAddItem>,
@@ -3157,8 +2654,7 @@ pub struct AddRuleResponse {
 
 /// List all custom allow/block rules.
 ///
-/// Requires an operator (session or API key). Returned in the same syntax
-/// used to add them (hosts-file / Adblock-style lines).
+/// Requires an operator (session or API key). Returned in the syntax they were added in.
 #[utoipa::path(
     get, path = "/api/rules", tag = "rules",
     security(("api_key" = [])),
@@ -3179,11 +2675,9 @@ async fn get_rules(
 
 /// Add a custom allow/block rule.
 ///
-/// Requires an operator (session or API key). No-op (200, `id: 0`) if the
-/// exact rule text already exists rather than erroring; a genuinely new rule
-/// returns 201 with its id. Rejects text that doesn't parse as a rule (400).
-/// Triggers an async filter-engine rebuild so the rule takes effect shortly
-/// after the response returns.
+/// Requires an operator (session or API key). A new rule returns 201 with its id; an
+/// existing one is a no-op 200 with `id: 0`; unparseable text is a 400. Triggers an async
+/// filter-engine rebuild.
 #[utoipa::path(
     post, path = "/api/rules", tag = "rules",
     security(("api_key" = [])),
@@ -3201,8 +2695,7 @@ async fn add_rule(
 ) -> Result<(StatusCode, Json<AddRuleResponse>), StatusCode> {
     match create_custom_rule(&state, &body.rule).await {
         Ok(Some(id)) => Ok((StatusCode::CREATED, Json(AddRuleResponse { id }))),
-        // Already there. A duplicate is the same end state as a create, so it is
-        // not an error — but it is not a creation either, hence 200 and no id.
+        // Already there: same end state, but not a creation.
         Ok(None) => Ok((StatusCode::OK, Json(AddRuleResponse { id: 0 }))),
         Err(RuleError::Unparseable) => Err(StatusCode::BAD_REQUEST),
         Err(RuleError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -3216,11 +2709,8 @@ pub enum RuleError {
     Internal,
 }
 
-/// Add a custom allow/block rule, or report that it was already there.
-///
-/// `Ok(None)` means the exact text already exists. The parse is what decides
-/// whether the rule allows or blocks, so it is also the validation — sharing it
-/// is what stops the form accepting a line the API would refuse.
+/// Add a custom rule; `Ok(None)` if the exact text already exists. The parse decides allow
+/// vs block and is the validation, shared by the form and the API.
 pub async fn create_custom_rule(state: &AppState, rule: &str) -> Result<Option<i64>, RuleError> {
     let rule = rule.trim();
     let rule_type = match crate::filter::parser::parse_rule(rule) {
@@ -3253,9 +2743,7 @@ pub async fn create_custom_rule(state: &AppState, rule: &str) -> Result<Option<i
 
 /// Delete a custom allow/block rule.
 ///
-/// Requires an operator (session or API key). Triggers an async
-/// filter-engine rebuild so the removal takes effect shortly after the
-/// response returns.
+/// Requires an operator (session or API key). Triggers an async filter-engine rebuild.
 #[utoipa::path(
     delete, path = "/api/rules/{id}", tag = "rules",
     security(("api_key" = [])),
@@ -3348,9 +2836,7 @@ pub struct CreateApiKeyResponse {
 
 /// List the caller's own API keys.
 ///
-/// Requires an operator (session or API key). Scoped to the authenticated
-/// caller — never returns another operator's keys. Only metadata is
-/// returned; the secret token itself is never shown again after creation.
+/// Requires an operator (session or API key). Metadata only, never the secret.
 #[utoipa::path(
     get, path = "/api/api-keys", tag = "api-keys",
     security(("api_key" = [])),
@@ -3370,10 +2856,9 @@ async fn list_api_keys(
 
 /// Create a new API key for the calling operator.
 ///
-/// Requires an operator (session or API key). The full secret `token` is
-/// returned only in this response — it is never shown or recoverable again,
-/// only the `prefix` is retained for identification afterwards. The new key
-/// inherits the caller's permissions.
+/// Requires a session with a recent password proof (`POST /api/auth/reauth`, or sign-in);
+/// an API key cannot mint another. The key inherits the caller's permissions. The secret
+/// `token` is returned only here; afterwards only `prefix` identifies the key.
 #[utoipa::path(
     post, path = "/api/api-keys", tag = "api-keys",
     security(("api_key" = [])),
@@ -3401,12 +2886,8 @@ pub enum ApiKeyError {
     Internal,
 }
 
-/// Mint an API key for an operator, returning the one and only sight of its
-/// secret.
-///
-/// Shared by `POST /api/api-keys` and the account page's form. The token is in
-/// the return value and nowhere else — it is not stored, so whatever the caller
-/// does not show, nobody can recover.
+/// Mint an API key, returning the only copy of its secret (only the hash is stored). Shared
+/// by `POST /api/api-keys` and the account page's form.
 pub(crate) async fn issue_api_key(
     state: &AppState,
     user_id: i64,
@@ -3444,9 +2925,8 @@ pub(crate) async fn issue_api_key(
 
 /// Delete one of the caller's own API keys.
 ///
-/// Requires an operator (session or API key). Scoped to the authenticated
-/// caller — deleting an id owned by another operator returns 404 rather
-/// than revealing it exists.
+/// Requires an operator (session or API key). Another operator's key answers 404, not
+/// revealing it exists.
 #[utoipa::path(
     delete, path = "/api/api-keys/{id}", tag = "api-keys",
     security(("api_key" = [])),
@@ -3468,10 +2948,8 @@ async fn delete_api_key(
     }
 }
 
-/// Revoke one of an operator's own API keys, reporting whether it existed.
-///
-/// Scoped to `user_id` in the query itself, so a key belonging to another
-/// operator is indistinguishable from one that was never there.
+/// Revoke one of an operator's own API keys, reporting whether it existed. Scoped to
+/// `user_id` in the query, so another operator's key looks absent.
 pub(crate) async fn revoke_api_key(state: &AppState, user_id: i64, id: i64) -> Result<bool, ()> {
     let deleted = state
         .db
@@ -3491,18 +2969,15 @@ pub(crate) async fn revoke_api_key(state: &AppState, user_id: i64, id: i64) -> R
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct FilterCheckRequest {
-    /// Domain to evaluate, e.g. `"ads.example.com"`. A trailing dot is
-    /// stripped before matching.
+    /// Domain to evaluate, e.g. `"ads.example.com"`; a trailing dot is stripped.
     domain: String,
 }
 
 /// Check what the filter engine would decide for a domain, without querying DNS.
 ///
-/// Requires an operator (session or API key). Evaluates against the live,
-/// currently-loaded filter engine (custom rules + enabled lists). The
-/// response is an untyped JSON verdict: `{"action": "blocked", "rule":
-/// ..., "list": ...}` or `{"action": "allowed", "rule": ...}` (rule
-/// omitted when no explicit allow rule matched).
+/// Requires an operator (session or API key). Evaluates the live engine and answers
+/// `{"action": "blocked", "rule": ..., "list": ...}` or `{"action": "allowed", "rule": ...}`
+/// (`rule` omitted when no allow rule matched).
 #[utoipa::path(
     post, path = "/api/filter/check", tag = "filter",
     security(("api_key" = [])),
@@ -3584,9 +3059,8 @@ async fn upstream_latency(
 
 /// Get aggregate query statistics for today, the last 7 days, and the last 30 days.
 ///
-/// Requires an operator (session or API key). Includes totals, block ratio,
-/// cache hit rate, average response time per window, plus the query rate
-/// over the last minute.
+/// Requires an operator (session or API key). Totals, block ratio, cache hit rate and
+/// average response time per window, plus the last minute's query rate.
 #[utoipa::path(
     get, path = "/api/stats/summary", tag = "stats",
     security(("api_key" = [])),
@@ -3671,26 +3145,21 @@ async fn get_stats_top_upstreams(
 }
 
 // Each stats/v2 endpoint declares exactly the parameters it honours, and
-// `deny_unknown_fields` makes anything else a 400 rather than a silent no-op.
-// One shared struct used to cover them all, so `?range=` on the heatmap (a
-// fixed 30-day window) and `?tz_offset=` on the range-only endpoints were
-// accepted without complaint and quietly discarded — the API answering a
-// question it had not been asked and reporting no problem.
+// `deny_unknown_fields` makes any other a 400 rather than silently ignored.
 
-/// Query for `/api/stats/v2/timeline`, the one endpoint that honours both.
+/// Query for `/api/stats/v2/timeline`, the one endpoint honouring both `range` and
+/// `tz_offset`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineV2Query {
     pub range: Option<String>,
-    /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), used
-    /// to align buckets to their local calendar. Clamped to ±14h and rounded to
-    /// the nearest 15 minutes, which every zone in use already is; missing ⇒ 0
-    /// (UTC-aligned).
+    /// Viewer's east-positive UTC offset in minutes (e.g. 480 for UTC+8), aligning buckets
+    /// to the local calendar. Clamped to ±14h, rounded to 15 minutes; missing ⇒ 0 (UTC).
     pub tz_offset: Option<i64>,
 }
 
-/// Query for `/api/stats/v2/heatmap`. No `range`: the heatmap is a fixed
-/// 30-day window by design (see [`stats::compute_heatmap`]).
+/// Query for `/api/stats/v2/heatmap`. No `range`: its window is fixed (see
+/// [`stats::compute_heatmap`]).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeatmapQuery {
@@ -3698,8 +3167,7 @@ pub struct HeatmapQuery {
     pub tz_offset: Option<i64>,
 }
 
-/// Query for the stats/v2 endpoints that select a window but do not align it
-/// to the viewer's calendar, so they take no `tz_offset`.
+/// Query for the stats/v2 endpoints whose window is not calendar-aligned (no `tz_offset`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RangeQuery {
@@ -3711,12 +3179,9 @@ fn parse_stats_range(raw: Option<&str>) -> Result<stats::StatsRange, StatusCode>
     stats::StatsRange::parse(raw.unwrap_or("7d")).ok_or(StatusCode::BAD_REQUEST)
 }
 
-/// Resolve the viewer's UTC offset to seconds, clamped to the real-world range
-/// (±14h) so a malformed value can't shift buckets to nonsense.
-///
-/// Rounded to a quarter hour because that is the grain of
-/// `query_stats_quarter`: a quarter-aligned offset is answered from the rollup,
-/// any other would count every row in the window. No zone in use is affected.
+/// Resolve the viewer's UTC offset to seconds, clamped to ±14h. Rounded to a quarter hour,
+/// the grain of the `query_stats_quarter` rollup these charts fold; no zone in use is
+/// affected.
 fn resolve_tz_offset_secs(tz_offset: Option<i64>) -> i64 {
     let minutes = tz_offset.unwrap_or(0).clamp(-14 * 60, 14 * 60);
     (minutes + 7).div_euclid(15) * 15 * 60
@@ -3832,12 +3297,9 @@ struct MobileConfigProfile {
     payload_uuid: String,
     payload_version: u32,
     payload_description: String,
-    /// macOS 26.1 (Tahoe) and later refuse a `com.apple.dnsSettings.managed`
-    /// profile that does not declare a scope, failing with "The 'VPN Service'
-    /// payload could not be installed" — encrypted DNS and VPNs share the
-    /// `NetworkExtension` machinery, and without this key the profile is
-    /// evaluated as a user-scoped VPN service, which cannot be created.
-    /// A DNS resolver is a system-wide setting anyway, and iOS ignores the key.
+    /// Required by macOS 26.1+: without it a `com.apple.dnsSettings.managed` profile is
+    /// treated as a user-scoped VPN service and fails ("The 'VPN Service' payload could not
+    /// be installed"). iOS ignores it.
     payload_scope: String,
 }
 
@@ -3933,9 +3395,7 @@ async fn get_mobileconfig(
     Ok((StatusCode::OK, headers, xml))
 }
 
-/// Generate a deterministic UUID v5 from a seed string.
-///
-/// Uses the URL namespace since these UUIDs identify `DoH` URL-based resources.
+/// Deterministic UUID v5 from a seed, in the URL namespace (these identify `DoH` URLs).
 fn make_uuid(seed: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes()).to_string()
 }
@@ -3959,9 +3419,7 @@ pub struct LogsQuery {
 
 /// List recent DNS query logs, most recent first.
 ///
-/// Supports pagination (`limit`/`offset`) and filtering by domain substring,
-/// block outcome, `DoH` token, and DNS record type. Returns the matching
-/// `logs` array plus the `total` count for the applied filters.
+/// Supports pagination and filters; returns `logs` plus the `total` matching the filters.
 #[utoipa::path(
     get, path = "/api/logs", tag = "logs",
     security(("api_key" = [])),
@@ -3997,14 +3455,9 @@ async fn get_logs(
 /// Query for [`stream_events`].
 #[derive(Deserialize)]
 pub struct EventStreamQuery {
-    /// Ask for `stats` events as well as the heartbeat. Only the dashboard
-    /// does; every other page holds the same stream open for the status
-    /// indicator alone, and computing a snapshot for it would be waste.
+    /// Ask for `stats` events (only the dashboard does, so other pages cost no snapshot).
     pub stats: Option<String>,
-    /// Ask for `log` events: one per query as it is answered. Only the query
-    /// log's live tail does, and only while the operator has it switched on —
-    /// a busy appliance answers far more queries than a paused tail should be
-    /// made to carry.
+    /// Ask for `log` events, one per answered query (only the query log's tail, while on).
     pub logs: Option<String>,
 }
 
@@ -4018,18 +3471,14 @@ impl EventStreamQuery {
     }
 }
 
-/// `serde_urlencoded` only accepts `true`/`false` for a `bool`, so `?stats=1`
-/// — what anyone writes by hand — would 400 with nothing to explain why.
+/// Accepts `1` as well as `true`: `serde_urlencoded` would 400 `?stats=1` for a `bool`.
 fn flag(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true"))
 }
 
-/// One arm of the pump's `select!`: a receive that never completes when the
-/// source is absent — either because this connection never asked for it, or
-/// because it closed and retired. That is what keeps an arm out of the way
-/// without a guard expression duplicating the `Option` check, and it is
-/// cancel-safe because the receiver's state lives in the `Option`, not in the
-/// future `select!` drops.
+/// One arm of the pump's `select!`: a receive that never completes when the source is absent
+/// (never asked for, or closed and retired). Cancel-safe: the receiver lives in the
+/// `Option`, not in the future `select!` drops.
 async fn next_broadcast<T: Clone>(
     source: &mut Option<tokio::sync::broadcast::Receiver<T>>,
 ) -> Result<T, tokio::sync::broadcast::error::RecvError> {
@@ -4039,35 +3488,20 @@ async fn next_broadcast<T: Clone>(
     }
 }
 
-/// The admin UI's one push channel — every push the UI takes rides this
-/// connection, so a tab holds one whatever page it is on.
+/// `GET /api/events`: the admin UI's one push channel, one connection per tab.
 ///
-/// Four event names:
+/// - `ping` every tick: the status indicator's heartbeat, a real event because SSE
+///   keep-alive comments never reach `EventSource`. Carries `traffic` (ever answered a
+///   query), which retires the onboarding notice.
+/// - `stats`: a [`events::DashboardSnapshot`], when `?stats=1`.
+/// - `log`: a [`QueryLogEntry`] per answered query, published before the DB flush, when
+///   `?logs=1`.
+/// - `rebuild`: a [`crate::filter::rebuild::RebuildStatus`] on both edges of every filter
+///   rebuild, unasked-for (the banner is in the shell).
 ///
-/// - `ping` on every tick, the status indicator's heartbeat. It has to be a
-///   real event because SSE keep-alive comments never reach `EventSource`,
-///   leaving a silently-dead socket indistinguishable from an idle one. It
-///   carries `traffic`, whether the appliance has ever answered a query, which
-///   is the onboarding notice's cue to take itself down.
-/// - `stats` carrying a [`events::DashboardSnapshot`] when `?stats=1`.
-/// - `log` carrying a [`QueryLogEntry`] per answered query when `?logs=1`.
-///   Published before the logger's DB flush, so the tail is real-time.
-/// - `rebuild` carrying a [`crate::filter::rebuild::RebuildStatus`] on both edges of every filter
-///   rebuild. Unasked-for, like `ping`: the banner it feeds lives in the shell
-///   and is therefore on every page.
-///
-/// Two openers, sent before the stream settles into pushing changes:
-///
-/// - A client asking for stats gets one snapshot immediately rather than
-///   waiting out the first tick: the page is server-rendered with real numbers
-///   already, and up to ten seconds of divergence between that markup and the
-///   first push would read as a stale dashboard that suddenly jumps.
-/// - Every client gets one `rebuild`, idle or not. This stream is the only
-///   place the rebuild state is published, so it has to be able to answer
-///   "what is happening right now" rather than only "what changed since you
-///   connected" — a rebuild that finished a moment before the connection
-///   opened would otherwise leave the client waiting for an edge that has
-///   already passed.
+/// On open, a stats client gets a snapshot at once (so the server-rendered numbers do not
+/// lag the first tick), and every client gets the current `rebuild` state — this stream is
+/// the only place it is published, so a rebuild that just finished must still be reported.
 async fn stream_events(
     State(state): State<AppState>,
     _auth: AuthedUser,
@@ -4076,21 +3510,15 @@ async fn stream_events(
     let wants_stats = query.wants_stats();
     let hub = state.events.clone();
     let mut ticks = Some(hub.subscribe());
-    // Subscribed only when asked for. A receiver nobody reads still makes the
-    // sender do the work of filling it, which on a busy appliance is every
-    // answered query, for every open tab.
+    // Only when asked for: even an unread receiver costs the sender every answered query.
     let mut logs = query.wants_logs().then(|| state.log_events.subscribe());
-    // Unconditional, unlike the two above: a rebuild publishes twice and only
-    // when one runs, so the cost of carrying it on a connection that never
-    // sees one is nothing.
+    // Unconditional: a rebuild publishes only twice per run.
     let mut rebuilds = Some(state.rebuild.subscribe());
-    // Kept for the pump, which answers a lagged subscriber with the live state
-    // instead of the messages it missed.
+    // For the pump, which answers a lagged subscriber with the live state.
     let rebuild = state.rebuild.clone();
 
-    // Dropping this is what tells the ticker to stop computing snapshots once
-    // the last dashboard goes away, so it is moved into the pump task and
-    // lives exactly as long as the connection.
+    // Moved into the pump so it lives as long as the connection; dropping the last one
+    // stops the ticker computing snapshots.
     let guard = wants_stats.then(|| hub.stats_guard());
 
     let mut initial = Vec::new();
@@ -4116,16 +3544,12 @@ async fn stream_events(
         }
     }
 
-    // A tick becomes one or two events, which no single stream combinator
-    // expresses; pumping into a channel says it plainly instead. The client
-    // going away drops the receiver, the next send fails, and the task and its
-    // guard end with it.
+    // A tick becomes one or two events, so pump into a channel. When the client goes away
+    // the next send fails and the task (and its guard) ends.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
     tokio::spawn(async move {
         let _guard = guard;
-        // Held for the life of the connection. Without it the last `Arc` can be
-        // the router's, and a stream that asked for no stats would watch its
-        // tick source close the moment the handler returned.
+        // Held so the tick source cannot close when the handler returns.
         let _hub = hub;
 
         for event in initial {
@@ -4134,18 +3558,14 @@ async fn stream_events(
             }
         }
 
-        // A closed source retires its own arm rather than ending the
-        // connection: the tail and the heartbeat are independent, and taking
-        // the stream down with one of them would blank the status indicator
-        // over something it can still report on.
+        // A closed source retires its own arm rather than ending the connection: the
+        // heartbeat must outlive the tail.
         while ticks.is_some() || logs.is_some() || rebuilds.is_some() {
             tokio::select! {
                 received = next_broadcast(&mut ticks) => {
                     let tick = match received {
                         Ok(tick) => tick,
-                        // Lagged: this client fell behind the buffer. The next
-                        // tick is ten seconds away and carries the whole
-                        // state, so there is nothing to replay.
+                        // Lagged: the next tick carries the whole state.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             ticks = None;
@@ -4176,9 +3596,7 @@ async fn stream_events(
                 received = next_broadcast(&mut logs) => {
                     let entry = match received {
                         Ok(entry) => entry,
-                        // Lagged: a tail that fell behind skips what it missed
-                        // rather than replaying a burst the operator has
-                        // already scrolled past.
+                        // Lagged: skip what was missed rather than replay a burst.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             logs = None;
@@ -4196,11 +3614,8 @@ async fn stream_events(
                 received = next_broadcast(&mut rebuilds) => {
                     let status = match received {
                         Ok(status) => status,
-                        // Lagged: unlike a tick, a rebuild edge never comes
-                        // round again, and the one worth missing least is the
-                        // completion — skipping it leaves a banner spinning
-                        // over a rebuild that has finished. The live state
-                        // answers the question the missed messages would have.
+                        // Lagged: a missed edge never recurs (a missed completion would
+                        // leave the banner spinning), so send the live state.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             rebuild.status()
                         }
@@ -4225,7 +3640,7 @@ async fn stream_events(
 
 /// Delete all DNS query logs.
 ///
-/// Permanently clears the entire query-log history. This cannot be undone.
+/// Permanently clears the entire query-log history.
 #[utoipa::path(
     delete, path = "/api/logs", tag = "logs",
     security(("api_key" = [])),
@@ -4273,9 +3688,8 @@ mod openapi_tests {
         );
     }
 
-    /// Every annotated operation must carry a human-readable summary and
-    /// description, not just bare status-code/param docs — otherwise the
-    /// rendered Scalar UI shows nothing but an endpoint title.
+    /// Every annotated operation needs a summary (first doc paragraph) and a description
+    /// (the rest), or Scalar shows only a title.
     #[test]
     fn openapi_operations_have_summary_and_description() {
         let doc = ApiDoc::openapi();
@@ -4320,19 +3734,13 @@ mod openapi_tests {
     }
 }
 
-/// The helpers that make a caller-controlled string safe to put in a log line.
-///
-/// Every production caller sits in a `tracing` field position, which is only
-/// evaluated once a subscriber has declared interest — so nothing else in the
-/// suite reaches these, and both sentinels went untested until this module.
+/// The helpers that make a caller-controlled string safe to log. Production callers sit in
+/// `tracing` fields, evaluated only with a subscriber, so nothing else tests these.
 #[cfg(test)]
 mod log_value_tests {
     use super::*;
 
-    /// A request that simply sent no such header must not be logged with the
-    /// false claim that it sent a garbled one — the whole reason
-    /// [`header_log_value`] exists rather than
-    /// `headers.get(..).and_then(|v| v.to_str().ok())`.
+    /// An absent header must not be logged as a garbled one.
     #[test]
     fn header_log_value_separates_absent_from_unreadable() {
         let mut headers = HeaderMap::new();
@@ -4342,8 +3750,7 @@ mod log_value_tests {
         headers.insert("x-probe", axum::http::HeaderValue::from_static("plain"));
         assert_eq!(header_log_value(&headers, "x-probe"), "plain");
 
-        // Latin-1 bytes are a legal header value but not `to_str`-able, which
-        // is the case the second sentinel names.
+        // Latin-1 bytes: a legal header value, but not `to_str`-able.
         headers.insert(
             axum::http::header::USER_AGENT,
             axum::http::HeaderValue::from_bytes(b"caf\xe9").unwrap(),
@@ -4351,8 +3758,7 @@ mod log_value_tests {
         assert_eq!(user_agent_log_value(&headers), "<non-ascii>");
     }
 
-    /// `log_safe` cuts on a `char` boundary, so truncating multi-byte UTF-8
-    /// cannot split a sequence and emit invalid text into a log line.
+    /// `log_safe` never splits a multi-byte UTF-8 sequence.
     #[test]
     fn log_safe_truncates_on_a_char_boundary() {
         assert_eq!(log_safe("short", LOG_SAFE_MAX), "short");

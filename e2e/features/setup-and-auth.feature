@@ -4,11 +4,9 @@ Feature: First-run setup and authentication
   I want to create an operator account and sign in
   So that the admin UI is protected from unauthorized access
 
-  # These scenarios run against a dedicated noadd instance with a fresh,
-  # empty database, in a single worker and in file order. They form one
-  # deliberate narrative: a database can only be "set up" once, and
-  # revoking sessions is destructive, so they must not share the main
-  # authenticated instance used by the @app features.
+  # A dedicated, initially empty instance; scenarios run one at a time in
+  # file order as one narrative. Setup happens once and revoking sessions is
+  # destructive, so this cannot share the @app instance.
 
   Scenario: Setup rejects a mismatched password confirmation
     Given the admin UI has never been configured
@@ -58,11 +56,8 @@ Feature: First-run setup and authentication
     Then I land on the dashboard
 
   Scenario: The next-step banner can be dismissed and stays dismissed
-    # On a fresh install every page but the dashboard carries a banner telling
-    # the admin how to point a device at noadd; the dashboard says it in its own
-    # empty state instead. This instance never serves DNS queries, so the banner
-    # here can only be cleared by an explicit dismissal, and that choice must
-    # survive a reload.
+    # This instance never serves DNS, so only a dismissal clears the onboarding
+    # banner (shown on every page but the dashboard), and it must survive a reload.
     Given the admin password has been set to "correct horse battery staple"
     When I open the admin UI
     And I sign in with the password "correct horse battery staple"

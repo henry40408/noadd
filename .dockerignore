@@ -1,8 +1,6 @@
-# The builder only needs the Cargo manifests, src/, build.rs and admin-ui/dist.
-# Everything below is rebuilt inside the image, is local dev state, or is
-# secret — and without this file `COPY . .` ships a multi-gigabyte context.
+# Without this file `COPY . .` ships a multi-gigabyte context.
 
-# Rebuilt in the builder stage, and shadowed by the target cache mount anyway.
+# Shadowed by the builder's target cache mount anyway.
 /target
 
 # e2e is a separate cargo workspace; none of it reaches the binary.
@@ -17,7 +15,5 @@
 *.pem
 .envrc
 
-# build.rs stamps the binary with GIT_VERSION. Keeping .git out of the context
-# means its `git describe` fallback cannot run in the builder, so the Docker
-# workflow passes the describe output in as a build arg instead.
+# The Docker workflow passes GIT_VERSION as a build arg instead.
 .git

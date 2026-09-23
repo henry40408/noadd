@@ -1,16 +1,8 @@
-//! The runner for the tests that are not Gherkin.
+//! The runner for the non-Gherkin specs (`harness = false`; see
+//! [`noadd_e2e::Suite`] for why not libtest).
 //!
-//! `harness = false`, for the same reason the Cucumber runner uses it: every
-//! file here owns a noadd instance that has to be started, sometimes seeded
-//! between two boots, and stopped around its cases. A `#[test]` function has
-//! nowhere to keep that — a `static` holding the server never drops, so the
-//! process would exit leaving an orphan per file holding ports.
-//!
-//! Files run concurrently up to a small cap; cases *within* a file run in the
-//! order they are written, as they did under `workers: 1`. Every file has its
-//! own ports and its own database, which is what makes the first half safe —
-//! and several files depend on the second: the query log's last case empties
-//! the log the earlier ones page through.
+//! Files run concurrently up to [`noadd_e2e::max_concurrency`], safe because
+//! each has its own ports and database; cases within a file run in order.
 
 mod account_sensitive_actions;
 mod chart_touch;
@@ -44,9 +36,7 @@ macro_rules! spawn_spec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Before anything runs in parallel — see `Browser::prepare`. On a cold
-    // driver cache several sessions opening at once contend on the same
-    // download and the run wedges rather than slows, and CI is cold every run.
+    // Before anything runs in parallel — see `Browser::prepare`.
     Browser::prepare().await?;
 
     let permits = Arc::new(Semaphore::new(noadd_e2e::max_concurrency()));
@@ -62,8 +52,8 @@ async fn main() -> Result<()> {
     spawn_spec!(set, permits, stats_charts);
     spawn_spec!(set, permits, stats_no_js);
 
-    // Every file runs before any of them can fail the process: which cases
-    // failed is the whole report, not which file failed first.
+    // Collect every file's failing cases before failing the process. (A file
+    // whose setup errors still aborts the run via `??`.)
     let mut failures = Vec::new();
     while let Some(joined) = set.join_next().await {
         failures.extend(joined??);

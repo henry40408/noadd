@@ -1,20 +1,11 @@
-//! The runner for the tests that were never Gherkin.
+//! The runner for the non-Gherkin regression specs in `tests/specs`.
 //!
-//! Eight of the twelve Playwright projects were plain `test()` blocks rather
-//! than features — the touch, auto-save, account and four no-JS files. They are
-//! regressions with a paragraph of reasoning each, not user journeys, and
-//! rewriting them as scenarios would have invented a vocabulary nobody speaks.
-//! So they stay tests, and this is the `describe` / `test` they need.
+//! Not libtest: each file owns a noadd instance started, seeded and stopped
+//! around its cases, and a `static` holding a server never drops, so `#[test]`
+//! functions would leave orphans holding ports.
 //!
-//! It is not libtest. Each file owns a noadd instance that has to be started,
-//! seeded and stopped around its cases, and `#[test]` functions have nowhere to
-//! put that: a `static` holding the server never drops, so the process would
-//! exit leaving eight orphans holding ports. A [`Suite`] owns the server for as
-//! long as its cases run and takes it down on the way out.
-//!
-//! Cases run in the order they are written, as they did under `workers: 1`.
-//! Several files depend on it — the query log's last case empties the log the
-//! earlier ones page through.
+//! Cases run in the order written, and several files depend on it — the query
+//! log's last case empties the log the earlier ones page through.
 
 use anyhow::Result;
 
@@ -44,13 +35,9 @@ impl Suite {
 
     /// Runs one case in a session of its own.
     ///
-    /// A fresh session per case is what Playwright's per-test context gave, and
-    /// here it is also a requirement: `Emulation.setScriptExecutionDisabled`
+    /// Per-case sessions are required: `Emulation.setScriptExecutionDisabled`
     /// applies to the next document, so a no-JS case cannot inherit a session
-    /// that has already navigated.
-    ///
-    /// A failure is recorded and the remaining cases still run — the whole
-    /// point of a suite is to learn more than which test failed first.
+    /// that has already navigated. A failure is recorded and later cases still run.
     pub async fn case<F>(&mut self, name: &str, body: F)
     where
         F: AsyncFnOnce(&Browser, &Page) -> Result<()>,
@@ -76,9 +63,7 @@ impl Suite {
     {
         let browser = Browser::open(&self.profile).await?;
         let page = Page::new(browser.driver(), &self.base);
-        // The session is closed either way: a case that failed has already
-        // reported, and leaking a browser per failure is how a red run becomes
-        // an unusable machine.
+        // Close the session even on failure, or a red run leaks a browser per case.
         let outcome = body(&browser, &page).await;
         let closed = browser.quit().await;
         outcome?;

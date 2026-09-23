@@ -1,19 +1,11 @@
 {#
-  The dashboard.
+  The dashboard: readings only, with the real numbers in the first response.
 
-  There is not a form on this page — everything here is a reading. What the
-  server rendering buys is the first paint: the six stat cards, the three top-N
-  tables and the onboarding notice arrive with the real numbers in them, where
-  they used to appear empty and fill in over five API calls.
+  `app.js` re-draws the same markup from each `stats` snapshot on the event
+  stream, so every shape below has a counterpart in `DashboardPage`, formatted
+  identically — a number that changed notation on update would read as a change.
 
-  `app.js` keeps the page live from there. It re-draws the same markup every ten
-  seconds and flashes what changed, so every shape below has a counterpart in
-  `DashboardPage` — a number that changed its notation when the poll landed
-  would read as a change in the number itself.
-
-  The chart is the one thing not here. It is drawn from a timeline series by the
-  client, which is the documented exception to this UI working without
-  JavaScript; the card says so rather than sitting empty.
+  The chart is the documented no-JS exception: the client draws it.
 #}
 {% extends "shell.html" %}
 
@@ -21,7 +13,7 @@
       <dashboard-page>
       <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between">
         <div><h2>Dashboard</h2><p>DNS query statistics overview</p></div>
-        {# Auto-refresh is the client's job, so the control for it ships hidden. #}
+        {# Live updates need the client, so the toggle ships hidden. #}
         <button class="live-toggle js-only" id="live-btn" data-testid="live-toggle" title="Auto-refresh every 10s. Click to toggle." hidden><span class="live-dot"></span> LIVE</button>
       </div>
       <div class="card fade-in" id="onboard-empty" data-testid="dashboard-empty-state"{% if has_queries %} style="display:none"{% endif %}>
@@ -45,11 +37,11 @@
         <div class="stat-card" data-i="4"><div class="stat-label">Avg Response</div><div class="stat-value text-orange">{{ avg_ms }}<span style="font-size:0.9rem;color:var(--text-dim)">ms</span></div><div class="stat-sub">7d: {{ avg_ms_7d }} ms / 30d: {{ avg_ms_30d }} ms</div></div>
         <div class="stat-card" data-i="5" data-testid="stat-throughput"><div class="stat-label">Throughput</div><div class="stat-value accent" data-testid="stat-throughput-value">{{ qps_now }}<span style="font-size:0.9rem;color:var(--text-dim)">q/s</span></div><div class="stat-sub">24h: {{ qps_today }} / 7d: {{ qps_7d }}</div></div>
       </div>
-      {# One `style`, not two: a repeated attribute is dropped, and the second one is the one that matters here. #}
+      {# One `style` attribute: a repeated one is dropped. #}
       <div class="card fade-in" id="chart-card" style="animation-delay:0.1s{% if !has_queries %};display:none{% endif %}">
         <div class="card-title">Queries (24h)</div>
         <div class="chart-container" id="chart">
-          {# Replaced by the drawn chart on connect. Says what it is rather than leaving a gap. #}
+          {# Replaced by the drawn chart on connect. #}
           <p class="panel-empty" data-testid="chart-needs-js">The 24-hour chart is drawn in the browser. The numbers above and below it are complete without it.</p>
         </div>
       </div>

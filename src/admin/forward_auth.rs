@@ -2,13 +2,11 @@
 //! (Authelia, Authentik, oauth2-proxy, tinyauth, ...) via a configurable
 //! request header.
 //!
-//! Trust policy is deliberately **stricter** than [`crate::net`]'s client-IP
-//! handling. There, a forged `X-Forwarded-For` only pollutes logs and rate
-//! limits, so loopback is trusted implicitly as a convenience. Here, a forged
-//! header hands the caller a fully authenticated operator session — so
-//! forward auth has its own, separate CIDR allow-list
-//! (`--forward-auth-trusted-proxies`) and loopback gets **no** special case:
-//! the proxy's peer address must be listed explicitly, every time.
+//! Trust is deliberately **stricter** than [`crate::net`]'s client-IP handling:
+//! a forged `X-Forwarded-For` only pollutes logs and rate limits, but a forged
+//! header here is a full operator session. So forward auth has its own CIDR
+//! allow-list (`--forward-auth-trusted-proxies`) and loopback gets **no**
+//! implicit trust.
 
 use std::net::IpAddr;
 
@@ -16,8 +14,7 @@ use axum::http::{HeaderMap, HeaderName};
 
 use crate::net::{CidrParseError, TrustedProxies};
 
-/// Maximum accepted username length, mirroring `create_user_handler`'s limit
-/// on operator usernames created through the regular signup path.
+/// Maximum username length, matching `create_user_handler`'s limit.
 pub const MAX_USERNAME_LEN: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,11 +41,10 @@ pub struct ForwardAuthConfig {
 }
 
 impl ForwardAuthConfig {
-    /// Build a config from the raw `--forward-auth-header` /
-    /// `--forward-auth-trusted-proxies` values, or `Ok(None)` if the feature
-    /// is left off (both empty). Either flag set without the other is a
-    /// startup error — a header with no allow-list would trust any client,
-    /// and an allow-list with no header does nothing.
+    /// Build a config from `--forward-auth-header` /
+    /// `--forward-auth-trusted-proxies`, or `Ok(None)` if both are empty. Either
+    /// without the other is an error: a header with no allow-list trusts any
+    /// client, and an allow-list with no header does nothing.
     pub fn from_args(
         header: &str,
         cidrs: &str,
@@ -71,9 +67,8 @@ impl ForwardAuthConfig {
             .map_err(|_err| ForwardAuthConfigError::InvalidHeader(header.to_string()))?;
 
         let trusted = TrustedProxies::parse(cidrs)?;
-        // A list that parsed but yielded no CIDRs (e.g. ",,") must not leave
-        // forward auth "on" while trusting nothing — that's the same footgun
-        // as an empty allow-list, just reached via a different input.
+        // A list that parsed to no CIDRs (e.g. ",,") is the same footgun as an
+        // empty one.
         if trusted.is_empty() {
             return Err(ForwardAuthConfigError::MissingTrustedProxies);
         }
@@ -109,21 +104,16 @@ impl ForwardAuthConfig {
         self.logout_url.as_deref()
     }
 
-    /// Resolve the operator username asserted by the proxy, or `None` if the
-    /// request cannot be trusted. `peer` is the TCP peer address (`None` when
-    /// there is no `ConnectInfo`, e.g. a raw `tower::Service` call in tests —
-    /// treated as untrusted, never as loopback).
+    /// Resolve the username asserted by the proxy, or `None` if the request
+    /// cannot be trusted. A `None` `peer` (no `ConnectInfo`) is untrusted.
     pub fn resolve_username(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<String> {
         let peer = peer?;
         if !self.trusted.contains(peer) {
             return None;
         }
 
-        // A repeated header (e.g. a client-supplied value the proxy failed to
-        // strip, plus the proxy's own appended value) arrives as two header
-        // values. Picking either — first or last — is a spoofing hazard, so
-        // any request with more than one value for the header is rejected
-        // outright rather than guessing which one is trustworthy.
+        // A repeated header (a client value the proxy failed to strip plus its
+        // own) is rejected: picking either one is a spoofing hazard.
         let mut values = headers.get_all(&self.header).iter();
         let first = values.next()?;
         if values.next().is_some() {
@@ -134,10 +124,9 @@ impl ForwardAuthConfig {
     }
 }
 
-/// Trim and validate a raw header value as a username: non-empty, within
-/// [`MAX_USERNAME_LEN`] characters, and free of control characters (which
-/// have no legitimate place in a username and could otherwise smuggle
-/// terminal escapes or similar into logs).
+/// Trim and validate a header value as a username: non-empty, at most
+/// [`MAX_USERNAME_LEN`] characters, and free of control characters (which could
+/// smuggle terminal escapes into logs).
 fn normalize_username(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.chars().count() > MAX_USERNAME_LEN {
@@ -266,10 +255,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
-        // A raw `\n` cannot survive `HeaderValue` construction at all (the
-        // HTTP layer itself rejects it); a tab is a control char that HTTP
-        // does permit in header values, so it's the one that must be caught
-        // by `normalize_username` itself.
+        // `HeaderValue` already rejects `\n` but permits a tab, so the tab is
+        // what `normalize_username` itself must catch.
         let headers = headers_with("Remote-User", "ali\tce");
         assert!(cfg.resolve_username(Some(peer), &headers).is_none());
     }
@@ -301,8 +288,7 @@ mod tests {
 
     #[test]
     fn header_matching_is_case_insensitive() {
-        // Configured with mixed case; sent all-lowercase, as HTTP header names
-        // require case-insensitive matching.
+        // Configured mixed-case, sent lowercase: header names are case-insensitive.
         let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
             .unwrap()
             .unwrap();

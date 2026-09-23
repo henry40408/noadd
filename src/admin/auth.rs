@@ -12,64 +12,44 @@ use rand::distr::Alphanumeric;
 /// Session expiry in seconds (7 days).
 pub const SESSION_MAX_AGE_SECS: i64 = 7 * 86400;
 
-/// Idle (inactivity) expiry in seconds (48 hours). Deliberately the same order
-/// of magnitude as [`SESSION_MAX_AGE_SECS`] rather than OWASP's 15-30 minute
-/// suggestion: noadd is a self-hosted appliance whose operators expect a
-/// long-lived admin tab, and the requirement being satisfied here is that both
-/// an idle layer and an absolute layer exist — not a specific figure.
+/// Idle (inactivity) expiry in seconds (48 hours). Long rather than OWASP's
+/// 15-30 minutes: operators of a self-hosted appliance expect a long-lived tab,
+/// and the requirement is that an idle layer exists alongside the absolute one.
 ///
-/// This window measures time since the last *request* this device made, not
-/// time since a human last looked at the screen — the conventional
-/// simplification for a server-side idle timeout, and here it means what it
-/// says. The admin UI used to poll (`/api/filter/rebuild-status` every 2s, the
-/// dashboard every 10s), and every one of those trips refreshed `last_seen`
-/// through `validate_session`, so in practice only a closed tab ever expired.
-/// Both polls are gone: what an open tab holds now is one `GET /api/events`,
-/// whose session is validated when it is established and not again for as long
-/// as it stays up. A tab left open past this window therefore does expire, and
-/// the next navigation — or the `EventSource`'s next reconnect — lands on
-/// `/login`. That is the layer doing its job rather than a regression, but it
-/// is a real change in what an operator sees.
+/// Measured from the last *request*. An open tab holds one `GET /api/events`,
+/// validated only when it connects, so a tab left open past this window does
+/// expire and its next navigation or reconnect lands on `/login`.
 ///
-/// `last_seen` is only flushed to disk every 60s (see `flush_last_seen`), so a
-/// value reloaded after a restart can lag reality by up to that long. Against
-/// a 48h window that's a 0.03% error and requires no compensation. If a future
-/// maintainer lowers this constant to the same order of magnitude as the flush
-/// interval (e.g. below ~15 minutes), the flush interval must be shortened — or
-/// a `flush_last_seen` call added to the graceful shutdown path — first.
+/// `last_seen` is flushed to disk every 60s (see [`flush_last_seen`]), so a
+/// restored value can lag by that much — immaterial at 48h. Lowering this
+/// toward the flush interval requires shortening the flush (or flushing on
+/// shutdown) first.
 pub const SESSION_IDLE_TIMEOUT_SECS: i64 = 2 * 86400;
 
 /// In-memory session metadata. Persisted to the `sessions` table on creation
-/// and revocation; `last_seen` is flushed periodically (see `flush_last_seen`).
+/// and revocation; `last_seen` is flushed periodically (see [`flush_last_seen`]).
 #[derive(Debug, Clone, Copy)]
 pub struct SessionInfo {
     pub session_id: i64,
     pub user_id: i64,
     pub created_at: i64,
     pub last_seen: i64,
-    /// When this session last proved the account's password — at login, or at
-    /// a later `POST /api/auth/reauth`. Sensitive actions require this to be
-    /// within [`REAUTH_WINDOW_SECS`]; see [`has_fresh_reauth`].
+    /// When this session last proved the account's password (login or a later
+    /// reauth). Sensitive actions require it within [`REAUTH_WINDOW_SECS`]; see
+    /// [`has_fresh_reauth`].
     ///
-    /// Deliberately **not** persisted to the `sessions` table. Restoring it
-    /// would mean writing on every re-authentication for a value whose whole
-    /// purpose is to go stale in minutes, and the failure mode of not
-    /// restoring it is the safe one: `load_sessions_from_db` falls back to
-    /// `created_at`, so a session restored after a restart is treated as
-    /// having last proved the password when it was created — true by
-    /// construction, since login is what created it.
+    /// Deliberately **not** persisted: it goes stale in minutes, and
+    /// [`load_sessions_from_db`] falls back to `created_at`, which is the safe
+    /// direction — login is what created the session.
     pub last_reauth_at: i64,
 }
 
-/// Thread-safe session store. Maps **token hash** (see [`hash_session_token`])
-/// -> session metadata.
+/// Thread-safe session store: **token hash** (see [`hash_session_token`]) ->
+/// session metadata.
 ///
-/// Keyed by the hash rather than the token so that the raw token exists in
-/// exactly two places — the `Set-Cookie` header on the way out and the
-/// `Cookie` header on the way back in — and nowhere in noadd's own state.
-/// The store and the `sessions` table therefore agree on one identifier, which
-/// is what lets a row deleted by id be evicted from memory by the value the
-/// DELETE returned.
+/// Keyed by the hash so the raw token never lives in noadd's own state, and so
+/// the store and the `sessions` table share one identifier — a row deleted by
+/// id is evicted from memory by the hash the DELETE returned.
 pub type SessionStore = Arc<Mutex<HashMap<String, SessionInfo>>>;
 
 /// Create a new, empty session store.
@@ -96,14 +76,10 @@ pub const SESSION_COOKIE: &str = "session";
 /// blocks a subdomain from overwriting it (session fixation).
 pub const SESSION_COOKIE_HOST: &str = "__Host-session";
 
-/// The cookie name to *emit*. Conditional on `cookie_secure`: a browser
-/// silently rejects a `__Host-`-prefixed cookie that is not `Secure` and not
-/// delivered over HTTPS, so emitting it unconditionally would make login
-/// appear to succeed and then fail on the next request — on exactly the
-/// HTTP-only internal deployments `resolve_cookie_secure` exists to support.
-/// The reverse move (an HTTPS deployment dropped back to HTTP) is not covered
-/// by this fallback: a browser holding `__Host-session` will not send it over
-/// plain HTTP, so that operator has to log in again once.
+/// The cookie name to *emit*. A browser silently drops a `__Host-` cookie that
+/// lacks `Secure` or arrives over plain HTTP, so on HTTP deployments login
+/// would appear to succeed and then fail. Moving a deployment from HTTPS back
+/// to HTTP costs one fresh login, since `__Host-session` is never sent over HTTP.
 pub fn session_cookie_name(cookie_secure: bool) -> &'static str {
     if cookie_secure {
         SESSION_COOKIE_HOST
@@ -117,10 +93,9 @@ const API_KEY_PREFIX: &str = "noadd_";
 /// Random body length; 40 alphanumeric chars ≈ 238 bits of entropy.
 const API_KEY_BODY_LEN: usize = 40;
 
-/// BLAKE2b-512 of `secret`, lower-hex encoded. Fast one-way hash with no salt:
-/// every secret hashed here is high-entropy random, so there is no dictionary
-/// to defend against and nothing for Argon2 to buy, while the hex digest stays
-/// directly indexable for an equality lookup.
+/// BLAKE2b-512 of `secret`, lower-hex. Unsalted and fast on purpose: every
+/// input is high-entropy random (no dictionary to defend against), and the
+/// digest must stay indexable for an equality lookup.
 fn blake2b_hex(secret: &str) -> String {
     use std::fmt::Write as _;
     let mut hasher = Blake2b512::new();
@@ -139,34 +114,26 @@ pub fn hash_api_key(token: &str) -> String {
 /// Hash of a session token, as stored in `sessions.token_hash` and used as the
 /// [`SessionStore`] key.
 ///
-/// Same construction as [`hash_api_key`], and for the same reason: a copy of
-/// the database — a backup, a stray WAL file, a snapshot on a disposed SD card
-/// — must not hand over live credentials. Before this, API keys were hashed
-/// while session tokens sat in the same file in plaintext, so the weaker of
-/// the two set the real bar.
-///
-/// This is *not* [`session_log_id`]: that one is salted and truncated for log
-/// correlation and cannot be looked up. This one must be deterministic and
-/// unsalted precisely so a presented cookie can find its row.
+/// Same construction as [`hash_api_key`]: a copy of the database (backup, stray
+/// WAL, disposed SD card) must not hand over live credentials. Deterministic
+/// and unsalted so a presented cookie can find its row — unlike
+/// [`session_log_id`], which is salted for logs and cannot be looked up.
 pub fn hash_session_token(token: &str) -> String {
     blake2b_hex(token)
 }
 
-/// Process-wide salt for [`session_log_id`]. Installed once at startup from the
-/// value persisted in `settings` (see [`load_or_create_session_log_salt`]) so
-/// log identifiers stay correlatable across restarts. If it is never
-/// installed (unit tests), a random salt is generated on first use — never an
-/// empty or fixed one, so an unsalted digest can never reach a log.
+/// Process-wide salt for [`session_log_id`], installed at startup from
+/// `settings` (see [`load_or_create_session_log_salt`]) so log ids correlate
+/// across restarts. If never installed (unit tests), a random one is generated
+/// on first use, so an unsalted digest never reaches a log.
 static SESSION_LOG_SALT: OnceLock<[u8; 16]> = OnceLock::new();
 
 /// Settings key holding the hex-encoded audit-log salt.
 pub const SESSION_LOG_SALT_KEY: &str = "session_log_salt";
 
-/// Install the process-wide audit salt. The first call wins; later calls are
-/// no-ops other than a warning. Must run before any session event of any kind
-/// is logged: a `sid_hash` computed before this call would be salted with a
-/// temporary random value instead of the persisted one, and would then never
-/// correlate with anything logged afterwards under the real salt.
+/// Install the process-wide audit salt; the first call wins, later ones only
+/// warn. Must run before any session event is logged, or those `sid_hash`es are
+/// salted with a throwaway value and never correlate with later ones.
 pub fn init_session_log_salt(salt: [u8; 16]) {
     if SESSION_LOG_SALT.set(salt).is_err() {
         tracing::warn!(
@@ -197,10 +164,8 @@ pub async fn load_or_create_session_log_salt(
     Ok(salt)
 }
 
-/// Decode a 32-character lower-hex string into 16 bytes, or `None` if it is
-/// the wrong length or contains non-hex characters — a corrupted or
-/// hand-edited setting falls back to generating a fresh salt rather than
-/// panicking.
+/// Decode 32 hex chars into 16 bytes; `None` on a malformed setting, which then
+/// gets a fresh salt instead of a panic.
 fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
     if hex.len() != 32 {
         return None;
@@ -213,21 +178,14 @@ fn decode_hex_salt(hex: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
-/// Salted, truncated `BLAKE2b` digest of a session's token hash: a stable,
-/// non-reversible identifier safe to write to logs, so session events can be
-/// correlated without ever disclosing the token. Never log the token itself.
+/// Salted, truncated `BLAKE2b` digest of a session's token hash: a stable
+/// identifier for correlating session events in logs. Never log the token.
 ///
-/// Takes the hash rather than the raw token — that is the only identifier the
-/// logging call sites still hold (see [`hash_session_token`]) — and the salt
-/// is what keeps this distinct from the stored `token_hash`, so a log line can
-/// never be matched against a stolen database row.
+/// The salt keeps it distinct from the stored `token_hash`, so a log line
+/// cannot be matched against a stolen database row.
 ///
-/// Deliberately not called for a successful session validation: that path
-/// runs on every request, so logging it there would drown the audit log
-/// without adding anything an audit needs — only a session's creation and
-/// destruction are lifecycle events worth recording. A successful API key use
-/// is likewise not logged per-call; it is already tracked via
-/// `api_keys.last_used_at`.
+/// Only creation and destruction are logged, not each successful validation
+/// (every request) — likewise API key use, tracked in `api_keys.last_used_at`.
 pub fn session_log_id(token_hash: &str) -> String {
     let salt = SESSION_LOG_SALT.get_or_init(|| {
         let mut s = [0u8; 16];
@@ -237,16 +195,14 @@ pub fn session_log_id(token_hash: &str) -> String {
     session_log_id_with(salt, token_hash)
 }
 
-/// [`session_log_id`]'s digest under an explicit salt, split out so the
-/// salting property itself is directly testable — a test driving the
-/// process-wide `OnceLock` can only ever exercise one salt value per process.
+/// [`session_log_id`] under an explicit salt, so tests can vary the salt (the
+/// process-wide `OnceLock` holds only one).
 fn session_log_id_with(salt: &[u8; 16], token_hash: &str) -> String {
     let mut hasher = Blake2b512::new();
     hasher.update(salt);
     hasher.update(token_hash.as_bytes());
     use std::fmt::Write as _;
-    // 16 hex chars (64 bits) is far more than enough to correlate the handful
-    // of sessions one appliance ever has, and keeps log lines readable.
+    // 64 bits is plenty for one appliance's sessions and keeps log lines short.
     hasher.finalize()[..8]
         .iter()
         .fold(String::new(), |mut acc, b| {
@@ -279,16 +235,13 @@ pub fn store_session(store: &SessionStore, token_hash: &str, info: SessionInfo) 
 /// entries are dropped).
 pub fn validate_session(store: &SessionStore, token_hash: &str) -> Option<i64> {
     let now = now_secs();
-    // Reason for eviction, resolved under the lock and logged after it is
-    // dropped so no log formatting happens while the store is held.
+    // Logged after the lock is dropped.
     let mut expired: Option<(i64, &'static str)> = None;
     {
         let mut map = store.lock();
         if let Some(info) = map.get_mut(token_hash) {
-            // Order matters: the idle check must read `last_seen` *before*
-            // this request refreshes it, otherwise it can never fire. A clock
-            // going backwards just makes these subtractions negative, which
-            // compares as "not expired" rather than misfiring.
+            // The idle check must read `last_seen` before this request refreshes
+            // it. A backwards clock yields negative deltas, i.e. "not expired".
             let reason = if now - info.created_at >= SESSION_MAX_AGE_SECS {
                 Some("expired_absolute")
             } else if now - info.last_seen >= SESSION_IDLE_TIMEOUT_SECS {
@@ -320,9 +273,8 @@ pub fn validate_session(store: &SessionStore, token_hash: &str) -> Option<i64> {
     None
 }
 
-/// Drop in-memory sessions that have hit either timeout. Returns how many were
-/// evicted. `validate_session` expires lazily (only on access), so a session
-/// nobody touches stays in the map until this runs.
+/// Drop in-memory sessions past either timeout; returns how many. Needed
+/// because [`validate_session`] only expires sessions on access.
 pub fn prune_expired(store: &SessionStore) -> usize {
     let now = now_secs();
     let mut map = store.lock();
@@ -334,17 +286,12 @@ pub fn prune_expired(store: &SessionStore) -> usize {
     before - map.len()
 }
 
-/// How recently a session must have proved the account's password before it
-/// may perform a sensitive action (mint an API key, add or remove an
-/// operator).
+/// How recently a session must have proved the password before a sensitive
+/// action (mint an API key, add or remove an operator).
 ///
-/// Five minutes is short on purpose. The threat this closes is an attacker
-/// holding a *stolen session cookie* — someone who walked past an unlocked
-/// screen, or picked the token out of a proxy log — and the window is exactly
-/// how long that cookie stays useful for the actions that would make the
-/// compromise permanent. It costs a legitimate operator one password entry per
-/// sitting, since logging in counts as a proof and most operators do these
-/// things right after signing in.
+/// Short on purpose: it bounds how long a *stolen session cookie* can be used
+/// to make a compromise permanent. Login counts as a proof, so an operator
+/// rarely pays more than one extra password entry.
 pub const REAUTH_WINDOW_SECS: i64 = 300;
 
 /// Record that this session has just proved the account's password. Returns
@@ -360,14 +307,8 @@ pub fn mark_reauthenticated(store: &SessionStore, token_hash: &str) -> bool {
 }
 
 /// Whether this session proved the password within [`REAUTH_WINDOW_SECS`].
-///
-/// A token naming no live session is not fresh — the caller is about to be
-/// rejected as unauthenticated anyway, and answering `true` here would be the
-/// wrong default for a function guarding sensitive actions.
-///
-/// A clock that jumps backwards makes the subtraction negative, which reads as
-/// "not yet stale" rather than misfiring — the same direction the session
-/// expiry checks take, so the two cannot disagree about what time it is.
+/// An unknown token is not fresh. A backwards clock reads as "not yet stale",
+/// the same direction the session expiry checks take.
 pub fn has_fresh_reauth(store: &SessionStore, token_hash: &str) -> bool {
     let now = now_secs();
     store
@@ -376,14 +317,9 @@ pub fn has_fresh_reauth(store: &SessionStore, token_hash: &str) -> bool {
         .is_some_and(|info| now - info.last_reauth_at < REAUTH_WINDOW_SECS)
 }
 
-/// Revoke a single session token (logout this device only).
-///
-/// Leaves every other session intact. Persistence to the database is the
-/// caller's responsibility (see `delete_session_by_token_hash`). Returns the
-/// evicted session's info, or `None` if `token_hash` did not name a live
-/// session — callers that log a `session.destroyed` event must gate on `Some`
-/// so an unvalidated/fabricated token (e.g. read from a client-supplied
-/// cookie) cannot inject a destruction event for a session that never existed.
+/// Revoke one session (log out this device only). The caller persists it
+/// (`delete_session_by_token_hash`). Callers logging `session.destroyed` must
+/// gate on `Some`, so a fabricated cookie cannot inject a destruction event.
 pub fn revoke_session(store: &SessionStore, token_hash: &str) -> Option<SessionInfo> {
     store.lock().remove(token_hash)
 }
@@ -407,9 +343,7 @@ pub async fn load_sessions_from_db(
                 user_id: s.user_id,
                 created_at: s.created_at,
                 last_seen: s.last_seen,
-                // Not persisted — see the field's doc comment. `created_at` is
-                // the honest floor: login proved the password, and nothing
-                // since a restart has proved it again.
+                // Not persisted; see the field's doc comment.
                 last_reauth_at: s.created_at,
             },
         );
@@ -433,10 +367,8 @@ pub async fn flush_last_seen(
 /// Sweep expired sessions from both the in-memory store and the `sessions`
 /// table. Returns `(evicted_from_memory, deleted_rows)`.
 ///
-/// The caller must flush `last_seen` first (see `flush_last_seen`): the DB
-/// predicate reads `last_seen`, which lags memory by up to one flush interval.
-/// With a 48 h idle window a 60 s lag is immaterial, but flushing first keeps
-/// the two views from diverging on principle.
+/// Flush first ([`flush_last_seen`]): the DB predicate reads `last_seen`,
+/// which otherwise lags memory by up to one flush interval.
 pub async fn sweep_expired(
     store: &SessionStore,
     db: &crate::db::Database,
@@ -449,11 +381,9 @@ pub async fn sweep_expired(
     Ok((evicted, deleted))
 }
 
-/// Revoke every session except the one whose token hash is `keep` (log out
-/// other devices, staying signed in on the current one). When `keep` is `None`
-/// — e.g. a forward-auth caller that holds no session cookie — every session is
-/// revoked, since none of them is the caller's own device. Returns the number
-/// of sessions revoked, for the caller's audit log.
+/// Revoke every session except `keep` (log out other devices). `None` — e.g. a
+/// forward-auth caller with no session cookie — revokes all. Returns the count
+/// revoked, for the audit log.
 pub async fn revoke_other_sessions(
     store: &SessionStore,
     db: &crate::db::Database,
@@ -468,21 +398,13 @@ pub async fn revoke_other_sessions(
     }
 }
 
-/// Revoke every session owned by `user_id` except the one whose token hash is
-/// `keep` (the caller's own device). `keep = None` revokes all of that user's
-/// sessions. Unlike
-/// [`revoke_other_sessions`], other operators are unaffected — which is the
-/// required semantics after a password change, where only the account whose
-/// credential changed may be logged out.
+/// Revoke `user_id`'s sessions except `keep` (`None` revokes all of them).
+/// Unlike [`revoke_other_sessions`], other operators are unaffected — the
+/// semantics a password change needs.
 ///
-/// Returns the number of sessions actually evicted from the in-memory store —
-/// the in-memory `retain` below is what actually terminates authentication,
-/// not the row count the DB delete returns, and the two can diverge in both
-/// directions: a lazily-expired session's row lingers in the DB until the
-/// periodic sweep (counted in rows, not evicted from memory), while a session
-/// already swept from the DB can still be live in memory (evicted here, not
-/// counted in rows). For "how many devices did this action sign out?", the
-/// in-memory count is the number an operator actually reads it as.
+/// Returns the count evicted from memory, not the DB row count: eviction is
+/// what ends authentication, and the two diverge (rows of lazily-expired
+/// sessions linger until the sweep).
 pub async fn revoke_user_sessions_except(
     store: &SessionStore,
     db: &crate::db::Database,
@@ -514,36 +436,23 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     }
 }
 
-/// Argon2 hash of a fixed, unusable string, generated once per process with
-/// the same parameters as every real hash. Verifying against it therefore
-/// costs exactly what verifying a real password costs, which is the entire
-/// point — see [`spend_verify_cost`].
+/// Argon2 hash of a fixed, unusable string with the real parameters, so
+/// verifying against it costs what a real verification does.
 static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
 
 /// Spend the Argon2 work a real password verification would, and discard the
 /// answer.
 ///
-/// Without this, `login` has the textbook "quick exit" shape OWASP warns
-/// about: an unknown username returns before any hashing happens, while a
-/// known one pays Argon2's ~50 ms first. Both answers are the same generic
-/// 401, but the *response time* is not, and that difference is a
-/// user-enumeration oracle — the one discrepancy factor a generic error
-/// message cannot close on its own.
+/// Closes the user-enumeration timing oracle in `start_password_session`
+/// (`src/admin/api.rs`): without it an unknown username answers before any
+/// hashing while a known one pays Argon2 first.
 ///
-/// The hash is generated lazily from a fixed string rather than hard-coded as
-/// a PHC literal so that it always tracks [`Argon2::default`]: a literal would
-/// silently stop matching the real cost the day those default parameters
-/// change, which is exactly when nobody would think to look. The first call
-/// additionally pays for generating it; that happens once per process and is
-/// not attributable to any particular username.
-///
-/// This equalises the dominant cost, not every instruction — the database
-/// lookup that precedes it still differs slightly between a hit and a miss.
-/// That residual sits orders of magnitude below the Argon2 term it now hides
-/// behind, and closing it entirely would require a constant-time database.
+/// Generated lazily rather than hard-coded as a PHC literal so it tracks
+/// [`Argon2::default`] if the parameters ever change. The DB lookup before it
+/// still differs slightly between hit and miss, orders of magnitude below the
+/// Argon2 cost.
 pub fn spend_verify_cost(password: &str) {
     let hash = DUMMY_PASSWORD_HASH.get_or_init(|| {
-        // A fixed input under default parameters; hashing it cannot fail.
         hash_password("noadd::timing-equalisation::not-a-real-password")
             .expect("hashing a fixed string with default Argon2 parameters cannot fail")
     });
@@ -552,16 +461,12 @@ pub fn spend_verify_cost(password: &str) {
 }
 
 /// Stored in `users.password_hash` for operators provisioned from a trusted
-/// forward-auth header. `!` is not a valid PHC string, so it can never match a
-/// real Argon2 hash — the same convention `/etc/shadow` uses to mark an account
-/// as having no usable password, and it keeps the column `NOT NULL` so no
-/// schema migration is needed.
+/// forward-auth header. `!` is not a valid PHC string, so it never matches
+/// (the `/etc/shadow` convention) and the column stays `NOT NULL`.
 ///
-/// Every password-verifying path checks this explicitly rather than relying on
-/// the PHC parse failing: [`verify_password`] reports an unparseable stored hash
-/// as an `Err`, which callers surface as a 500. That is the right answer for a
-/// corrupted row, but the wrong answer for a passwordless account, which must be
-/// an ordinary 401.
+/// Password paths must check this explicitly: [`verify_password`] returns `Err`
+/// for an unparseable hash, which callers surface as a 500, whereas a
+/// passwordless account must get an ordinary 401.
 pub const NO_PASSWORD_SENTINEL: &str = "!";
 
 /// True when the stored hash marks an account that cannot authenticate with a
@@ -571,59 +476,40 @@ pub fn has_no_password(hash: &str) -> bool {
 }
 
 /// How many unknown session tokens one client may present within
-/// [`INVALID_SESSION_WINDOW_SECS`] before the burst is reported. A browser
-/// whose session expired legitimately keeps presenting its stale cookie on
-/// every poll (the admin SPA polls every 2s), so a threshold well above one
-/// is what separates "somebody's tab went stale" from "somebody is guessing
-/// session IDs" — the single-occurrence event would be pure noise.
+/// [`INVALID_SESSION_WINDOW_SECS`] before the burst is reported. A tab whose
+/// session expired keeps presenting its stale cookie, so the threshold sits
+/// well above one to separate that from someone guessing session ids.
 pub const INVALID_SESSION_MAX_ATTEMPTS: u32 = 10;
 
 /// Sliding window for [`INVALID_SESSION_MAX_ATTEMPTS`].
 pub const INVALID_SESSION_WINDOW_SECS: u64 = 60;
 
-/// Consecutive password failures an account may accumulate before any delay
-/// applies. Three covers ordinary mistyping — a caps-lock slip and two
-/// retries — at no cost to the operator.
+/// Consecutive password failures allowed before any delay (ordinary mistyping).
 pub const LOCKOUT_FREE_ATTEMPTS: u32 = 3;
 
-/// Ceiling on the exponential backoff, so a locked-out operator always gets
-/// back in within this long. See [`AccountLockout`] on why a ceiling exists at
-/// all rather than a permanent lock.
+/// Ceiling on the exponential backoff; see [`AccountLockout`] for why there is
+/// a ceiling rather than a permanent lock.
 pub const LOCKOUT_MAX_SECS: u64 = 900;
 
-/// Quiet period after which an account's failure count is forgotten. Without
-/// it, three typos in March and one in June would land an operator on June's
-/// attempt at a backoff earned three months earlier.
+/// Quiet period after which an account's failure count is forgotten, so old
+/// typos do not carry a backoff months later.
 pub const LOCKOUT_RESET_SECS: u64 = 3600;
 
 /// Per-account exponential backoff on password failures.
 ///
-/// The IP limiter next door bounds one source address; this bounds one
-/// *account*, which is the control OWASP actually asks for — "the counter of
-/// failed logins should be associated with the account itself, rather than the
-/// source IP address, in order to prevent an attacker from making login
-/// attempts from a large number of different IP addresses". A botnet with a
-/// thousand addresses gets a thousand separate IP budgets and one account
-/// budget.
+/// The IP limiter bounds one source address; this bounds one *account*, as
+/// OWASP asks, so a botnet gets many IP budgets but one account budget.
 ///
-/// **Backoff, not lockout.** Past [`LOCKOUT_FREE_ATTEMPTS`] each further
-/// failure locks the account for twice as long as the last, capped at
-/// [`LOCKOUT_MAX_SECS`]. A hard lock would be a denial of service an attacker
-/// triggers on demand — they need only fail repeatedly against a username they
-/// can guess — and noadd has no password-reset flow to escape one with. The
-/// cap bounds that to fifteen minutes of admin-UI unavailability per sustained
-/// attack, while still turning a brute-force run into days. DNS resolution is
-/// unaffected either way: this gates the admin login, nothing on the query
-/// path. If an operator is locked out by a live attack and cannot wait,
-/// restarting the process clears the state — it is deliberately in-memory.
+/// **Backoff, not lockout.** Past [`LOCKOUT_FREE_ATTEMPTS`] each failure
+/// doubles the lock, capped at [`LOCKOUT_MAX_SECS`]. A hard lock would be an
+/// on-demand denial of service with no password-reset flow to escape it. Only
+/// admin login is gated, never DNS, and the state is in-memory on purpose: a
+/// restart clears it.
 ///
-/// **Keyed by `user_id`, and only ever populated with one that resolved.**
-/// That is what keeps the map bounded by the number of operator accounts, so
-/// unlike the IP-keyed limiters there is nothing here for a caller to grow by
-/// cycling through inputs. It also means the lockout can never answer a
-/// question about whether an account exists — see the call site in `login`,
-/// which spends the same Argon2 cost and returns the same generic 401 for a
-/// locked account as for a wrong password.
+/// **Keyed by `user_id`, only ever one that resolved**, so the map is bounded
+/// by the number of accounts. `start_password_session` (`src/admin/api.rs`)
+/// answers a locked account with the same Argon2 cost and generic 401 as a
+/// wrong password, so the lockout never reveals whether an account exists.
 pub struct AccountLockout {
     /// `user_id` -> (consecutive failures, when the last one happened).
     failures: Mutex<HashMap<i64, (u32, Instant)>>,
@@ -649,8 +535,8 @@ impl AccountLockout {
         if over == 0 {
             return None;
         }
-        // 1s, 2s, 4s, … saturating rather than wrapping: `over` is attacker-
-        // driven and 1u64 << 64 is undefined, not large.
+        // 1s, 2s, 4s, … saturating: `over` is attacker-driven and an
+        // oversized shift must not wrap.
         let secs = 1u64
             .checked_shl(over - 1)
             .unwrap_or(LOCKOUT_MAX_SECS)
@@ -675,8 +561,6 @@ impl AccountLockout {
     pub fn record_failure(&self, user_id: i64) -> Option<Duration> {
         let mut map = self.failures.lock();
         let entry = map.entry(user_id).or_insert((0, Instant::now()));
-        // A long quiet spell forgets the history rather than resuming the
-        // backoff where it left off.
         if entry.1.elapsed().as_secs() >= LOCKOUT_RESET_SECS {
             *entry = (1, Instant::now());
         } else {
@@ -686,9 +570,7 @@ impl AccountLockout {
         Self::penalty(entry.0)
     }
 
-    /// Forget an account's failures. Called on a successful password check,
-    /// which is the only evidence that the attempts were the real operator
-    /// fumbling rather than someone guessing.
+    /// Forget an account's failures after a successful password check.
     pub fn record_success(&self, user_id: i64) {
         self.failures.lock().remove(&user_id);
     }
@@ -699,13 +581,11 @@ impl AccountLockout {
     }
 }
 
-/// Simple IP-based sliding-window counter, used both to rate-limit login
-/// attempts and to detect bursts of unknown session tokens.
+/// Per-IP windowed attempt counter, used to rate-limit logins and to detect
+/// bursts of unknown session tokens.
 ///
-/// Tracks the number of attempts per IP within a sliding window. Instances are
-/// per-signal: sharing one across signals would let an attacker guessing
-/// session cookies consume a legitimate operator's login budget from the same
-/// NAT address.
+/// One instance per signal: sharing one would let a cookie guesser spend an
+/// operator's login budget from the same NAT address.
 pub struct RateLimiter {
     attempts: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     max_attempts: u32,
@@ -713,10 +593,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// Create a new rate limiter.
-    ///
-    /// - `max_attempts`: maximum allowed attempts within the window
-    /// - `window_secs`: the time window in seconds
+    /// Allow `max_attempts` per `window_secs` per IP.
     pub fn new(max_attempts: u32, window_secs: u64) -> Self {
         Self {
             attempts: Mutex::new(HashMap::new()),
@@ -725,9 +602,7 @@ impl RateLimiter {
         }
     }
 
-    /// Check if the given IP is allowed to make another attempt.
-    ///
-    /// Returns `true` if allowed, `false` if rate limited.
+    /// Whether the IP may make another attempt (`false` = rate limited).
     pub fn check(&self, ip: IpAddr) -> bool {
         let map = self.attempts.lock();
         if let Some((count, started)) = map.get(&ip) {
@@ -751,14 +626,8 @@ impl RateLimiter {
         }
     }
 
-    /// Record an attempt and report whether it is the one that *reached*
-    /// `max_attempts` in the current window.
-    ///
-    /// Returns `true` on exactly one attempt per window, which is what makes
-    /// this usable to drive a log line: a caller that instead tested
-    /// `count >= max` would re-emit on every further attempt, and the burst
-    /// being reported is precisely the case where further attempts keep
-    /// arriving.
+    /// Record an attempt; `true` only for the one that *reaches* `max_attempts`
+    /// in this window — once per window, so it can drive a single log line.
     pub fn record_crossing(&self, ip: IpAddr) -> bool {
         let mut map = self.attempts.lock();
         let entry = map.entry(ip).or_insert((0, Instant::now()));
@@ -770,16 +639,10 @@ impl RateLimiter {
         entry.0 == self.max_attempts
     }
 
-    /// Drop entries whose window has already elapsed, returning how many were
-    /// removed. Without this the map retains one entry per source IP forever,
-    /// which a scanner cycling through addresses (trivial from a /64 of IPv6)
-    /// turns into unbounded memory growth.
-    ///
-    /// Unlike `IpRateLimiter::prune`, this takes no `max_age`: an entry whose
-    /// window has elapsed carries no information at all here — both `check`
-    /// and `record` already treat it as a fresh start — so there is nothing
-    /// for a caller to tune, and a too-short `max_age` could otherwise
-    /// discard a live window.
+    /// Drop entries whose window has elapsed; returns how many. Without it a
+    /// scanner cycling addresses (trivial across an IPv6 /64) grows the map
+    /// without bound. Takes no `max_age` (unlike `IpRateLimiter::prune`): an
+    /// elapsed entry already reads as a fresh start.
     pub fn prune(&self) -> usize {
         let mut map = self.attempts.lock();
         let before = map.len();
@@ -824,21 +687,15 @@ mod tests {
 
     #[test]
     fn verify_password_rejects_the_sentinel_as_unparseable() {
-        // This is exactly why callers must check `has_no_password` before
-        // calling `verify_password`: the sentinel is not a valid PHC string,
-        // so verifying against it fails to parse rather than returning
-        // `Ok(false)`, and a caller that mapped `Err` to 500 would turn a
-        // passwordless account's login attempt into a server error instead
-        // of an ordinary 401.
+        // Why callers must check `has_no_password` first: this is `Err`, not
+        // `Ok(false)`, and would otherwise surface as a 500.
         assert!(verify_password("anything", NO_PASSWORD_SENTINEL).is_err());
     }
 
     #[test]
     fn session_log_id_with_actually_depends_on_the_salt() {
-        // An unsalted `blake2b(token)` would pass every determinism/distinctness/
-        // shape assertion the integration test makes just as well as a salted
-        // one — the only thing that proves salting is happening at all is that
-        // two different salts over the *same* token produce different ids.
+        // Only differing salts over the *same* token prove salting happens; an
+        // unsalted digest passes every other assertion.
         let token = "same-token-both-times";
         let salt_a = [0x11u8; 16];
         let salt_b = [0x22u8; 16];
@@ -868,9 +725,7 @@ mod tests {
 
     #[test]
     fn lockout_doubles_and_then_stops_doubling() {
-        // The shape of the backoff is the security property: linear growth
-        // would still let a patient attacker through, and unbounded growth
-        // would turn a lockout into a permanent denial of service.
+        // The shape is the security property: doubling, then capped.
         let secs = |n: u32| AccountLockout::penalty(n).map(|d| d.as_secs());
         assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS), None);
         assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 1), Some(1));
@@ -880,8 +735,7 @@ mod tests {
         // Capped from here on, however many failures pile up.
         assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 11), Some(LOCKOUT_MAX_SECS));
         assert_eq!(secs(LOCKOUT_FREE_ATTEMPTS + 40), Some(LOCKOUT_MAX_SECS));
-        // A shift count past the width of the type must saturate to the cap,
-        // not wrap round to a one-second lock. `over` is attacker-driven.
+        // An oversized shift saturates to the cap rather than wrapping.
         assert_eq!(secs(u32::MAX), Some(LOCKOUT_MAX_SECS));
     }
 
@@ -902,8 +756,7 @@ mod tests {
 
     #[test]
     fn lockout_is_per_account() {
-        // The whole point is that it is keyed by account, not by source: one
-        // account under attack must not lock any other operator out.
+        // One account under attack must not lock any other operator out.
         let lockout = AccountLockout::new();
         for _ in 0..=LOCKOUT_FREE_ATTEMPTS {
             lockout.record_failure(1);
@@ -940,8 +793,7 @@ mod tests {
         assert!(!rl.record_crossing(ip));
         assert!(!rl.record_crossing(ip));
         assert!(rl.record_crossing(ip), "the 3rd attempt reaches the limit");
-        // The burst continues; the caller must not be told about it again, or
-        // one attacker would produce one log line per request.
+        // Not again for the rest of the burst.
         assert!(!rl.record_crossing(ip));
         assert!(!rl.record_crossing(ip));
         // A different IP has its own window.

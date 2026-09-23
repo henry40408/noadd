@@ -1,15 +1,10 @@
 {#
   The account page: this account, operators, sessions and API keys.
 
-  The three sensitive actions — add an operator, delete one, mint an API key —
-  carry a "your password" field in the form itself. There is no dialog and no
-  stale-proof round trip: the password travels with the action that needs it, so
-  the path is the same with JavaScript and without. `POST /api/auth/reauth` is
-  still there for API callers.
-
-  Deleting an operator expands the row via `?confirm_delete={id}` rather than
-  putting a password field on every row at once — the field then belongs to one
-  named operator, which is also what makes the confirmation meaningful.
+  Adding an operator, deleting one and minting an API key carry a "your
+  password" field in the form itself, so the path is the same with and without
+  JavaScript. Deleting expands the row via `?confirm_delete={id}` rather than
+  putting a password field on every row.
 #}
 {% extends "shell.html" %}
 
@@ -56,10 +51,7 @@
               <td>{{ op.created_text }}</td>
               <td style="text-align:right">
                 {%- if op.deletable %}
-                {#
-                  A link, not a button: it expands this row into a confirmation
-                  with a password field, on the server, with no JavaScript.
-                #}
+                {# A link: the server expands this row into a password confirmation. #}
                 <a href="/account?confirm_delete={{ op.id }}" class="btn btn-danger btn-sm del-op" data-id="{{ op.id }}" aria-label="Delete {{ op.username }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></a>
                 {%- else %}
                 <span class="btn btn-danger btn-sm" aria-disabled="true" style="opacity:.35"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span>
@@ -92,10 +84,7 @@
           <div class="input-row"><input type="text" id="op-user" name="username" autocomplete="off" data-testid="operator-username" placeholder="username" value="{{ operator_username }}" style="max-width:200px"></div>
           <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw" name="password" autocomplete="new-password" data-testid="operator-password" placeholder="password (min {{ min_password_length }})" style="max-width:220px"></div>
           <div class="input-row" style="margin-top:8px"><input type="password" id="op-pw2" name="confirm" autocomplete="new-password" data-testid="operator-password-confirm" placeholder="confirm password" style="max-width:220px"></div>
-          {#
-            The proof for this action. Without JavaScript there is nowhere to
-            raise a dialog, and with it there is no reason to.
-          #}
+          {# The password proof for this action. #}
           <div class="input-row" style="margin-top:8px"><input type="password" name="your_password" autocomplete="current-password" data-testid="operator-your-password" placeholder="your password" style="max-width:220px"></div>
           <button type="submit" class="btn btn-primary btn-sm" id="op-add" data-testid="operator-add" style="margin-top:12px">Add Operator</button>
         </form>
@@ -158,17 +147,14 @@
             {%- endif %}
           </tbody>
         </table></div>
-        {#
-          The only sight of the token there will ever be — it is not stored.
-          This is why creating a key renders rather than redirects.
-        #}
+        {# The token's only appearance — it is not stored, so this renders rather than redirects. #}
         <div id="api-key-reveal" data-testid="api-key-reveal"{% if new_key_token == "" %} style="display:none"{% else %} class="api-key-reveal"{% endif %}>
           {%- if new_key_token != "" %}
           <div style="color:var(--text-primary);font-weight:600;margin-bottom:4px">API key created: {{ new_key_name }}</div>
           <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px">Copy this token now — it won't be shown again.</div>
           <div class="input-row">
             <input type="text" id="api-key-token" data-testid="api-key-token" class="mono" value="{{ new_key_token }}" readonly style="flex:1">
-            {# Copying needs a clipboard, so the button ships hidden and app.js unhides it. #}
+            {# Needs a clipboard, so ships hidden; app.js unhides it. #}
             <button type="button" class="btn btn-primary btn-sm js-only" id="api-key-copy" hidden>Copy</button>
             <a href="/account" class="btn btn-sm" id="api-key-dismiss">Dismiss</a>
           </div>

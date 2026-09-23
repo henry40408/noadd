@@ -1,14 +1,6 @@
-//! The step definitions, ported from `e2e/steps/*.js`.
-//!
-//! The Gherkin is unchanged — `cucumber` reads the same `.feature` files — so
-//! every step text here is the text that was there before, including the two
-//! that had to stay regular expressions because a Cucumber Expression cannot
-//! spell them (`I (add|have added)`, and the allow/block alternation).
-//!
-//! One step definition did not come across: `I am recording uncaught page
-//! errors` / `no uncaught page errors were recorded`. No feature file used
-//! either half, and porting a page-error stream that nothing calls would have
-//! meant a CDP event subscription for dead code.
+//! Step definitions for `features/*.feature`. Two are regular expressions
+//! because a Cucumber Expression cannot spell them (`I (add|have added)`, and
+//! the allow/block alternation).
 
 use std::time::{Duration, Instant};
 
@@ -22,8 +14,8 @@ use noadd_e2e::{dns, wait};
 
 /// The human nav label used in the features, and the `data-testid` it means.
 ///
-/// Only the desktop strip carries the test ids — the mobile F-key bar renders
-/// the same table without them — so each of these matches exactly one element.
+/// Only the desktop strip carries the test ids (the mobile F-key bar does not),
+/// so each matches exactly one element.
 const NAV: &[(&str, &str)] = &[
     ("Dashboard", "nav-dashboard"),
     ("Statistics", "nav-stats"),
@@ -33,24 +25,15 @@ const NAV: &[(&str, &str)] = &[
     ("Account", "nav-account"),
 ];
 
-/// The filter-list name whose double quote used to escape its own attribute.
-///
-/// Kept out of the `.feature` file, as it was before: a `{string}` argument
-/// cannot carry a double quote reliably, and the payload only needs to be
-/// readable here.
+/// A filter-list name whose double quote once escaped its own attribute. Kept
+/// out of the `.feature` file: a `{string}` argument cannot carry a `"` reliably.
 const INJECTED_NAME: &str = r#"q" onmouseover="window.__xss=1"#;
 const INJECTED_URL: &str = "https://example.com/e2e-attr-injection.txt";
 
-/// How long the two filter-rebuild waits allow — one reading the event stream
-/// for a settled `rebuild`, one still re-running a domain check.
-///
-/// The `expect.poll` calls these replace allowed ten seconds, under a runner
-/// that drove one browser at a time. A rebuild is the one thing in this suite
-/// whose cost is not the browser's — it reparses the enabled lists, and the
-/// built-in one carries tens of thousands of rules — so under a machine that is
-/// also running the spec files it is the first thing to run late. Reusing the
-/// element wait keeps one number to reason about, and a rebuild that genuinely
-/// never finishes still fails.
+/// How long the filter-rebuild waits allow (the event-stream wait and the
+/// domain-test re-run). A rebuild reparses the enabled lists, so it is the
+/// first thing to run late on a loaded machine; reusing the element wait keeps
+/// one number to reason about.
 const REBUILD_TIMEOUT: Duration = noadd_e2e::browser::WAIT_TIMEOUT;
 
 fn testid_for(tab: &str) -> Result<&'static str> {
@@ -107,8 +90,7 @@ fn list_row(page: &Page, name: &str) -> noadd_e2e::Locator {
 
 /// Clicks a row's toggle if it is not already in the wanted state.
 ///
-/// The label is what gets clicked, not the input: the checkbox is visually
-/// hidden and clicking the label flips it however the toggle is styled.
+/// Clicks the label: the checkbox itself is visually hidden.
 async fn set_list_enabled(page: &Page, name: &str, enabled: bool) -> Result<()> {
     let row = list_row(page, name);
     let toggle = row.testid("filter-list-toggle");
@@ -275,8 +257,7 @@ async fn log_out_others(world: &mut NoaddWorld) -> StepResult {
 
 #[then("I stay signed in on the account page")]
 async fn stay_signed_in(world: &mut NoaddWorld) -> StepResult {
-    // The current session is kept, so we remain on the account page rather
-    // than being bounced to the sign-in screen.
+    // The current session is kept, so no bounce to the sign-in screen.
     let page = world.page()?;
     page.testid("logout-other-sessions")
         .expect_visible()
@@ -325,9 +306,8 @@ async fn see_metric(world: &mut NoaddWorld, name: String) -> StepResult {
     Ok(())
 }
 
-/// The badge ships hidden with a placeholder label; both the unhide and the
-/// text come from the event stream connecting, so asserting on the text alone
-/// would pass against markup that never reached the server.
+/// The badge ships hidden with a placeholder; `data-state` proves the event
+/// stream actually connected.
 #[then("the status bar reports the server is online")]
 async fn status_bar_online(world: &mut NoaddWorld) -> StepResult {
     let page = world.page()?;
@@ -367,9 +347,8 @@ async fn toggle_live(world: &mut NoaddWorld) -> StepResult {
     Ok(())
 }
 
-/// The `▌` before each stat label is tinted by a `:has()` rule that reads the
-/// value's class. It once read the inline style attribute instead, so moving a
-/// colour to a utility class silently reverted the marker to green.
+/// The `▌` before each stat label is tinted by a `:has()` rule on the value's
+/// class; one keyed on the inline style once silently reverted it to green.
 const MARKER_COLOURS: &str = r"
     const root = getComputedStyle(document.documentElement);
     // Resolve a custom property to the same rgb() form getComputedStyle returns.
@@ -414,13 +393,10 @@ async fn markers_match(world: &mut NoaddWorld) -> StepResult {
     Ok(())
 }
 
-/// A fragment that should be markup but reaches a template as a plain string is
-/// escaped and shows up as visible source. Assertions on specific elements sail
-/// straight past that, so this sweeps every tab for text nodes that look like
-/// tags.
+/// Text nodes that look like tags: a fragment that reached a template as a
+/// plain string and was escaped into visible source.
 const LEAKED_MARKUP: &str = r"
-    // The admin UI ships its script in the document, so a <script> body would
-    // match everything; only rendered text counts.
+    // Only rendered text counts, so skip <script> and <style> bodies.
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             const tag = node.parentElement && node.parentElement.tagName;
@@ -447,7 +423,7 @@ async fn visit_every_tab(world: &mut NoaddWorld) -> StepResult {
         for (label, id) in NAV {
             page.testid(id).click().await?;
             page.testid(id).expect_class("active").await?;
-            // Each page fetches on connect; let those renders land.
+            // Let any client-side re-render land.
             page.wait_for_network_idle().await?;
             let hits = page.eval(LEAKED_MARKUP).await?;
             if let Some(rows) = hits.as_array() {
@@ -479,8 +455,7 @@ async fn summary_reports(world: &mut NoaddWorld, queries_1m: i64, today: i64) ->
     Ok(())
 }
 
-// The slash is escaped because a bare `/` is alternation in a Cucumber
-// Expression — the same escape the JavaScript step carried.
+// A bare `/` is alternation in a Cucumber Expression, hence the escape.
 #[then(expr = r"the Throughput card reads {string} q\/s")]
 async fn throughput_reads(world: &mut NoaddWorld, value: String) -> StepResult {
     world
@@ -612,23 +587,20 @@ async fn quoted_name_shown(world: &mut NoaddWorld) -> StepResult {
     Ok(())
 }
 
-/// An ordinary link now, so following it is an ordinary navigation.
+/// An ordinary link, so this is an ordinary navigation.
 #[when("I open the registry browser")]
 async fn open_registry(world: &mut NoaddWorld) -> StepResult {
     world.page()?.loc("#browse-registry").click().await?;
     Ok(())
 }
 
-/// Slashes are alternation in a Cucumber Expression, so the path stays out of
-/// the step text and lives in the assertion.
+/// The path stays out of the step text: `/` is alternation in a Cucumber Expression.
 #[then("the registry browser is a page of its own")]
 async fn registry_is_a_page(world: &mut NoaddWorld) -> StepResult {
     let page = world.page()?;
     page.expect_url_ends_with("/filters/registry").await?;
     page.loc("registry-page").expect_visible().await?;
-    // Filters marks the page it is a view of, so the navigation still says
-    // where the operator is. Both bars carry the mark, so this asks the named
-    // one.
+    // The nav still marks Filters; both bars do, so ask the one with a test id.
     page.testid("nav-filters").expect_class("active").await?;
     Ok(())
 }
@@ -678,8 +650,7 @@ async fn rule_gone(world: &mut NoaddWorld, domain: String) -> StepResult {
 
 #[given("the filter engine has finished rebuilding")]
 async fn rebuild_settled(world: &mut NoaddWorld) -> StepResult {
-    // Adding a rule kicks off an async rebuild; wait for any in-flight one to
-    // settle.
+    // Adding a rule starts an async rebuild; wait for it to settle.
     let instance = world.instance()?.clone();
     let session = instance
         .session
@@ -700,8 +671,7 @@ async fn run_domain_test(world: &mut NoaddWorld, domain: String) -> StepResult {
 
 #[then(expr = "the domain test reports the domain as {string}")]
 async fn domain_test_verdict(world: &mut NoaddWorld, verdict: String) -> StepResult {
-    // Re-run the check while polling to absorb the async filter rebuild: the
-    // verdict comes from the live engine, and a rebuild swaps a new one in.
+    // Re-run the check until the async rebuild swaps in an engine with the rule.
     let page = world.page()?;
     let deadline = Instant::now() + REBUILD_TIMEOUT;
     loop {
@@ -735,9 +705,8 @@ async fn domain_test_mentions(world: &mut NoaddWorld, text: String) -> StepResul
 
 #[then("I see a setup error about the password being too short")]
 async fn setup_too_short(world: &mut NoaddWorld) -> StepResult {
-    // Minimum-agnostic on purpose: the figure lives in `MIN_PASSWORD_LENGTH`
-    // (`src/admin/api.rs`) and has already moved once. What this scenario is
-    // about is that the UI blocks a too-short password before any API call.
+    // Deliberately not the figure (`MIN_PASSWORD_LENGTH` in `src/admin/api.rs`):
+    // only that the server-rendered setup form rejects a short password with a reason.
     world
         .page()?
         .testid("setup-error")
@@ -807,9 +776,7 @@ async fn dashboard_guidance(world: &mut NoaddWorld) -> StepResult {
 
 #[then("the guidance shows this server's DNS address")]
 async fn guidance_shows_dns(world: &mut NoaddWorld) -> StepResult {
-    // The empty state should print where to point a device. The HTTP origin's
-    // hostname is the same address noadd serves DNS on, so assert the guidance
-    // surfaces that host.
+    // The HTTP origin's host is the address noadd serves DNS on.
     let host = world
         .instance()?
         .base
@@ -845,9 +812,8 @@ async fn disable_every_list(world: &mut NoaddWorld) -> StepResult {
     for i in 0..count {
         let toggle = page.testid("filter-list-toggle").nth(i);
         if toggle.is_checked().await? {
-            // Click the wrapping label (the input itself is visually hidden),
-            // which flips the toggle and fires the PUT. Awaiting the unchecked
-            // state lets that settle without a flaky explicit response-wait.
+            // Click the label (the input is visually hidden); that fires the PUT,
+            // and the unchecked state is what we wait on.
             page.testid("filter-list-row")
                 .nth(i)
                 .loc("label.toggle")
@@ -881,9 +847,7 @@ async fn warning_offers_recommended(world: &mut NoaddWorld) -> StepResult {
 
 #[when("noadd resolves a real DNS query")]
 async fn resolve_real_query(world: &mut NoaddWorld) -> StepResult {
-    // noadd logs every handled query and the logger flushes about once a
-    // second; the assertion that follows polls under the element wait, which
-    // absorbs that window. No response is needed.
+    // No response needed: the following assertion polls past the logger's flush.
     dns::send_query(world.instance()?.dns_port, "onboarding-probe.example").await?;
     Ok(())
 }

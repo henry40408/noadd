@@ -132,11 +132,9 @@ async fn heatmap_shifts_cells_by_tz_offset() {
     assert_eq!(cells[0].hour, 19);
 }
 
-/// `hourly_heatmap_since` derives weekday and hour with integer arithmetic
-/// instead of `strftime`, which is far cheaper but easy to get subtly wrong —
-/// an off-by-one in the Thursday epoch anchor, or truncation where flooring
-/// was meant. Pin it against `SQLite`'s own `strftime` across a full week of
-/// hours and several UTC offsets, which is the thing the arithmetic replaced.
+/// `hourly_heatmap_since` derives weekday and hour by integer arithmetic rather
+/// than `strftime`, which is easy to get subtly wrong (the Thursday epoch
+/// anchor, truncation vs flooring). Pin it across a week and several offsets.
 #[tokio::test]
 async fn heatmap_matches_strftime_across_a_full_week() {
     let db = test_db().await;
@@ -153,10 +151,8 @@ async fn heatmap_matches_strftime_across_a_full_week() {
         let offset = offset_hours * 3600;
         let cells = db.hourly_heatmap_since(0, offset).await.unwrap();
 
-        // Recompute the expected grid in Rust with *flooring* division, which
-        // is what strftime effectively does and what the SQL's truncating
-        // division only coincides with while the shifted timestamp stays
-        // non-negative.
+        // Flooring division, as strftime does; the SQL truncates, which agrees
+        // only while the shifted timestamp is non-negative.
         let mut expected: std::collections::BTreeMap<(i64, i64), i64> =
             std::collections::BTreeMap::new();
         for i in 0..40 {
@@ -364,10 +360,9 @@ async fn compute_summary_populates_7d_and_30d_rates() {
     assert!((s.avg_response_ms_30d - 5.0).abs() < 1e-9);
 }
 
-/// One statement answers what the dashboard used to ask two for: totals and
-/// blocks over every query, cache hits and latency over the allowed ones only.
-/// The blocked rows are given a response time the allowed ones never have, so
-/// an average that let them in would show it.
+/// Totals and blocks count every query; cache hits and latency only allowed
+/// ones. Blocked rows get a response time no allowed row has, so an average
+/// that let them in would show it.
 #[tokio::test]
 async fn summary_multi_since_computes_each_window() {
     let db = test_db().await;
@@ -434,9 +429,8 @@ async fn summary_multi_since_on_an_empty_window_reports_zeroes() {
 async fn compute_summary_queries_1m_counts_only_the_last_60_seconds() {
     use noadd::admin::stats::compute_summary;
 
-    // The dashboard's Throughput card divides this by 60 and presents it as the
-    // current rate, so the window boundary is user-visible: anything older than
-    // 60s leaking in would inflate the live reading with historical traffic.
+    // The dashboard's Throughput card divides this by 60 as the current rate, so
+    // anything older than 60s leaking in would inflate it.
     let db = test_db().await;
     let now: i64 = 40 * 86400;
 
@@ -465,12 +459,9 @@ async fn compute_summary_queries_1m_counts_only_the_last_60_seconds() {
 
 #[tokio::test]
 async fn both_timeline_types_report_bucket_starts_in_the_same_unit() {
-    // The two sibling types are returned by adjacent endpoints, and
-    // TimelinePoint used to emit milliseconds while TimelineMultiPoint emitted
-    // seconds. Nothing broke at the time only because the admin UI funnelled
-    // both through a helper that accepts either magnitude; any consumer that
-    // did not would have been off by a factor of 1000, silently, landing dates
-    // in 1970 or the far future rather than erroring.
+    // TimelinePoint once emitted milliseconds while its sibling
+    // TimelineMultiPoint emitted seconds — a silent 1000x error for any
+    // consumer that did not accept both.
     let db = test_db().await;
     let entries = vec![
         entry(600, "A", false, false, Some("NOERROR")),
@@ -525,9 +516,7 @@ async fn window_metrics_agrees_with_the_single_purpose_queries() {
     );
 }
 
-/// An empty `result` is not an answer, the same way a NULL one is not — the
-/// classification the index carries has to draw the line where the `CASE` it
-/// replaced drew it.
+/// An empty `result` is not an answer, just as a NULL one is not.
 #[tokio::test]
 async fn an_empty_result_counts_as_empty_not_resolved() {
     let db = test_db().await;
@@ -548,8 +537,7 @@ async fn an_empty_result_counts_as_empty_not_resolved() {
     assert_eq!(outcomes.get("Resolved"), Some(&1));
 }
 
-/// Blocked wins over cached, and cached over whether an answer came back, so a
-/// query is counted exactly once however many of those are true at the time.
+/// Blocked wins over cached, cached over answered, so each query counts once.
 #[tokio::test]
 async fn outcome_precedence_counts_each_query_once() {
     let db = test_db().await;
@@ -601,11 +589,9 @@ async fn domain_stats_on_an_empty_window_reports_nothing() {
     assert!(stats.top.is_empty());
 }
 
-/// Both lists come out of one grouping of `(domain, client_ip, doh_token)`, so
-/// the folds have to put back what the grouping split: a domain queried by
-/// several clients is one domain, and a client over `DoH` is a different
-/// client from the same IP over plain DNS. Counts are chosen to tie, so the
-/// order ties break in is asserted too.
+/// Both lists fold one grouping of `(domain, client_ip, doh_token)`: a domain
+/// queried by several clients is one domain, and a client over `DoH` is distinct
+/// from the same IP over plain DNS. Counts tie, so tie-break order is asserted.
 #[tokio::test]
 async fn traffic_lists_answer_what_the_separate_lists_did() {
     let db = test_db().await;
@@ -670,9 +656,8 @@ fn sorted(mut rows: Vec<(String, i64)>) -> Vec<(String, i64)> {
     rows
 }
 
-/// A mixed stream of queries spread over several days at an interval that is
-/// not a whole number of minutes, so rows land at every offset inside a
-/// quarter hour and on both sides of every boundary the tests below draw.
+/// Several days of mixed queries at a non-whole-minute interval, so rows land
+/// on both sides of every boundary the tests below draw.
 fn spread_entries() -> Vec<QueryLogEntry> {
     let start = 1_704_067_200; // 2024-01-01 00:00:00 UTC, a Monday
     (0..900_i64)
@@ -691,9 +676,8 @@ fn spread_entries() -> Vec<QueryLogEntry> {
         .collect()
 }
 
-/// The browser's folds, restated. The series has to carry enough to answer
-/// what the API answers for any offset in use; `app.js` holds the JavaScript
-/// spelling of these to the API directly, in `e2e/tests/specs/stats_charts.rs`.
+/// The browser's folds, restated in Rust. The JavaScript ones are held to the
+/// API in `e2e/tests/specs/stats_charts.rs`.
 fn fold_timeline(series: &QuarterSeries, bucket: i64, offset: i64) -> Vec<TimelineMultiPoint> {
     let mut out: Vec<TimelineMultiPoint> = Vec::new();
     for (i, &total) in series.total.iter().enumerate() {
@@ -735,11 +719,9 @@ fn fold_heatmap(
     cells
 }
 
-/// The page's one scan replaces three statements, and has to answer what each
-/// of them did: the window readings exactly, and — once folded into a viewer's
-/// calendar — the timeline and the heatmap the API computes with that viewer's
-/// offset. The offsets include the half- and three-quarter-hour zones (India,
-/// Nepal, the Marquesas), which are the ones a coarser grain would get wrong.
+/// The page's scan must match the window readings exactly and, folded into a
+/// viewer's calendar, the API's timeline and heatmap for that offset —
+/// including half- and three-quarter-hour zones (India, Nepal, the Marquesas).
 #[tokio::test]
 async fn the_stats_scan_answers_what_the_separate_queries_do() {
     let db = test_db().await;
@@ -785,9 +767,8 @@ async fn the_stats_scan_answers_what_the_separate_queries_do() {
     }
 }
 
-/// Each window keeps its own edge to the millisecond, including inside the
-/// quarter both edges share, and the series starts at the first quarter that
-/// held anything rather than at either window's start.
+/// Each window keeps its own edge to the millisecond, even inside a shared
+/// quarter; the series starts at the first non-empty quarter.
 #[tokio::test]
 async fn the_stats_scan_draws_each_window_to_the_millisecond() {
     let db = test_db().await;
@@ -836,9 +817,8 @@ async fn the_stats_scan_of_an_empty_window_reports_nothing() {
 
 const HOUR_MS: i64 = 3_600_000;
 
-/// Three days of traffic starting 1 234 ms past an hour, one query every
-/// 86 413 ms, so rows fall on both sides of every quarter and hour boundary a
-/// window can start at. Every column a reading groups or sums varies.
+/// ~3 days of traffic from 1 234 ms past an hour, one query every 86 413 ms, so
+/// rows straddle every quarter and hour boundary; every grouped column varies.
 async fn recount_db() -> (Database, String) {
     let dir = tempdir().unwrap();
     let path = dir.keep().join("recount.db");
@@ -881,10 +861,8 @@ fn recount_sinces() -> Vec<i64> {
     ]
 }
 
-/// The dashboard's readings now fold rollups and the table only where a window
-/// starts inside a unit, so the answers are checked against the statements they
-/// replaced, run on the same rows: any disagreement is a query reporting
-/// traffic the table does not hold.
+/// The dashboard's readings fold rollups (plus the table where a window starts
+/// inside a unit), so each is checked against a plain recount of the table.
 #[tokio::test]
 async fn dashboard_readings_equal_a_recount_of_the_table() {
     let (db, path) = recount_db().await;
@@ -1056,11 +1034,9 @@ async fn dashboard_readings_equal_a_recount_of_the_table() {
 }
 
 /// The Statistics page's scan and the API's timeline, heatmap and window
-/// readings fold rollups and the table only where a window starts inside a
-/// unit, so each is checked against a count of the table itself, for every
-/// window start and for heatmap windows before, equal to and after the range's.
-/// The offsets include half- and three-quarter-hour zones, and one — seven
-/// minutes — that no zone uses, which the readers answer from the table.
+/// readings, checked against a recount of the table for every window start.
+/// Offsets include half- and three-quarter-hour zones, and seven minutes, which
+/// no zone uses and the readers answer from the table.
 #[tokio::test]
 async fn statistics_readings_equal_a_recount_of_the_table() {
     let (db, path) = recount_db().await;

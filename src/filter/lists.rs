@@ -48,9 +48,7 @@ impl ListManager {
 
         let lists = self.db.get_filter_lists().await?;
 
-        // Read each enabled list's content sequentially (a single SQLite
-        // connection serializes the calls anyway) into an `(id, name, content)`
-        // vector. Parse + trie build then run on the blocking pool.
+        // Sequential reads: SQLite serialises them anyway.
         let mut list_payloads: Vec<(i64, String, String)> = Vec::new();
         for list in lists.iter().filter(|l| l.enabled) {
             if let Some(content) = self.db.get_filter_list_content(list.id).await? {
@@ -64,8 +62,7 @@ impl ListManager {
         let custom_allows = self.db.get_custom_rules_by_type("allow").await?;
         let custom_allow_rules: Vec<String> = custom_allows.into_iter().map(|cr| cr.rule).collect();
 
-        // Parse each list on its own blocking worker so the parse cost (line
-        // tokenising + per-rule `to_lowercase`) is shared across cores.
+        // One blocking worker per list, so parsing spreads across cores.
         let parse_start = std::time::Instant::now();
         let mut set: tokio::task::JoinSet<(
             usize,
@@ -83,9 +80,8 @@ impl ListManager {
         }
         let parse_ms = parse_start.elapsed().as_millis() as u64;
 
-        // Finalise rule tables on the blocking pool so FilterEngine::new
-        // (FST + flat trie build) doesn't pin a runtime worker. DNS queries
-        // served from other listener tasks keep moving while we rebuild.
+        // `FilterEngine::new` on the blocking pool so it does not pin a runtime
+        // worker that DNS queries need.
         let engine = tokio::task::spawn_blocking(move || {
             let mut lists: Vec<ListMeta> = Vec::new();
             let mut block_rules: Vec<(crate::filter::parser::ParsedRule, u16)> = Vec::new();
@@ -113,8 +109,7 @@ impl ListManager {
                 }
             }
 
-            // Custom rules sit under a synthetic "Custom" list. Only allocate
-            // the slot if at least one custom block rule lands in it.
+            // Synthetic "Custom" list, allocated only if a custom block rule exists.
             let mut custom_idx: Option<u16> = None;
             for rule_text in custom_block_rules {
                 if let Some(rule) = parse_rule(&rule_text) {
@@ -141,9 +136,7 @@ impl ListManager {
         let (engine, block_count, allow_count) = engine;
         self.filter.store(Arc::new(engine));
 
-        // The build dropped its large transient trees on the blocking worker;
-        // return those freed pages to the OS now instead of waiting for the
-        // allocator's lazy purge, so the resident spike doesn't linger.
+        // Return the build's freed transient trees to the OS now.
         crate::reclaim_memory();
 
         tracing::info!(
@@ -158,8 +151,7 @@ impl ListManager {
         Ok(())
     }
 
-    /// Download a single list by ID and store its content in DB.
-    /// Returns the number of parsed rules.
+    /// Download a list by ID and store it; returns the number of parsed rules.
     pub async fn download_and_update_list(&self, list_id: i64) -> Result<usize, ListError> {
         let lists = self.db.get_filter_lists().await?;
         let list = lists.iter().find(|l| l.id == list_id);
@@ -190,8 +182,7 @@ impl ListManager {
 
     /// Download all enabled lists. Does **not** rebuild the filter engine.
     ///
-    /// Downloads run concurrently (bounded) — serial downloads were the
-    /// dominant cost of the 24h update cycle on hosts running many lists.
+    /// Downloads run concurrently, at most four at a time.
     pub async fn update_all_lists_no_rebuild(&self) -> Result<(), ListError> {
         let lists = self.db.get_filter_lists().await?;
 
@@ -206,9 +197,7 @@ impl ListManager {
                 (list.id, list.name, result)
             });
         }
-        // Per-list download failures are expected (transient network issues,
-        // upstream 5xx, list removed). Aggregate them into a single warn instead
-        // of one error per list so a flaky update does not flood the logs.
+        // Per-list failures are expected; aggregate them into one warn.
         let mut failures: Vec<String> = Vec::new();
         while let Some(joined) = set.join_next().await {
             match joined {

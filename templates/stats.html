@@ -1,23 +1,13 @@
 {#
   The statistics page.
 
-  The split here is the one the data draws for itself. Only the three charts
-  below need a calendar, and a calendar-aligned bucket needs the viewer's UTC
-  offset, which arrives with the browser rather than with the request; the
-  charts were already the documented exception to this UI working without
-  JavaScript. So the charts say they are drawn in the browser, and their data
-  is already here: `data-series` holds quarter-hour counts on UTC boundaries,
-  taken from the same scan as the breakdowns, which `app.js` folds into the
-  viewer's hours and days. No second request, and no second scan.
+  Only the three charts need a calendar, and calendar buckets need the viewer's
+  UTC offset, which only the browser knows. So they are drawn client-side from
+  `data-series`: quarter-hour counts on UTC boundaries, from the same scan as
+  the breakdowns, which `app.js` folds into local hours and days.
 
-  Everything else is a plain `now - range` window with no calendar in it: the
-  highlights, both breakdowns, both ranged lists and the health grid are
-  rendered here and never move again. `app.js` does not redraw them, which is
-  why there is no second copy of this markup in it.
-
-  The range switcher is three links rather than three buttons for the same
-  reason every other view on this UI is in the URL: the range picks the server's
-  window, so `?range=30d` can be refreshed, bookmarked and shared.
+  Everything else is a plain `now - range` window, rendered here and never
+  redrawn by `app.js`.
 #}
 {% extends "shell.html" %}
 {%- import "_macros.html" as macros -%}
@@ -26,7 +16,7 @@
       <stats-page data-series="{{ series_json }}" data-bucket-secs="{{ bucket_secs }}">
       <div class="page-header fade-in" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
         <div><h2>Statistics</h2><p>Long-term traffic patterns</p></div>
-        {# Links, not buttons: the range is a server-side window, so it lives in the URL. #}
+        {# Links: the range is a server-side window, so it lives in the URL. #}
         <div class="range-switcher" id="range-switcher" data-testid="range-switcher">
           {%- for option in ranges %}
           <a href="/stats?range={{ option.label }}"{% if option.active %} class="active" aria-current="page"{% endif %}>{{ option.label }}</a>
@@ -42,7 +32,7 @@
         <div class="card" id="timeline-card">
           <div class="card-title" id="timeline-title">Queries (last {{ range }})</div>
           <div class="chart-container" id="timeline-chart">
-            {# Replaced by the drawn chart on connect; says what it is rather than leaving a gap. #}
+            {# Replaced by the drawn chart on connect. #}
             <p class="panel-empty" data-testid="timeline-needs-js">This chart is drawn in the browser, aligned to its calendar. The figures around it are complete without it.</p>
           </div>
         </div>

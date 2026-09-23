@@ -1,22 +1,17 @@
-//! What the Statistics page costs in **page misses** — the 4 KiB database pages
-//! `SQLite` has to fetch from the file to answer it. Manual-only, gated by
-//! `#[ignore]`.
+//! What the Statistics page costs in **page misses** — 4 KiB pages `SQLite`
+//! fetches from the file. Manual-only.
 //!
 //!   BENCH_DB=/tmp/noadd-bench.db cargo nextest run --release \
 //!     --no-capture --run-ignored only `stats_page_miss`
 //!
-//! Pages, not milliseconds, because development runs off an SSD and the
-//! appliance runs off an SD card: the same query that reads 12 000 pages looks
-//! free on one and takes seconds on the other, so a wall-clock number measured
-//! here says nothing about a Raspberry Pi. A page count is the same on both.
-//! `stats_parallel_bench` is the wall-clock companion, and is the one to
-//! distrust when the two disagree.
+//! Pages, not milliseconds: development runs off an SSD and the appliance off
+//! an SD card, so wall time here says nothing about a Raspberry Pi, while a page
+//! count is the same on both. Distrust the wall-clock `stats_parallel_bench`
+//! when the two disagree.
 //!
-//! Each reading is taken with the read pool's page cache dropped first, so the
-//! number is what a cold appliance pays. `BENCH_RANGE` picks the window
-//! (`7d`, `30d`, `90d`; default `30d`). `BENCH_NOW` (unix seconds) pins the
-//! clock the window ends at, so an old copy can still be measured over the
-//! traffic it holds.
+//! Each reading starts with the pool's page cache dropped (a cold appliance).
+//! `BENCH_RANGE`: `7d`, `30d` (default), `90d`. `BENCH_NOW` (unix seconds) pins
+//! the window's end, so an old copy still measures its traffic.
 
 use noadd::admin::stats::{
     self, StatsRange, compute_db_health, compute_heatmap, compute_range_stats,
@@ -27,8 +22,7 @@ use noadd::now_unix;
 
 const TOP_N: i64 = 15;
 
-/// Run `f` with the pool's page cache dropped first, and report how many pages
-/// it had to read.
+/// Pages `f` reads with the pool's page cache dropped first.
 async fn page_misses<F, Fut, T>(db: &Database, f: F) -> i64
 where
     F: FnOnce() -> Fut,
@@ -65,7 +59,7 @@ async fn stats_page_miss_bench() {
         range.label()
     );
 
-    // Exactly what `stats_page` reads, in the order the template consumes it.
+    // Exactly what `stats_page` reads.
     let mut rows: Vec<(&str, i64)> = Vec::new();
     rows.push((
         "range_stats (all readings, charts, both lists)",
@@ -78,9 +72,8 @@ async fn stats_page_miss_bench() {
 
     let page_total: i64 = rows.iter().map(|(_, n)| *n).sum();
 
-    // The API's chart endpoints. The page no longer calls them — its charts are
-    // folded from `range_stats` in the browser — so these are what a visit used
-    // to add on top, and what an API caller still pays.
+    // The API's chart endpoints: not called by the page (the browser folds its
+    // charts from `range_stats`), but still paid by API callers.
     let charts: Vec<(&str, i64)> = vec![
         (
             "  timeline (API only)",
@@ -134,8 +127,7 @@ async fn stats_page_miss_bench() {
         page_size.main_bytes as f64 / (1024.0 * 1024.0)
     );
 
-    // A reading that costs nothing means the cache was not actually dropped, so
-    // every later number would be meaningless.
+    // Zero means the cache was not dropped and every number is meaningless.
     assert!(
         page_total > 0,
         "no page misses recorded — is BENCH_DB an empty database?"

@@ -7,7 +7,7 @@ use tempfile::tempdir;
 
 async fn test_db() -> Database {
     let dir = tempdir().unwrap();
-    // Persist the tempdir (no Drop cleanup) so it lives for the duration of the test.
+    // Persist the tempdir (no Drop cleanup) so it lives for the test.
     let path = dir.keep().join("test.db");
     let path_str = path.to_str().unwrap().to_string();
     Database::open(&path_str).await.unwrap()
@@ -75,8 +75,7 @@ async fn session_log_salt_is_persisted() {
     assert!(stored.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
-/// What the onboarding notice asks before it offers to explain how to point a
-/// device at the appliance: has this machine ever answered anything?
+/// The onboarding notice's question: has this appliance ever answered anything?
 #[tokio::test]
 async fn has_any_query_logs_reports_whether_the_appliance_has_served_traffic() {
     let db = test_db().await;
@@ -218,7 +217,7 @@ async fn test_query_logs_search_prefix_fastpath() {
     db.insert_query_logs(&entries).await.unwrap();
 
     // Plain term -> prefix match: "example" matches "example.com" but NOT
-    // "api.example.com" (no longer a substring match) and NOT "subexample.net".
+    // "api.example.com" or "subexample.net".
     let prefix = db
         .query_logs(100, 0, Some("example"), None, None, None)
         .await
@@ -239,8 +238,7 @@ async fn test_query_logs_search_prefix_fastpath() {
     assert_eq!(mixed.len(), 1);
     assert_eq!(mixed[0].domain, "example.com");
 
-    // Wildcards -> substring LIKE fallback. "*example*" matches every domain
-    // containing "example".
+    // Wildcards -> substring LIKE fallback.
     let glob_substring = db
         .query_logs(100, 0, Some("*example*"), None, None, None)
         .await
@@ -433,8 +431,6 @@ async fn test_count_queries_since() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    // Counts only — the blocked total this used to return was summed by SQLite
-    // and bound to `_` by the sole production caller.
     assert_eq!(db.count_queries_since(1500).await.unwrap(), 2);
     assert_eq!(db.count_queries_since(0).await.unwrap(), 3);
 }
@@ -498,9 +494,7 @@ async fn test_top_domains_since() {
 
 #[tokio::test]
 async fn test_read_conn_opens_and_basic_roundtrip_works() {
-    // Verifies that Database::open successfully opens both connections
-    // against the same file and that a write followed by a read still
-    // works end-to-end after the read_conn infrastructure is wired.
+    // A write on the writer is visible to a read on the reader connection.
     let db = test_db().await;
     let entry = QueryLogEntry {
         timestamp: 1_700_000_000_000,
@@ -589,9 +583,8 @@ async fn test_create_user_no_password() {
         db.get_user_password_hash(id).await.unwrap().as_deref(),
         Some(noadd::admin::auth::NO_PASSWORD_SENTINEL)
     );
-    // The sentinel is not a valid PHC string, so verifying against it fails to
-    // parse rather than returning `Ok(false)` — exactly why `login` must guard
-    // with `has_no_password` before calling `verify_password`.
+    // The sentinel is not a PHC string, so verifying errors rather than
+    // returning `Ok(false)` — why callers check `has_no_password` first.
     assert!(noadd::admin::auth::verify_password("anything", &auth.password_hash).is_err());
 
     // The username UNIQUE constraint still applies to passwordless accounts.
@@ -629,8 +622,8 @@ async fn test_sessions_crud_and_cascade() {
     assert!(db.list_sessions().await.unwrap().is_empty());
     assert!(db.delete_session_by_id(sid).await.unwrap().is_none());
 
-    // Deleting the user cascades to their sessions. Add a second operator first
-    // so carol is not the last one (which would be refused).
+    // Deleting the user cascades to their sessions. A second operator keeps
+    // carol from being the last one, whose deletion would be refused.
     db.insert_session("tok-2", uid, 100, 100, None, None)
         .await
         .unwrap();
@@ -646,9 +639,8 @@ async fn test_sessions_crud_and_cascade() {
 async fn test_load_sessions_drops_expired() {
     let db = test_db().await;
     let uid = db.create_user("dave", "h", 0).await.unwrap();
-    // created_at 1_050 -> age 50, comfortably inside max_age 100 (not at the
-    // cutoff boundary, which purge_expired_sessions/load_sessions correctly
-    // treat as expired — see the boundary-matrix test).
+    // created_at 1_050 -> age 50, well inside max_age 100 (the boundary itself
+    // counts as expired; see the boundary-matrix test).
     db.insert_session("fresh", uid, 1_050, 1_050, None, None)
         .await
         .unwrap();
@@ -657,8 +649,7 @@ async fn test_load_sessions_drops_expired() {
         .unwrap();
 
     // max_age 100, now 1100 → cutoff 1000; "stale" (created_at 1) is purged.
-    // idle_secs is large enough that the idle check never fires here, so this
-    // exercises only the absolute-timeout branch.
+    // idle_secs is large, so only the absolute timeout is exercised.
     let loaded = db.load_sessions(100, 10_000, 1_100).await.unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].token_hash, "fresh");
@@ -718,9 +709,8 @@ async fn test_flush_last_seen() {
     assert_eq!(db.list_sessions().await.unwrap()[0].last_seen, 555);
 }
 
-/// Insert the four-row fixture shared by the `purge_expired_sessions` tests:
-/// one live row and one row expired via each timeout (individually and
-/// jointly), so a single purge call must remove exactly three of them.
+/// Four sessions: one live, and one expired by each timeout alone and by both,
+/// so a purge must remove exactly three.
 async fn insert_purge_fixture(db: &Database, uid: i64, now: i64) {
     db.insert_session("normal", uid, now - 1_000, now, None, None)
         .await
@@ -795,8 +785,7 @@ async fn purge_expired_sessions_is_idempotent() {
     assert_eq!(second, 0);
 }
 
-/// One row of the boundary matrix exercised by
-/// `purge_expired_sessions_matches_in_memory_predicate_at_boundaries`.
+/// One row of the boundary matrix below.
 struct BoundaryCase {
     label: &'static str,
     /// Offset from `now` for the row's `created_at`.
@@ -809,13 +798,10 @@ struct BoundaryCase {
 
 #[tokio::test]
 async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
-    // The SQL predicate (`Database::PURGE_EXPIRED_SESSIONS_SQL`) and the
-    // in-memory predicate (`admin::auth::prune_expired`, sharing its
-    // comparison with `validate_session`) must agree on every row, including
-    // exactly at the absolute and idle boundaries — that boundary is what a
-    // prior bug got wrong (SQL used `<`, memory used `>=`). This drives both
-    // predicates with identical fixtures and checks they agree with each
-    // other, not just with a hand-derived expectation restated in the test.
+    // `Database::PURGE_EXPIRED_SESSIONS_SQL` and `admin::auth::prune_expired`
+    // (same comparison as `validate_session`) must agree on every row,
+    // exactly at the boundaries too — a prior bug had SQL use `<` where memory
+    // used `>=`. Checked against each other, not only against the expectation.
     let cases = [
         BoundaryCase {
             label: "created_at exactly at the absolute-timeout boundary",
@@ -868,25 +854,17 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
     ];
 
     for case in cases {
-        // `prune_expired` reads the wall clock itself rather than accepting
-        // an injected `now`, so if the second ticks over between capturing
-        // `now` below and that internal read, a boundary case computed
-        // against the now-stale `now` can flip expired/not-expired and fail
-        // for no reason the test is actually asserting about. Retry the
-        // whole case (bounded, so a genuinely broken predicate still fails
-        // rather than looping forever) whenever that race is detected,
-        // rather than weakening what is asserted.
+        // `prune_expired` reads the wall clock itself, so a second ticking over
+        // after `now` is captured can flip a boundary case. Retry (bounded) on
+        // that race rather than weakening the assertion.
         const MAX_ATTEMPTS: u32 = 5;
         for attempt in 1..=MAX_ATTEMPTS {
-            // `now` is captured immediately before driving the in-memory
-            // predicate, which reads the wall clock internally and cannot be
-            // handed a fake `now` — the SQL predicate below reuses this exact
-            // value, so it alone stays fully deterministic.
+            // The SQL side reuses this exact `now`.
             let now = noadd::now_unix();
             let created_at = now + case.created_offset;
             let last_seen = now + case.last_seen_offset;
 
-            // In-memory side: the real prune_expired predicate.
+            // In-memory side.
             let store = new_session_store();
             store_session(
                 &store,
@@ -916,7 +894,7 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
                 case.label
             );
 
-            // SQL side: the same fixture through purge_expired_sessions.
+            // SQL side, same fixture.
             let db = test_db().await;
             let uid = db.create_user("op", "h", 0).await.unwrap();
             db.insert_session("tok", uid, created_at, last_seen, None, None)
@@ -933,8 +911,6 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
                 case.label
             );
 
-            // The two predicates must agree with each other, not merely each
-            // independently match the expectation.
             assert_eq!(
                 evicted, deleted,
                 "{}: SQL predicate and in-memory predicate disagreed",
@@ -947,10 +923,7 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
 
 #[tokio::test]
 async fn test_filter_list_url_fetches_one_row_by_id() {
-    // Replaces a get_filter_lists() call that materialised every column of
-    // every row to read a single `url`, so the lookup being correct — and
-    // returning None rather than someone else's URL for an unknown id — is
-    // the whole point.
+    // An unknown id must return None, not another row's URL.
     let db = test_db().await;
     let first = db
         .add_filter_list("EasyList", "https://easylist.example.com/list.txt", true)
@@ -976,11 +949,9 @@ async fn test_filter_list_url_fetches_one_row_by_id() {
     );
 }
 
-/// `total_log_count` is a counter now rather than a `COUNT(*)`, and so is an
-/// unfiltered `count_logs`, so every path that changes how many rows
-/// `query_logs` holds has to move it. One that does not leaves the Database
-/// Health card and the query log's pager reporting a total the table stopped
-/// holding, and nothing else would notice.
+/// `total_log_count` and an unfiltered `count_logs` read a maintained counter,
+/// not `COUNT(*)`, so every write that changes the row count must move it or
+/// the Database Health card and the log pager silently drift.
 #[tokio::test]
 async fn the_log_count_follows_every_write_that_changes_it() {
     fn log(timestamp: i64) -> QueryLogEntry {
@@ -999,8 +970,7 @@ async fn the_log_count_follows_every_write_that_changes_it() {
         }
     }
 
-    // Every reader of the counter, against the rows themselves, which must
-    // never differ.
+    // Every reader of the counter, against the rows themselves.
     async fn assert_holds(db: &Database, expected: i64) {
         let rows = db
             .query_logs(i64::MAX, 0, None, None, None, None)
@@ -1042,10 +1012,9 @@ async fn the_log_count_follows_every_write_that_changes_it() {
     assert_holds(&db, 0).await;
 }
 
-/// A query type on its own is answered as two runs, one per verdict, merged
-/// back into one page. The page has to be the one the plain statement returns
-/// for every page size and offset `/api/logs` accepts, including the negative
-/// ones `SQLite` reads as "no limit" and "from the start".
+/// A query-type filter is answered as two runs, one per verdict, merged into one
+/// page. It must equal the plain statement's page for every limit and offset
+/// `/api/logs` accepts, including negatives (`SQLite`: "no limit", "from start").
 #[tokio::test]
 async fn a_query_type_filter_pages_exactly_like_the_table() {
     let dir = tempdir().unwrap();
@@ -1053,8 +1022,7 @@ async fn a_query_type_filter_pages_exactly_like_the_table() {
     let path_str = path.to_str().unwrap().to_string();
     let db = Database::open(&path_str).await.unwrap();
 
-    // Verdicts come in uneven runs, so a page often draws from only one of the
-    // two runs and the merge point moves from page to page.
+    // Uneven verdict runs, so the merge point moves from page to page.
     let entries: Vec<QueryLogEntry> = (0..300_i64)
         .map(|i| QueryLogEntry {
             timestamp: 1_000_000 + i * 1000,

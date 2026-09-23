@@ -1,24 +1,12 @@
-//! A page and a locator, in the shape the ported tests already spoke.
-//!
-//! Playwright's locator is lazy and its `expect` retries; `WebDriver`'s
-//! `WebElement` is a handle to one element found once, and nothing retries. The
-//! suite this replaces leaned on that behaviour 208 times, so rebuilding it is
-//! not optional — [`Locator`] resolves its selector on every call and every
+//! A page and a lazy locator. A `WebElement` is one element found once and
+//! nothing retries, so [`Locator`] resolves its selector on every call and every
 //! `expect_*` polls through [`crate::wait`].
 //!
-//! Two Playwright conveniences are rebuilt rather than imitated:
-//!
-//! * `locator.filter({ hasText })` — [`Locator::having_text`], applied after
-//!   the selector because CSS cannot express it. The filter-list rows keyed by
-//!   a name carrying a double quote are exactly why: `[data-name="q\" …"]` is
-//!   not a selector anyone should have to write.
-//! * `click({ force: true })` — [`Locator::click_js`]. Playwright's `force`
-//!   skips the actionability checks; the equivalent here is to activate the
-//!   element directly instead of aiming a synthetic pointer at its centre.
-//!   Both no-JS suites need it for the same reason they needed it before: the
-//!   status bar is `position: fixed` at the foot of the viewport and swallows a
-//!   click aimed at what sits under it, and a card still running its fade-in is
-//!   a moving target.
+//! * [`Locator::having_text`] filters after the selector, since CSS cannot
+//!   match text (and a name containing `"` makes an attribute selector painful).
+//! * [`Locator::click_js`] activates the element directly instead of aiming a
+//!   pointer at its centre, which the fixed status bar can swallow and a card
+//!   still fading in can dodge. The no-JS suites rely on it.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -87,10 +75,9 @@ impl Page {
 
     /// Replays an API session into the browser.
     ///
-    /// A cookie can only be set for the document's own origin, so this lands on
-    /// the instance first. That first request is the sign-in page, which is
-    /// cheap and — unlike a UI sign-in — spends none of the five-per-minute
-    /// login budget the tests that follow are there to exercise.
+    /// A cookie can only be set for the document's own origin, so this loads
+    /// the instance first. Unlike a UI sign-in, it spends none of the
+    /// five-per-minute login budget.
     ///
     /// # Errors
     ///
@@ -122,11 +109,8 @@ impl Page {
 
     /// Runs a script in the page and returns its value.
     ///
-    /// The driver can inject script into a page whose *own* scripts are
-    /// disabled — `Emulation.setScriptExecutionDisabled` stops the document's
-    /// scripts, not `Execute Script` — so this works in the no-JS suites too,
-    /// which is what makes the "is any of this text on screen" checks portable
-    /// across both.
+    /// Works in the no-JS suites too: `Emulation.setScriptExecutionDisabled`
+    /// stops the document's scripts, not `Execute Script`.
     ///
     /// # Errors
     ///
@@ -142,22 +126,12 @@ impl Page {
 
     /// Is this string among the page's text?
     ///
-    /// Replaces `page.getByText(name, { exact: false }).first()` followed by
-    /// `toBeVisible`. It walks the document's text nodes rather than reading
-    /// `innerText`, for the reason set out on [`Locator::text`]: `innerText` is
-    /// the *rendered* form, and this UI puts `text-transform: uppercase` on
-    /// section headings — so "Database Health" would never be found by a check
-    /// that only sees "DATABASE HEALTH".
+    /// Reads text nodes, not `innerText`, so CSS `text-transform` does not
+    /// matter (see [`Locator::text`]); `<script>` and `<style>` are skipped.
     ///
-    /// `<script>` and `<style>` are skipped, which is the difference between
-    /// this and a bare `document.body.textContent`.
-    ///
-    /// ⚠️ It walks the elements itself rather than using a `TreeWalker`,
-    /// because a `TreeWalker`'s `acceptNode` filter is *page* script: with
-    /// `Emulation.setScriptExecutionDisabled` in force the DOM refuses to call
-    /// it, and the whole script fails with "the provided callback is no longer
-    /// runnable". `Execute Script` still runs — it is the document's own
-    /// scripting that is off — so anything callback-free is fine.
+    /// ⚠️ Walks the elements itself rather than using a `TreeWalker`: its
+    /// `acceptNode` filter is page script, which the DOM refuses to call with
+    /// scripting disabled ("the provided callback is no longer runnable").
     ///
     /// # Errors
     ///
@@ -213,7 +187,7 @@ impl Page {
         .await
     }
 
-    /// Waits until the URL ends with `suffix` — the `toHaveURL(/…$/)` shape.
+    /// Waits until the URL ends with `suffix`.
     ///
     /// # Errors
     ///
@@ -228,9 +202,8 @@ impl Page {
 
     /// Answers a `confirm()` with OK.
     ///
-    /// The session runs with `unhandledPromptBehavior: "ignore"`, so the dialog
-    /// is still standing when this is called — the W3C default would have
-    /// answered Cancel before the test got a say.
+    /// Relies on the session's `unhandledPromptBehavior: "ignore"` leaving the
+    /// dialog open.
     ///
     /// # Errors
     ///
@@ -247,10 +220,7 @@ impl Page {
 
     /// Waits until the page has made no new network request for a beat.
     ///
-    /// Replaces `waitForLoadState('networkidle')`, which only one step used —
-    /// the sweep that visits every tab and looks for markup rendered as text.
-    /// The resource timeline is the same signal, read from the page rather than
-    /// from the driver.
+    /// Judged by the page's resource timeline no longer growing.
     ///
     /// # Errors
     ///
@@ -264,9 +234,8 @@ impl Page {
                     .unwrap_or(0),
             )
         };
-        // Written as a plain loop rather than through `eventually`: the
-        // previous reading has to survive between polls, and a `FnMut` closure
-        // cannot lend a captured variable to the future it returns.
+        // Not `eventually`: the previous reading must survive between polls, and
+        // a `FnMut` closure cannot lend a captured variable to its future.
         let deadline = std::time::Instant::now() + crate::browser::WAIT_TIMEOUT;
         let mut last = count().await?;
         loop {
@@ -324,8 +293,7 @@ impl Page {
 
     /// Waits for one more `method` request to `path` than there were before.
     ///
-    /// Replaces `page.waitForResponse(...)`, whose only job in these tests was
-    /// to keep a reload from racing the save it was checking.
+    /// Keeps a reload from racing the save it is checking.
     ///
     /// # Errors
     ///
@@ -339,7 +307,7 @@ impl Page {
     }
 }
 
-/// A lazily-resolved selector, with the filters the ported tests used.
+/// A lazily-resolved selector, optionally narrowed by text, index and scope.
 #[derive(Debug, Clone)]
 pub struct Locator {
     handle: Arc<SessionHandle>,
@@ -350,7 +318,7 @@ pub struct Locator {
 }
 
 impl Locator {
-    /// Narrows to the elements whose rendered text contains `text`.
+    /// Narrows to the elements whose `textContent` contains `text`.
     pub fn having_text(mut self, text: impl Into<String>) -> Self {
         self.has_text = Some(text.into());
         self
@@ -367,7 +335,7 @@ impl Locator {
         self.nth(0)
     }
 
-    /// A locator scoped to this one's first match — `row.getByTestId(…)`.
+    /// A locator scoped to this one's first match.
     pub fn loc(&self, css: impl Into<String>) -> Self {
         Self {
             handle: Arc::clone(&self.handle),
@@ -449,13 +417,9 @@ impl Locator {
 
     /// The first match's text, with whitespace normalised.
     ///
-    /// `textContent`, not `WebElement::text`. `WebDriver`'s "Get Element Text" is
-    /// the *rendered* form, which applies `text-transform` — and this UI
-    /// uppercases badges and section headings in CSS, so a verdict written
-    /// `Blocked` comes back as `BLOCKED`. Playwright's text assertions read
-    /// `textContent`, so every ported assertion is phrased against the markup's
-    /// casing; reading the rendered form would have meant rewriting all of them
-    /// to match a stylesheet.
+    /// `textContent`, not `WebElement::text`: "Get Element Text" applies CSS
+    /// `text-transform`, and this UI uppercases badges and headings, so
+    /// `Blocked` would read `BLOCKED`. Assertions are phrased against the markup.
     ///
     /// # Errors
     ///
@@ -466,8 +430,7 @@ impl Locator {
 
     /// The first match's `textContent`, untouched.
     ///
-    /// For the one caller that needs the line breaks: a query-log row's domain
-    /// cell carries the domain on its first line and metadata under it.
+    /// For callers that need the line breaks, e.g. a query-log domain cell.
     ///
     /// # Errors
     ///
@@ -520,9 +483,8 @@ impl Locator {
 
     /// Clears the field and types `text` into it.
     ///
-    /// Real key events rather than an assigned `value`, which matters: the
-    /// settings page fires on `change`, not `input`, and the whole point of one
-    /// of its tests is that typing mid-value sends nothing.
+    /// Real key events, not an assigned `value`: the settings page saves on
+    /// `change`, and one test checks that typing mid-value sends nothing.
     ///
     /// # Errors
     ///
@@ -546,10 +508,8 @@ impl Locator {
         Ok(())
     }
 
-    /// Presses Enter in the field, which is how a browser submits a form that
-    /// has a submit button in it — a real path, and the one a keyboard user
-    /// takes. It is also independent of where the button ended up, which the
-    /// fixed status bar makes a live concern on a short viewport.
+    /// Presses Enter in the field, submitting its form as a keyboard user would,
+    /// wherever the fixed status bar has left the submit button.
     ///
     /// # Errors
     ///
@@ -571,7 +531,7 @@ impl Locator {
         Ok(())
     }
 
-    /// Activates the element directly — the stand-in for `click({force:true})`.
+    /// Activates the element with a script `click()`, skipping pointer hit-testing.
     ///
     /// # Errors
     ///
@@ -625,8 +585,7 @@ impl Locator {
         Ok((x + width / 2.0, y + height / 2.0))
     }
 
-    /// The first match's `getBoundingClientRect`, as `(x, y, width, height)` —
-    /// Playwright's `boundingBox()`.
+    /// The first match's `getBoundingClientRect`, as `(x, y, width, height)`.
     ///
     /// # Errors
     ///
@@ -648,7 +607,7 @@ impl Locator {
         Ok((at(0)?, at(1)?, at(2)?, at(3)?))
     }
 
-    /// `toBeVisible`.
+    /// Waits until any match is displayed.
     ///
     /// # Errors
     ///
@@ -664,8 +623,7 @@ impl Locator {
         .await
     }
 
-    /// `toBeHidden` / `not.toBeVisible` — absent counts as hidden, as in
-    /// Playwright.
+    /// Waits until no match is displayed; absent counts as hidden.
     ///
     /// # Errors
     ///
@@ -677,7 +635,7 @@ impl Locator {
         .await
     }
 
-    /// `toHaveCount`.
+    /// Waits until exactly `expected` elements match.
     ///
     /// # Errors
     ///
@@ -689,7 +647,7 @@ impl Locator {
         .await
     }
 
-    /// `expect(count).toBeGreaterThan(n - 1)`.
+    /// Waits until at least `least` elements match.
     ///
     /// # Errors
     ///
@@ -705,7 +663,7 @@ impl Locator {
         .await
     }
 
-    /// `toContainText`.
+    /// Waits until the first match's text contains `needle`.
     ///
     /// # Errors
     ///
@@ -721,9 +679,8 @@ impl Locator {
         .await
     }
 
-    /// The negative of [`Locator::expect_text_contains`], checked once the
-    /// element is there — an absence that is only true because the page has not
-    /// rendered yet is not the absence these tests mean.
+    /// The negative of [`Locator::expect_text_contains`], checked once after the
+    /// element exists, so an unrendered page does not pass by default.
     ///
     /// # Errors
     ///
@@ -738,9 +695,8 @@ impl Locator {
         Ok(())
     }
 
-    /// `toHaveText` — the whole rendered text, with whitespace normalised the
-    /// way Playwright normalised it, so a line break in the markup does not
-    /// decide whether an assertion holds.
+    /// Waits until the whole text equals `expected`, whitespace normalised on
+    /// both sides.
     ///
     /// # Errors
     ///
@@ -754,7 +710,7 @@ impl Locator {
         .await
     }
 
-    /// `toHaveValue`.
+    /// Waits until the `value` equals `expected`.
     ///
     /// # Errors
     ///
@@ -768,7 +724,7 @@ impl Locator {
         .await
     }
 
-    /// `toHaveValue(/^prefix/)`.
+    /// Waits until the `value` starts with `prefix`.
     ///
     /// # Errors
     ///
@@ -784,7 +740,7 @@ impl Locator {
         .await
     }
 
-    /// `not.toBeEmpty()` on a field.
+    /// Waits until the field's `value` is non-empty.
     ///
     /// # Errors
     ///
@@ -797,7 +753,7 @@ impl Locator {
         .await
     }
 
-    /// `toHaveClass(/name/)`.
+    /// Waits until the first match carries class `name`.
     ///
     /// # Errors
     ///
@@ -816,7 +772,7 @@ impl Locator {
         .await
     }
 
-    /// `not.toHaveClass(/name/)`.
+    /// Waits until the first match drops class `name`.
     ///
     /// # Errors
     ///
@@ -835,7 +791,7 @@ impl Locator {
         .await
     }
 
-    /// `toBeChecked({ checked })`.
+    /// Waits until the checkbox's state is `checked`.
     ///
     /// # Errors
     ///
@@ -847,7 +803,7 @@ impl Locator {
         .await
     }
 
-    /// `toHaveAttribute`.
+    /// Waits until attribute `name` equals `expected`.
     ///
     /// # Errors
     ///
@@ -876,8 +832,7 @@ impl Locator {
     }
 }
 
-/// Fails with `message` — the shape a ported `expect(x).toBe(y)` takes when
-/// there is nothing to poll for.
+/// Fails with `message` unless `condition` holds: a one-shot, non-polling check.
 ///
 /// # Errors
 ///
@@ -890,7 +845,7 @@ pub fn ensure(condition: bool, message: impl std::fmt::Display) -> Result<()> {
     }
 }
 
-/// Trims and collapses runs of whitespace, as Playwright's text assertions did.
+/// Trims and collapses runs of whitespace.
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -909,11 +864,8 @@ async fn text_content(handle: &Arc<SessionHandle>, element: &WebElement) -> Resu
 
 /// A step failure that prints its whole context chain.
 ///
-/// `cucumber`'s codegen turns a non-unit return into
-/// `unwrap_or_else(|e| panic!("{}", e))`, and `anyhow`'s `Display` prints only
-/// the outermost message — so "no element matches …" would arrive without the
-/// "while signing in" that explains where it came from. This prints `{:#}`
-/// instead, which is the whole chain on one line.
+/// `cucumber` panics with the error's `Display`, and `anyhow`'s prints only the
+/// outermost message; this prints `{:#}`, the whole chain on one line.
 #[derive(Debug)]
 pub struct StepError(anyhow::Error);
 

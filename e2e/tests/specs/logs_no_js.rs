@@ -1,14 +1,6 @@
-//! The query log with JavaScript switched off entirely. Filtering and paging
-//! are the claim this page makes — both live in the URL, so the filters are a
-//! GET form and the pager is two links, and neither needs a client.
-//!
-//! The live tail is the documented exception (it is an `EventSource`), so its
-//! button must not even be visible here.
-//!
-//! Its own noadd instance on dedicated ports, seeded through `sqlite3` against
-//! the stopped database: several pages of history is what makes paging
-//! testable, and sending that many real DNS queries would be slow and
-//! dependent on an upstream.
+//! The query log with JavaScript off: filters are a GET form and the pager is
+//! two links, so both work from the URL alone. The live tail needs a client, so
+//! its button must not be visible. Seeded with three pages of history.
 
 use anyhow::Result;
 use noadd_e2e::dom::Page;
@@ -54,7 +46,7 @@ pub async fn run() -> Result<Vec<String>> {
                 page.loc("#log-pagination")
                     .expect_text_contains(&format!("{} queries", seed::LOG_ROWS))
                     .await?;
-                // The one thing that genuinely needs a client is not offered.
+                // The live tail needs a client, so it is not offered.
                 page.testid("logs-live-toggle").expect_hidden().await
             },
         )
@@ -72,11 +64,8 @@ pub async fn run() -> Result<Vec<String>> {
                     .await?;
 
                 open(page, &session, "").await?;
-                // `click_js`, as in filters-no-js and for the same reason: the
-                // pager sits at the foot of a long page and the status bar is fixed
-                // to the bottom of the viewport, so a plain click is a function of
-                // the window height. The URL assertions below only pass if the
-                // navigation actually happened.
+                // `click_js`: the pager sits under the fixed status bar on a
+                // short window. The URL assertions prove the navigation happened.
                 page.testid("logs-next").click_js().await?;
                 page.expect_url_contains("page=2").await?;
                 page.loc("#log-pagination")
@@ -110,8 +99,7 @@ pub async fn run() -> Result<Vec<String>> {
                     rows.clone().nth(i).expect_text_contains("AAAA").await?;
                     rows.clone().nth(i).expect_text_contains("ads").await?;
                 }
-                // The form comes back showing what is applied, so it can be
-                // adjusted rather than retyped.
+                // The form comes back showing what is applied.
                 page.testid("logs-search").expect_value("ads").await?;
                 page.testid("logs-type").expect_value("AAAA").await
             },
@@ -138,9 +126,8 @@ pub async fn run() -> Result<Vec<String>> {
             async |_browser, page| {
                 open(page, &session, "?action=blocked&page=1").await?;
                 let row = page.testid("log-row").first();
-                // The cell carries the domain on its first line and metadata
-                // under it, so the whole thing is trimmed before the split —
-                // `textContent` starts with the newline after the `<td>`.
+                // Domain on the first line, metadata under it; trimmed first
+                // because `textContent` starts with the newline after `<td>`.
                 let cell = row.loc("td").nth(2).text_raw().await?;
                 let domain = cell
                     .trim()

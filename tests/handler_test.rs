@@ -180,9 +180,7 @@ fn test_decrement_ttl_clamps_to_minimum_1() {
 
 #[tokio::test]
 async fn test_handler_returns_refused_when_rate_limit_exhausted() {
-    // Block rule keeps the test local (no upstream calls). Rate limiter
-    // configured with 1 token capacity, 0 qps refill — one query allowed,
-    // the second must be refused.
+    // A block rule keeps the test local (no upstream calls).
     let block_rules = vec![(
         ParsedRule {
             domain: "ads.example.com".to_string(),
@@ -196,9 +194,8 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     let cache = DnsCache::with_capacity_bytes(64 * 1024 * 1024);
     let forwarder = Arc::new(UpstreamForwarder::new(UpstreamConfig::default()).await);
     let (tx, mut rx) = mpsc::channel(16);
-    // qps=1, burst=1 — back-to-back queries happen in microseconds, far
-    // below the 1s needed to refill one token, so the second query from
-    // the same IP is guaranteed to be refused.
+    // qps=1, burst=1 (qps=0 would disable limiting): back-to-back queries
+    // are far inside the 1s refill, so the second from one IP is refused.
     let limiter = Arc::new(IpRateLimiter::new(1, 1));
     let handler = DnsHandler::new(filter, cache, forwarder, tx).with_rate_limiter(limiter);
 
@@ -206,9 +203,7 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
     let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-    // Check that the first allowed query still returns the blocked answer
-    // (NoError with 0.0.0.0), not REFUSED — so we know we're not
-    // over-filtering.
+    // The first query gets the block answer, not REFUSED.
     let first = handler.handle(&query, ip1, None).await.unwrap();
     let first_msg = Message::from_bytes(&first.bytes).unwrap();
     assert_eq!(first_msg.metadata.response_code, ResponseCode::NoError);
@@ -246,12 +241,8 @@ async fn test_handler_returns_refused_when_rate_limit_exhausted() {
 
 #[tokio::test]
 async fn test_handler_serves_queries_while_log_channel_is_saturated() {
-    // Tiny channel (capacity 1, no receiver consuming) saturates immediately,
-    // so try_send fails on every query past the first. That is the whole point
-    // of try_send over send: resolution must not stall behind SQLite, so a
-    // wedged logger costs log rows and nothing else. Each drop is reported by
-    // an error! line rather than a counter, so what is asserted here is the
-    // behaviour that matters — every query still gets a well-formed answer.
+    // A capacity-1 channel nobody drains makes try_send fail past the first
+    // query. A wedged logger must cost log rows, never answers.
     let block_rules = vec![(
         ParsedRule {
             domain: "ads.example.com".to_string(),
@@ -287,9 +278,8 @@ async fn test_handler_serves_queries_while_log_channel_is_saturated() {
 
 #[tokio::test]
 async fn test_handler_inflight_limit_serves_all_queries() {
-    // With a low concurrency limit, queries must still complete (permits are
-    // released once each call returns). Uses a block rule so queries stay
-    // local and fast — no upstream dependency.
+    // Under a low concurrency limit every query still completes (permits are
+    // released on return). A block rule keeps it local.
     let block_rules = vec![(
         ParsedRule {
             domain: "ads.example.com".to_string(),
@@ -328,9 +318,8 @@ async fn test_handler_inflight_limit_serves_all_queries() {
 
 #[tokio::test]
 async fn test_non_query_opcode_returns_notimp() {
-    // A blocked domain keeps this local (no upstream) and proves the opcode
-    // check fires before the filter: a STATUS query for a blocked name must
-    // still come back NOTIMP, not a synthesized block answer.
+    // The opcode check fires before the filter: a STATUS query for a blocked
+    // name is NOTIMP, not a block answer.
     let block_rules = vec![(
         ParsedRule {
             domain: "ads.example.com".to_string(),

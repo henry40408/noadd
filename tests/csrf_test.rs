@@ -1,14 +1,11 @@
-//! Integration coverage for the first-line CSRF origin guard layered on the
-//! admin router (`src/admin/csrf.rs`). The guard runs before any handler or
-//! `AuthedUser` extraction, so most of these assert on status alone — a
-//! provably cross-origin unsafe-method request is short-circuited with 403,
-//! while same-origin and header-less (CLI/bearer) requests reach their
-//! handler. The classification is `tower_http::csrf`'s and tested upstream;
-//! what is pinned here is the behaviour this appliance relies on.
+//! The CSRF origin guard on the admin router (`src/admin/csrf.rs`). It runs
+//! before any handler or auth, so most tests assert on status alone: a
+//! cross-origin unsafe request gets 403; same-origin and header-less (CLI)
+//! requests reach the handler. The classification is `tower_http::csrf`'s;
+//! this pins the behaviour the appliance relies on.
 //!
-//! The ones that capture logs assert on the `csrf.rejected` audit event: a bodyless
-//! 403 that leaves no trace is indistinguishable from every other 403 this
-//! appliance can return, which is the whole reason the event exists.
+//! Log-capturing tests assert on the `csrf.rejected` event, without which the
+//! guard's bodyless 403 is indistinguishable from any other.
 
 use std::sync::Arc;
 
@@ -25,8 +22,7 @@ use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 
-/// Build a bare admin router. No operator is provisioned — the guard fires
-/// ahead of auth, so an unauthenticated app is enough to exercise it.
+/// A bare admin router with no operator — the guard fires ahead of auth.
 async fn build_app() -> axum::Router {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.keep().join("test.db");
@@ -125,14 +121,12 @@ async fn same_origin_request_reaches_handler() {
         .body(Body::from(r#"{"username":"x","password":"y"}"#))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // The guard passes same-origin through; the handler then answers on its own
-    // merits (bad creds → 401). What matters is it is NOT the guard's 403.
+    // The handler answers on its own merits (bad creds → 401), not the guard's 403.
     assert_ne!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// The `no_store` layer (`src/headers.rs`) is registered outside the CSRF
-/// guard, so even the guard's own 403 — which never reaches a handler — must
-/// carry the no-store headers.
+/// `no_store` (`src/headers.rs`) wraps the CSRF guard, so even the guard's own
+/// 403 carries it.
 #[tokio::test]
 async fn csrf_rejection_is_not_stored() {
     let app = build_app().await;
@@ -165,18 +159,14 @@ async fn header_less_client_reaches_handler() {
         .body(Body::from(r#"{"pattern":"example.com","action":"block"}"#))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // No Origin / Sec-Fetch-Site → treated as a non-browser client and passed
-    // through; unauthenticated, so the handler rejects with 401, not the
-    // guard's 403.
+    // No Origin / Sec-Fetch-Site → a non-browser client, passed through to the
+    // handler's 401.
     assert_ne!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// A `tracing` sink that keeps everything written to it, so a test can assert
-/// on the audit events the guard emitted.
-///
-/// Under nextest each test is its own process, so installing a thread-local
-/// default subscriber cannot leak into another test.
+/// A `tracing` sink that keeps everything written to it. Under nextest each test
+/// is its own process, so the thread-local default cannot leak between tests.
 #[derive(Clone)]
 struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -190,9 +180,8 @@ impl CapturedLogs {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 
-    /// Install as the default subscriber for as long as the returned guard
-    /// lives. JSON so a field can be matched as `"field":value` rather than
-    /// by groping through prose.
+    /// Install as the default subscriber while the guard lives. JSON, so a field
+    /// matches as `"field":value`.
     fn install(&self) -> tracing::subscriber::DefaultGuard {
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -220,9 +209,8 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
     }
 }
 
-/// The rejection is auditable, and carries all three classification inputs —
-/// telling a real cross-site POST apart from a proxy that rewrote `Host`
-/// needs every one of them.
+/// The rejection event carries all three classification inputs — telling a
+/// cross-site POST from a proxy that rewrote `Host` needs every one.
 #[tokio::test]
 async fn rejection_records_the_classification_inputs() {
     let app = build_app().await;
@@ -246,27 +234,23 @@ async fn rejection_records_the_classification_inputs() {
         "expected a csrf.rejected event, got: {text}"
     );
     for field in [
-        // The fallback branch decided this one, and says so: a browser that
-        // never sent `Sec-Fetch-Site` is as likely a proxy rewriting `Host`
-        // as it is an attack, and the two want different fixes.
+        // The fallback branch: without `Sec-Fetch-Site` this is as likely a
+        // proxy rewriting `Host` as an attack.
         r#""reason":"origin_mismatch""#,
         r#""method":"POST""#,
         r#""path":"/api/auth/logout""#,
         r#""origin":"https://evil.test""#,
         r#""host":"app.test""#,
-        // Absent here, and recorded as such rather than silently omitted:
-        // "the browser did not send it" and "it said same-origin" are
-        // different stories and must not render identically.
+        // Recorded as absent rather than omitted: "not sent" and
+        // "same-origin" must not read the same.
         r#""sec_fetch_site":"<none>""#,
     ] {
         assert!(text.contains(field), "missing {field} in: {text}");
     }
 }
 
-/// The other branch of the classification, recorded under its own `reason`.
-/// A browser that stated the request was cross-site is an attempted CSRF; the
-/// `origin_mismatch` above is not necessarily one. The event that cannot tell
-/// them apart is the one an operator has to guess at.
+/// A browser-stated cross-site request is an attempted CSRF; `origin_mismatch`
+/// is not necessarily one, so they log under different reasons.
 #[tokio::test]
 async fn a_browser_stated_cross_site_rejection_is_logged_under_its_own_reason() {
     let app = build_app().await;
@@ -296,15 +280,9 @@ async fn a_browser_stated_cross_site_rejection_is_logged_under_its_own_reason() 
     );
 }
 
-/// The gap `SameSite=Lax` cannot close, and the one this guard exists for.
-///
-/// `SameSite` is scoped to the registrable domain, not the origin, so a page
-/// on a sibling subdomain is *same-site* and its POST carries the session
-/// cookie. A browser labels exactly that request `Sec-Fetch-Site: same-site` —
-/// so treating the header as a blanket allow hands the attacker the one case
-/// the guard was added to refuse. `same-site` is a statement about the
-/// registrable domain, never about the origin, and the `Origin` still has to
-/// agree with `Host`.
+/// The gap `SameSite=Lax` cannot close, and the one this guard exists for: a
+/// sibling subdomain is same-site, so its POST carries the session cookie and
+/// arrives as `Sec-Fetch-Site: same-site`. That header must never be an allow.
 #[tokio::test]
 async fn a_same_site_post_from_a_sibling_subdomain_is_refused() {
     let app = build_app().await;
@@ -330,14 +308,9 @@ async fn a_same_site_post_from_a_sibling_subdomain_is_refused() {
     );
 }
 
-/// `same-site` is refused even when the `Origin` agrees with `Host`.
-///
-/// A browser posting from the appliance's own origin says `same-origin`, so a
-/// `same-site` request whose `Origin` looks like this host was sent from
-/// somewhere the browser knows is a *different* origin. Behind a proxy that
-/// forwards `Host` without its port, that is another service on the same host
-/// posting to this one — the attack itself, which an `Origin`/`Host` comparison
-/// can no longer see.
+/// `same-site` is refused even when `Origin` agrees with `Host`: the browser
+/// knows it is a different origin (e.g. another port behind a proxy that drops
+/// the port from `Host`), which an `Origin`/`Host` comparison cannot see.
 #[tokio::test]
 async fn a_same_site_post_is_refused_even_when_its_origin_matches_host() {
     let resp = post_with(&[
@@ -362,9 +335,8 @@ async fn post_with(headers: &[(&str, &str)]) -> axum::response::Response {
         .unwrap()
 }
 
-/// With no `Sec-Fetch-Site` — a browser too old to send it — the guard falls
-/// back to comparing the `Origin`'s full authority, port included, with the
-/// request's own.
+/// Without `Sec-Fetch-Site` the guard compares `Origin`'s full authority, port
+/// included, with `Host`.
 #[tokio::test]
 async fn the_origin_fallback_rejects_an_authority_that_differs_from_host() {
     for (origin, host, why) in [
@@ -405,8 +377,7 @@ async fn the_origin_fallback_passes_an_authority_that_matches_host() {
     for (origin, host) in [
         ("http://app.test:8080", "app.test:8080"),
         ("http://[::1]:8080", "[::1]:8080"),
-        // A TLS-terminating proxy: the browser's `https://` Origin meets a
-        // scheme-less Host, and the comparison ignores scheme.
+        // A TLS-terminating proxy: the comparison ignores scheme.
         ("https://app.test", "app.test"),
     ] {
         let resp = post_with(&[("origin", origin), ("host", host)]).await;
@@ -418,9 +389,7 @@ async fn the_origin_fallback_passes_an_authority_that_matches_host() {
     }
 }
 
-/// Every `reason` the event can carry, each produced by the request shape it
-/// names. The layer itself only distinguishes "the browser said so" from "the
-/// `Origin` fallback failed"; the finer split is what an operator acts on.
+/// Every `reason` the event can carry, each from the request shape it names.
 #[tokio::test]
 async fn each_rejection_is_logged_under_the_reason_that_decided_it() {
     for (headers, reason) in [
@@ -433,8 +402,7 @@ async fn each_rejection_is_logged_under_the_reason_that_decided_it() {
             ][..],
             "same_site_cross_origin",
         ),
-        // A browser that said `same-site` is a browser, so a missing Origin
-        // cannot be read as the non-browser client the header-less case is.
+        // A browser that said `same-site` is not a header-less client.
         (
             &[("sec-fetch-site", "same-site")][..],
             "same_site_cross_origin",
@@ -463,18 +431,15 @@ async fn each_rejection_is_logged_under_the_reason_that_decided_it() {
     }
 }
 
-/// The anti-spam lock. `log_rejection` sits on every admin request, so
-/// anything it logs on the *pass-through* path is written once per call for
-/// the life of the deployment. A request the guard allows must leave it
-/// silent.
+/// `log_rejection` sits on every admin request, so it must stay silent on the
+/// pass-through path.
 #[tokio::test]
 async fn a_request_the_guard_allows_logs_nothing() {
     let app = build_app().await;
     let logs = CapturedLogs::new();
     let guard = logs.install();
 
-    // Header-less, i.e. the non-browser client path — the one a scanner or a
-    // CLI takes, and the highest-volume way through this layer.
+    // Header-less: the highest-volume path (scanners, CLIs).
     let req = Request::builder()
         .method("POST")
         .uri("/api/rules")

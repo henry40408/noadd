@@ -20,16 +20,14 @@ use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
 use tokio::sync::mpsc;
 
-/// CIDR trusted by every test's `forward_auth` config; `TRUSTED_PEER` is
-/// inside it, `UNTRUSTED_PEER` is outside it.
+/// CIDR trusted by every test's `forward_auth` config; `TRUSTED_PEER` is inside it.
 const TRUSTED_CIDR: &str = "203.0.113.0/24";
 const TRUSTED_PEER: &str = "203.0.113.10:9000";
 const UNTRUSTED_PEER: &str = "198.51.100.10:9000";
 const HEADER: &str = "Remote-User";
 
-/// Build a router plus its backing `Database`. When `seed_operator` is true,
-/// creates an operator ("admin" / "adminpass") with a valid session token.
-/// When false, the database is empty.
+/// A router and its `Database`, optionally seeding operator "admin" / "adminpass"
+/// with a valid session token.
 async fn build(
     forward_auth: Option<Arc<ForwardAuthConfig>>,
     seed_operator: bool,
@@ -125,10 +123,7 @@ async fn build(
     (router, db, token)
 }
 
-/// Build a router plus its backing `Database`, with an operator ("admin" /
-/// "adminpass") already seeded and holding a valid session token — mirrors
-/// `build_app` in `admin_api_test.rs`, parameterised on `forward_auth` so
-/// tests can turn the feature on or off.
+/// [`build`] with a seeded operator; mirrors `build_app` in `admin_api_test.rs`.
 async fn build_app(
     forward_auth: Option<Arc<ForwardAuthConfig>>,
 ) -> (axum::Router, Database, String) {
@@ -136,8 +131,7 @@ async fn build_app(
     (router, db, token.unwrap())
 }
 
-/// Build a router plus its backing `Database` with no seeded operator — the
-/// database is empty and ready for tests that check initial setup behavior.
+/// [`build`] with an empty database, for setup tests.
 async fn build_app_without_operator(
     forward_auth: Option<Arc<ForwardAuthConfig>>,
 ) -> (axum::Router, Database) {
@@ -308,12 +302,10 @@ async fn forward_auth_header_sent_twice_is_rejected() {
     assert_eq!(db.count_users().await.unwrap(), 1);
 }
 
-/// A forward-auth-provisioned account stores a sentinel hash that cannot be
-/// parsed as a PHC string, so `verify_password` would return `Err` for it.
-/// This is the regression guard ensuring `login` checks `has_no_password`
-/// before `verify_password` and returns the ordinary 401 rather than letting
-/// that `Err` surface as a 500, which would also leak which accounts are
-/// forward-auth-provisioned.
+/// A forward-auth-provisioned account stores a sentinel that `verify_password`
+/// rejects with `Err`. `start_password_session` must check `has_no_password`
+/// first and answer the ordinary 401 — a 500 would also reveal which accounts
+/// are forward-auth-provisioned.
 #[tokio::test]
 async fn provisioned_operator_cannot_password_login() {
     let (app, db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -344,9 +336,7 @@ async fn provisioned_operator_cannot_password_login() {
 async fn session_cookie_still_wins_without_forward_auth_header() {
     let (app, _db, token) = build_app(Some(forward_auth_cfg())).await;
 
-    // No forward-auth header at all, peer not even attached — the existing
-    // cookie-based path must be entirely unaffected by forward auth being
-    // configured.
+    // No forward-auth header or peer: the cookie path is unaffected.
     let req = Request::builder()
         .uri("/api/settings")
         .header("cookie", format!("session={token}"))
@@ -356,11 +346,8 @@ async fn session_cookie_still_wins_without_forward_auth_header() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// Regression: the account page calls `GET /api/sessions` on load. That
-/// handler used to be cookie-only (`current_session`), so a forward-auth user
-/// — who holds no `session` cookie — got a 401, which the admin UI turns into
-/// an "auth-required" redirect back to login even though they are authenticated.
-/// It must now authorize via the forward-auth header like every other page.
+/// Regression: `GET /api/sessions` was cookie-only, so a forward-auth user (no
+/// `session` cookie) got a 401. It authorizes via the header like everything else.
 #[tokio::test]
 async fn forward_auth_user_can_list_sessions() {
     let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -377,8 +364,7 @@ async fn forward_auth_user_can_list_sessions() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// An untrusted peer (no valid auth of any kind) listing sessions is still
-/// rejected — the fix must not turn `/api/sessions` into an open endpoint.
+/// An untrusted peer is still refused: `/api/sessions` must not become open.
 #[tokio::test]
 async fn untrusted_peer_cannot_list_sessions() {
     let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -395,8 +381,7 @@ async fn untrusted_peer_cannot_list_sessions() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// `GET /api/auth/me` reports `via_sso: true` for a forward-auth request so the
-/// account page can tell the operator their session is proxy-managed.
+/// `GET /api/auth/me` reports `via_sso: true` for a forward-auth request.
 #[tokio::test]
 async fn forward_auth_me_reports_via_sso() {
     let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -467,8 +452,7 @@ async fn revoke_others_keeps_the_current_session() {
     );
 }
 
-/// A forward-auth caller holds no session cookie, so "log out other sessions"
-/// clears every session (none is their own device).
+/// A forward-auth caller has no session of its own, so every session is revoked.
 #[tokio::test]
 async fn forward_auth_revoke_others_removes_all_sessions() {
     let (app, db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -488,10 +472,9 @@ async fn forward_auth_revoke_others_removes_all_sessions() {
     assert_eq!(db.list_sessions().await.unwrap().len(), 0);
 }
 
-/// When forward auth is configured, the setup wizard must refuse all requests,
-/// even on a fresh install with zero users. This prevents anyone who can reach
-/// the HTTP listener directly (bypassing the proxy) from claiming the first
-/// operator account before the proxy provisions one.
+/// With forward auth configured, setup refuses everything even with zero users,
+/// so nobody reaching the listener directly (bypassing the proxy) can claim the
+/// first operator account.
 #[tokio::test]
 async fn setup_is_refused_when_forward_auth_is_configured() {
     let (app, db) = build_app_without_operator(Some(forward_auth_cfg())).await;
@@ -518,9 +501,7 @@ async fn setup_is_refused_when_forward_auth_is_configured() {
     );
 }
 
-/// When forward auth is disabled, the setup wizard must work normally on a
-/// fresh install. This is a regression guard to ensure that non-forward-auth
-/// deployments are unaffected by the new guard.
+/// Without forward auth, setup works normally on a fresh install.
 #[tokio::test]
 async fn setup_still_works_without_forward_auth() {
     let (app, db) = build_app_without_operator(None).await;
@@ -543,9 +524,8 @@ async fn setup_still_works_without_forward_auth() {
     assert_eq!(db.count_users().await.unwrap(), 1, "operator was created");
 }
 
-/// A forward-auth caller (trusted peer + header, no session cookie) logging
-/// out gets a 200 with the configured proxy logout URL handed back, so the
-/// SPA can redirect the browser there to actually end the upstream session.
+/// A forward-auth caller logging out gets 200 with the proxy logout URL, so the
+/// client can go there to end the upstream session.
 #[tokio::test]
 async fn forward_auth_logout_with_configured_url_returns_redirect() {
     const LOGOUT_URL: &str = "https://sso.example/logout";
@@ -553,10 +533,8 @@ async fn forward_auth_logout_with_configured_url_returns_redirect() {
 
     let resp = app.oneshot(forward_auth_logout_request()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    // Clear-Site-Data must still be present alongside redirect_to: the SPA
-    // reads redirect_to from the body before the browser acts on the header,
-    // so the two are not in tension, but a regression here would mean either
-    // the header regressed or the forward-auth handoff broke while adding it.
+    // Clear-Site-Data must accompany redirect_to (it omits `executionContexts`,
+    // so the caller survives to read the body).
     let clear_site_data = resp
         .headers()
         .get("clear-site-data")
@@ -571,9 +549,7 @@ async fn forward_auth_logout_with_configured_url_returns_redirect() {
     assert_eq!(body["via_forward_auth"], true);
 }
 
-/// Same as above but with no logout URL configured: still 200 (no more
-/// 401 for forward-auth callers), `redirect_to` is `null` since there is
-/// nowhere for the SPA to send the browser.
+/// With no logout URL configured: still 200, `redirect_to` null.
 #[tokio::test]
 async fn forward_auth_logout_without_configured_url_returns_null() {
     let (app, _db, _token) = build_app(Some(forward_auth_cfg())).await;
@@ -588,10 +564,8 @@ async fn forward_auth_logout_without_configured_url_returns_null() {
     assert_eq!(body["via_forward_auth"], true);
 }
 
-/// A genuine cookie/password user logging out must NOT be redirected to the
-/// proxy logout URL, even in a deployment where one is configured — their
-/// session is revoked server-side, so `via_forward_auth` is false and
-/// `redirect_to` stays null. Pins the gating in the logout handler.
+/// A cookie-session user is never sent to the proxy logout URL, even when one is
+/// configured: their session is revoked server-side, so `redirect_to` stays null.
 #[tokio::test]
 async fn cookie_user_logout_ignores_configured_logout_url() {
     const LOGOUT_URL: &str = "https://sso.example/logout";

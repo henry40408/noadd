@@ -43,9 +43,8 @@ async fn concurrent_spawns_serialised() {
     assert!(t.elapsed() >= Duration::from_millis(95));
 }
 
-/// Both edges reach a subscriber, and the completion carries the numbers that
-/// go with it: a banner that read `last_duration_ms` from a message published
-/// before the duration landed would report the *previous* rebuild's time.
+/// Both edges reach a subscriber, and the completion carries its own
+/// `last_duration_ms`, not the previous rebuild's.
 #[tokio::test]
 async fn subscribers_see_both_edges_of_a_rebuild() {
     let coord = RebuildCoordinator::new();
@@ -75,10 +74,8 @@ async fn subscribers_see_both_edges_of_a_rebuild() {
     );
 }
 
-/// The state a late subscriber is handed, which is what the event stream sends
-/// as a connection opens. Without it a client that connects between two
-/// rebuilds cannot tell an idle appliance from one it has simply not heard
-/// from yet.
+/// What the event stream sends as a connection opens, so a client connecting
+/// between rebuilds can tell idle from not-yet-heard.
 #[tokio::test]
 async fn status_reports_the_current_state_to_a_caller_that_missed_the_edges() {
     let coord = RebuildCoordinator::new();
@@ -106,7 +103,6 @@ async fn failed_rebuild_clears_flag() {
         .spawn_raw(|| async { Err::<(), _>(std::io::Error::other("boom")) })
         .await
         .unwrap();
-    // The flag is what this guards: a failed rebuild must not leave the
-    // coordinator wedged as permanently "rebuilding".
+    // A failed rebuild must not leave the coordinator stuck "rebuilding".
     assert!(!state.rebuilding.load(Ordering::Relaxed));
 }

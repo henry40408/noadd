@@ -1,28 +1,16 @@
-//! The Cucumber runner.
+//! The Cucumber runner (`cargo test --test e2e` from `e2e/`). One instance and
+//! one pass per feature tag:
 //!
-//! `harness = false`: cucumber drives the scenarios itself, so there is no
-//! libtest harness collecting `#[test]` functions. Run it from `e2e/` with
-//! `cargo test --test e2e`.
+//! * `@auth` — first-run setup and the session lifecycle. Setup happens once and
+//!   revoking sessions is destructive, so it starts unconfigured on its own.
+//! * `@onboarding` — needs an appliance that has served no DNS queries, and its
+//!   last scenario sends one, so it too gets its own.
+//! * `@app` — the read-mostly features, on a shared instance provisioned up
+//!   front with a session minted over the API and replayed as a cookie.
 //!
-//! What `playwright.config.js` expressed as three BDD projects plus three
-//! `webServer` entries is expressed here as three instances and three passes,
-//! selected by the tag each feature already carries:
-//!
-//! * `@auth` — first-run setup and the session lifecycle. A database can only
-//!   be set up once and revoking sessions is destructive, so it gets an
-//!   instance of its own that starts unconfigured.
-//! * `@onboarding` — the new-install guidance. Every scenario depends on an
-//!   appliance that has served *no* DNS queries, and the last one sends a real
-//!   query to prove the banner clears itself, so there is no going back.
-//! * `@app` — the read-mostly features, against a shared instance the runner
-//!   configures up front. That is the old `setup-app` project: a session minted
-//!   over the API and replayed as a cookie, which is what `storageState` was.
-//!
-//! Scenarios run one at a time, as they did under `workers: 1`. That is not
-//! conservatism: the `@auth` and `@onboarding` features are each one deliberate
-//! narrative in file order, and the `@app` features share mutable filter state.
-//! What *is* parallel is nothing here — the parallelism in this suite lives in
-//! `tests/specs`, where every file owns its own instance.
+//! Scenarios run one at a time: `@auth` and `@onboarding` are each one narrative
+//! in file order, and the `@app` features share mutable filter state. Parallelism
+//! lives in `tests/specs`, where every file owns its instance.
 
 mod steps;
 
@@ -45,8 +33,7 @@ async fn main() -> Result<()> {
     let auth = Server::fresh("auth", ports::AUTH.0, ports::AUTH.1).await?;
     let onboarding = Server::fresh("onboarding", ports::ONBOARDING.0, ports::ONBOARDING.1).await?;
 
-    // The `setup-app` project, in one line: configure the shared instance and
-    // keep the session it hands back.
+    // Configure the shared instance and keep the session it hands back.
     let app_session = Api::new(app.base_url()).provision().await?;
 
     register(HashMap::from([
@@ -58,9 +45,7 @@ async fn main() -> Result<()> {
                 session: Some(app_session),
             },
         ),
-        // No session for these two: the scenarios are about configuring an
-        // appliance and signing in to it, which an already-authenticated
-        // browser would have skipped past.
+        // No session: these scenarios configure the appliance and sign in themselves.
         (
             "auth".to_string(),
             Instance {
@@ -88,9 +73,7 @@ async fn main() -> Result<()> {
         failures += run(tag).await;
     }
 
-    // Every pass runs before any of them can fail the process: a broken
-    // onboarding flow is worth seeing on the same run that showed the rest
-    // passing.
+    // Run every pass before failing, so one broken tag does not hide the others.
     anyhow::ensure!(failures == 0, "{failures} cucumber failure(s)");
     Ok(())
 }

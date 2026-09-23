@@ -1,18 +1,13 @@
-//! One real DNS query, for the one scenario that needs noadd to have answered.
-//!
-//! The onboarding banner clears itself once the appliance has served traffic,
-//! and the only honest way to prove that is to make it serve some. A resolver
-//! crate would be a dependency for twelve bytes of header, so the packet is
-//! built by hand exactly as `steps/onboarding.steps.js` built it.
+//! One real DNS query, for the scenarios that need noadd to have served traffic.
+//! Built by hand: a resolver crate would be a dependency for a twelve-byte header.
 
 use anyhow::Result;
 use tokio::net::UdpSocket;
 
 /// Sends a standard A query for `name` to the DNS listener on `port`.
 ///
-/// No response is read: noadd logs every query it handles and the logger
-/// flushes about once a second, which the assertion that follows polls
-/// through. Whether an upstream answers is beside the point.
+/// No response is read: the query is logged either way (flushed within about a
+/// second), which is what callers poll for.
 ///
 /// # Errors
 ///
@@ -28,8 +23,7 @@ pub async fn send_query(port: u16, name: &str) -> Result<()> {
 /// A minimal A-record query: one question, recursion desired, no EDNS.
 fn query_packet(name: &str) -> Vec<u8> {
     let mut packet = Vec::with_capacity(32 + name.len());
-    // A fixed transaction id is fine — nothing here reads the reply, and two
-    // queries in flight at once never happens.
+    // A fixed transaction id is fine: nothing reads the reply.
     packet.extend_from_slice(&0x1234_u16.to_be_bytes()); // transaction id
     packet.extend_from_slice(&0x0100_u16.to_be_bytes()); // standard query, RD=1
     packet.extend_from_slice(&1_u16.to_be_bytes()); // QDCOUNT
