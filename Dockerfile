@@ -6,7 +6,7 @@
 # to an un-suffixed `rust:1.x` tag — it resolves to trixie (silent Debian bump).
 FROM --platform=$BUILDPLATFORM rust:bookworm AS build
 
-# cmake: aws-lc-sys. curl: fetches zig, and build.rs downloads the filter lists.
+# cmake: aws-lc-sys. curl: fetches zig.
 # xz: unpacks zig. No git: `.git` is excluded, so GIT_VERSION arrives as an arg.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake curl xz-utils \
