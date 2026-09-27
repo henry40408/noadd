@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use cucumber::{given, then, when};
-use noadd_e2e::api::{ADMIN_PASSWORD, ADMIN_USERNAME};
+use noadd_e2e::api::{ADMIN_PASSWORD, ADMIN_USERNAME, SESSION_COOKIE};
 use noadd_e2e::browser::override_summary;
 use noadd_e2e::dom::{Page, StepResult, ensure};
 use noadd_e2e::world::NoaddWorld;
@@ -758,6 +758,25 @@ async fn banner_gone(world: &mut NoaddWorld) -> StepResult {
 
 #[then("reloading the admin UI does not show the next-step banner again")]
 async fn banner_stays_gone(world: &mut NoaddWorld) -> StepResult {
+    // `app.js` removes the banner before its fire-and-forget POST lands, so a
+    // reload straight away can reach the server first and get it back.
+    let session = world
+        .browser()?
+        .driver()
+        .get_named_cookie(SESSION_COOKIE)
+        .await?
+        .value;
+    let api = world.api()?;
+    wait::eventually("the dismissal to be saved", || async {
+        let settings = api.get_json(&session, "/api/settings").await?;
+        let saved = &settings["onboarding_banner_dismissed"];
+        Ok((
+            saved == "true",
+            format!("onboarding_banner_dismissed is {saved}"),
+        ))
+    })
+    .await?;
+
     let page = world.page()?;
     page.reload().await?;
     page.testid("next-step-banner").expect_count(0).await?;
