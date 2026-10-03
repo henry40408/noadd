@@ -42,14 +42,16 @@ pub struct UpstreamConfig {
 impl Default for UpstreamConfig {
     fn default() -> Self {
         Self {
-            // Privacy-oriented resolvers in separate jurisdictions
-            // (Cloudflare US, Quad9 CH, Mullvad SE).
+            // Privacy-oriented public resolvers: Cloudflare (US; truncates
+            // client IPs, purges logs within 25h) and Quad9 (CH; keeps no
+            // client IPs).
             servers: vec![
                 "1.1.1.1:53".into(),
                 "9.9.9.9:53".into(),
-                // Mullvad's plain-UDP endpoint answers REFUSED from arbitrary
-                // networks; its DoT endpoint does not.
-                "tls://dns.mullvad.net:853".into(),
+                // Same operator as the entry above, so it adds transport
+                // (encrypted, untampered AD verdict) rather than operator
+                // diversity.
+                "tls://dns.quad9.net:853".into(),
             ],
             timeout_ms: 5000,
         }
@@ -1068,32 +1070,32 @@ mod tests {
 
     #[test]
     fn parse_dot_default_port() {
-        let s = UpstreamSpec::parse("tls://dns.mullvad.net").unwrap();
-        assert_eq!(s.host, "dns.mullvad.net");
+        let s = UpstreamSpec::parse("tls://dns.quad9.net").unwrap();
+        assert_eq!(s.host, "dns.quad9.net");
         assert_eq!(s.port, 853);
         assert_eq!(
             s.kind,
             UpstreamKind::Tls {
-                sni: "dns.mullvad.net".into(),
+                sni: "dns.quad9.net".into(),
             }
         );
     }
 
     #[test]
     fn parse_dot_explicit_port() {
-        let s = UpstreamSpec::parse("tls://dns.mullvad.net:8853").unwrap();
+        let s = UpstreamSpec::parse("tls://dns.quad9.net:8853").unwrap();
         assert_eq!(s.port, 8853);
     }
 
     #[test]
     fn parse_doh_default_path_and_port() {
-        let s = UpstreamSpec::parse("https://dns.mullvad.net").unwrap();
-        assert_eq!(s.host, "dns.mullvad.net");
+        let s = UpstreamSpec::parse("https://dns.quad9.net").unwrap();
+        assert_eq!(s.host, "dns.quad9.net");
         assert_eq!(s.port, 443);
         assert_eq!(
             s.kind,
             UpstreamKind::Https {
-                sni: "dns.mullvad.net".into(),
+                sni: "dns.quad9.net".into(),
                 path: "/dns-query".into(),
             }
         );
@@ -1148,15 +1150,14 @@ mod tests {
 
     #[test]
     fn parse_upstreams_accepts_newlines_and_commas() {
-        let out = parse_upstreams(
-            "1.1.1.1:53\ntls://dns.mullvad.net:853, https://dns.quad9.net/dns-query",
-        )
-        .unwrap();
+        let out =
+            parse_upstreams("1.1.1.1:53\ntls://dns.quad9.net:853, https://dns.quad9.net/dns-query")
+                .unwrap();
         assert_eq!(
             out,
             vec![
                 "1.1.1.1:53".to_string(),
-                "tls://dns.mullvad.net:853".to_string(),
+                "tls://dns.quad9.net:853".to_string(),
                 "https://dns.quad9.net:443/dns-query".to_string(),
             ]
         );
@@ -1198,13 +1199,13 @@ mod tests {
     #[test]
     fn parse_upstreams_canonicalizes_every_scheme() {
         let out =
-            parse_upstreams("1.1.1.1\n::1\ntls://dns.mullvad.net\nhttps://dns.quad9.net").unwrap();
+            parse_upstreams("1.1.1.1\n::1\ntls://dns.quad9.net\nhttps://dns.quad9.net").unwrap();
         assert_eq!(
             out,
             vec![
                 "1.1.1.1:53".to_string(),
                 "[::1]:53".to_string(),
-                "tls://dns.mullvad.net:853".to_string(),
+                "tls://dns.quad9.net:853".to_string(),
                 "https://dns.quad9.net:443/dns-query".to_string(),
             ]
         );
