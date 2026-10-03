@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(3600),
     );
 
+    // A corrupt stored value must never block boot: warn and use the defaults.
     let upstream_config = match db.get_setting("upstream_servers").await {
         Ok(Some(v)) if !v.trim().is_empty() => {
             match noadd::upstream::forwarder::parse_upstreams(&v) {

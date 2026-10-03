@@ -42,6 +42,8 @@ pub struct UpstreamConfig {
 impl Default for UpstreamConfig {
     fn default() -> Self {
         Self {
+            // Privacy-oriented resolvers in separate jurisdictions
+            // (Cloudflare US, Quad9 CH, Mullvad SE).
             servers: vec![
                 "1.1.1.1:53".into(),
                 "9.9.9.9:53".into(),

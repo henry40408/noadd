@@ -313,7 +313,8 @@ pub fn admin_router(state: AppState) -> Router {
 static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
 
 /// Strong, quoted `ETag` from a content hash. `DefaultHasher` uses fixed keys, so the digest
-/// is stable across restarts of the same binary.
+/// is stable across restarts of the same binary. Not derived from `GIT_VERSION`: a `-dirty`
+/// dev tree keeps one version string across UI edits and would get stale `304`s.
 fn etag_for(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -548,6 +549,7 @@ fn note_invalid_session_cookie(
 }
 
 /// Extract a bearer token from the `Authorization` header, if present.
+// TODO: the auth scheme is case-insensitive (RFC 7235); `bearer xyz` is rejected today.
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let v = headers
         .get(axum::http::header::AUTHORIZATION)?
@@ -2091,6 +2093,8 @@ pub(crate) async fn apply_settings(
         }
     }
 
+    // TODO: values are stored untrimmed though validated trimmed, so a raw-API
+    // `" nxdomain "` persists with spaces (readers trim, so behaviour is right).
     for (key, value) in settings {
         state
             .db
@@ -2943,6 +2947,8 @@ async fn delete_api_key(
 ) -> Result<StatusCode, StatusCode> {
     match revoke_api_key(&state, auth.user_id, id).await {
         Ok(true) => Ok(StatusCode::OK),
+        // Another operator's key is 404 like an absent one: no existence oracle.
+        // Only the DB layer tests the owner scoping; no HTTP test covers it yet.
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(()) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
