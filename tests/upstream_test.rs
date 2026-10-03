@@ -116,11 +116,10 @@ async fn test_health_check_reports_live_upstream_as_ok() {
 }
 
 #[tokio::test]
-async fn test_health_check_mullvad_dot_succeeds() {
-    // Mullvad's plain UDP:53 REFUSEs recursion from arbitrary networks, but
-    // its DoT endpoint (dns.mullvad.net:853) recurses and must probe healthy.
+async fn test_health_check_quad9_dot_succeeds() {
+    // The default DoT upstream must probe healthy over TLS.
     let config = UpstreamConfig {
-        servers: vec!["tls://dns.mullvad.net:853".into()],
+        servers: vec!["tls://dns.quad9.net:853".into()],
         timeout_ms: 8000,
     };
     let forwarder = UpstreamForwarder::new(config).await;
@@ -128,15 +127,15 @@ async fn test_health_check_mullvad_dot_succeeds() {
 
     assert_eq!(results.len(), 1);
     let (server, ok, _ms) = &results[0];
-    assert_eq!(server, "tls://dns.mullvad.net:853");
-    assert!(*ok, "Mullvad DoT upstream should report ok=true");
+    assert_eq!(server, "tls://dns.quad9.net:853");
+    assert!(*ok, "Quad9 DoT upstream should report ok=true");
 }
 
 #[tokio::test]
-async fn test_forward_via_mullvad_dot_resolves_known_domain() {
-    // End-to-end: a real query through Mullvad DoT.
+async fn test_forward_via_quad9_dot_resolves_known_domain() {
+    // End-to-end: a real query through Quad9 DoT.
     let config = UpstreamConfig {
-        servers: vec!["tls://dns.mullvad.net:853".into()],
+        servers: vec!["tls://dns.quad9.net:853".into()],
         timeout_ms: 8000,
     };
     let forwarder = UpstreamForwarder::new(config).await;
@@ -145,10 +144,10 @@ async fn test_forward_via_mullvad_dot_resolves_known_domain() {
     let (response, upstream, _ad) = forwarder
         .forward(&query)
         .await
-        .expect("forward via Mullvad DoT should succeed");
+        .expect("forward via Quad9 DoT should succeed");
 
     assert!(response.len() >= 12, "response too short");
-    assert_eq!(upstream, "tls://dns.mullvad.net:853");
+    assert_eq!(upstream, "tls://dns.quad9.net:853");
 }
 
 #[tokio::test]

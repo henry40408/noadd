@@ -22,7 +22,7 @@
       <div class="card fade-in" style="animation-delay:0.05s">
         <div class="card-title">Upstream DNS</div>
         <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px">One server per line — <code class="text-accent">ip:port</code>, <code class="text-accent">tls://host</code> (DoT), or <code class="text-accent">https://host/dns-query</code> (DoH)</p>
-        <textarea id="s-upstream" name="upstream_servers" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.mullvad.net:853">{{ upstream_servers }}</textarea>
+        <textarea id="s-upstream" name="upstream_servers" rows="4" placeholder="1.1.1.1:53&#10;tls://dns.quad9.net:853">{{ upstream_servers }}</textarea>
         <div class="field-msg{% if error_field == "upstream_servers" %} error{% endif %}" id="msg-upstream">{% if error_field == "upstream_servers" %}{{ error_message }}{% endif %}</div>
         {#
           A submit, so it saves the form without JavaScript. `app.js` intercepts

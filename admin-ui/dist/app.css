@@ -594,7 +594,8 @@ textarea { resize: vertical; line-height: 1.7; }
 /* Timeline bar-chart SVG (Dashboard 24h + Statistics). 50px is reserved below
    the plot: the 28px .chart-labels row (20px + 4px margin + 4px padding) plus
    the 22px legend. preserveAspectRatio="none" stretches the 600×180 viewBox, so
-   y-axis numbers live in the .tl-yticks HTML overlay, not the SVG. */
+   y-axis numbers live in the .tl-yticks HTML overlay, not the SVG. The same goes
+   for anything shape-sensitive: a <circle> marker would render as an ellipse. */
 .tl-svg {
   width: 100%;
   height: calc(100% - 50px);

@@ -59,11 +59,15 @@ Neither is logged or rate-limited: they carry no domain to attribute.
 
 All three settings are validated and applied live via the settings API.
 
+The mode is global — none per rule or per client. The IP in a hosts-style rule (`127.0.0.1 tracker.com`) is discarded, since `ParsedRule` carries none; honouring it would thread an address through the parser, engine and `FilterResult`.
+
 ### DNSSEC Transparency
 
 When enabled (the default; `dnssec_disabled` setting), the forwarder sends upstream a copy of the request whose EDNS OPT carries DO and a 1232-byte payload size. Before replying it restores the client's own EDNS/DO profile: DNSSEC records are stripped unless the client set DO, AD is cleared for clients that did not ask for DNSSEC (RFC 6840 §5.7), and an OPT is returned iff the client sent one.
 
 The upstream's AD verdict is captured **before** that tailoring and stored in `query_logs.authenticated_data` (and in the cache entry, so hits log the same verdict) — which is how the log shows the true upstream result even for non-DO clients. This is transparency, not validation: noadd verifies no signatures, and hop-by-hop protection needs a `tls://` upstream and DoH to devices. **Known limitation:** NXDOMAIN/NODATA answers are logged `authenticated_data = false` even when validated upstream, because hickory 0.26 surfaces them as `NoRecordsFound`, whose `NoRecords` payload has no AD field.
+
+The setting is negative on purpose: an absent key means enabled, so a fresh database is on by default and a row exists only when the operator deviates; the UI shows the positive form. Forcing DO can make an upstream that validates only on DO SERVFAIL domains with broken DNSSEC, where it previously answered; the defaults validate regardless, and the toggle is the escape hatch — it applies live and flushes the cache on a real flip.
 
 ### Negative Responses (NXDOMAIN / NODATA)
 
@@ -166,6 +170,8 @@ A bare IP is tried as `SocketAddr`, then as `IpAddr` with port 53. The two never
 Entries are stored in **canonical form** — explicit port and path, bracketed IPv6 — and deduplicated. Upstreams are keyed by label for health checks and latency EMAs, so `1.1.1.1` and `1.1.1.1:53` must not become two upstreams. Older non-canonical values keep parsing and are rewritten on the next settings save.
 
 `UpstreamForwarder` holds the live set behind `ArcSwap<Upstreams>`; a settings save calls `reconfigure(servers)`, which builds a fresh `Upstreams` (resolves hostnames, builds `NameServerPool`s, resets EMAs) and swaps it in. In-flight queries finish on the old snapshot. Strategy and DNSSEC mode live outside the snapshot and survive `reconfigure`.
+
+An empty list is rejected (zero upstreams is a non-functional resolver), and a bad value is refused before anything is persisted. A corrupt stored value at startup falls back to the defaults with a warning rather than blocking boot. If every entry fails to resolve on `reconfigure`, queries fail until a working set is saved — accepted, since the health table shows it.
 
 ### DoH Token Auth
 
@@ -309,6 +315,8 @@ Index work is measured in **page misses** (`SQLITE_DBSTATUS_CACHE_MISS`, 4 KiB p
 ### One scan per rollup family, not one per reading
 
 `stats_scan_since` and `traffic_lists_since` are the Statistics page's two reads; every reading, charts included, is folded out of one of them (`compute_range_stats`, `src/admin/stats.rs`). `stats_scan_since` streams rows and folds in Rust rather than grouping in SQL, because a grain carrying both quarter and `response_ms` approaches one group per row. `traffic_lists_since` answers top domains, the distinct-domain count and top clients from one statement. The single-purpose `/api/stats/*` readers are separate statements over the same rollups; `domain_stats_since` breaks ties by name like `traffic_lists_since`, so the two agree.
+
+**Not collected:** `query_logs` does not record which list or rule blocked a query, so there is no blocked-by-list breakdown (it needs a new column and migration); the only per-list figure is the filters page's Impact column, from the live engine. Upstream failure rates and cache internals (entries, evictions, TTL spread) are not collected either.
 
 The Database Health card's row count is not a scan: `SELECT COUNT(*)` walks an index end to end, so the count lives in `settings.query_log_count`, seeded by the version-13 migration and moved inside their own transactions by the only three writes that change the row count — the logger's batch, the hourly prune and Clear All. `total_log_count` falls back to counting if the row is missing. The query log's pager reads the same counter (`read_log_count`, via `count_logs`) whenever no filter is applied.
 

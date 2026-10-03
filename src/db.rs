@@ -549,6 +549,8 @@ impl Database {
                 next: AtomicUsize::new(0),
             })
         } else {
+            // A reader that fails to open aborts startup: falling back to the
+            // writer would silently bring back the contention the pool removes.
             let mut conns = Vec::with_capacity(READ_POOL_SIZE);
             for _ in 0..READ_POOL_SIZE {
                 conns.push(open_read_conn(path).await?);

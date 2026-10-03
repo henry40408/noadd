@@ -3683,7 +3683,7 @@ async fn test_upstream_servers_round_trip_and_validation() {
                 .header("content-type", "application/json")
                 .header("cookie", format!("session={token}"))
                 .body(Body::from(
-                    r#"{"upstream_servers":"1.1.1.1:53\ntls://dns.mullvad.net:853"}"#,
+                    r#"{"upstream_servers":"1.1.1.1:53\ntls://dns.quad9.net:853"}"#,
                 ))
                 .unwrap(),
         )
