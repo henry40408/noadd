@@ -16,9 +16,7 @@ base64 = "0.23.0"
 cucumber = "0.23.0"
 reqwest = { version = "0.13.0", default-features = false, features = ["rustls", "json"] }
 serde_json = "1.0.145"
-# Pinned exactly while 0.37.5 (2026-08-12) was inside the seven-day release
-# cooldown; relax to a caret once it has aged out.
-thirtyfour = "=0.37.5"
+thirtyfour = "0.37"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 # Both runners drive their own scenarios; no libtest harness.
