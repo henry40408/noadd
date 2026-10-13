@@ -1,2 +1,6 @@
 /target
 *.db
+*.pem
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
