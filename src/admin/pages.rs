@@ -2346,16 +2346,13 @@ fn parse_expiry_date(raw: &str) -> Result<Option<i64>, String> {
     }
     // `time` checks the day against the month and leap years, and caps the
     // year, so nonexistent dates and absurd years are errors, not overflow.
-    let date = i32::try_from(year)
+    let year = i32::try_from(year).map_err(|_e| invalid())?;
+    let month = u8::try_from(month)
         .ok()
-        .zip(
-            u8::try_from(month)
-                .ok()
-                .and_then(|m| time::Month::try_from(m).ok()),
-        )
-        .zip(u8::try_from(day).ok())
-        .and_then(|((y, m), d)| time::Date::from_calendar_date(y, m, d).ok())
+        .and_then(|m| time::Month::try_from(m).ok())
         .ok_or_else(invalid)?;
+    let day = u8::try_from(day).map_err(|_e| invalid())?;
+    let date = time::Date::from_calendar_date(year, month, day).map_err(|_e| invalid())?;
     Ok(Some(date.midnight().assume_utc().unix_timestamp() + 86_399))
 }
 
@@ -3564,7 +3561,10 @@ mod tests {
             assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
         }
         // Leap days are real in leap years (the 4 and 400 rules).
-        assert_eq!(parse_expiry_date("2028-02-29"), Ok(Some(1_835_481_599)));
+        assert_eq!(
+            parse_expiry_date("2028-02-29"),
+            Ok(Some(21_243 * 86_400 + 86_399))
+        );
         assert!(parse_expiry_date("2000-02-29").is_ok());
     }
 
@@ -3574,7 +3574,7 @@ mod tests {
             "9223372036854775807-12-31",
             "10000-01-01",
             "2147483648-01-01",
-            "99999999999999999999-01-01",
+            "2147483647-01-01",
         ] {
             assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
         }
