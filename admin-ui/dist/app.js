@@ -533,7 +533,12 @@ class RebuildBanner extends LiveElement {
   }
   _renderElapsed() {
     const elapsed = this.startedAt ? Math.max(0, Math.floor(Date.now()/1000) - this.startedAt) : 0;
-    this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
+    const meta = `${elapsed}s elapsed`;
+    // Already showing: change the number in place. Rebuilding the node every
+    // second replays the strip's entrance animation and restarts the spinner.
+    const current = this.querySelector('.rebuild-banner.active .meta');
+    if (current) { current.textContent = meta; return; }
+    this.render('active', 'Rebuilding filter engine', meta);
   }
   render(state, label, meta) {
     if (!state) {
@@ -543,7 +548,11 @@ class RebuildBanner extends LiveElement {
     const indicator = state === 'active'
       ? raw('<span class="spin"></span>')
       : html`<span class="check">${icons.check}</span>`;
-    const metaHtml = meta ? html`<span class="meta">${meta}</span>` : '';
+    // The ticking "Ns elapsed" is updated in place inside a live region, so
+    // keep it out of the accessibility tree rather than announce it each second.
+    const metaHtml = !meta ? ''
+      : state === 'active' ? html`<span class="meta" aria-hidden="true">${meta}</span>`
+      : html`<span class="meta">${meta}</span>`;
     this.innerHTML = html`
       <div class="rebuild-banner show ${state}" role="status" aria-live="polite">
         <span class="icon">${indicator}</span>
