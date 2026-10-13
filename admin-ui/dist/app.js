@@ -548,7 +548,11 @@ class RebuildBanner extends LiveElement {
     const indicator = state === 'active'
       ? raw('<span class="spin"></span>')
       : html`<span class="check">${icons.check}</span>`;
-    const metaHtml = meta ? html`<span class="meta">${meta}</span>` : '';
+    // The ticking "Ns elapsed" is updated in place inside a live region, so
+    // keep it out of the accessibility tree rather than announce it each second.
+    const metaHtml = !meta ? ''
+      : state === 'active' ? html`<span class="meta" aria-hidden="true">${meta}</span>`
+      : html`<span class="meta">${meta}</span>`;
     this.innerHTML = html`
       <div class="rebuild-banner show ${state}" role="status" aria-live="polite">
         <span class="icon">${indicator}</span>
