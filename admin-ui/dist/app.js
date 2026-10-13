@@ -533,7 +533,12 @@ class RebuildBanner extends LiveElement {
   }
   _renderElapsed() {
     const elapsed = this.startedAt ? Math.max(0, Math.floor(Date.now()/1000) - this.startedAt) : 0;
-    this.render('active', 'Rebuilding filter engine', `${elapsed}s elapsed`);
+    const meta = `${elapsed}s elapsed`;
+    // Already showing: change the number in place. Rebuilding the node every
+    // second replays the strip's entrance animation and restarts the spinner.
+    const current = this.querySelector('.rebuild-banner.active .meta');
+    if (current) { current.textContent = meta; return; }
+    this.render('active', 'Rebuilding filter engine', meta);
   }
   render(state, label, meta) {
     if (!state) {
