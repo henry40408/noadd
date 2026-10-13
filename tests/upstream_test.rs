@@ -138,13 +138,31 @@ async fn test_forward_via_quad9_dot_resolves_known_domain() {
         servers: vec!["tls://dns.quad9.net:853".into()],
         timeout_ms: 8000,
     };
-    let forwarder = UpstreamForwarder::new(config).await;
 
     let query = build_query("example.com.", RecordType::A);
-    let (response, upstream, _ad) = forwarder
-        .forward(&query)
-        .await
-        .expect("forward via Quad9 DoT should succeed");
+    // A single DoT query can fail fast on a transient connect/TLS error from a
+    // shared CI runner (seen once as `AllFailed` in 58ms), which says nothing
+    // about the forwarder. Retry a few times; a real regression fails every try.
+    let mut last_err = None;
+    let mut ok = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        // Built per attempt: hostnames are resolved once in `new`, so a one-off
+        // lookup failure would otherwise doom every retry.
+        let forwarder = UpstreamForwarder::new(config.clone()).await;
+        match forwarder.forward(&query).await {
+            Ok(r) => {
+                ok = Some(r);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let (response, upstream, _ad) = ok.unwrap_or_else(|| {
+        panic!("forward via Quad9 DoT failed 3 times, last error: {last_err:?}")
+    });
 
     assert!(response.len() >= 12, "response too short");
     assert_eq!(upstream, "tls://dns.quad9.net:853");
