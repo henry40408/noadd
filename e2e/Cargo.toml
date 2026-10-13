@@ -2,6 +2,7 @@
 name = "noadd-e2e"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "Browser E2E tests and the screenshot pipeline for the noadd admin UI"
 
