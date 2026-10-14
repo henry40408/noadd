@@ -9,7 +9,19 @@ all-features = true
 version = 2
 # `ignore`: advisory IDs reviewed and accepted.
 yanked = "deny"
-ignore = []
+ignore = [
+    # rustls 0.23.45: fixed in 0.23.46 (published 2026-10-14 09:54 UTC), still
+    # inside the 168-hour dependency cooldown. Upgrade after 2026-10-21 09:54
+    # UTC and remove these four entries.
+    # Reachability: no ECH usage in src/ (0347); no `brotli` crate in
+    # Cargo.lock, so Brotli cert decompression is not compiled in (0348);
+    # session Debug exposure (0346) and key-exchange downgrade (0349) are
+    # not assessed.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0347",
+    "RUSTSEC-2026-0348",
+    "RUSTSEC-2026-0349",
+]
 
 [licenses]
 version = 2
