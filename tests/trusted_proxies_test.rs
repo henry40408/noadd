@@ -330,3 +330,87 @@ fn no_connect_info_no_headers_yields_loopback() {
     let ip = extract_client_ip(None, &headers, &tp);
     assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
+
+#[test]
+fn mapped_peer_matches_ipv4_cidr_and_is_canonicalised() {
+    let tp = TrustedProxies::parse("10.0.0.0/8").unwrap();
+    let connect = ci("[::ffff:10.0.0.5]:50000");
+    let headers = headers_xff("203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn mapped_loopback_peer_is_trusted() {
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("[::ffff:127.0.0.1]:50000");
+    let headers = headers_xff("203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn mapped_untrusted_peer_returns_canonical_ipv4() {
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("[::ffff:192.0.2.9]:50000");
+    let headers = headers_xff("203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+}
+
+#[test]
+fn mapped_xff_hops_are_canonicalised() {
+    let tp = TrustedProxies::parse("10.0.0.0/8").unwrap();
+    let connect = ci("127.0.0.1:50000");
+    // Mapped proxy hop is skipped; mapped client comes back as IPv4.
+    let headers = headers_xff("[::ffff:203.0.113.7], ::ffff:10.0.0.5");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn pure_ipv6_peer_unaffected() {
+    let tp = TrustedProxies::parse("10.0.0.0/8").unwrap();
+    let connect = ci("[2001:db8::1]:50000");
+    let headers = headers_xff("203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V6("2001:db8::1".parse().unwrap()));
+}
+
+#[test]
+fn x_real_ip_mapped_form_is_canonicalised() {
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("127.0.0.1:50000");
+    let headers = headers_xri("::ffff:203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn mapped_form_cidr_does_not_match_ipv4_block() {
+    let tp = TrustedProxies::parse("::ffff:10.0.0.0/104").unwrap();
+    assert!(!tp.contains("10.0.0.5".parse().unwrap()));
+    // A canonicalised peer therefore is not trusted through a mapped-form CIDR.
+    let connect = ci("[::ffff:10.0.0.5]:50000");
+    let headers = headers_xff("203.0.113.7");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+}
+
+#[test]
+fn xff_mapped_loopback_hop_is_a_trusted_proxy() {
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("127.0.0.1:50000");
+    let headers = headers_xff("203.0.113.7, ::ffff:127.0.0.1");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+}
+
+#[test]
+fn ipv4_compatible_loopback_hop_is_not_trusted() {
+    let tp = TrustedProxies::parse("").unwrap();
+    let connect = ci("127.0.0.1:50000");
+    let headers = headers_xff("203.0.113.7, ::127.0.0.1");
+    let ip = extract_client_ip(connect.as_ref(), &headers, &tp);
+    assert_eq!(ip, "::127.0.0.1".parse::<IpAddr>().unwrap());
+}

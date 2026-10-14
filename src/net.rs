@@ -79,7 +79,9 @@ impl Cidr {
     }
 
     /// Whether `ip` is in this CIDR. Cross-family checks (e.g. `::ffff:a.b.c.d`
-    /// against an IPv4 block) deliberately return false.
+    /// against an IPv4 block) return false; callers on the request path
+    /// normalise with `IpAddr::to_canonical()` first, so a mapped peer is
+    /// matched as the IPv4 address it wraps.
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.base, ip) {
             (IpAddr::V4(b), IpAddr::V4(i)) => {
@@ -192,7 +194,10 @@ pub fn extract_client_ip(
     headers: &HeaderMap,
     trusted: &TrustedProxies,
 ) -> IpAddr {
-    let peer = connect.map(|ci| ci.0.ip());
+    // A dual-stack `[::]` listener reports IPv4 peers as `::ffff:a.b.c.d`;
+    // canonicalise so IPv4 CIDRs and `is_loopback` match, and so the returned
+    // key is one form per client (rate limits, query log).
+    let peer = connect.map(|ci| ci.0.ip().to_canonical());
 
     let trust_headers = match peer {
         None => true,
@@ -207,7 +212,7 @@ pub fn extract_client_ip(
         let mut outermost_proxy = None;
         for hop in s.rsplit(',').take(MAX_XFF_HOPS) {
             // Skipping an unreadable hop would walk into unvouched entries.
-            let Some(ip) = parse_forwarded_hop(hop) else {
+            let Some(ip) = parse_forwarded_hop(hop).map(|ip| ip.to_canonical()) else {
                 break;
             };
             if !trusted.is_proxy_hop(ip) {
@@ -226,7 +231,7 @@ pub fn extract_client_ip(
         && let Ok(s) = hv.to_str()
         && let Ok(ip) = s.trim().parse::<IpAddr>()
     {
-        return ip;
+        return ip.to_canonical();
     }
 
     peer.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
