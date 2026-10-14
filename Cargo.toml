@@ -33,6 +33,7 @@ parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
 rusqlite = "0.40"
+rustc-hash = "2"
 rustls = { version = "0.23", default-features = false }
 rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "axum", "webpki-roots"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

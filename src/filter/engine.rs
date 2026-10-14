@@ -10,6 +10,12 @@ use std::collections::HashMap;
 
 use fst::Map as FstMap;
 use fst::Set as FstSet;
+// `FxHash` instead of `SipHash` for the build-time maps (`BuildNode.children`,
+// `compute_unique_rules` owners): keys come from operator-configured lists,
+// never query traffic, so `HashDoS` resistance is unneeded and a fixed,
+// non-random seed is harmless. These maps live only during a rebuild, which
+// hashes over a million labels.
+use rustc_hash::FxBuildHasher;
 
 use crate::filter::parser::{ParsedRule, RuleAction};
 
@@ -117,58 +123,6 @@ impl FlatTrie {
         let lo = read_u32(&self.nodes, entry_off) as usize;
         let len = read_u16(&self.nodes, entry_off + 4) as usize;
         &self.labels[lo..lo + len]
-    }
-}
-
-/// `FxHash`, rustc's internal hash. `SipHash`'s `DoS` resistance is unneeded here:
-/// keys come from operator-configured lists, never query traffic, and these
-/// maps live only during a rebuild, which hashes over a million labels.
-#[derive(Default)]
-struct FxHasher {
-    hash: u64,
-}
-
-/// Fractional part of the golden ratio, scaled to 64 bits — `FxHash`'s mixer.
-const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-impl FxHasher {
-    #[inline]
-    fn add(&mut self, word: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
-    }
-}
-
-impl std::hash::Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let (chunks, rem) = bytes.as_chunks::<8>();
-        for chunk in chunks {
-            self.add(u64::from_le_bytes(*chunk));
-        }
-        if !rem.is_empty() {
-            let mut buf = [0u8; 8];
-            buf[..rem.len()].copy_from_slice(rem);
-            self.add(u64::from_le_bytes(buf));
-        }
-        // Mix the length so trailing zero bytes cannot alias a shorter label.
-        self.add(bytes.len() as u64);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-#[derive(Default, Clone)]
-struct FxBuildHasher;
-
-impl std::hash::BuildHasher for FxBuildHasher {
-    type Hasher = FxHasher;
-
-    #[inline]
-    fn build_hasher(&self) -> FxHasher {
-        FxHasher::default()
     }
 }
 
@@ -756,5 +710,31 @@ mod tests {
             matches!(engine.check(&domain), FilterResult::Blocked { .. }),
             "a >255-byte label must round-trip and still block"
         );
+    }
+}
+
+#[cfg(test)]
+mod fx_hasher_tests {
+    use super::*;
+
+    /// The hasher itself must tell trailing-NUL and zero-padded variants apart
+    /// (map equality alone would hide a degenerate hasher).
+    #[test]
+    fn fx_hasher_separates_zero_padded_keys() {
+        use std::hash::BuildHasher;
+        let h = |s: &str| FxBuildHasher.hash_one(s);
+        assert_ne!(h("a"), h("a\0"));
+        assert_ne!(h(""), h("\0"));
+        for len in [7usize, 8, 9, 16, 17] {
+            let base = "a".repeat(len);
+            let hashes: Vec<u64> = (0..=9)
+                .map(|pad| h(&format!("{base}{}", "\0".repeat(pad))))
+                .collect();
+            let mut uniq = hashes.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(uniq.len(), hashes.len(), "collision at len {len}");
+            assert_ne!(h(&format!("{}\0", &base[..len - 1])), h(&base));
+        }
     }
 }
