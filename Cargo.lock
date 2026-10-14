@@ -1925,6 +1925,7 @@ dependencies = [
  "reqwest",
  "resvg",
  "rusqlite",
+ "rustc-hash",
  "rustls",
  "rustls-acme",
  "serde",
