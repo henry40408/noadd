@@ -10,9 +10,10 @@ noadd is a single-binary, self-hosted DNS ad-blocker (plain DNS + DNS-over-HTTPS
 
 ```bash
 cargo build                              # debug; embeds admin-ui/dist, runs build.rs
-cargo nextest run                        # tests — nextest, not `cargo test` (CI uses nextest)
+cargo nextest run                        # root workspace tests — nextest, not `cargo test` (CI uses nextest); `e2e/` is the exception, below
 cargo nextest run filter_engine          # by name substring
-cargo nextest run -E 'test(parse_hosts)' # nextest filter expression
+cargo nextest run -E 'test(parse_hosts)' # nextest filterset
+cargo nextest run --test filter_parser_test # one test file in tests/
 cargo fmt --check                        # CI gate
 cargo clippy --all-targets -- -D warnings
 cargo deny check                         # advisories, licenses, bans, sources
@@ -37,6 +38,8 @@ cargo fmt --check            # CI gates e2e/ separately from the root crate
 cargo clippy --all-targets -- -D warnings
 ```
 
+Root-level fmt, clippy, nextest and coverage do not cover `e2e/` (separate workspace), so run fmt and clippy inside `e2e/` too; CI does (the `e2e` job) and keeps `e2e/` out of `cargo deny`.
+
 e2e's lint set mirrors the root crate's (minus server-only entries) because a separate workspace inherits none of it; keep the two in sync.
 
 A local **Chrome or Chromium is required**: `WebDriver::managed` fetches a matching chromedriver but not the browser (`brew install --cask ungoogled-chromium`; CI's runner ships Chrome).
@@ -59,7 +62,8 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 ## Build-time behavior (`build.rs`)
 
 - Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
-- Stamps `GIT_VERSION` from `git describe` (env var overrides; a literal `dev` counts as unset). `.dockerignore` excludes `.git`, so image builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
+- Stamps `GIT_VERSION` from the `GIT_VERSION` env var when set (a literal `dev` or empty value counts as unset), else from `git describe --tags --always --dirty`; it falls back to `dev` if `git describe` fails (e.g. no `.git`). `.dockerignore` excludes `.git`, so Docker builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
+- Releases use `gh release create --generate-notes`; never edit the manifest `version` or add a `CHANGELOG.md`.
 
 ## Admin UI
 
