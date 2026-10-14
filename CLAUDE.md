@@ -21,11 +21,11 @@ cargo deny check                         # advisories, licenses, bans, sources
 RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Integration tests live in `tests/` (shared helpers in `tests/common/`). Files ending `_bench.rs` are benchmark-style tests run by the normal test command.
+Integration tests live in `tests/` (shared helpers in `tests/common/`). Files ending `_bench.rs` are benchmark-style tests marked `#[ignore]`, which the normal test command skips; run one with `--run-ignored only`. GitHub Actions in `.github/workflows` are pinned by commit SHA with the tag as a trailing comment.
 
 ### End-to-end (admin UI)
 
-`cucumber` + `thirtyfour` in `e2e/`, **its own cargo workspace** so a `--workspace` coverage run never compiles the browser stack. No Node.js anywhere. The suites boot the `noadd` binary themselves, so **`cargo build` first** or the UI under test is stale.
+`cucumber` + `thirtyfour` in `e2e/`, **its own cargo workspace** so the root's `cargo llvm-cov nextest` coverage run never compiles the browser stack. No Node.js anywhere. The suites boot the `noadd` binary themselves, so **`cargo build` first** or the UI under test is stale.
 
 ```bash
 cargo build
@@ -33,7 +33,11 @@ cd e2e
 cargo test --test e2e        # the Gherkin features
 cargo test --test specs      # the regression specs
 cargo run --bin screenshots  # re-seeds fake traffic, re-captures docs/screenshots/
+cargo fmt --check            # CI gates e2e/ separately from the root crate
+cargo clippy --all-targets -- -D warnings
 ```
+
+e2e's lint set mirrors the root crate's (minus server-only entries) because a separate workspace inherits none of it; keep the two in sync.
 
 A local **Chrome or Chromium is required**: `WebDriver::managed` fetches a matching chromedriver but not the browser (`brew install --cask ungoogled-chromium`; CI's runner ships Chrome).
 
@@ -46,7 +50,7 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 - **`WebDriver` does not retry.** Every `Locator::expect_*` in `src/dom.rs` polls for 30 s and reports the last value seen.
 - ⚠️ **Text is `textContent`, not rendered text.** WebDriver's "Get Element Text" applies `text-transform`, and this UI uppercases badges and headings in CSS (`Blocked` reads as `BLOCKED`). `Locator::text` reads `textContent`, so assert against the markup.
 
-**Every page has no-JS coverage** in four files using `Profile::no_js()` (`Emulation.setScriptExecutionDisabled`, 1024×600 viewport): `filters_no_js`, `logs_no_js`, `stats_no_js` and `pages_no_js` (dashboard, settings and account on one shared instance, since none seeds or empties anything). Ports 14107–14110, DNS 15107–15110. Every instance's ports live in `ports` in `e2e/src/lib.rs`; a new file takes the next free pair there.
+**Every page has no-JS coverage** in four files using `Profile::no_js()` (`Emulation.setScriptExecutionDisabled`, 1024×600 viewport): `filters_no_js`, `logs_no_js`, `stats_no_js` and `pages_no_js` (dashboard, settings and account on one shared instance, since none seeds or empties anything). Ports 14107–14110, DNS 15107–15110. Every instance's ports live in `ports` in `e2e/src/lib.rs`; a new file takes the next free pair there, which is past 14110 (14150 is the screenshots).
 
 ⚠️ **`setScriptExecutionDisabled` applies to the *next* document**, so sessions are per-case and the flag is set before the first navigation. It stops only page scripts — `Execute Script` still runs — but a DOM callback such as a `TreeWalker` filter counts as page script and is refused, so `Page::has_text` walks elements itself.
 
@@ -133,7 +137,7 @@ Statistics — readings in a **chosen window**, and what the server cannot rende
 - **A date the server can only write in UTC ships as an ISO day plus `data-date-ts`**; `app.js` restates it in the browser's locale.
 - **Measured in page misses, not milliseconds** — the appliance runs off an SD card; page counts transfer, durations do not. `cargo nextest run --release --no-capture --run-ignored only stats_page_miss` with `BENCH_DB` pointed at a copy of a real database reports them; `dashboard_page_miss` and `logs_page_miss` cover the dashboard (first response and tick) and the query log (every filter); `BENCH_NOW` pins the clock for an older copy. Distrust a wall-clock reading when the two disagree.
 - **One statement per rollup family.** The page's reads are `stats_scan_since` (quarter + metrics rollups) and `traffic_lists_since` (top domains, distinct-domain count, top clients) in `src/db.rs`, via `compute_range_stats` (`src/admin/stats.rs`). `stats_scan_since` streams rows and folds in Rust, telling its four arms apart by a leading column. A new reading is folded out of one of these, not added as a statement.
-- **A total nobody can count cheaply is maintained.** `query_logs`' row count lives in `settings` (`query_log_count`), moved by the insert batch, the prune and Clear All inside their own transactions; the Database Health card and the unfiltered pager (`count_logs`) read it. A fourth write path to `query_logs` needs a fourth `bump_log_count`.
+- **A total nobody can count cheaply is maintained.** `query_logs`' row count lives in `settings` (`query_log_count`), moved by the insert batch, the prune and Clear All inside their own transactions; the Database Health card and the unfiltered pager (`count_logs`) read it. A fourth write path to `query_logs` must move it too, in its own transaction (`bump_log_count`, or `set_log_count` as Clear All does).
 - **The rollups (`query_stats_*`, ARCHITECTURE.md *Rollups*) must always equal a recount of `query_logs`.** Inserts are covered by the `query_logs_maintain_stats` trigger; a new path that *deletes* from `query_logs` must unwind them in its own transaction, as `prune_logs_before` (`unwind_stats_rollups`) and Clear All do.
 - Four bar lists share **one askama macro** (`templates/_macros.html`); `{% call … %}` needs a matching `{% endcall %}` in askama 0.16, and `{% include %}` cannot see a loop variable.
 
