@@ -2341,20 +2341,19 @@ fn parse_expiry_date(raw: &str) -> Result<Option<i64>, String> {
         .ok_or_else(invalid)?
         .parse()
         .map_err(|_e| invalid())?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if parts.next().is_some() {
         return Err(invalid());
     }
-    Ok(Some(days_from_civil(year, month, day) * 86_400 + 86_399))
-}
-
-/// Days since the Unix epoch for a civil date, by Howard Hinnant's `days_from_civil`.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    // `time` checks the day against the month and leap years, and caps the
+    // year, so nonexistent dates and absurd years are errors, not overflow.
+    let year = i32::try_from(year).map_err(|_e| invalid())?;
+    let month = u8::try_from(month)
+        .ok()
+        .and_then(|m| time::Month::try_from(m).ok())
+        .ok_or_else(invalid)?;
+    let day = u8::try_from(day).map_err(|_e| invalid())?;
+    let date = time::Date::from_calendar_date(year, month, day).map_err(|_e| invalid())?;
+    Ok(Some(date.midnight().assume_utc().unix_timestamp() + 86_399))
 }
 
 /// `POST /account/api-keys/{id}/delete`.
@@ -3516,16 +3515,6 @@ mod tests {
     }
 
     #[test]
-    fn civil_dates_convert_to_the_days_the_epoch_counts() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(1970, 1, 2), 1);
-        assert_eq!(days_from_civil(1969, 12, 31), -1);
-        // 2000 is a leap year (the 400 rule), 2100 is not (the 100 rule).
-        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
-        assert_eq!(days_from_civil(2100, 3, 1), 47_541);
-    }
-
-    #[test]
     fn an_expiry_date_lasts_until_that_day_is_over() {
         // Blank means a key that never expires, not one expiring at the epoch.
         assert_eq!(parse_expiry_date(""), Ok(None));
@@ -3534,6 +3523,17 @@ mod tests {
         // A date lasts until the end of that day.
         assert_eq!(parse_expiry_date("1970-01-01"), Ok(Some(86_399)));
         assert_eq!(parse_expiry_date("1970-01-02"), Ok(Some(86_400 + 86_399)));
+        // Before the epoch counts backwards.
+        assert_eq!(parse_expiry_date("1969-12-31"), Ok(Some(-1)));
+        // 2000 is a leap year (the 400 rule), 2100 is not (the 100 rule).
+        assert_eq!(
+            parse_expiry_date("2000-03-01"),
+            Ok(Some(11_017 * 86_400 + 86_399))
+        );
+        assert_eq!(
+            parse_expiry_date("2100-03-01"),
+            Ok(Some(47_541 * 86_400 + 86_399))
+        );
 
         for bad in [
             "not-a-date",
@@ -3541,6 +3541,40 @@ mod tests {
             "2027-01-32",
             "2027-01",
             "2027-01-01-01",
+        ] {
+            assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn an_expiry_date_must_exist_on_the_calendar() {
+        // Days that overflow their month used to roll into the next one.
+        for bad in [
+            "2027-02-29",
+            "2027-02-30",
+            "2027-02-31",
+            "2027-04-31",
+            "2100-02-29",
+            "2027-00-10",
+            "2027-01-00",
+        ] {
+            assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
+        }
+        // Leap days are real in leap years (the 4 and 400 rules).
+        assert_eq!(
+            parse_expiry_date("2028-02-29"),
+            Ok(Some(21_243 * 86_400 + 86_399))
+        );
+        assert!(parse_expiry_date("2000-02-29").is_ok());
+    }
+
+    #[test]
+    fn an_expiry_year_out_of_range_is_rejected_not_wrapped() {
+        for bad in [
+            "9223372036854775807-12-31",
+            "10000-01-01",
+            "2147483648-01-01",
+            "2147483647-01-01",
         ] {
             assert!(parse_expiry_date(bad).is_err(), "{bad} was accepted");
         }
