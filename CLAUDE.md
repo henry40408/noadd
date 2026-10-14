@@ -63,7 +63,7 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 
 - Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
 - Stamps `GIT_VERSION` from the `GIT_VERSION` env var when set (a literal `dev` or empty value counts as unset), else from `git describe --tags --always --dirty`; it falls back to `dev` if `git describe` fails (e.g. no `.git`). `.dockerignore` excludes `.git`, so Docker builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
-- Releases use `gh release create --generate-notes`; never edit the manifest `version` or add a `CHANGELOG.md`. Pushing a `v*` tag triggers `docker.yml`.
+- Releases use `gh release create --generate-notes`; never edit the manifest `version` or add a `CHANGELOG.md`.
 
 ## Admin UI
 
