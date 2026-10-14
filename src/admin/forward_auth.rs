@@ -107,7 +107,8 @@ impl ForwardAuthConfig {
     /// Resolve the username asserted by the proxy, or `None` if the request
     /// cannot be trusted. A `None` `peer` (no `ConnectInfo`) is untrusted.
     pub fn resolve_username(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<String> {
-        let peer = peer?;
+        // Dual-stack `[::]` listeners report IPv4 peers as `::ffff:a.b.c.d`.
+        let peer = peer?.to_canonical();
         if !self.trusted.contains(peer) {
             return None;
         }
@@ -280,6 +281,19 @@ mod tests {
             .unwrap();
         let peer: IpAddr = "10.0.0.5".parse().unwrap();
         let headers = headers_with("Remote-User", "alice ");
+        assert_eq!(
+            cfg.resolve_username(Some(peer), &headers),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_username_canonicalises_mapped_ipv4_peer() {
+        let cfg = ForwardAuthConfig::from_args("Remote-User", "10.0.0.0/8", "")
+            .unwrap()
+            .unwrap();
+        let peer: IpAddr = "::ffff:10.0.0.5".parse().unwrap();
+        let headers = headers_with("Remote-User", "alice");
         assert_eq!(
             cfg.resolve_username(Some(peer), &headers),
             Some("alice".to_string())

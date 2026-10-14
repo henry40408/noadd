@@ -200,7 +200,10 @@ noadd rate-limits logins and DoH queries per client IP, watches for session-ID
 guessing per IP, and records the IP in the query log, so it must find the real
 client behind any proxy. `--trusted-proxies` takes a comma-separated CIDR list of
 the proxies in the chain; loopback (127.0.0.0/8, `::1`) is always trusted, so a
-same-host proxy needs no configuration.
+same-host proxy needs no configuration. On a dual-stack listener (`[::]`)
+IPv4-mapped addresses (`::ffff:a.b.c.d`) are treated as the IPv4 address they
+wrap, so IPv4 CIDRs and the loopback rule match as written. Mapped-form CIDRs
+(`::ffff:a.b.c.d/n`) therefore no longer match; write the IPv4 form.
 
 `X-Forwarded-For` is read **right to left**, and the first hop that is not a
 configured proxy is the client. Most proxies (nginx's usual
