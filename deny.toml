@@ -21,6 +21,15 @@ ignore = [
     "RUSTSEC-2026-0347",
     "RUSTSEC-2026-0348",
     "RUSTSEC-2026-0349",
+    # webpki-roots 0.26.11 is a shim that depends on webpki-roots 1.0.10, which
+    # already removes the emSign root, so the root is absent at runtime. No
+    # 0.26.x fix exists; async-web-client 0.6.3 (via rustls-acme 0.15.4) pins
+    # ^0.26. Remove after they move to 1.x. Tracked in #323.
+    "RUSTSEC-2026-0381",
+    # basic-toml is unmaintained; build-time only, via askama_derive 0.16.1
+    # (latest), which still depends on it. Remove once askama drops it.
+    # Tracked in #324.
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]
