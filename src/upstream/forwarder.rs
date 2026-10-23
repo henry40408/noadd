@@ -340,28 +340,82 @@ struct Upstreams {
     latencies: Vec<AtomicU64>,
 }
 
+/// One finished host lookup: the config index it belongs to, the original
+/// config entry, its parsed spec, and the addresses found.
+type HostLookup = (
+    usize,
+    String,
+    UpstreamSpec,
+    std::io::Result<Vec<SocketAddr>>,
+);
+
 /// Resolve hosts concurrently and build one lazy `NameServerPool` per server.
 async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
     let timeout = Duration::from_millis(config.timeout_ms.max(MIN_TIMEOUT_MS));
+    let cx = pool_context(timeout);
+    let provider = TokioRuntimeProvider::default();
 
+    let mut lookup_set = spawn_host_lookups(&config.servers);
+
+    let mut entries: Vec<Option<UpstreamEntry>> = (0..config.servers.len()).map(|_| None).collect();
+    while let Some(joined) = lookup_set.join_next().await {
+        let (idx, server, spec, addrs) = match joined {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(
+                    event = "upstream.resolve_join_failed",
+                    error = %e,
+                    "upstream resolve task join failed"
+                );
+                continue;
+            }
+        };
+        let Some(addr) = first_address(&server, addrs) else {
+            continue;
+        };
+
+        let pool = NameServerPool::from_config(
+            [name_server_config(&spec.kind, addr)],
+            cx.clone(),
+            provider.clone(),
+        );
+        entries[idx] = Some(UpstreamEntry {
+            label: server,
+            pool,
+        });
+    }
+
+    let latencies = (0..config.servers.len())
+        .map(|_| AtomicU64::new(NO_LATENCY.to_bits()))
+        .collect();
+
+    Upstreams {
+        config,
+        entries,
+        latencies,
+    }
+}
+
+fn pool_context(timeout: Duration) -> Arc<PoolContext> {
     // Only `timeout` matters on the `NameServerPool` path; `attempts` etc.
     // apply to hickory's full `Resolver`, which we don't use. UDP retransmit
     // happens inside hickory's transport (every ~333ms within `timeout`).
     let mut opts = ResolverOpts::default();
     opts.timeout = timeout;
 
-    let provider = TokioRuntimeProvider::default();
     // The TLS config selects aws-lc-rs explicitly, so no process-wide rustls
     // crypto provider is needed.
-    let cx = Arc::new(PoolContext::new(
+    Arc::new(PoolContext::new(
         opts,
         TlsConfig::new().expect("failed to build default rustls TLS config"),
-    ));
+    ))
+}
 
-    // Concurrent, so slow lookups don't make startup linear in upstream
-    // count. Each task carries its config index to slot into `entries`.
+/// Concurrent, so slow lookups don't make startup linear in upstream count.
+/// Each task carries its config index to slot into `entries`.
+fn spawn_host_lookups(servers: &[String]) -> tokio::task::JoinSet<HostLookup> {
     let mut lookup_set = tokio::task::JoinSet::new();
-    for (idx, server) in config.servers.iter().enumerate() {
+    for (idx, server) in servers.iter().enumerate() {
         let spec = match UpstreamSpec::parse(server) {
             Ok(s) => s,
             Err(e) => {
@@ -383,83 +437,47 @@ async fn build_upstreams(config: UpstreamConfig) -> Upstreams {
             (idx, server, spec, addrs)
         });
     }
+    lookup_set
+}
 
-    let mut entries: Vec<Option<UpstreamEntry>> = (0..config.servers.len()).map(|_| None).collect();
-    while let Some(joined) = lookup_set.join_next().await {
-        let (idx, server, spec, addrs) = match joined {
-            Ok(t) => t,
-            Err(e) => {
+/// The first resolved address, or `None` after logging why there is none.
+fn first_address(server: &str, addrs: std::io::Result<Vec<SocketAddr>>) -> Option<SocketAddr> {
+    match addrs {
+        Ok(list) => {
+            let first = list.into_iter().next();
+            if first.is_none() {
                 warn!(
-                    event = "upstream.resolve_join_failed",
-                    error = %e,
-                    "upstream resolve task join failed"
-                );
-                continue;
-            }
-        };
-        let addr = match addrs {
-            Ok(list) => {
-                if let Some(a) = list.into_iter().next() {
-                    a
-                } else {
-                    warn!(
-                        event = "upstream.resolve_empty",
-                        server = %server,
-                        "no addresses returned for upstream"
-                    );
-                    continue;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    event = "upstream.resolve_failed",
+                    event = "upstream.resolve_empty",
                     server = %server,
-                    error = %e,
-                    "failed to resolve upstream host"
+                    "no addresses returned for upstream"
                 );
-                continue;
             }
-        };
-
-        // A single connection of the requested transport, no TCP fallback: a
-        // truncated UDP response is relayed and the client retries over TCP.
-        let ns_cfg = match &spec.kind {
-            UpstreamKind::Udp => {
-                let mut udp = ConnectionConfig::udp();
-                udp.port = addr.port();
-                NameServerConfig::new(addr.ip(), true, vec![udp])
-            }
-            UpstreamKind::Tls { sni } => {
-                let mut c = ConnectionConfig::tls(Arc::from(sni.as_str()));
-                c.port = addr.port();
-                NameServerConfig::new(addr.ip(), true, vec![c])
-            }
-            UpstreamKind::Https { sni, path } => {
-                let mut c = ConnectionConfig::https(
-                    Arc::from(sni.as_str()),
-                    Some(Arc::from(path.as_str())),
-                );
-                c.port = addr.port();
-                NameServerConfig::new(addr.ip(), true, vec![c])
-            }
-        };
-
-        let pool = NameServerPool::from_config([ns_cfg], cx.clone(), provider.clone());
-        entries[idx] = Some(UpstreamEntry {
-            label: server,
-            pool,
-        });
+            first
+        }
+        Err(e) => {
+            warn!(
+                event = "upstream.resolve_failed",
+                server = %server,
+                error = %e,
+                "failed to resolve upstream host"
+            );
+            None
+        }
     }
+}
 
-    let latencies = (0..config.servers.len())
-        .map(|_| AtomicU64::new(NO_LATENCY.to_bits()))
-        .collect();
-
-    Upstreams {
-        config,
-        entries,
-        latencies,
-    }
+/// A single connection of the requested transport, no TCP fallback: a
+/// truncated UDP response is relayed and the client retries over TCP.
+fn name_server_config(kind: &UpstreamKind, addr: SocketAddr) -> NameServerConfig {
+    let mut connection = match kind {
+        UpstreamKind::Udp => ConnectionConfig::udp(),
+        UpstreamKind::Tls { sni } => ConnectionConfig::tls(Arc::from(sni.as_str())),
+        UpstreamKind::Https { sni, path } => {
+            ConnectionConfig::https(Arc::from(sni.as_str()), Some(Arc::from(path.as_str())))
+        }
+    };
+    connection.port = addr.port();
+    NameServerConfig::new(addr.ip(), true, vec![connection])
 }
 
 /// Forwards DNS queries to upstreams by strategy; transport is delegated to
