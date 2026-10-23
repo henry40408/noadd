@@ -14,7 +14,7 @@ use tracing::error;
 
 use crate::cache::{CacheKey, ClientResponseProfile, DnsCache};
 use crate::dns::block::{BlockConfig, BlockMode};
-use crate::dns::inflight::{BeginResult, InflightUpstream};
+use crate::dns::inflight::{BeginResult, FetchGuard, InflightUpstream};
 use crate::dns::ratelimit::IpRateLimiter;
 use crate::dns::ttl;
 use crate::filter::engine::{FilterEngine, FilterResult};
@@ -271,225 +271,202 @@ impl DnsHandler {
 
         // Held for the whole call, bounding active queries however many tasks
         // the listeners spawned.
-        let _permit = match &self.concurrency_limit {
-            Some(sem) => Some(
-                sem.clone()
-                    .acquire_owned()
-                    .await
-                    .expect("concurrency-limit semaphore is never closed"),
-            ),
-            None => None,
-        };
+        let _permit = self.acquire_permit().await;
 
         let message = Message::from_bytes(query_bytes)?;
 
-        // Non-standard opcodes get NOTIMP and EDNS version > 0 gets BADVERS
-        // (RFC 6891 §6.1.3), before filter, cache or upstream. Neither is
-        // logged or rate-limited.
-        if message.metadata.op_code != OpCode::Query {
-            return Ok(HandleOutcome {
-                bytes: build_notimp_response(&message)?,
-                min_ttl: 0,
-            });
-        }
-        if message.edns.as_ref().is_some_and(|edns| edns.version() > 0) {
-            return Ok(HandleOutcome {
-                bytes: build_badvers_response(&message)?,
-                min_ttl: 0,
-            });
+        if let Some(outcome) = unsupported_query_response(&message)? {
+            return Ok(outcome);
         }
 
         let query = message.queries.first().ok_or(HandlerError::NoQuery)?;
         let domain = query.name().to_ascii();
-        let domain_clean = domain.trim_end_matches('.');
-        let query_type = query.query_type();
-        let query_type_u16: u16 = query_type.into();
-        let query_id = message.metadata.id;
-        let response_profile = ClientResponseProfile {
-            has_edns: message.edns.is_some(),
-            dnssec_ok: message
-                .edns
-                .as_ref()
-                .is_some_and(|edns| edns.flags().dnssec_ok),
-            checking_disabled: message.metadata.checking_disabled,
-            upstream_dnssec_enabled: self.forwarder.dnssec_enabled(),
+        let question = Question {
+            message: &message,
+            raw: query_bytes,
+            domain: domain.trim_end_matches('.'),
+            query_type: query.query_type(),
+            profile: ClientResponseProfile {
+                has_edns: message.edns.is_some(),
+                dnssec_ok: message
+                    .edns
+                    .as_ref()
+                    .is_some_and(|edns| edns.flags().dnssec_ok),
+                checking_disabled: message.metadata.checking_disabled,
+                upstream_dnssec_enabled: self.forwarder.dnssec_enabled(),
+            },
+        };
+        let logged = LoggedQuery {
+            client_ip,
+            domain: question.domain,
+            query_type: question.query_type.into(),
+            doh_token,
         };
 
         // REFUSED says "unwilling", not "broken" as SERVFAIL would.
-        if let Some(limiter) = &self.rate_limiter
-            && !limiter.try_acquire(client_ip)
-        {
-            let response_bytes = build_refused_response(&message)?;
-            let elapsed = start.elapsed().as_millis() as i64;
-            let ctx = QueryContext {
-                timestamp: crate::now_unix_ms(),
-                client_ip,
-                domain: domain_clean.to_string(),
-                query_type: query_type_u16,
-                action: QueryAction::RateLimited,
-                cached: false,
-                upstream: None,
-                response_time_ms: elapsed,
-                matched_rule: None,
-                matched_list: None,
-                doh_token,
-                result: None,
-                authenticated_data: false,
-            };
-            if let Err(e) = self.log_tx.try_send(ctx) {
-                error!(
-                    event = "querylog.dropped",
-                    error = %e,
-                    "query log event dropped, logger cannot keep up"
-                );
-            }
-            // REFUSED is not cacheable downstream.
-            return Ok(HandleOutcome {
-                bytes: response_bytes,
-                min_ttl: 0,
-            });
+        if self.is_rate_limited(client_ip) {
+            let answer = Answer::refused(&message)?;
+            let elapsed_ms = start.elapsed().as_millis() as i64;
+            return Ok(self.log_and_finish(logged, answer, elapsed_ms, None));
         }
 
-        let filter_guard = self.filter.load();
-        let filter_result = filter_guard.check(domain_clean);
+        let answer = self.answer(&question).await?;
 
-        let (
-            response_bytes,
-            min_ttl,
-            action,
-            was_cached,
-            upstream,
-            matched_rule,
-            matched_list,
-            authenticated,
-        ) = match filter_result {
-            FilterResult::Blocked { rule, list } => {
-                let block_cfg = self.block_config.load();
-                let response = build_blocked_response(&message, query_type, &block_cfg)?;
-                // Must match the TTL build_blocked_response writes.
-                (
-                    response,
-                    BLOCKED_RESPONSE_TTL_SECS,
-                    QueryAction::Blocked,
-                    false,
-                    None,
-                    Some(rule),
-                    Some(list),
-                    // Locally-synthesised block, never validated upstream.
-                    false,
-                )
-            }
-            FilterResult::Allowed { .. } => {
-                // Skip to_lowercase()'s pass for the common all-lowercase name.
-                let domain_lower = if domain_clean.bytes().any(|b| b.is_ascii_uppercase()) {
-                    domain_clean.to_lowercase()
-                } else {
-                    domain_clean.to_string()
-                };
-                let cache_key = CacheKey::new(domain_lower, query_type_u16, response_profile);
-
-                if let Some(cached) = self.cache.get(&cache_key).await {
-                    let bytes = prepare_cached_response(&cached, query_id);
-                    let remaining = remaining_ttl_secs(&cached);
-
-                    if cached.is_stale() {
-                        self.spawn_stale_refresh(&cache_key, query_bytes);
-                    }
-
-                    (
-                        bytes,
-                        remaining,
-                        QueryAction::Allowed,
-                        true,
-                        None,
-                        None,
-                        None,
-                        cached.authenticated_data(),
-                    )
-                } else {
-                    // Coalesce misses: a waiter re-checks the cache once the
-                    // fetcher finishes and forwards itself only if it failed.
-                    let fetcher_guard = match self.inflight_fetches.begin(&cache_key) {
-                        BeginResult::Fetcher(g) => Some(g),
-                        BeginResult::Waiter(notify) => {
-                            // Subscribe before the cache check, or a
-                            // `notify_waiters` in between is lost.
-                            let fut = notify.notified();
-                            tokio::pin!(fut);
-                            fut.as_mut().enable();
-                            if self.cache.get(&cache_key).await.is_none() {
-                                // Cap in case the fetcher is wedged; then
-                                // forward ourselves.
-                                let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
-                            }
-                            None
-                        }
-                    };
-
-                    if let Some(cached) = self.cache.get(&cache_key).await {
-                        // Fetcher filled the cache: serve as a hit.
-                        let bytes = prepare_cached_response(&cached, query_id);
-                        let remaining = remaining_ttl_secs(&cached);
-                        (
-                            bytes,
-                            remaining,
-                            QueryAction::Allowed,
-                            true,
-                            None,
-                            None,
-                            None,
-                            cached.authenticated_data(),
-                        )
-                    } else {
-                        // Fetcher, or a waiter whose fetcher failed/timed out.
-                        let (response, upstream_addr, upstream_ad) =
-                            self.forwarder.forward(query_bytes).await?;
-                        let cache_ttl = cache_ttl_for_response(&response);
-                        if let Some(ttl) = cache_ttl {
-                            self.cache
-                                .insert(cache_key.clone(), response.clone(), ttl, upstream_ad)
-                                .await;
-                        }
-                        // DoH max-age: the stored TTL, or 0 if uncacheable.
-                        let min_ttl = cache_ttl.map_or(0, |d| d.as_secs() as u32);
-                        // Wake waiters only once the insert is visible.
-                        drop(fetcher_guard);
-                        (
-                            response,
-                            min_ttl,
-                            QueryAction::Allowed,
-                            false,
-                            Some(upstream_addr),
-                            None,
-                            None,
-                            upstream_ad,
-                        )
-                    }
-                }
-            }
-        };
-
-        let elapsed = start.elapsed().as_millis() as i64;
-
+        let elapsed_ms = start.elapsed().as_millis() as i64;
         let result = if self.log_query_results {
-            extract_result_summary(&response_bytes)
+            extract_result_summary(&answer.bytes)
         } else {
             None
         };
+        Ok(self.log_and_finish(logged, answer, elapsed_ms, result))
+    }
+
+    async fn acquire_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let semaphore = self.concurrency_limit.as_ref()?;
+        Some(
+            semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("concurrency-limit semaphore is never closed"),
+        )
+    }
+
+    fn is_rate_limited(&self, client_ip: IpAddr) -> bool {
+        self.rate_limiter
+            .as_ref()
+            .is_some_and(|limiter| !limiter.try_acquire(client_ip))
+    }
+
+    /// Filter first, so a new block rule applies before any cached answer.
+    async fn answer(&self, question: &Question<'_>) -> Result<Answer, HandlerError> {
+        let filter_result = self.filter.load().check(question.domain);
+        match filter_result {
+            FilterResult::Blocked { rule, list } => self.answer_blocked(question, rule, list),
+            FilterResult::Allowed { .. } => self.answer_allowed(question).await,
+        }
+    }
+
+    fn answer_blocked(
+        &self,
+        question: &Question<'_>,
+        rule: String,
+        list: String,
+    ) -> Result<Answer, HandlerError> {
+        let block_cfg = self.block_config.load();
+        let bytes = build_blocked_response(question.message, question.query_type, &block_cfg)?;
+        Ok(Answer {
+            bytes,
+            // Must match the TTL build_blocked_response writes.
+            min_ttl: BLOCKED_RESPONSE_TTL_SECS,
+            action: QueryAction::Blocked,
+            cached: false,
+            upstream: None,
+            matched_rule: Some(rule),
+            matched_list: Some(list),
+            // Locally-synthesised block, never validated upstream.
+            authenticated: false,
+        })
+    }
+
+    async fn answer_allowed(&self, question: &Question<'_>) -> Result<Answer, HandlerError> {
+        // Skip to_lowercase()'s pass for the common all-lowercase name.
+        let domain_lower = if question.domain.bytes().any(|b| b.is_ascii_uppercase()) {
+            question.domain.to_lowercase()
+        } else {
+            question.domain.to_string()
+        };
+        let cache_key = CacheKey::new(domain_lower, question.query_type.into(), question.profile);
+        let query_id = question.message.metadata.id;
+
+        if let Some(cached) = self.cache.get(&cache_key).await {
+            let answer = Answer::from_cache(&cached, query_id);
+            if cached.is_stale() {
+                self.spawn_stale_refresh(&cache_key, question.raw);
+            }
+            return Ok(answer);
+        }
+
+        let fetcher_guard = self.begin_fetch(&cache_key).await;
+
+        if let Some(cached) = self.cache.get(&cache_key).await {
+            // Fetcher filled the cache: serve as a hit.
+            return Ok(Answer::from_cache(&cached, query_id));
+        }
+
+        // Fetcher, or a waiter whose fetcher failed/timed out.
+        self.forward_and_cache(question.raw, cache_key, fetcher_guard)
+            .await
+    }
+
+    /// Coalesce misses: a waiter re-checks the cache once the fetcher finishes
+    /// and forwards itself only if it failed. Returns the guard for a fetcher.
+    async fn begin_fetch(&self, cache_key: &CacheKey) -> Option<FetchGuard> {
+        let notify = match self.inflight_fetches.begin(cache_key) {
+            BeginResult::Fetcher(guard) => return Some(guard),
+            BeginResult::Waiter(notify) => notify,
+        };
+        // Subscribe before the cache check, or a `notify_waiters` in between
+        // is lost.
+        let fut = notify.notified();
+        tokio::pin!(fut);
+        fut.as_mut().enable();
+        if self.cache.get(cache_key).await.is_none() {
+            // Cap in case the fetcher is wedged; then forward ourselves.
+            let _ = tokio::time::timeout(Duration::from_secs(3), fut).await;
+        }
+        None
+    }
+
+    async fn forward_and_cache(
+        &self,
+        query_bytes: &[u8],
+        cache_key: CacheKey,
+        fetcher_guard: Option<FetchGuard>,
+    ) -> Result<Answer, HandlerError> {
+        let (response, upstream_addr, upstream_ad) = self.forwarder.forward(query_bytes).await?;
+        let cache_ttl = cache_ttl_for_response(&response);
+        if let Some(ttl) = cache_ttl {
+            self.cache
+                .insert(cache_key, response.clone(), ttl, upstream_ad)
+                .await;
+        }
+        // Wake waiters only once the insert is visible.
+        drop(fetcher_guard);
+        Ok(Answer {
+            bytes: response,
+            // DoH max-age: the stored TTL, or 0 if uncacheable.
+            min_ttl: cache_ttl.map_or(0, |d| d.as_secs() as u32),
+            action: QueryAction::Allowed,
+            cached: false,
+            upstream: Some(upstream_addr),
+            matched_rule: None,
+            matched_list: None,
+            authenticated: upstream_ad,
+        })
+    }
+
+    fn log_and_finish(
+        &self,
+        query: LoggedQuery<'_>,
+        answer: Answer,
+        elapsed_ms: i64,
+        result: Option<String>,
+    ) -> HandleOutcome {
         let ctx = QueryContext {
             timestamp: crate::now_unix_ms(),
-            client_ip,
-            domain: domain_clean.to_string(),
-            query_type: query_type_u16,
-            action,
-            cached: was_cached,
-            upstream,
-            response_time_ms: elapsed,
-            matched_rule,
-            matched_list,
-            doh_token,
+            client_ip: query.client_ip,
+            domain: query.domain.to_string(),
+            query_type: query.query_type,
+            action: answer.action,
+            cached: answer.cached,
+            upstream: answer.upstream,
+            response_time_ms: elapsed_ms,
+            matched_rule: answer.matched_rule,
+            matched_list: answer.matched_list,
+            doh_token: query.doh_token,
             result,
-            authenticated_data: authenticated,
+            authenticated_data: answer.authenticated,
         };
         // Logging is non-blocking, but a dropped entry makes every statistic
         // under-report for good — a fault, hence `error!`.
@@ -500,12 +477,89 @@ impl DnsHandler {
                 "query log event dropped, logger cannot keep up"
             );
         }
+        HandleOutcome {
+            bytes: answer.bytes,
+            min_ttl: answer.min_ttl,
+        }
+    }
+}
 
-        Ok(HandleOutcome {
-            bytes: response_bytes,
-            min_ttl,
+/// A parsed query and what the pipeline needs to answer it.
+struct Question<'a> {
+    message: &'a Message,
+    raw: &'a [u8],
+    /// Without the trailing dot.
+    domain: &'a str,
+    query_type: RecordType,
+    profile: ClientResponseProfile,
+}
+
+/// The parts of a query that end up in its query-log row.
+struct LoggedQuery<'a> {
+    client_ip: IpAddr,
+    domain: &'a str,
+    query_type: u16,
+    doh_token: Option<String>,
+}
+
+/// What the pipeline decided for one query, before it is logged.
+struct Answer {
+    bytes: Vec<u8>,
+    min_ttl: u32,
+    action: QueryAction,
+    cached: bool,
+    upstream: Option<String>,
+    matched_rule: Option<String>,
+    matched_list: Option<String>,
+    authenticated: bool,
+}
+
+impl Answer {
+    fn from_cache(cached: &crate::cache::CacheValue, query_id: u16) -> Self {
+        Self {
+            bytes: prepare_cached_response(cached, query_id),
+            min_ttl: remaining_ttl_secs(cached),
+            action: QueryAction::Allowed,
+            cached: true,
+            upstream: None,
+            matched_rule: None,
+            matched_list: None,
+            authenticated: cached.authenticated_data(),
+        }
+    }
+
+    fn refused(message: &Message) -> Result<Self, HandlerError> {
+        Ok(Self {
+            bytes: build_refused_response(message)?,
+            // REFUSED is not cacheable downstream.
+            min_ttl: 0,
+            action: QueryAction::RateLimited,
+            cached: false,
+            upstream: None,
+            matched_rule: None,
+            matched_list: None,
+            authenticated: false,
         })
     }
+}
+
+/// Non-standard opcodes get NOTIMP and EDNS version > 0 gets BADVERS
+/// (RFC 6891 §6.1.3), before filter, cache or upstream. Neither is logged or
+/// rate-limited.
+fn unsupported_query_response(message: &Message) -> Result<Option<HandleOutcome>, HandlerError> {
+    if message.metadata.op_code != OpCode::Query {
+        return Ok(Some(HandleOutcome {
+            bytes: build_notimp_response(message)?,
+            min_ttl: 0,
+        }));
+    }
+    if message.edns.as_ref().is_some_and(|edns| edns.version() > 0) {
+        return Ok(Some(HandleOutcome {
+            bytes: build_badvers_response(message)?,
+            min_ttl: 0,
+        }));
+    }
+    Ok(None)
 }
 
 /// Build a REFUSED response echoing the query's ID, question and RD bit.
