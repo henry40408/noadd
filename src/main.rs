@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
     noadd::config::init_tracing(args.log_format);
 
-    let db_path = noadd::config::resolve_db_path(args.db_path);
+    let db_path = noadd::config::resolve_db_path(args.db_path.clone());
     let db = Database::open(db_path.to_str().unwrap_or(noadd::config::DEFAULT_DB_PATH)).await?;
 
     if !args.acme_domain.is_empty() && db.get_setting("public_url").await?.is_none() {
@@ -68,63 +68,9 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(3600),
     );
 
-    // A corrupt stored value must never block boot: warn and use the defaults.
-    let upstream_config = match db.get_setting("upstream_servers").await {
-        Ok(Some(v)) if !v.trim().is_empty() => {
-            match noadd::upstream::forwarder::parse_upstreams(&v) {
-                Ok(servers) => UpstreamConfig {
-                    servers,
-                    ..UpstreamConfig::default()
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        event = "config.invalid_setting",
-                        setting = "upstream_servers",
-                        error = %e,
-                        "invalid setting; using defaults"
-                    );
-                    UpstreamConfig::default()
-                }
-            }
-        }
-        _ => UpstreamConfig::default(),
-    };
-    let forwarder = Arc::new(UpstreamForwarder::new(upstream_config).await);
+    let forwarder = load_upstream_forwarder(&db).await;
 
-    if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
-        && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
-    {
-        forwarder.set_strategy(strategy);
-        tracing::info!(
-            event = "config.setting_loaded",
-            setting = "upstream_strategy",
-            value = %strategy_str,
-            "loaded setting from database"
-        );
-    }
-
-    if let Ok(Some(v)) = db.get_setting("dnssec_disabled").await {
-        forwarder.set_dnssec_enabled(v.trim() != "true");
-        tracing::info!(
-            event = "config.setting_loaded",
-            setting = "dnssec_disabled",
-            value = %v,
-            "loaded setting from database"
-        );
-    }
-
-    let block_config = {
-        let mode = db.get_setting("block_mode").await.ok().flatten();
-        let v4 = db.get_setting("block_custom_ipv4").await.ok().flatten();
-        let v6 = db.get_setting("block_custom_ipv6").await.ok().flatten();
-        noadd::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref())
-    };
-    tracing::info!(
-        event = "config.setting_loaded",
-        setting = "block_mode",
-        value = block_config.mode.as_str(),
-        "loaded setting from database"
-    );
+    let block_config = load_block_config(&db).await;
 
     let cache = DnsCache::with_capacity_bytes(DNS_CACHE_CAPACITY_BYTES);
 
@@ -173,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let listener_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Subscribe before spawning the DNS listeners: one can fail and broadcast
     // immediately, and a later subscriber would miss it.
-    let mut http_shutdown = shutdown_tx.subscribe();
+    let http_shutdown = shutdown_tx.subscribe();
 
     let dns_addr: SocketAddr = args.dns_addr.parse()?;
     let udp_handle = tokio::spawn(noadd::shutdown::supervise_listener(
@@ -266,38 +212,7 @@ async fn main() -> anyhow::Result<()> {
         forward_auth,
     });
 
-    // Persist session last_seen every minute; sweep expired sessions every
-    // tenth tick, since otherwise only startup deletes them.
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-        tick.tick().await; // skip immediate fire
-        let mut ticks: u32 = 0;
-        loop {
-            tick.tick().await;
-            let _ =
-                noadd::admin::auth::flush_last_seen(&session_store_for_flush, &db_for_flush).await;
-            ticks = (ticks + 1) % 10;
-            if ticks == 0 {
-                match noadd::admin::auth::sweep_expired(&session_store_for_flush, &db_for_flush)
-                    .await
-                {
-                    Ok((evicted, deleted)) if evicted > 0 || deleted > 0 => tracing::info!(
-                        event = "session.destroyed",
-                        reason = "swept",
-                        evicted,
-                        deleted,
-                        "swept expired sessions"
-                    ),
-                    Ok(_) => {}
-                    Err(err) => tracing::warn!(
-                        event = "session.sweep_failed",
-                        error = %err,
-                        "session sweep failed; will retry next cycle"
-                    ),
-                }
-            }
-        }
-    });
+    spawn_session_maintenance(session_store_for_flush, db_for_flush);
 
     // One listener for DoH and admin, deliberately (no `--admin-addr`). A second
     // listener would need its own TLS identity and per-listener
@@ -306,194 +221,32 @@ async fn main() -> anyhow::Result<()> {
     // DoH without publishing the admin UI").
     let app = doh_routes.merge(admin_routes);
 
-    // HSTS covers DoH too: same scheme, and DoH is HTTPS-only anyway.
-    let app = if noadd::config::resolve_hsts(args.hsts, tls_enabled) {
-        let value = noadd::headers::hsts_value(args.hsts_max_age);
-        tracing::info!(
-            event = "server.hsts_enabled",
-            max_age = args.hsts_max_age,
-            "HSTS enabled"
-        );
-        app.layer(axum::middleware::from_fn_with_state(
-            value,
-            noadd::headers::hsts,
-        ))
-    } else {
-        app
-    };
+    let app = with_hsts(app, &args, tls_enabled);
 
     let http_addr: SocketAddr = args.http_addr.parse()?;
 
-    // Background list update scheduler (every 24h)
-    let update_manager = list_manager.clone();
-    let update_rebuild = rebuild.clone();
-    let mut shutdown_rx = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-        interval.tick().await; // skip first immediate tick
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if let Err(e) = update_manager.update_all_lists_no_rebuild().await {
-                        tracing::warn!(
-                        event = "filter.list_refresh_failed",
-                        error = %e,
-                        "failed to update filter lists; keeping previous lists"
-                    );
-                    }
-                    let mgr = update_manager.clone();
-                    update_rebuild.clone().spawn_raw(move || async move {
-                        mgr.rebuild_filter().await
-                    });
-                }
-                _ = shutdown_rx.recv() => break,
-            }
-        }
-    });
+    spawn_list_updates(
+        list_manager.clone(),
+        rebuild.clone(),
+        shutdown_tx.subscribe(),
+    );
 
     spawn_log_pruning(db.clone(), shutdown_tx.subscribe());
 
-    // Evict rate-limit buckets unseen for 10 min so roaming clients and
-    // scanners cannot grow the maps without bound; the admin limiters too.
-    let prune_limiter = ip_rate_limiter.clone();
-    let mut shutdown_rx = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
-        interval.tick().await; // skip immediate tick
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    for (scope, removed) in [
-                        ("dns", prune_limiter.prune(std::time::Duration::from_secs(600))),
-                        ("login", login_limiter_for_prune.prune()),
-                        ("invalid_session", invalid_session_limiter_for_prune.prune()),
-                    ] {
-                        if removed > 0 {
-                            tracing::debug!(
-                                event = "ratelimit.buckets_pruned",
-                                scope,
-                                removed,
-                                "pruned inactive rate-limit buckets"
-                            );
-                        }
-                    }
-                }
-                _ = shutdown_rx.recv() => break,
-            }
-        }
-    });
-
-    // Upstream latency probe (every 60s, only for the lowest-latency strategy)
-    let probe_forwarder = forwarder.clone();
-    let mut shutdown_rx = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        interval.tick().await; // skip first immediate tick
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if probe_forwarder.strategy()
-                        == noadd::upstream::strategy::UpstreamStrategy::LowestLatency
-                    {
-                        probe_forwarder.probe_all().await;
-                        tracing::debug!(event = "upstream.probe_completed", "upstream latency probe complete");
-                    }
-                }
-                _ = shutdown_rx.recv() => break,
-            }
-        }
-    });
+    spawn_rate_limit_pruning(
+        ip_rate_limiter.clone(),
+        login_limiter_for_prune,
+        invalid_session_limiter_for_prune,
+        shutdown_tx.subscribe(),
+    );
+    spawn_upstream_probe(forwarder.clone(), shutdown_tx.subscribe());
 
     if use_acme {
-        // Let's Encrypt automatic TLS via rustls-acme
-        use rustls_acme::AcmeConfig;
-        use rustls_acme::caches::DirCache;
-        use tokio_stream::StreamExt;
-
-        let acme_cache = args.acme_cache.clone();
-        let mut acme_config = AcmeConfig::new(args.acme_domain)
-            .cache(DirCache::new(acme_cache))
-            .directory_lets_encrypt(args.acme_prod);
-
-        if let Some(ref email) = args.acme_email {
-            acme_config = acme_config.contact([format!("mailto:{email}")]);
-        }
-
-        let mut state = acme_config.state();
-        let acceptor = state.axum_acceptor(state.default_rustls_config());
-
-        tokio::spawn(async move {
-            loop {
-                match state.next().await {
-                    Some(Ok(ok)) => {
-                        tracing::info!(event = "acme.event", detail = ?ok, "ACME event");
-                    }
-                    Some(Err(err)) => {
-                        tracing::error!(event = "acme.failed", error = ?err, "ACME error");
-                    }
-                    None => break,
-                }
-            }
-        });
-
-        tracing::info!(
-            event = "server.started",
-            scheme = "https",
-            tls = "acme",
-            %http_addr,
-            "HTTP server started (DoH + Admin)"
-        );
-        let handle = axum_server::Handle::new();
-        let server_handle = handle.clone();
-        tokio::spawn(async move {
-            let _ = http_shutdown.recv().await;
-            server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-        });
-        axum_server::bind(http_addr)
-            .acceptor(acceptor)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await?;
+        serve_acme(app, http_addr, http_shutdown, &args).await?;
     } else if use_tls {
-        let tls_config = noadd::tls::load_tls_config(
-            args.tls_cert.as_ref().unwrap(),
-            args.tls_key.as_ref().unwrap(),
-        )?;
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
-        tracing::info!(
-            event = "server.started",
-            scheme = "https",
-            tls = "static_cert",
-            %http_addr,
-            "HTTP server started (DoH + Admin)"
-        );
-        let handle = axum_server::Handle::new();
-        let server_handle = handle.clone();
-        tokio::spawn(async move {
-            let _ = http_shutdown.recv().await;
-            server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-        });
-        axum_server::bind_rustls(http_addr, rustls_config)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await?;
+        serve_static_tls(app, http_addr, http_shutdown, &args).await?;
     } else {
-        let listener = tokio::net::TcpListener::bind(http_addr).await?;
-        tracing::info!(
-            event = "server.started",
-            scheme = "http",
-            tls = "none",
-            %http_addr,
-            "HTTP server started (DoH + Admin)"
-        );
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = http_shutdown.recv().await;
-        })
-        .await?;
+        serve_plain(app, http_addr, http_shutdown).await?;
     }
 
     tracing::info!(event = "shutdown.started", "shutting down");
@@ -559,4 +312,323 @@ async fn prune_logs_and_maintain(db: &Database) {
             "database maintenance failed; will retry next cycle"
         );
     }
+}
+
+async fn load_upstream_forwarder(db: &Database) -> Arc<UpstreamForwarder> {
+    // A corrupt stored value must never block boot: warn and use the defaults.
+    let upstream_config = match db.get_setting("upstream_servers").await {
+        Ok(Some(v)) if !v.trim().is_empty() => {
+            match noadd::upstream::forwarder::parse_upstreams(&v) {
+                Ok(servers) => UpstreamConfig {
+                    servers,
+                    ..UpstreamConfig::default()
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        event = "config.invalid_setting",
+                        setting = "upstream_servers",
+                        error = %e,
+                        "invalid setting; using defaults"
+                    );
+                    UpstreamConfig::default()
+                }
+            }
+        }
+        _ => UpstreamConfig::default(),
+    };
+    let forwarder = Arc::new(UpstreamForwarder::new(upstream_config).await);
+
+    if let Ok(Some(strategy_str)) = db.get_setting("upstream_strategy").await
+        && let Ok(strategy) = strategy_str.parse::<noadd::upstream::strategy::UpstreamStrategy>()
+    {
+        forwarder.set_strategy(strategy);
+        tracing::info!(
+            event = "config.setting_loaded",
+            setting = "upstream_strategy",
+            value = %strategy_str,
+            "loaded setting from database"
+        );
+    }
+
+    if let Ok(Some(v)) = db.get_setting("dnssec_disabled").await {
+        forwarder.set_dnssec_enabled(v.trim() != "true");
+        tracing::info!(
+            event = "config.setting_loaded",
+            setting = "dnssec_disabled",
+            value = %v,
+            "loaded setting from database"
+        );
+    }
+
+    forwarder
+}
+
+async fn load_block_config(db: &Database) -> noadd::dns::block::BlockConfig {
+    let mode = db.get_setting("block_mode").await.ok().flatten();
+    let v4 = db.get_setting("block_custom_ipv4").await.ok().flatten();
+    let v6 = db.get_setting("block_custom_ipv6").await.ok().flatten();
+    let block_config =
+        noadd::dns::block::from_settings(mode.as_deref(), v4.as_deref(), v6.as_deref());
+    tracing::info!(
+        event = "config.setting_loaded",
+        setting = "block_mode",
+        value = block_config.mode.as_str(),
+        "loaded setting from database"
+    );
+    block_config
+}
+
+/// Persists session `last_seen` every minute and sweeps expired sessions every
+/// tenth tick, since otherwise only startup deletes them.
+fn spawn_session_maintenance(store: noadd::admin::auth::SessionStore, db: Database) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.tick().await; // skip immediate fire
+        let mut ticks: u32 = 0;
+        loop {
+            tick.tick().await;
+            let _ = noadd::admin::auth::flush_last_seen(&store, &db).await;
+            ticks = (ticks + 1) % 10;
+            if ticks == 0 {
+                sweep_expired_sessions(&store, &db).await;
+            }
+        }
+    });
+}
+
+async fn sweep_expired_sessions(store: &noadd::admin::auth::SessionStore, db: &Database) {
+    match noadd::admin::auth::sweep_expired(store, db).await {
+        Ok((evicted, deleted)) if evicted > 0 || deleted > 0 => tracing::info!(
+            event = "session.destroyed",
+            reason = "swept",
+            evicted,
+            deleted,
+            "swept expired sessions"
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            event = "session.sweep_failed",
+            error = %err,
+            "session sweep failed; will retry next cycle"
+        ),
+    }
+}
+
+/// Refreshes the filter lists every 24h and rebuilds the filter.
+fn spawn_list_updates(
+    list_manager: Arc<ListManager>,
+    rebuild: Arc<noadd::filter::rebuild::RebuildCoordinator>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = list_manager.update_all_lists_no_rebuild().await {
+                        tracing::warn!(
+                            event = "filter.list_refresh_failed",
+                            error = %e,
+                            "failed to update filter lists; keeping previous lists"
+                        );
+                    }
+                    let mgr = list_manager.clone();
+                    rebuild.clone().spawn_raw(move || async move {
+                        mgr.rebuild_filter().await
+                    });
+                }
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+}
+
+/// Evicts rate-limit buckets unseen for 10 min so roaming clients and scanners
+/// cannot grow the maps without bound; the admin limiters too.
+fn spawn_rate_limit_pruning(
+    dns_limiter: Arc<IpRateLimiter>,
+    login_limiter: Arc<RateLimiter>,
+    invalid_session_limiter: Arc<RateLimiter>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        interval.tick().await; // skip immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    for (scope, removed) in [
+                        ("dns", dns_limiter.prune(std::time::Duration::from_secs(600))),
+                        ("login", login_limiter.prune()),
+                        ("invalid_session", invalid_session_limiter.prune()),
+                    ] {
+                        if removed > 0 {
+                            tracing::debug!(
+                                event = "ratelimit.buckets_pruned",
+                                scope,
+                                removed,
+                                "pruned inactive rate-limit buckets"
+                            );
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+}
+
+/// Probes upstream latency every 60s, only under the lowest-latency strategy.
+fn spawn_upstream_probe(
+    forwarder: Arc<UpstreamForwarder>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if forwarder.strategy()
+                        == noadd::upstream::strategy::UpstreamStrategy::LowestLatency
+                    {
+                        forwarder.probe_all().await;
+                        tracing::debug!(event = "upstream.probe_completed", "upstream latency probe complete");
+                    }
+                }
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+}
+
+/// HSTS covers `DoH` too: same scheme, and `DoH` is HTTPS-only anyway.
+fn with_hsts(app: axum::Router, args: &CliArgs, tls_enabled: bool) -> axum::Router {
+    if !noadd::config::resolve_hsts(args.hsts, tls_enabled) {
+        return app;
+    }
+    let value = noadd::headers::hsts_value(args.hsts_max_age);
+    tracing::info!(
+        event = "server.hsts_enabled",
+        max_age = args.hsts_max_age,
+        "HSTS enabled"
+    );
+    app.layer(axum::middleware::from_fn_with_state(
+        value,
+        noadd::headers::hsts,
+    ))
+}
+
+/// Drains an `axum_server` for up to 5s once shutdown fires.
+fn graceful_shutdown_on_signal(
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+) -> axum_server::Handle<SocketAddr> {
+    let handle = axum_server::Handle::new();
+    let server_handle = handle.clone();
+    tokio::spawn(async move {
+        let _ = shutdown.recv().await;
+        server_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+    });
+    handle
+}
+
+/// Let's Encrypt automatic TLS via rustls-acme.
+async fn serve_acme(
+    app: axum::Router,
+    http_addr: SocketAddr,
+    http_shutdown: tokio::sync::broadcast::Receiver<()>,
+    args: &CliArgs,
+) -> anyhow::Result<()> {
+    use rustls_acme::AcmeConfig;
+    use rustls_acme::caches::DirCache;
+    use tokio_stream::StreamExt;
+
+    let mut acme_config = AcmeConfig::new(args.acme_domain.clone())
+        .cache(DirCache::new(args.acme_cache.clone()))
+        .directory_lets_encrypt(args.acme_prod);
+
+    if let Some(ref email) = args.acme_email {
+        acme_config = acme_config.contact([format!("mailto:{email}")]);
+    }
+
+    let mut state = acme_config.state();
+    let acceptor = state.axum_acceptor(state.default_rustls_config());
+
+    tokio::spawn(async move {
+        loop {
+            match state.next().await {
+                Some(Ok(ok)) => {
+                    tracing::info!(event = "acme.event", detail = ?ok, "ACME event");
+                }
+                Some(Err(err)) => {
+                    tracing::error!(event = "acme.failed", error = ?err, "ACME error");
+                }
+                None => break,
+            }
+        }
+    });
+
+    tracing::info!(
+        event = "server.started",
+        scheme = "https",
+        tls = "acme",
+        %http_addr,
+        "HTTP server started (DoH + Admin)"
+    );
+    axum_server::bind(http_addr)
+        .acceptor(acceptor)
+        .handle(graceful_shutdown_on_signal(http_shutdown))
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
+    Ok(())
+}
+
+async fn serve_static_tls(
+    app: axum::Router,
+    http_addr: SocketAddr,
+    http_shutdown: tokio::sync::broadcast::Receiver<()>,
+    args: &CliArgs,
+) -> anyhow::Result<()> {
+    let tls_config = noadd::tls::load_tls_config(
+        args.tls_cert.as_ref().unwrap(),
+        args.tls_key.as_ref().unwrap(),
+    )?;
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
+    tracing::info!(
+        event = "server.started",
+        scheme = "https",
+        tls = "static_cert",
+        %http_addr,
+        "HTTP server started (DoH + Admin)"
+    );
+    axum_server::bind_rustls(http_addr, rustls_config)
+        .handle(graceful_shutdown_on_signal(http_shutdown))
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
+    Ok(())
+}
+
+async fn serve_plain(
+    app: axum::Router,
+    http_addr: SocketAddr,
+    mut http_shutdown: tokio::sync::broadcast::Receiver<()>,
+) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(http_addr).await?;
+    tracing::info!(
+        event = "server.started",
+        scheme = "http",
+        tls = "none",
+        %http_addr,
+        "HTTP server started (DoH + Admin)"
+    );
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = http_shutdown.recv().await;
+    })
+    .await?;
+    Ok(())
 }
