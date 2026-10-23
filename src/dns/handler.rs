@@ -218,6 +218,48 @@ impl DnsHandler {
         self.block_config.load()
     }
 
+    /// Serve-stale companion: refreshes `cache_key` in the background, at most
+    /// once per key at a time.
+    fn spawn_stale_refresh(&self, cache_key: &CacheKey, query_bytes: &[u8]) {
+        let already_refreshing = self.refreshing.insert(cache_key.clone(), ()).is_some();
+        if already_refreshing {
+            return;
+        }
+
+        let forwarder = self.forwarder.clone();
+        let cache = self.cache.clone();
+        let refreshing = self.refreshing.clone();
+        let query_owned = query_bytes.to_vec();
+        let key = cache_key.clone();
+        tokio::spawn(async move {
+            // Clears the marker even on panic or cancel,
+            // or one bad refresh would block the key forever.
+            let _guard = RefreshGuard {
+                set: refreshing,
+                key: key.clone(),
+            };
+            let (response, _, authenticated) = match forwarder.forward(&query_owned).await {
+                Ok(forwarded) => forwarded,
+                Err(e) => {
+                    tracing::debug!(
+                        event = "cache.stale_refresh_failed",
+                        error = %e,
+                        "stale refresh failed"
+                    );
+                    return;
+                }
+            };
+            let Some(ttl) = cache_ttl_for_response(&response) else {
+                tracing::debug!(
+                    event = "cache.stale_refresh_uncacheable",
+                    "stale refresh got non-cacheable response"
+                );
+                return;
+            };
+            cache.insert(key, response, ttl, authenticated).await;
+        });
+    }
+
     /// Handle a raw DNS query from `client_ip`, with the `DoH` token name if any.
     pub async fn handle(
         &self,
@@ -351,44 +393,7 @@ impl DnsHandler {
                     let remaining = remaining_ttl_secs(&cached);
 
                     if cached.is_stale() {
-                        // Serve stale, refresh in the background — once per key.
-                        let should_refresh =
-                            self.refreshing.insert(cache_key.clone(), ()).is_none();
-
-                        if should_refresh {
-                            let forwarder = self.forwarder.clone();
-                            let cache = self.cache.clone();
-                            let refreshing = self.refreshing.clone();
-                            let query_owned = query_bytes.to_vec();
-                            let key = cache_key.clone();
-                            tokio::spawn(async move {
-                                // Clears the marker even on panic or cancel,
-                                // or one bad refresh would block the key forever.
-                                let _guard = RefreshGuard {
-                                    set: refreshing,
-                                    key: key.clone(),
-                                };
-                                match forwarder.forward(&query_owned).await {
-                                    Ok((response, _, authenticated)) => {
-                                        if let Some(ttl) = cache_ttl_for_response(&response) {
-                                            cache.insert(key, response, ttl, authenticated).await;
-                                        } else {
-                                            tracing::debug!(
-                                                event = "cache.stale_refresh_uncacheable",
-                                                "stale refresh got non-cacheable response"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            event = "cache.stale_refresh_failed",
-                                            error = %e,
-                                            "stale refresh failed"
-                                        );
-                                    }
-                                }
-                            });
-                        }
+                        self.spawn_stale_refresh(&cache_key, query_bytes);
                     }
 
                     (
