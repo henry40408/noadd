@@ -351,50 +351,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Background log pruning (every hour)
-    let prune_db = db.clone();
-    let mut shutdown_rx = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let retention_days: i64 = prune_db
-                        .get_setting("log_retention_days")
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(noadd::admin::stats::DEFAULT_LOG_RETENTION_DAYS);
-                    let cutoff = noadd::now_unix() - retention_days * 86400;
-                    match prune_db.prune_logs_before(cutoff).await {
-                        Ok(count) => {
-                            if count > 0 {
-                                tracing::info!(
-                                    event = "db.logs_pruned",
-                                    count,
-                                    "pruned old query logs"
-                                );
-                            }
-                            if let Err(e) = prune_db.run_maintenance().await {
-                                tracing::warn!(
-                                    event = "db.maintenance_failed",
-                                    error = %e,
-                                    "database maintenance failed; will retry next cycle"
-                                );
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            event = "db.prune_failed",
-                            error = %e,
-                            "failed to prune logs; will retry next cycle"
-                        ),
-                    }
-                }
-                _ = shutdown_rx.recv() => break,
-            }
-        }
-    });
+    spawn_log_pruning(db.clone(), shutdown_tx.subscribe());
 
     // Evict rate-limit buckets unseen for 10 min so roaming clients and
     // scanners cannot grow the maps without bound; the admin limiters too.
@@ -556,4 +513,50 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Prunes old query logs and runs database maintenance every hour until
+/// shutdown.
+fn spawn_log_pruning(db: Database, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => prune_logs_and_maintain(&db).await,
+                _ = shutdown_rx.recv() => break,
+            }
+        }
+    });
+}
+
+async fn prune_logs_and_maintain(db: &Database) {
+    let retention_days: i64 = db
+        .get_setting("log_retention_days")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(noadd::admin::stats::DEFAULT_LOG_RETENTION_DAYS);
+    let cutoff = noadd::now_unix() - retention_days * 86400;
+    let count = match db.prune_logs_before(cutoff).await {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!(
+                event = "db.prune_failed",
+                error = %e,
+                "failed to prune logs; will retry next cycle"
+            );
+            return;
+        }
+    };
+    if count > 0 {
+        tracing::info!(event = "db.logs_pruned", count, "pruned old query logs");
+    }
+    if let Err(e) = db.run_maintenance().await {
+        tracing::warn!(
+            event = "db.maintenance_failed",
+            error = %e,
+            "database maintenance failed; will retry next cycle"
+        );
+    }
 }
