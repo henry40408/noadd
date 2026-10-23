@@ -799,6 +799,37 @@ pub(crate) enum LoginError {
     Internal,
 }
 
+/// The credentials of one sign-in, with the request they arrived on.
+pub(crate) struct LoginAttempt<'a> {
+    pub connect: Option<&'a ConnectInfo<SocketAddr>>,
+    pub headers: &'a HeaderMap,
+    pub username: &'a str,
+    pub password: &'a str,
+}
+
+/// The signed-in session a password-gated action runs as.
+#[derive(Clone, Copy)]
+pub(crate) struct SessionActor<'a> {
+    pub user_id: i64,
+    pub token_hash: &'a str,
+    pub ip: std::net::IpAddr,
+}
+
+/// A request to replace `actor`'s password, proving the current one.
+pub(crate) struct PasswordChange<'a> {
+    pub actor: SessionActor<'a>,
+    pub current_password: &'a str,
+    pub new_password: &'a str,
+}
+
+/// Which session row to revoke, and on whose behalf.
+pub(crate) struct SessionRevocation<'a> {
+    pub actor_user_id: i64,
+    pub ip: std::net::IpAddr,
+    pub id: i64,
+    pub current_hash: Option<&'a str>,
+}
+
 /// Verify a username and password and mint a session, returning the jar with its
 /// `Set-Cookie`.
 ///
@@ -806,12 +837,15 @@ pub(crate) enum LoginError {
 /// audit events — shared by the JSON endpoint and the HTML form. Do not add a second copy.
 pub(crate) async fn start_password_session(
     state: &AppState,
-    connect: Option<&ConnectInfo<SocketAddr>>,
-    headers: &HeaderMap,
+    attempt: LoginAttempt<'_>,
     jar: CookieJar,
-    username: &str,
-    password: &str,
 ) -> Result<CookieJar, LoginError> {
+    let LoginAttempt {
+        connect,
+        headers,
+        username,
+        password,
+    } = attempt;
     let ip = client_ip(state, connect, headers);
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
@@ -938,11 +972,13 @@ async fn login(
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
     let jar = start_password_session(
         &state,
-        connect.as_deref(),
-        &headers,
+        LoginAttempt {
+            connect: connect.as_deref(),
+            headers: &headers,
+            username: &body.username,
+            password: &body.password,
+        },
         jar,
-        &body.username,
-        &body.password,
     )
     .await
     .map_err(|err| match err {
@@ -1165,7 +1201,12 @@ async fn reauth(
     let (user_id, token_hash) = current_session(&state, connect.as_deref(), &headers, &jar)?;
     let ip = client_ip(&state, connect.as_deref(), &headers);
 
-    match confirm_password(&state, user_id, &token_hash, ip, &body.password).await {
+    let actor = SessionActor {
+        user_id,
+        token_hash: &token_hash,
+        ip,
+    };
+    match confirm_password(&state, actor, &body.password).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(ReauthError::RateLimited) => Err(StatusCode::TOO_MANY_REQUESTS),
         Err(ReauthError::Invalid) => Err(StatusCode::UNAUTHORIZED),
@@ -1189,11 +1230,14 @@ pub enum ReauthError {
 /// gets the stamp too, though it does not need it.
 pub(crate) async fn confirm_password(
     state: &AppState,
-    user_id: i64,
-    token_hash: &str,
-    ip: std::net::IpAddr,
+    actor: SessionActor<'_>,
     password: &str,
 ) -> Result<(), ReauthError> {
+    let SessionActor {
+        user_id,
+        token_hash,
+        ip,
+    } = actor;
     if !state.rate_limiter.check(ip) {
         tracing::warn!(
             event = "auth.failed",
@@ -1315,11 +1359,9 @@ pub(crate) const CLEAR_SITE_DATA: (axum::http::HeaderName, &str) = (
 pub(crate) async fn end_session(
     state: &AppState,
     auth: &AuthedUser,
-    connect: Option<&ConnectInfo<SocketAddr>>,
-    headers: &HeaderMap,
+    ip: std::net::IpAddr,
     jar: CookieJar,
 ) -> (CookieJar, Option<String>) {
-    let ip = client_ip(state, connect, headers);
     // Revoke every token a cookie names, not just the authenticating one: both cookies are
     // cleared below, and an unrevoked one would leave a live, replayable session behind.
     let candidates: Vec<String> = session_cookie_hashes(&jar).collect();
@@ -1369,7 +1411,8 @@ async fn logout(
     StatusCode,
 > {
     let via_forward_auth = auth.via_forward_auth;
-    let (jar, redirect_to) = end_session(&state, &auth, connect.as_deref(), &headers, jar).await;
+    let ip = client_ip(&state, connect.as_deref(), &headers);
+    let (jar, redirect_to) = end_session(&state, &auth, ip, jar).await;
     Ok((
         jar,
         [CLEAR_SITE_DATA],
@@ -1432,7 +1475,13 @@ async fn create_user_handler(
     Json(body): Json<CreateUserRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    match create_operator(&state, auth.user_id, ip, &body.username, &body.password).await {
+    let new_operator = NewOperator {
+        actor_user_id: auth.user_id,
+        ip,
+        username: &body.username,
+        password: &body.password,
+    };
+    match create_operator(&state, new_operator).await {
         Ok(_id) => Ok(StatusCode::CREATED),
         Err(OperatorError::Invalid(message)) => Err(bad_request(message)),
         Err(OperatorError::Conflict) => Err((
@@ -1458,16 +1507,27 @@ pub enum OperatorError {
     Internal,
 }
 
+/// An operator account to create, and the operator creating it.
+pub(crate) struct NewOperator<'a> {
+    pub actor_user_id: i64,
+    pub ip: std::net::IpAddr,
+    pub username: &'a str,
+    pub password: &'a str,
+}
+
 /// Provision another operator, with full admin access. Shared by `POST /api/users` and the
 /// account page's form; both prove a password first ([`ReauthedUser`] /
 /// [`confirm_password`]).
 pub(crate) async fn create_operator(
     state: &AppState,
-    actor_user_id: i64,
-    ip: std::net::IpAddr,
-    username: &str,
-    password: &str,
+    new_operator: NewOperator<'_>,
 ) -> Result<i64, OperatorError> {
+    let NewOperator {
+        actor_user_id,
+        ip,
+        username,
+        password,
+    } = new_operator;
     let username = username.trim();
     if username.is_empty() || username.chars().count() > 64 {
         return Err(OperatorError::Invalid("invalid username".to_string()));
@@ -1603,17 +1663,22 @@ pub(crate) enum PasswordChangeError {
 /// callers, or an admin reset of another account, must pass `None` to
 /// [`crate::admin::auth::revoke_user_sessions_except`] — never use
 /// `revoke_other_sessions`, which spans every operator.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn change_password_for_session(
     state: &AppState,
     headers: &HeaderMap,
     jar: CookieJar,
-    user_id: i64,
-    token_hash: &str,
-    ip: std::net::IpAddr,
-    current_password: &str,
-    new_password: &str,
+    change: PasswordChange<'_>,
 ) -> Result<CookieJar, PasswordChangeError> {
+    let PasswordChange {
+        actor,
+        current_password,
+        new_password,
+    } = change;
+    let SessionActor {
+        user_id,
+        token_hash,
+        ip,
+    } = actor;
     // Throttled on sign-in's budget: it guesses the same credential from the same IP.
     if !state.rate_limiter.check(ip) {
         tracing::warn!(
@@ -1694,7 +1759,7 @@ pub(crate) async fn change_password_for_session(
         ),
     }
 
-    Ok(rotate_own_session(state, headers, jar, user_id, token_hash, ip).await)
+    Ok(rotate_own_session(state, headers, jar, actor).await)
 }
 
 /// `POST /api/users/me/password`: [`change_password_for_session`] mapped to status codes.
@@ -1710,18 +1775,16 @@ async fn change_own_password(
         Err(status) => return status.into_response(),
     };
     let ip = client_ip(&state, connect.as_deref(), &headers);
-    match change_password_for_session(
-        &state,
-        &headers,
-        jar,
-        user_id,
-        &token_hash,
-        ip,
-        &body.current_password,
-        &body.new_password,
-    )
-    .await
-    {
+    let change = PasswordChange {
+        actor: SessionActor {
+            user_id,
+            token_hash: &token_hash,
+            ip,
+        },
+        current_password: &body.current_password,
+        new_password: &body.new_password,
+    };
+    match change_password_for_session(&state, &headers, jar, change).await {
         Ok(jar) => (jar, StatusCode::NO_CONTENT).into_response(),
         Err(PasswordChangeError::RateLimited) => StatusCode::TOO_MANY_REQUESTS.into_response(),
         Err(PasswordChangeError::Rejected(message)) => bad_request(message).into_response(),
@@ -1736,10 +1799,13 @@ async fn rotate_own_session(
     state: &AppState,
     headers: &HeaderMap,
     jar: CookieJar,
-    user_id: i64,
-    old_token_hash: &str,
-    ip: std::net::IpAddr,
+    actor: SessionActor<'_>,
 ) -> CookieJar {
+    let SessionActor {
+        user_id,
+        token_hash: old_token_hash,
+        ip,
+    } = actor;
     let now = crate::now_unix();
     let token = generate_token();
     let token_hash = crate::admin::auth::hash_session_token(&token);
@@ -1881,7 +1947,13 @@ async fn revoke_session_by_id(
     // Only used to clear the caller's cookie if its own session is revoked, so it must be
     // read before `revoke_session_row` evicts that session.
     let current_hash = live_session_token_hash(&state, &jar);
-    match revoke_session_row(&state, auth.user_id, ip, id, current_hash.as_deref()).await {
+    let revocation = SessionRevocation {
+        actor_user_id: auth.user_id,
+        ip,
+        id,
+        current_hash: current_hash.as_deref(),
+    };
+    match revoke_session_row(&state, revocation).await {
         Ok(true) => Ok((clear_session_cookies(jar), StatusCode::NO_CONTENT)),
         Ok(false) => Ok((jar, StatusCode::NO_CONTENT)),
         Err(SessionRevokeError::NotFound) => Err(StatusCode::NOT_FOUND),
@@ -1898,11 +1970,14 @@ pub enum SessionRevokeError {
 /// handles the cookie). Shared by `DELETE /api/sessions/{id}` and the account page's form.
 pub(crate) async fn revoke_session_row(
     state: &AppState,
-    actor_user_id: i64,
-    ip: std::net::IpAddr,
-    id: i64,
-    current_hash: Option<&str>,
+    revocation: SessionRevocation<'_>,
 ) -> Result<bool, SessionRevokeError> {
+    let SessionRevocation {
+        actor_user_id,
+        ip,
+        id,
+        current_hash,
+    } = revocation;
     let removed = state
         .db
         .delete_session_by_id(id)
