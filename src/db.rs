@@ -776,191 +776,17 @@ impl Database {
     fn run_migrations(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
-        if version < 1 {
-            add_column_if_missing(conn, "query_logs", "cached", "INTEGER NOT NULL DEFAULT 0")?;
+        for &(target_version, migrate) in MIGRATIONS {
+            if version < target_version {
+                migrate(conn)?;
+            }
         }
 
-        if version < 2 {
-            add_column_if_missing(conn, "query_logs", "doh_token", "TEXT")?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS doh_tokens (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    token TEXT NOT NULL UNIQUE
-                )",
-            )?;
-        }
-
-        if version < 3 {
-            add_column_if_missing(conn, "query_logs", "upstream", "TEXT")?;
-        }
-
-        if version < 4 {
-            add_column_if_missing(conn, "query_logs", "result", "TEXT")?;
-        }
-
-        if version < 5 {
-            // ANALYZE is required after every index change here: with stale
-            // sqlite_stat1 the planner keeps the old plan.
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_query_logs_domain;
-                 CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 6 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    token TEXT NOT NULL UNIQUE,
-                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    created_at INTEGER NOT NULL,
-                    last_seen INTEGER NOT NULL,
-                    ip TEXT,
-                    user_agent TEXT
-                );
-                DELETE FROM settings WHERE key = 'admin_password_hash';
-                DELETE FROM settings WHERE key = 'sessions';",
-            )?;
-        }
-
-        if version < 7 {
-            add_column_if_missing(
-                conn,
-                "query_logs",
-                "authenticated_data",
-                "INTEGER NOT NULL DEFAULT 0",
-            )?;
-        }
-
-        if version < 8 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS api_keys (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    name         TEXT    NOT NULL,
-                    token_hash   TEXT    NOT NULL UNIQUE,
-                    prefix       TEXT    NOT NULL,
-                    created_at   INTEGER NOT NULL,
-                    last_used_at INTEGER,
-                    expires_at   INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);",
-            )?;
-        }
-
-        if version < 9 {
-            // Session tokens become BLAKE2b digests. Existing raw-token rows are
-            // dropped, not rehashed: rehashing would leave the plaintext in
-            // freelist pages and the WAL anyway. Operators sign in once more.
-            conn.execute_batch(
-                "DELETE FROM sessions;
-                 ALTER TABLE sessions RENAME COLUMN token TO token_hash;",
-            )?;
-        }
-
-        if version < 10 {
-            // Versions 10, 11, 12, 14 and 15 add indexes for statistics that
-            // now read the rollups; version 17 drops them again.
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts \
-                 ON query_logs(client_ip, doh_token, timestamp);
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 11 {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
-                 ON query_logs(timestamp, blocked, cached, response_ms, query_type);
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 12 {
-            // A VIRTUAL generated column costs no table space; the planner
-            // would not treat an index on the bare expression as covering.
-            add_column_if_missing(
-                conn,
-                "query_logs",
-                "has_result",
-                "INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL",
-            )?;
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
-                 CREATE INDEX idx_query_logs_ts_metrics \
-                 ON query_logs(timestamp, blocked, cached, response_ms, query_type, has_result);
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 13 {
-            // Seed the maintained row count (`QUERY_LOG_COUNT_KEY`); `COUNT(*)`
-            // walks a whole index. `WHERE true`: see `STATS_ROLLUP_BACKFILL`.
-            conn.execute_batch(
-                "INSERT INTO settings (key, value) \
-                 SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
-            )?;
-        }
-
-        if version < 14 {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream \
-                 ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 15 {
-            // The domain index stays: the query log's domain search seeks it
-            // by prefix.
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_query_logs_client_ts;
-                 CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client \
-                 ON query_logs(timestamp, domain, client_ip, doh_token);
-                 ANALYZE;",
-            )?;
-        }
-
-        if version < 16 {
-            // Statistics rollups (see `STATS_ROLLUP_SCHEMA`), backfilled from
-            // the rows already logged.
-            conn.execute_batch(STATS_ROLLUP_SCHEMA)?;
-            conn.execute_batch(STATS_ROLLUP_BACKFILL)?;
-        }
-
-        if version < 17 {
-            // Statistics read the rollups, so the timestamp-first statistics
-            // indexes go. What is left to index is the query log's filters, and
-            // each gets an index leading with what it matches, so a quiet token
-            // or record type no longer walks the whole window (see
-            // `Database::query_logs` for why the type index carries `blocked`).
-            // On large databases the freed pages cross `VACUUM_FREELIST_RATIO`,
-            // so the first maintenance after upgrading rewrites the file once.
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
-                 DROP INDEX IF EXISTS idx_query_logs_ts_upstream;
-                 DROP INDEX IF EXISTS idx_query_logs_ts_domain_client;
-                 CREATE INDEX IF NOT EXISTS idx_query_logs_token_ts \
-                 ON query_logs(doh_token, timestamp);
-                 CREATE INDEX IF NOT EXISTS idx_query_logs_blocked_ts \
-                 ON query_logs(blocked, timestamp);
-                 CREATE INDEX IF NOT EXISTS idx_query_logs_type_blocked_ts \
-                 ON query_logs(query_type, blocked, timestamp);
-                 ANALYZE;",
-            )?;
-        }
-
-        const LATEST_VERSION: i64 = 17;
-        if version < LATEST_VERSION {
-            conn.pragma_update(None, "user_version", LATEST_VERSION)?;
+        let latest_version = MIGRATIONS
+            .last()
+            .map_or(0, |&(target_version, _)| target_version);
+        if version < latest_version {
+            conn.pragma_update(None, "user_version", latest_version)?;
         }
 
         Ok(())
@@ -3076,6 +2902,215 @@ fn read_log_count(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
         return Ok(count);
     }
     conn.query_row("SELECT COUNT(*) FROM query_logs", [], |row| row.get(0))
+}
+
+type Migration = (
+    i64,
+    fn(&rusqlite::Connection) -> Result<(), rusqlite::Error>,
+);
+
+/// Forward-only schema steps in ascending order; the last entry is the latest
+/// `user_version`. Never edit a released step: add a new one.
+const MIGRATIONS: &[Migration] = &[
+    (1, migrate_to_v1),
+    (2, migrate_to_v2),
+    (3, migrate_to_v3),
+    (4, migrate_to_v4),
+    (5, migrate_to_v5),
+    (6, migrate_to_v6),
+    (7, migrate_to_v7),
+    (8, migrate_to_v8),
+    (9, migrate_to_v9),
+    (10, migrate_to_v10),
+    (11, migrate_to_v11),
+    (12, migrate_to_v12),
+    (13, migrate_to_v13),
+    (14, migrate_to_v14),
+    (15, migrate_to_v15),
+    (16, migrate_to_v16),
+    (17, migrate_to_v17),
+];
+
+fn migrate_to_v1(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    add_column_if_missing(conn, "query_logs", "cached", "INTEGER NOT NULL DEFAULT 0")
+}
+
+fn migrate_to_v2(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    add_column_if_missing(conn, "query_logs", "doh_token", "TEXT")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS doh_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE
+        )",
+    )
+}
+
+fn migrate_to_v3(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    add_column_if_missing(conn, "query_logs", "upstream", "TEXT")
+}
+
+fn migrate_to_v4(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    add_column_if_missing(conn, "query_logs", "result", "TEXT")
+}
+
+fn migrate_to_v5(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // ANALYZE is required after every index change here: with stale
+    // sqlite_stat1 the planner keeps the old plan.
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_query_logs_domain;
+         CREATE INDEX IF NOT EXISTS idx_query_logs_domain_ts ON query_logs(domain, timestamp);
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v6(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            ip TEXT,
+            user_agent TEXT
+        );
+        DELETE FROM settings WHERE key = 'admin_password_hash';
+        DELETE FROM settings WHERE key = 'sessions';",
+    )
+}
+
+fn migrate_to_v7(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    add_column_if_missing(
+        conn,
+        "query_logs",
+        "authenticated_data",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn migrate_to_v8(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name         TEXT    NOT NULL,
+            token_hash   TEXT    NOT NULL UNIQUE,
+            prefix       TEXT    NOT NULL,
+            created_at   INTEGER NOT NULL,
+            last_used_at INTEGER,
+            expires_at   INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);",
+    )
+}
+
+fn migrate_to_v9(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Session tokens become BLAKE2b digests. Existing raw-token rows are
+    // dropped, not rehashed: rehashing would leave the plaintext in
+    // freelist pages and the WAL anyway. Operators sign in once more.
+    conn.execute_batch(
+        "DELETE FROM sessions;
+         ALTER TABLE sessions RENAME COLUMN token TO token_hash;",
+    )
+}
+
+fn migrate_to_v10(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Versions 10, 11, 12, 14 and 15 add indexes for statistics that
+    // now read the rollups; version 17 drops them again.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_query_logs_client_ts \
+         ON query_logs(client_ip, doh_token, timestamp);
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v11(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_metrics \
+         ON query_logs(timestamp, blocked, cached, response_ms, query_type);
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v12(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // A VIRTUAL generated column costs no table space; the planner
+    // would not treat an index on the bare expression as covering.
+    add_column_if_missing(
+        conn,
+        "query_logs",
+        "has_result",
+        "INTEGER GENERATED ALWAYS AS (result IS NOT NULL AND result != '') VIRTUAL",
+    )?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
+         CREATE INDEX idx_query_logs_ts_metrics \
+         ON query_logs(timestamp, blocked, cached, response_ms, query_type, has_result);
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v13(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Seed the maintained row count (`QUERY_LOG_COUNT_KEY`); `COUNT(*)`
+    // walks a whole index. `WHERE true`: see `STATS_ROLLUP_BACKFILL`.
+    conn.execute_batch(
+        "INSERT INTO settings (key, value) \
+         SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    )
+}
+
+fn migrate_to_v14(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_query_logs_ts_upstream \
+         ON query_logs(timestamp, upstream, response_ms) WHERE upstream IS NOT NULL;
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v15(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // The domain index stays: the query log's domain search seeks it
+    // by prefix.
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_query_logs_client_ts;
+         CREATE INDEX IF NOT EXISTS idx_query_logs_ts_domain_client \
+         ON query_logs(timestamp, domain, client_ip, doh_token);
+         ANALYZE;",
+    )
+}
+
+fn migrate_to_v16(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Statistics rollups (see `STATS_ROLLUP_SCHEMA`), backfilled from
+    // the rows already logged.
+    conn.execute_batch(STATS_ROLLUP_SCHEMA)?;
+    conn.execute_batch(STATS_ROLLUP_BACKFILL)
+}
+
+fn migrate_to_v17(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Statistics read the rollups, so the timestamp-first statistics
+    // indexes go. What is left to index is the query log's filters, and
+    // each gets an index leading with what it matches, so a quiet token
+    // or record type no longer walks the whole window (see
+    // `Database::query_logs` for why the type index carries `blocked`).
+    // On large databases the freed pages cross `VACUUM_FREELIST_RATIO`,
+    // so the first maintenance after upgrading rewrites the file once.
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_query_logs_ts_metrics;
+         DROP INDEX IF EXISTS idx_query_logs_ts_upstream;
+         DROP INDEX IF EXISTS idx_query_logs_ts_domain_client;
+         CREATE INDEX IF NOT EXISTS idx_query_logs_token_ts \
+         ON query_logs(doh_token, timestamp);
+         CREATE INDEX IF NOT EXISTS idx_query_logs_blocked_ts \
+         ON query_logs(blocked, timestamp);
+         CREATE INDEX IF NOT EXISTS idx_query_logs_type_blocked_ts \
+         ON query_logs(query_type, blocked, timestamp);
+         ANALYZE;",
+    )
 }
 
 /// Add a column to `table` if it doesn't already exist.
