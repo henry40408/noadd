@@ -5,7 +5,7 @@ use noadd::admin::auth::{
     hash_password, new_session_store, prune_expired, revoke_session, session_log_id,
     spend_verify_cost, store_session, sweep_expired, validate_session, verify_password,
 };
-use noadd::db::Database;
+use noadd::db::{Database, NewSession};
 use tempfile::tempdir;
 
 async fn test_db() -> Database {
@@ -226,17 +226,24 @@ async fn sweep_expired_reports_both_counts() {
     // Matching DB rows, since `purge_expired_sessions` reads `last_seen` from disk.
     // The literals stand in for token hashes (`hash_session_token`); any
     // consistent strings do, since nothing here goes through a cookie.
-    db.insert_session("active", uid, now - 1_000, now, None, None)
-        .await
-        .unwrap();
-    db.insert_session(
-        "idle",
-        uid,
-        now - 1_000,
-        now - SESSION_IDLE_TIMEOUT_SECS - 1,
-        None,
-        None,
-    )
+    db.insert_session(NewSession {
+        token_hash: "active",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "idle",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        ip: None,
+        user_agent: None,
+    })
     .await
     .unwrap();
 

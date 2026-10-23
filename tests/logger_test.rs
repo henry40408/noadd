@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use hickory_proto::rr::RecordType;
-use noadd::db::Database;
+use noadd::db::{Database, LogFilter};
 use noadd::dns::handler::{QueryAction, QueryContext};
 use noadd::logger::QueryLogger;
 
@@ -43,7 +43,7 @@ async fn test_logger_flushes_on_threshold() {
     drop(tx);
     handle.await.unwrap();
 
-    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, LogFilter::default()).await.unwrap();
     assert_eq!(logs.len(), threshold);
 
     for log in &logs {
@@ -89,7 +89,7 @@ async fn test_logger_flushes_on_channel_close() {
     handle.await.unwrap();
 
     // Verify all entries were flushed on shutdown
-    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, LogFilter::default()).await.unwrap();
     assert_eq!(logs.len(), 3);
 
     for log in &logs {
@@ -133,7 +133,7 @@ async fn test_logger_flushes_on_interval() {
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     // Verify entries were flushed by the timer
-    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, LogFilter::default()).await.unwrap();
     assert_eq!(logs.len(), 2);
 
     drop(tx);

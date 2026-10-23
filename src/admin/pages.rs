@@ -1077,22 +1077,16 @@ pub async fn logs_page(
     let token_filter = as_filter(&token);
 
     let offset = (page - 1) * LOGS_PAGE_SIZE;
+    let filter = crate::db::LogFilter {
+        search: search.as_deref(),
+        blocked,
+        token: token_filter.as_deref(),
+        query_type: type_filter.as_deref(),
+    };
     // Run concurrently rather than as two sequential round trips.
     let (entries, total) = tokio::join!(
-        state.db.query_logs(
-            LOGS_PAGE_SIZE,
-            offset,
-            search.as_deref(),
-            blocked,
-            token_filter.as_deref(),
-            type_filter.as_deref(),
-        ),
-        state.db.count_logs(
-            search.as_deref(),
-            blocked,
-            token_filter.as_deref(),
-            type_filter.as_deref(),
-        ),
+        state.db.query_logs(LOGS_PAGE_SIZE, offset, filter),
+        state.db.count_logs(filter),
     );
     let entries = entries.unwrap_or_default();
     let total = total.unwrap_or_default();

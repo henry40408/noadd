@@ -13,7 +13,7 @@ use noadd::admin::auth::{
     new_session_store, store_session,
 };
 use noadd::cache::{CacheKey, ClientResponseProfile, DnsCache};
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, NewSession, QueryLogEntry};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -110,7 +110,14 @@ async fn build_app_opts(
             .unwrap();
         let now = noadd::now_unix();
         let sid = db
-            .insert_session(&hash_session_token(&token), uid, now, now, None, None)
+            .insert_session(NewSession {
+                token_hash: &hash_session_token(&token),
+                user_id: uid,
+                created_at: now,
+                last_seen: now,
+                ip: None,
+                user_agent: None,
+            })
             .await
             .unwrap();
         store_session(
@@ -1023,14 +1030,14 @@ async fn logout_revokes_every_live_session_named_by_a_cookie() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(
-            &hash_session_token(&token_b),
-            admin_id,
-            now,
-            now,
-            None,
-            None,
-        )
+        .insert_session(NewSession {
+            token_hash: &hash_session_token(&token_b),
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+            ip: None,
+            user_agent: None,
+        })
         .await
         .unwrap();
     store_session(
@@ -3318,14 +3325,14 @@ async fn change_password_revokes_other_sessions_of_same_user() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(
-            &hash_session_token(&token_b),
-            admin_id,
-            now,
-            now,
-            None,
-            None,
-        )
+        .insert_session(NewSession {
+            token_hash: &hash_session_token(&token_b),
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+            ip: None,
+            user_agent: None,
+        })
         .await
         .unwrap();
     store_session(
@@ -3453,7 +3460,14 @@ async fn change_password_keeps_other_operators_signed_in() {
     let token_c = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(&hash_session_token(&token_c), bob_id, now, now, None, None)
+        .insert_session(NewSession {
+            token_hash: &hash_session_token(&token_c),
+            user_id: bob_id,
+            created_at: now,
+            last_seen: now,
+            ip: None,
+            user_agent: None,
+        })
         .await
         .unwrap();
     store_session(
@@ -3503,14 +3517,14 @@ async fn change_password_deletes_revoked_rows_from_db() {
     let token_b = generate_token();
     let now = noadd::now_unix();
     let sid = db
-        .insert_session(
-            &hash_session_token(&token_b),
-            admin_id,
-            now,
-            now,
-            None,
-            None,
-        )
+        .insert_session(NewSession {
+            token_hash: &hash_session_token(&token_b),
+            user_id: admin_id,
+            created_at: now,
+            last_seen: now,
+            ip: None,
+            user_agent: None,
+        })
         .await
         .unwrap();
     store_session(

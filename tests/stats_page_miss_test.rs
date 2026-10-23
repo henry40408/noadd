@@ -6,7 +6,7 @@
 //! query cannot quietly give them back.
 
 use noadd::admin::stats::{self, StatsRange};
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, LogFilter, QueryLogEntry};
 use tempfile::tempdir;
 
 /// Fat enough that the table dwarfs its indexes, so a stray rowid lookup per
@@ -198,7 +198,13 @@ async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
     let db = dense_db().await;
 
     // For scale: a search matching every domain walks an index over every row.
-    let scan = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let scan = page_misses(&db, || {
+        db.count_logs(LogFilter {
+            search: Some("*"),
+            ..LogFilter::default()
+        })
+    })
+    .await;
     let readings = [
         (
             "summary",
@@ -241,7 +247,13 @@ async fn the_dashboard_readings_fold_rollups_rather_than_the_table() {
 async fn the_statistics_readings_fold_rollups_rather_than_the_table() {
     let db = dense_db().await;
 
-    let scan = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let scan = page_misses(&db, || {
+        db.count_logs(LogFilter {
+            search: Some("*"),
+            ..LogFilter::default()
+        })
+    })
+    .await;
     let readings = [
         (
             "stats scan",
@@ -282,7 +294,13 @@ async fn the_total_log_count_is_read_rather_than_counted() {
 
     let read = page_misses(&db, || db.total_log_count()).await;
     // `*` matches every domain: the same total, counted.
-    let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let counted = page_misses(&db, || {
+        db.count_logs(LogFilter {
+            search: Some("*"),
+            ..LogFilter::default()
+        })
+    })
+    .await;
 
     assert!(
         counted > 0,
@@ -301,10 +319,22 @@ async fn the_total_log_count_is_read_rather_than_counted() {
 async fn the_unfiltered_query_log_count_is_read_rather_than_counted() {
     let db = seeded_db().await;
 
-    let unfiltered = page_misses(&db, || db.count_logs(None, None, None, None)).await;
+    let unfiltered = page_misses(&db, || db.count_logs(LogFilter::default())).await;
     // A blank search box is no filter, so it takes the same path.
-    let blank = page_misses(&db, || db.count_logs(Some("  "), None, None, None)).await;
-    let counted = page_misses(&db, || db.count_logs(Some("*"), None, None, None)).await;
+    let blank = page_misses(&db, || {
+        db.count_logs(LogFilter {
+            search: Some("  "),
+            ..LogFilter::default()
+        })
+    })
+    .await;
+    let counted = page_misses(&db, || {
+        db.count_logs(LogFilter {
+            search: Some("*"),
+            ..LogFilter::default()
+        })
+    })
+    .await;
 
     assert!(
         counted > 0,
@@ -358,30 +388,77 @@ async fn the_query_log_filters_seek_their_indexes() {
         (
             "token page",
             page_misses(&db, || {
-                db.query_logs(50, 0, None, None, Some("quiet"), None)
+                db.query_logs(
+                    50,
+                    0,
+                    LogFilter {
+                        token: Some("quiet"),
+                        ..LogFilter::default()
+                    },
+                )
             })
             .await,
         ),
         (
             "token count",
-            page_misses(&db, || db.count_logs(None, None, Some("quiet"), None)).await,
+            page_misses(&db, || {
+                db.count_logs(LogFilter {
+                    token: Some("quiet"),
+                    ..LogFilter::default()
+                })
+            })
+            .await,
         ),
         (
             "type page",
-            page_misses(&db, || db.query_logs(50, 0, None, None, None, Some("TXT"))).await,
+            page_misses(&db, || {
+                db.query_logs(
+                    50,
+                    0,
+                    LogFilter {
+                        query_type: Some("TXT"),
+                        ..LogFilter::default()
+                    },
+                )
+            })
+            .await,
         ),
         (
             "type count",
-            page_misses(&db, || db.count_logs(None, None, None, Some("TXT"))).await,
+            page_misses(&db, || {
+                db.count_logs(LogFilter {
+                    query_type: Some("TXT"),
+                    ..LogFilter::default()
+                })
+            })
+            .await,
         ),
         (
             "blocked page 20",
-            page_misses(&db, || db.query_logs(50, 950, None, Some(true), None, None)).await,
+            page_misses(&db, || {
+                db.query_logs(
+                    50,
+                    950,
+                    LogFilter {
+                        blocked: Some(true),
+                        ..LogFilter::default()
+                    },
+                )
+            })
+            .await,
         ),
         (
             "type + blocked page",
             page_misses(&db, || {
-                db.query_logs(50, 0, None, Some(false), None, Some("TXT"))
+                db.query_logs(
+                    50,
+                    0,
+                    LogFilter {
+                        blocked: Some(false),
+                        query_type: Some("TXT"),
+                        ..LogFilter::default()
+                    },
+                )
             })
             .await,
         ),

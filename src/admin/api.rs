@@ -30,7 +30,7 @@ use crate::admin::auth::{
 use crate::admin::events;
 use crate::admin::stats;
 use crate::cache::DnsCache;
-use crate::db::{Database, QueryLogEntry};
+use crate::db::{Database, LogFilter, NewApiKey, NewSession, QueryLogEntry};
 use crate::dns::handler::DnsHandler;
 use crate::filter::engine::FilterEngine;
 use crate::filter::lists::ListManager;
@@ -893,14 +893,14 @@ pub(crate) async fn start_password_session(
     let token_hash = crate::admin::auth::hash_session_token(&token);
     let session_id = state
         .db
-        .insert_session(
-            &token_hash,
-            auth.id,
-            now,
-            now,
-            Some(&ip.to_string()),
+        .insert_session(NewSession {
+            token_hash: &token_hash,
+            user_id: auth.id,
+            created_at: now,
+            last_seen: now,
+            ip: Some(&ip.to_string()),
             user_agent,
-        )
+        })
         .await
         .map_err(|_err| LoginError::Internal)?;
     store_session(
@@ -1750,14 +1750,14 @@ async fn rotate_own_session(
     // Persisted before anything is destroyed.
     let session_id = match state
         .db
-        .insert_session(
-            &token_hash,
+        .insert_session(NewSession {
+            token_hash: &token_hash,
             user_id,
-            now,
-            now,
-            Some(&ip.to_string()),
+            created_at: now,
+            last_seen: now,
+            ip: Some(&ip.to_string()),
             user_agent,
-        )
+        })
         .await
     {
         Ok(id) => id,
@@ -2908,7 +2908,14 @@ pub(crate) async fn issue_api_key(
     let now = crate::now_unix();
     let id = state
         .db
-        .insert_api_key(user_id, &name, &hash, &prefix, now, expires_at)
+        .insert_api_key(NewApiKey {
+            user_id,
+            name: &name,
+            token_hash: &hash,
+            prefix: &prefix,
+            created_at: now,
+            expires_at,
+        })
         .await
         .map_err(|_err| ApiKeyError::Internal)?;
     tracing::info!(
@@ -3443,11 +3450,15 @@ async fn get_logs(
     let blocked = query.blocked;
     let token = query.token.as_deref();
     let query_type = query.query_type.as_deref();
+    let filter = LogFilter {
+        search,
+        blocked,
+        token,
+        query_type,
+    };
     let (logs, total) = tokio::join!(
-        state
-            .db
-            .query_logs(limit, offset, search, blocked, token, query_type),
-        state.db.count_logs(search, blocked, token, query_type),
+        state.db.query_logs(limit, offset, filter),
+        state.db.count_logs(filter),
     );
     let logs = logs.map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
     let total = total.map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -14,7 +14,7 @@ use noadd::admin::auth::{
 };
 use noadd::admin::forward_auth::ForwardAuthConfig;
 use noadd::cache::DnsCache;
-use noadd::db::Database;
+use noadd::db::{Database, NewSession};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -63,7 +63,14 @@ async fn build(
         let token = generate_token();
         let now = noadd::now_unix();
         let sid = db
-            .insert_session(&hash_session_token(&token), uid, now, now, None, None)
+            .insert_session(NewSession {
+                token_hash: &hash_session_token(&token),
+                user_id: uid,
+                created_at: now,
+                last_seen: now,
+                ip: None,
+                user_agent: None,
+            })
             .await
             .unwrap();
         store_session(
@@ -429,9 +436,16 @@ async fn revoke_others_keeps_the_current_session() {
     let uid = db.get_user_auth("admin").await.unwrap().unwrap().id;
     let other = generate_token();
     let now = noadd::now_unix();
-    db.insert_session(&hash_session_token(&other), uid, now, now, None, None)
-        .await
-        .unwrap();
+    db.insert_session(NewSession {
+        token_hash: &hash_session_token(&other),
+        user_id: uid,
+        created_at: now,
+        last_seen: now,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
     assert_eq!(db.list_sessions().await.unwrap().len(), 2);
 
     let req = Request::builder()

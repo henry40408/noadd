@@ -13,7 +13,7 @@
 //! suggestions, the one windowed reading.
 
 use noadd::admin::stats::domain_suggestions;
-use noadd::db::Database;
+use noadd::db::{Database, LogFilter};
 use noadd::now_unix;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -187,18 +187,18 @@ async fn logs_page_miss_bench() {
             filter.token.as_deref(),
             filter.query_type.as_deref(),
         );
+        let log_filter = LogFilter {
+            search,
+            blocked: filter.blocked,
+            token,
+            query_type,
+        };
         for (page_label, page) in [("page 1", 1), ("page 20", DEEP_PAGE)] {
             let offset = (page - 1) * PAGE_SIZE;
-            let n = page_misses(&db, || {
-                db.query_logs(PAGE_SIZE, offset, search, filter.blocked, token, query_type)
-            })
-            .await;
+            let n = page_misses(&db, || db.query_logs(PAGE_SIZE, offset, log_filter)).await;
             rows.push((format!("{} — list {page_label}", filter.label), n));
         }
-        let n = page_misses(&db, || {
-            db.count_logs(search, filter.blocked, token, query_type)
-        })
-        .await;
+        let n = page_misses(&db, || db.count_logs(log_filter)).await;
         rows.push((format!("{} — count", filter.label), n));
     }
     rows.push((

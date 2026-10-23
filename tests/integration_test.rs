@@ -9,7 +9,7 @@ use hickory_proto::serialize::binary::BinDecodable;
 use tempfile::NamedTempFile;
 
 use noadd::cache::DnsCache;
-use noadd::db::Database;
+use noadd::db::{Database, LogFilter};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::filter::lists::ListManager;
@@ -71,7 +71,7 @@ async fn test_full_query_pipeline_block() {
     drop(handler);
     logger_handle.await.unwrap();
 
-    let logs = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
     assert!(!logs.is_empty(), "should have at least one log entry");
     let log = &logs[0];
     assert_eq!(log.domain, "ads.blocked.com");
@@ -116,7 +116,7 @@ async fn test_full_query_pipeline_allow() {
     drop(handler);
     logger_handle.await.unwrap();
 
-    let logs = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
     assert!(!logs.is_empty(), "should have at least one log entry");
     let log = &logs[0];
     assert_eq!(log.domain, "example.com");
