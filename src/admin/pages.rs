@@ -23,8 +23,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use crate::admin::api::{
-    ApiKeyError, AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginError, MIN_PASSWORD_LENGTH,
-    OperatorError, PasswordChangeError, ReauthError, RuleError, SettingsError, SetupError,
+    ApiKeyError, AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginAttempt, LoginError,
+    MIN_PASSWORD_LENGTH, NewOperator, OperatorError, PasswordChange, PasswordChangeError,
+    ReauthError, RuleError, SessionActor, SessionRevocation, SettingsError, SetupError,
     apply_settings, change_password_for_session, create_custom_rule, create_filter_list,
     create_first_operator, create_operator, end_session, issue_api_key, modify_filter_list,
     needs_setup, remove_operator, start_password_session,
@@ -800,7 +801,8 @@ pub async fn logout_submit(
     jar: CookieJar,
 ) -> Response {
     let via_forward_auth = auth.via_forward_auth;
-    let (jar, redirect_to) = end_session(&state, &auth, connect.as_deref(), &headers, jar).await;
+    let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
+    let (jar, redirect_to) = end_session(&state, &auth, ip, jar).await;
 
     if let Some(url) = redirect_to {
         // The proxy owns this session; hand the browser to its logout URL.
@@ -858,11 +860,13 @@ pub async fn login_submit(
     let next = form.next.as_deref().and_then(safe_next);
     match start_password_session(
         &state,
-        connect.as_deref(),
-        &headers,
+        LoginAttempt {
+            connect: connect.as_deref(),
+            headers: &headers,
+            username: &form.username,
+            password: &form.password,
+        },
         jar,
-        &form.username,
-        &form.password,
     )
     .await
     {
@@ -967,11 +971,13 @@ pub async fn setup_submit(
 
     match start_password_session(
         &state,
-        connect.as_deref(),
-        &headers,
+        LoginAttempt {
+            connect: connect.as_deref(),
+            headers: &headers,
+            username: &form.username,
+            password: &form.password,
+        },
         jar,
-        &form.username,
-        &form.password,
     )
     .await
     {
@@ -1014,10 +1020,24 @@ impl LogsQuery {
     }
 }
 
+/// The filters a `/logs` view applies, as [`LogsQuery::applied`] cleaned them.
+struct AppliedLogFilters<'a> {
+    q: &'a str,
+    action: &'a str,
+    query_type: &'a str,
+    token: &'a str,
+}
+
 /// Rebuild the page's query string, with `page` replaced.
 ///
 /// The pager must carry every filter, or paging silently drops them.
-fn logs_query_string(q: &str, action: &str, query_type: &str, token: &str, page: i64) -> String {
+fn logs_query_string(filters: &AppliedLogFilters<'_>, page: i64) -> String {
+    let AppliedLogFilters {
+        q,
+        action,
+        query_type,
+        token,
+    } = *filters;
     let mut parts: Vec<String> = Vec::new();
     let mut push = |key: &str, value: &str| {
         if !value.is_empty() {
@@ -1142,8 +1162,15 @@ pub async fn logs_page(
 
     // `i64::div_ceil` is unstable (only the unsigned one is stable).
     let total_pages = ((total + LOGS_PAGE_SIZE - 1) / LOGS_PAGE_SIZE).max(1);
-    let href_for =
-        |page: i64| logs_href(&logs_query_string(&q, &action, &query_type, &token, page));
+    let href_for = |page: i64| {
+        let filters = AppliedLogFilters {
+            q: &q,
+            action: &action,
+            query_type: &query_type,
+            token: &token,
+        };
+        logs_href(&logs_query_string(&filters, page))
+    };
 
     let domain_suggestions =
         crate::admin::stats::domain_suggestions(&state.db, crate::now_unix()).await;
@@ -1950,18 +1977,16 @@ pub async fn account_password_submit(
     };
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
 
-    match change_password_for_session(
-        &state,
-        &headers,
-        jar,
-        auth.user_id,
-        &token_hash,
-        ip,
-        &form.current_password,
-        &form.new_password,
-    )
-    .await
-    {
+    let change = PasswordChange {
+        actor: SessionActor {
+            user_id: auth.user_id,
+            token_hash: &token_hash,
+            ip,
+        },
+        current_password: &form.current_password,
+        new_password: &form.new_password,
+    };
+    match change_password_for_session(&state, &headers, jar, change).await {
         Ok(jar) => (
             set_flash(jar, Flash::PasswordChanged),
             Redirect::to("/account"),
@@ -2012,7 +2037,12 @@ async fn confirm_form_password(
             "This action needs a browser session".to_string(),
         ));
     };
-    match crate::admin::api::confirm_password(state, auth.user_id, token_hash, ip, password).await {
+    let actor = SessionActor {
+        user_id: auth.user_id,
+        token_hash,
+        ip,
+    };
+    match crate::admin::api::confirm_password(state, actor, password).await {
         Ok(()) => Ok(()),
         Err(ReauthError::RateLimited) => Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -2079,7 +2109,13 @@ pub async fn account_operator_add_submit(
         return reject(status, message, jar).await;
     }
 
-    match create_operator(&state, auth.user_id, ip, &form.username, &form.password).await {
+    let new_operator = NewOperator {
+        actor_user_id: auth.user_id,
+        ip,
+        username: &form.username,
+        password: &form.password,
+    };
+    match create_operator(&state, new_operator).await {
         Ok(_id) => account_saved(jar, Flash::AccountSaved),
         Err(err) => {
             let (status, message) = match err {
@@ -2173,15 +2209,13 @@ pub async fn account_session_revoke_submit(
     jar: CookieJar,
 ) -> Response {
     let ip = crate::admin::api::client_ip(&state, connect.as_deref(), &headers);
-    match crate::admin::api::revoke_session_row(
-        &state,
-        auth.user_id,
+    let revocation = SessionRevocation {
+        actor_user_id: auth.user_id,
         ip,
         id,
-        auth.session_token_hash.as_deref(),
-    )
-    .await
-    {
+        current_hash: auth.session_token_hash.as_deref(),
+    };
+    match crate::admin::api::revoke_session_row(&state, revocation).await {
         // Revoking your own session signs you out: go to sign-in, cookies cleared.
         Ok(true) => (
             crate::admin::api::clear_session_cookies(jar),
@@ -2385,6 +2419,14 @@ async fn current_settings(state: &AppState) -> std::collections::HashMap<String,
     out
 }
 
+/// What the last save attempt left to tell the operator; the default is a plain GET.
+#[derive(Default)]
+struct SettingsOutcome {
+    error_field: &'static str,
+    error_message: String,
+    saved: bool,
+}
+
 /// Build the page from a set of values, whatever their source.
 ///
 /// The persisted settings on a GET, the *submitted* ones on a rejected save, so
@@ -2392,10 +2434,13 @@ async fn current_settings(state: &AppState) -> std::collections::HashMap<String,
 fn settings_template(
     shell: ShellData,
     values: &std::collections::HashMap<String, String>,
-    error_field: &'static str,
-    error_message: String,
-    saved: bool,
+    outcome: SettingsOutcome,
 ) -> SettingsTemplate {
+    let SettingsOutcome {
+        error_field,
+        error_message,
+        saved,
+    } = outcome;
     let get = |key: &str| values.get(key).cloned().unwrap_or_default();
     SettingsTemplate {
         shell,
@@ -2439,7 +2484,14 @@ pub async fn settings_page(
     let values = current_settings(&state).await;
     (
         jar,
-        settings_template(shell, &values, "", String::new(), saved),
+        settings_template(
+            shell,
+            &values,
+            SettingsOutcome {
+                saved,
+                ..SettingsOutcome::default()
+            },
+        ),
     )
 }
 
@@ -2517,7 +2569,15 @@ pub async fn settings_submit(
             (
                 status,
                 jar,
-                settings_template(shell, &values, field, message, false),
+                settings_template(
+                    shell,
+                    &values,
+                    SettingsOutcome {
+                        error_field: field,
+                        error_message: message,
+                        saved: false,
+                    },
+                ),
             )
                 .into_response()
         }
@@ -3094,14 +3154,24 @@ fn registry_group_class(group_name: &str) -> &'static str {
     }
 }
 
+/// What a batch add left to report; the default is a plain GET.
+#[derive(Default)]
+struct RegistryBatchOutcome {
+    added_count: usize,
+    failures: Vec<RegistryFailureView>,
+}
+
 /// Build the page for this view, whatever brought the operator to it.
 async fn build_registry(
     state: &AppState,
     query: &RegistryQuery,
     shell: ShellData,
-    added_count: usize,
-    failures: Vec<RegistryFailureView>,
+    outcome: RegistryBatchOutcome,
 ) -> RegistryTemplate {
+    let RegistryBatchOutcome {
+        added_count,
+        failures,
+    } = outcome;
     let search = query.search();
     let group_id = query.group_id();
     let show_deprecated = query.show_deprecated();
@@ -3199,7 +3269,7 @@ pub async fn registry_page(
     let (shell, jar) = ShellData::build_for(&state, "/filters", &headers, jar).await;
     (
         jar,
-        build_registry(&state, &query, shell, 0, Vec::new()).await,
+        build_registry(&state, &query, shell, RegistryBatchOutcome::default()).await,
     )
 }
 
@@ -3294,7 +3364,16 @@ pub async fn registry_add_submit(
         Ok(()) => filters_saved(jar, Flash::FiltersSaved),
         Err((added, failures)) => (
             jar,
-            build_registry(&state, &query, shell, added, failures).await,
+            build_registry(
+                &state,
+                &query,
+                shell,
+                RegistryBatchOutcome {
+                    added_count: added,
+                    failures,
+                },
+            )
+            .await,
         )
             .into_response(),
     }
