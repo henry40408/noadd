@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use noadd::db::{Database, QueryLogEntry};
+use noadd::db::{Database, LogFilter, QueryLogEntry};
 use tempfile::tempdir;
 use tokio::time::timeout;
 
@@ -83,6 +83,6 @@ async fn reader_and_writer_run_concurrently_without_error() {
 async fn read_only_routing_does_not_break_writes() {
     let db = open_db().await;
     db.insert_query_logs(&[sample_entry(1)]).await.unwrap();
-    let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    let rows = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
     assert_eq!(rows.len(), 1);
 }

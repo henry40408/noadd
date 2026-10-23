@@ -11,7 +11,7 @@ use noadd::admin::auth::{
     store_session,
 };
 use noadd::cache::DnsCache;
-use noadd::db::Database;
+use noadd::db::{Database, NewSession};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -55,7 +55,14 @@ async fn setup_with_db() -> (axum::Router, String, Database) {
     let now = noadd::now_unix();
     let token = generate_token();
     let sid = db
-        .insert_session(&hash_session_token(&token), uid, now, now, None, None)
+        .insert_session(NewSession {
+            token_hash: &hash_session_token(&token),
+            user_id: uid,
+            created_at: now,
+            last_seen: now,
+            ip: None,
+            user_agent: None,
+        })
         .await
         .unwrap();
     store_session(

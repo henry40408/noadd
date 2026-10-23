@@ -9,7 +9,7 @@ use tower::ServiceExt; // oneshot
 use noadd::admin::api::{AppState, ServerInfo, admin_router};
 use noadd::admin::auth::{RateLimiter, generate_api_key, new_session_store};
 use noadd::cache::DnsCache;
-use noadd::db::Database;
+use noadd::db::{Database, NewApiKey};
 use noadd::dns::handler::DnsHandler;
 use noadd::filter::engine::FilterEngine;
 use noadd::upstream::forwarder::{UpstreamConfig, UpstreamForwarder};
@@ -110,9 +110,16 @@ async fn bearer_api_key_authenticates_like_a_session() {
     let (app, db, _sessions) = build_app().await;
 
     let (full, prefix, hash) = generate_api_key();
-    db.insert_api_key(1, "test", &hash, &prefix, 0, None)
-        .await
-        .unwrap();
+    db.insert_api_key(NewApiKey {
+        user_id: 1,
+        name: "test",
+        token_hash: &hash,
+        prefix: &prefix,
+        created_at: 0,
+        expires_at: None,
+    })
+    .await
+    .unwrap();
 
     // Valid bearer key -> 200.
     let res = app
@@ -163,9 +170,16 @@ async fn api_key_lifecycle_over_http() {
 
     // Authenticate management calls with a bootstrap key for user 1.
     let (boot, prefix, hash) = generate_api_key();
-    db.insert_api_key(1, "boot", &hash, &prefix, 0, None)
-        .await
-        .unwrap();
+    db.insert_api_key(NewApiKey {
+        user_id: 1,
+        name: "boot",
+        token_hash: &hash,
+        prefix: &prefix,
+        created_at: 0,
+        expires_at: None,
+    })
+    .await
+    .unwrap();
     let auth = format!("Bearer {boot}");
 
     // Create returns the full token exactly once. Minting needs a browser
@@ -236,9 +250,16 @@ async fn an_api_key_cannot_mint_another_api_key() {
     use serde_json::json;
     let (app, db, _sessions) = build_app().await;
     let (boot, prefix, hash) = generate_api_key();
-    db.insert_api_key(1, "boot", &hash, &prefix, 0, None)
-        .await
-        .unwrap();
+    db.insert_api_key(NewApiKey {
+        user_id: 1,
+        name: "boot",
+        token_hash: &hash,
+        prefix: &prefix,
+        created_at: 0,
+        expires_at: None,
+    })
+    .await
+    .unwrap();
 
     let res = app
         .oneshot(
@@ -271,9 +292,16 @@ async fn docs_endpoints_require_auth() {
     let (app, db, _sessions) = build_app().await;
 
     let (full, prefix, hash) = generate_api_key();
-    db.insert_api_key(1, "test", &hash, &prefix, 0, None)
-        .await
-        .unwrap();
+    db.insert_api_key(NewApiKey {
+        user_id: 1,
+        name: "test",
+        token_hash: &hash,
+        prefix: &prefix,
+        created_at: 0,
+        expires_at: None,
+    })
+    .await
+    .unwrap();
 
     for uri in ["/api/openapi.json", "/api/docs"] {
         // No credentials -> 401.

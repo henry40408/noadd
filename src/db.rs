@@ -62,6 +62,39 @@ impl ReadPool {
     }
 }
 
+/// Narrows the query log for [`Database::query_logs`] and
+/// [`Database::count_logs`]; a `None` field leaves that column unfiltered.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LogFilter<'a> {
+    pub search: Option<&'a str>,
+    pub blocked: Option<bool>,
+    pub token: Option<&'a str>,
+    pub query_type: Option<&'a str>,
+}
+
+/// An API key to store; `token_hash` is the digest, never the raw token.
+#[derive(Debug, Clone, Copy)]
+pub struct NewApiKey<'a> {
+    pub user_id: i64,
+    pub name: &'a str,
+    pub token_hash: &'a str,
+    pub prefix: &'a str,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+}
+
+/// A session to store; `token_hash` is the digest, never the raw token — see
+/// [`SessionRow::token_hash`].
+#[derive(Debug, Clone, Copy)]
+pub struct NewSession<'a> {
+    pub token_hash: &'a str,
+    pub user_id: i64,
+    pub created_at: i64,
+    pub last_seen: i64,
+    pub ip: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryLogEntry {
     pub timestamp: i64,
@@ -1017,14 +1050,12 @@ impl Database {
         &self,
         limit: i64,
         offset: i64,
-        search: Option<&str>,
-        blocked: Option<bool>,
-        token: Option<&str>,
-        query_type: Option<&str>,
+        filter: LogFilter<'_>,
     ) -> Result<Vec<QueryLogEntry>, DbError> {
-        let search = search.map(std::string::ToString::to_string);
-        let token = token.map(std::string::ToString::to_string);
-        let query_type = query_type.map(std::string::ToString::to_string);
+        let blocked = filter.blocked;
+        let search = filter.search.map(std::string::ToString::to_string);
+        let token = filter.token.map(std::string::ToString::to_string);
+        let query_type = filter.query_type.map(std::string::ToString::to_string);
         let rows = self
             .reader()
             .call(move |conn| {
@@ -1032,10 +1063,12 @@ impl Database {
                 let mut sql = format!("SELECT {COLUMNS} FROM query_logs WHERE 1=1");
                 let mut param_values = append_log_filters(
                     &mut sql,
-                    search.as_deref(),
-                    blocked,
-                    token.as_deref(),
-                    query_type.as_deref(),
+                    LogFilter {
+                        search: search.as_deref(),
+                        blocked,
+                        token: token.as_deref(),
+                        query_type: query_type.as_deref(),
+                    },
                 );
                 if let (Some(qt), [_]) = (&query_type, param_values.as_slice()) {
                     // A query type alone reads `(query_type, blocked, timestamp)`
@@ -1120,26 +1153,23 @@ impl Database {
         Ok(exists != 0)
     }
 
-    pub async fn count_logs(
-        &self,
-        search: Option<&str>,
-        blocked: Option<bool>,
-        token: Option<&str>,
-        query_type: Option<&str>,
-    ) -> Result<i64, DbError> {
-        let search = search.map(std::string::ToString::to_string);
-        let token = token.map(std::string::ToString::to_string);
-        let query_type = query_type.map(std::string::ToString::to_string);
+    pub async fn count_logs(&self, filter: LogFilter<'_>) -> Result<i64, DbError> {
+        let blocked = filter.blocked;
+        let search = filter.search.map(std::string::ToString::to_string);
+        let token = filter.token.map(std::string::ToString::to_string);
+        let query_type = filter.query_type.map(std::string::ToString::to_string);
         let count = self
             .reader()
             .call(move |conn| {
                 let mut sql = "SELECT COUNT(*) FROM query_logs WHERE 1=1".to_string();
                 let param_values = append_log_filters(
                     &mut sql,
-                    search.as_deref(),
-                    blocked,
-                    token.as_deref(),
-                    query_type.as_deref(),
+                    LogFilter {
+                        search: search.as_deref(),
+                        blocked,
+                        token: token.as_deref(),
+                        query_type: query_type.as_deref(),
+                    },
                 );
                 // Unfiltered: use the maintained count instead of walking an index.
                 if param_values.is_empty() {
@@ -1535,18 +1565,16 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub async fn insert_api_key(
-        &self,
-        user_id: i64,
-        name: &str,
-        token_hash: &str,
-        prefix: &str,
-        created_at: i64,
-        expires_at: Option<i64>,
-    ) -> Result<i64, DbError> {
-        let name = name.to_string();
-        let token_hash = token_hash.to_string();
-        let prefix = prefix.to_string();
+    pub async fn insert_api_key(&self, key: NewApiKey<'_>) -> Result<i64, DbError> {
+        let NewApiKey {
+            user_id,
+            created_at,
+            expires_at,
+            ..
+        } = key;
+        let name = key.name.to_string();
+        let token_hash = key.token_hash.to_string();
+        let prefix = key.prefix.to_string();
         let id = self
             .conn
             .call(move |conn| {
@@ -1820,20 +1848,16 @@ impl Database {
         Ok(val)
     }
 
-    /// Persist a session. `token_hash` is the digest, never the raw token —
-    /// see [`SessionRow::token_hash`].
-    pub async fn insert_session(
-        &self,
-        token_hash: &str,
-        user_id: i64,
-        created_at: i64,
-        last_seen: i64,
-        ip: Option<&str>,
-        user_agent: Option<&str>,
-    ) -> Result<i64, DbError> {
-        let token_hash = token_hash.to_string();
-        let ip = ip.map(std::string::ToString::to_string);
-        let user_agent = user_agent.map(std::string::ToString::to_string);
+    pub async fn insert_session(&self, session: NewSession<'_>) -> Result<i64, DbError> {
+        let NewSession {
+            user_id,
+            created_at,
+            last_seen,
+            ..
+        } = session;
+        let token_hash = session.token_hash.to_string();
+        let ip = session.ip.map(std::string::ToString::to_string);
+        let user_agent = session.user_agent.map(std::string::ToString::to_string);
         let id = self
             .conn
             .call(move |conn| {
@@ -3091,11 +3115,14 @@ fn add_column_if_missing(
 /// Domains are stored lowercase, so the term is lowercased.
 fn append_log_filters(
     sql: &mut String,
-    search: Option<&str>,
-    blocked: Option<bool>,
-    token: Option<&str>,
-    query_type: Option<&str>,
+    filter: LogFilter<'_>,
 ) -> Vec<Box<dyn rusqlite::types::ToSql>> {
+    let LogFilter {
+        search,
+        blocked,
+        token,
+        query_type,
+    } = filter;
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(s) = search {
         let s = s.trim().to_lowercase();
@@ -3159,7 +3186,14 @@ mod tests {
 
         // Table exists and is usable; user row preserved.
         let id = db
-            .insert_api_key(1, "ci", "deadbeef", "noadd_dead", 200, None)
+            .insert_api_key(NewApiKey {
+                user_id: 1,
+                name: "ci",
+                token_hash: "deadbeef",
+                prefix: "noadd_dead",
+                created_at: 200,
+                expires_at: None,
+            })
             .await
             .unwrap();
         assert!(id > 0);
@@ -3195,7 +3229,14 @@ mod tests {
 
         // And the renamed column is what the queries now use end to end.
         let sid = db
-            .insert_session("a-hash", 1, 200, 200, None, None)
+            .insert_session(NewSession {
+                token_hash: "a-hash",
+                user_id: 1,
+                created_at: 200,
+                last_seen: 200,
+                ip: None,
+                user_agent: None,
+            })
             .await
             .unwrap();
         let rows = db.list_sessions().await.unwrap();
@@ -3216,18 +3257,32 @@ mod tests {
         db.create_user("op2", "y", 100).await.unwrap(); // id = 2
 
         // Live key resolves to its owner.
-        db.insert_api_key(1, "live", "hash-live", "noadd_aaaa", 100, None)
-            .await
-            .unwrap();
+        db.insert_api_key(NewApiKey {
+            user_id: 1,
+            name: "live",
+            token_hash: "hash-live",
+            prefix: "noadd_aaaa",
+            created_at: 100,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
         assert_eq!(
             db.validate_api_key("hash-live", 200).await.unwrap(),
             Some(1)
         );
 
         // Expired key is rejected.
-        db.insert_api_key(1, "old", "hash-old", "noadd_bbbb", 100, Some(150))
-            .await
-            .unwrap();
+        db.insert_api_key(NewApiKey {
+            user_id: 1,
+            name: "old",
+            token_hash: "hash-old",
+            prefix: "noadd_bbbb",
+            created_at: 100,
+            expires_at: Some(150),
+        })
+        .await
+        .unwrap();
         assert_eq!(db.validate_api_key("hash-old", 200).await.unwrap(), None);
 
         // Unknown hash -> None.
@@ -3246,9 +3301,16 @@ mod tests {
         let path = dir.path().join("throttle.db");
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
         db.create_user("op", "x", 100).await.unwrap(); // id = 1
-        db.insert_api_key(1, "ci", "hash-ci", "noadd_cccc", 100, None)
-            .await
-            .unwrap();
+        db.insert_api_key(NewApiKey {
+            user_id: 1,
+            name: "ci",
+            token_hash: "hash-ci",
+            prefix: "noadd_cccc",
+            created_at: 100,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
 
         async fn last_used(db: &Database) -> Option<i64> {
             db.list_api_keys_for_user(1).await.unwrap()[0].last_used_at
@@ -3282,9 +3344,16 @@ mod tests {
         let db = Database::open(path.to_str().unwrap()).await.unwrap();
         db.create_user("a", "x", 100).await.unwrap(); // id 1
         db.create_user("b", "y", 100).await.unwrap(); // id 2 (so delete isn't the last operator)
-        db.insert_api_key(1, "k", "h", "noadd_cccc", 100, None)
-            .await
-            .unwrap();
+        db.insert_api_key(NewApiKey {
+            user_id: 1,
+            name: "k",
+            token_hash: "h",
+            prefix: "noadd_cccc",
+            created_at: 100,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
         assert_eq!(
             db.delete_user(1).await.unwrap(),
             crate::db::DeleteUserOutcome::Deleted
@@ -3532,23 +3601,41 @@ mod tests {
                 "{label}: blocked, resolved and empty"
             );
             assert_eq!(
-                db.query_logs(10, 0, None, None, Some("phone"), None)
-                    .await
-                    .unwrap()
-                    .len(),
+                db.query_logs(
+                    10,
+                    0,
+                    LogFilter {
+                        token: Some("phone"),
+                        ..LogFilter::default()
+                    }
+                )
+                .await
+                .unwrap()
+                .len(),
                 1
             );
             assert_eq!(
-                db.query_logs(10, 0, None, None, None, Some("A"))
-                    .await
-                    .unwrap()
-                    .len(),
+                db.query_logs(
+                    10,
+                    0,
+                    LogFilter {
+                        query_type: Some("A"),
+                        ..LogFilter::default()
+                    }
+                )
+                .await
+                .unwrap()
+                .len(),
                 6
             );
             assert_eq!(
-                db.count_logs(None, Some(true), None, Some("A"))
-                    .await
-                    .unwrap(),
+                db.count_logs(LogFilter {
+                    blocked: Some(true),
+                    query_type: Some("A"),
+                    ..LogFilter::default()
+                })
+                .await
+                .unwrap(),
                 1
             );
         }
@@ -3672,7 +3759,7 @@ mod tests {
             authenticated_data: true,
         };
         db.insert_query_logs(&[entry]).await.unwrap();
-        let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+        let rows = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].authenticated_data);
     }
@@ -3693,7 +3780,7 @@ mod tests {
         db.prune_logs_before(0).await.unwrap();
         db.run_maintenance().await.unwrap();
 
-        let logs = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+        let logs = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
         assert_eq!(
             logs.len(),
             10,

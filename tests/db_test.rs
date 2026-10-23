@@ -2,7 +2,7 @@ use noadd::admin::auth::{
     SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, new_session_store, prune_expired,
     store_session,
 };
-use noadd::db::{Database, DeleteUserOutcome, QueryLogEntry};
+use noadd::db::{Database, DeleteUserOutcome, LogFilter, NewSession, QueryLogEntry};
 use tempfile::tempdir;
 
 async fn test_db() -> Database {
@@ -136,21 +136,35 @@ async fn test_insert_and_query_logs() {
     ];
     db.insert_query_logs(&entries).await.unwrap();
 
-    let logs = db.query_logs(100, 0, None, None, None, None).await.unwrap();
+    let logs = db.query_logs(100, 0, LogFilter::default()).await.unwrap();
     assert_eq!(logs.len(), 2);
     // Should be ordered by timestamp desc
     assert_eq!(logs[0].domain, "ads.tracker.com");
     assert_eq!(logs[1].domain, "example.com");
 
     let blocked = db
-        .query_logs(100, 0, None, Some(true), None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                blocked: Some(true),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0].domain, "ads.tracker.com");
 
     let searched = db
-        .query_logs(100, 0, Some("example"), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("example"),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(searched.len(), 1);
@@ -219,20 +233,37 @@ async fn test_query_logs_search_prefix_fastpath() {
     // Plain term -> prefix match: "example" matches "example.com" but NOT
     // "api.example.com" or "subexample.net".
     let prefix = db
-        .query_logs(100, 0, Some("example"), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("example"),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(prefix.len(), 1);
     assert_eq!(prefix[0].domain, "example.com");
     let prefix_total = db
-        .count_logs(Some("example"), None, None, None)
+        .count_logs(LogFilter {
+            search: Some("example"),
+            ..LogFilter::default()
+        })
         .await
         .unwrap();
     assert_eq!(prefix_total, 1);
 
     // Case-insensitive: search term is lowercased before matching.
     let mixed = db
-        .query_logs(100, 0, Some("ExAmPlE"), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("ExAmPlE"),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(mixed.len(), 1);
@@ -240,19 +271,40 @@ async fn test_query_logs_search_prefix_fastpath() {
 
     // Wildcards -> substring LIKE fallback.
     let glob_substring = db
-        .query_logs(100, 0, Some("*example*"), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("*example*"),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(glob_substring.len(), 3);
     let like_substring = db
-        .query_logs(100, 0, Some("%example%"), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("%example%"),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(like_substring.len(), 3);
 
     // Empty / whitespace-only search behaves as "no filter".
     let blank = db
-        .query_logs(100, 0, Some("   "), None, None, None)
+        .query_logs(
+            100,
+            0,
+            LogFilter {
+                search: Some("   "),
+                ..LogFilter::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(blank.len(), entries.len());
@@ -279,16 +331,16 @@ async fn test_query_logs_pagination() {
     }
     db.insert_query_logs(&entries).await.unwrap();
 
-    let page1 = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    let page1 = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
     assert_eq!(page1.len(), 10);
     // Ordered desc: domain24, domain23, ...
     assert_eq!(page1[0].domain, "domain24.com");
 
-    let page2 = db.query_logs(10, 10, None, None, None, None).await.unwrap();
+    let page2 = db.query_logs(10, 10, LogFilter::default()).await.unwrap();
     assert_eq!(page2.len(), 10);
     assert_eq!(page2[0].domain, "domain14.com");
 
-    let page3 = db.query_logs(10, 20, None, None, None, None).await.unwrap();
+    let page3 = db.query_logs(10, 20, LogFilter::default()).await.unwrap();
     assert_eq!(page3.len(), 5);
 }
 
@@ -512,7 +564,7 @@ async fn test_read_conn_opens_and_basic_roundtrip_works() {
     db.insert_query_logs(std::slice::from_ref(&entry))
         .await
         .unwrap();
-    let rows = db.query_logs(10, 0, None, None, None, None).await.unwrap();
+    let rows = db.query_logs(10, 0, LogFilter::default()).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].domain, "example.com");
 }
@@ -604,7 +656,14 @@ async fn test_sessions_crud_and_cascade() {
     let uid = db.create_user("carol", "h", 100).await.unwrap();
 
     let sid = db
-        .insert_session("tok-1", uid, 100, 100, Some("1.2.3.4"), Some("UA"))
+        .insert_session(NewSession {
+            token_hash: "tok-1",
+            user_id: uid,
+            created_at: 100,
+            last_seen: 100,
+            ip: Some("1.2.3.4"),
+            user_agent: Some("UA"),
+        })
         .await
         .unwrap();
 
@@ -624,9 +683,16 @@ async fn test_sessions_crud_and_cascade() {
 
     // Deleting the user cascades to their sessions. A second operator keeps
     // carol from being the last one, whose deletion would be refused.
-    db.insert_session("tok-2", uid, 100, 100, None, None)
-        .await
-        .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "tok-2",
+        user_id: uid,
+        created_at: 100,
+        last_seen: 100,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
     db.create_user("carol2", "h", 200).await.unwrap();
     assert_eq!(
         db.delete_user(uid).await.unwrap(),
@@ -641,12 +707,26 @@ async fn test_load_sessions_drops_expired() {
     let uid = db.create_user("dave", "h", 0).await.unwrap();
     // created_at 1_050 -> age 50, well inside max_age 100 (the boundary itself
     // counts as expired; see the boundary-matrix test).
-    db.insert_session("fresh", uid, 1_050, 1_050, None, None)
-        .await
-        .unwrap();
-    db.insert_session("stale", uid, 1, 1, None, None)
-        .await
-        .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "fresh",
+        user_id: uid,
+        created_at: 1_050,
+        last_seen: 1_050,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "stale",
+        user_id: uid,
+        created_at: 1,
+        last_seen: 1,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
 
     // max_age 100, now 1100 → cutoff 1000; "stale" (created_at 1) is purged.
     // idle_secs is large, so only the absolute timeout is exercised.
@@ -667,19 +747,26 @@ async fn test_load_sessions_purges_idle_rows() {
     let db = test_db().await;
     let uid = db.create_user("frank", "h", 0).await.unwrap();
     let now = 10_000_000;
-    db.insert_session(
-        "idle",
-        uid,
-        now - 1_000,
-        now - SESSION_IDLE_TIMEOUT_SECS - 1,
-        None,
-        None,
-    )
+    db.insert_session(NewSession {
+        token_hash: "idle",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        ip: None,
+        user_agent: None,
+    })
     .await
     .unwrap();
-    db.insert_session("active", uid, now - 1_000, now, None, None)
-        .await
-        .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "active",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
 
     let loaded = db
         .load_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
@@ -700,9 +787,16 @@ async fn test_load_sessions_purges_idle_rows() {
 async fn test_flush_last_seen() {
     let db = test_db().await;
     let uid = db.create_user("erin", "h", 0).await.unwrap();
-    db.insert_session("tok", uid, 0, 0, None, None)
-        .await
-        .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "tok",
+        user_id: uid,
+        created_at: 0,
+        last_seen: 0,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
     db.flush_sessions_last_seen(&[("tok".to_string(), 555)])
         .await
         .unwrap();
@@ -712,37 +806,44 @@ async fn test_flush_last_seen() {
 /// Four sessions: one live, and one expired by each timeout alone and by both,
 /// so a purge must remove exactly three.
 async fn insert_purge_fixture(db: &Database, uid: i64, now: i64) {
-    db.insert_session("normal", uid, now - 1_000, now, None, None)
-        .await
-        .unwrap();
-    db.insert_session(
-        "stale-created",
-        uid,
-        now - SESSION_MAX_AGE_SECS - 1,
-        now,
-        None,
-        None,
-    )
+    db.insert_session(NewSession {
+        token_hash: "normal",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now,
+        ip: None,
+        user_agent: None,
+    })
     .await
     .unwrap();
-    db.insert_session(
-        "stale-seen",
-        uid,
-        now - 1_000,
-        now - SESSION_IDLE_TIMEOUT_SECS - 1,
-        None,
-        None,
-    )
+    db.insert_session(NewSession {
+        token_hash: "stale-created",
+        user_id: uid,
+        created_at: now - SESSION_MAX_AGE_SECS - 1,
+        last_seen: now,
+        ip: None,
+        user_agent: None,
+    })
     .await
     .unwrap();
-    db.insert_session(
-        "stale-both",
-        uid,
-        now - SESSION_MAX_AGE_SECS - 1,
-        now - SESSION_IDLE_TIMEOUT_SECS - 1,
-        None,
-        None,
-    )
+    db.insert_session(NewSession {
+        token_hash: "stale-seen",
+        user_id: uid,
+        created_at: now - 1_000,
+        last_seen: now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        ip: None,
+        user_agent: None,
+    })
+    .await
+    .unwrap();
+    db.insert_session(NewSession {
+        token_hash: "stale-both",
+        user_id: uid,
+        created_at: now - SESSION_MAX_AGE_SECS - 1,
+        last_seen: now - SESSION_IDLE_TIMEOUT_SECS - 1,
+        ip: None,
+        user_agent: None,
+    })
     .await
     .unwrap();
 }
@@ -897,9 +998,16 @@ async fn purge_expired_sessions_matches_in_memory_predicate_at_boundaries() {
             // SQL side, same fixture.
             let db = test_db().await;
             let uid = db.create_user("op", "h", 0).await.unwrap();
-            db.insert_session("tok", uid, created_at, last_seen, None, None)
-                .await
-                .unwrap();
+            db.insert_session(NewSession {
+                token_hash: "tok",
+                user_id: uid,
+                created_at,
+                last_seen,
+                ip: None,
+                user_agent: None,
+            })
+            .await
+            .unwrap();
             let deleted = db
                 .purge_expired_sessions(SESSION_MAX_AGE_SECS, SESSION_IDLE_TIMEOUT_SECS, now)
                 .await
@@ -973,17 +1081,19 @@ async fn the_log_count_follows_every_write_that_changes_it() {
     // Every reader of the counter, against the rows themselves.
     async fn assert_holds(db: &Database, expected: i64) {
         let rows = db
-            .query_logs(i64::MAX, 0, None, None, None, None)
+            .query_logs(i64::MAX, 0, LogFilter::default())
             .await
             .unwrap();
         assert_eq!(rows.len() as i64, expected);
         assert_eq!(db.total_log_count().await.unwrap(), expected);
+        assert_eq!(db.count_logs(LogFilter::default()).await.unwrap(), expected);
         assert_eq!(
-            db.count_logs(None, None, None, None).await.unwrap(),
-            expected
-        );
-        assert_eq!(
-            db.count_logs(Some("  "), None, None, None).await.unwrap(),
+            db.count_logs(LogFilter {
+                search: Some("  "),
+                ..LogFilter::default()
+            })
+            .await
+            .unwrap(),
             expected
         );
     }
@@ -1065,7 +1175,14 @@ async fn a_query_type_filter_pages_exactly_like_the_table() {
                 .collect::<Result<_, _>>()
                 .unwrap();
             let got: Vec<String> = db
-                .query_logs(limit, offset, None, None, None, Some(query_type))
+                .query_logs(
+                    limit,
+                    offset,
+                    LogFilter {
+                        query_type: Some(query_type),
+                        ..LogFilter::default()
+                    },
+                )
                 .await
                 .unwrap()
                 .into_iter()
