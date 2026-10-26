@@ -14,7 +14,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -23,6 +24,11 @@ jobs:
 
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # `e2e` is its own workspace; unnamed, its dependencies go uncached.
+          workspaces: |
+            .
+            e2e
 
       - name: Check formatting
         run: cargo fmt --check
@@ -30,7 +36,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Deliberately outside `cargo deny`: the browser stack's licences aren't
+      # on the allow-list, and none of it ships in the image.
+      - name: Check formatting (e2e)
+        working-directory: e2e
+        run: cargo fmt --check
+
+      - name: Clippy (e2e)
+        working-directory: e2e
+        run: cargo clippy --all-targets -- -D warnings
+
   deny:
+    name: deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +58,7 @@ jobs:
         run: cargo deny check
 
   test:
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +77,7 @@ jobs:
         run: cargo nextest run
 
   coverage:
+    name: coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +110,7 @@ jobs:
           fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}
 
   e2e:
+    name: e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -109,17 +129,6 @@ jobs:
       # their timeouts and embeds the current admin UI.
       - name: Build noadd (embeds the admin UI)
         run: cargo build
-
-      # Linted here to share this job's build. Deliberately outside `cargo deny`:
-      # the browser stack's licences aren't on the allow-list, and none of it
-      # ships in the image.
-      - name: Check formatting (e2e)
-        working-directory: e2e
-        run: cargo fmt --check
-
-      - name: Clippy (e2e)
-        working-directory: e2e
-        run: cargo clippy --all-targets -- -D warnings
 
       # `WebDriver::managed` fetches chromedriver; the runner ships Chrome.
       - name: Run the Cucumber features
