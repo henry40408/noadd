@@ -38,7 +38,7 @@ cargo fmt --check            # CI gates e2e/ separately from the root crate
 cargo clippy --all-targets -- -D warnings
 ```
 
-Root-level fmt, clippy, nextest and coverage do not cover `e2e/` (separate workspace), so run fmt and clippy inside `e2e/` too; CI does (the `e2e` job) and keeps `e2e/` out of `cargo deny`.
+Root-level fmt, clippy, nextest and coverage do not cover `e2e/` (separate workspace), so run fmt and clippy inside `e2e/` too; CI does (the `lint-e2e` job) and keeps `e2e/` out of `cargo deny`.
 
 e2e's lint set mirrors the root crate's (minus server-only entries) because a separate workspace inherits none of it; keep the two in sync.
 
