@@ -16,7 +16,7 @@ base64 = "0.23.0"
 cucumber = "0.23.0"
 reqwest = { version = "0.13.0", default-features = false, features = ["rustls", "json"] }
 serde_json = "1.0.145"
-thirtyfour = "0.37"
+thirtyfour = "0.38"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 # Both runners drive their own scenarios; no libtest harness.
