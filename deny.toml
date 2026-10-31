@@ -14,11 +14,6 @@ ignore = [
     # (latest), which still depends on it. Remove once askama drops it.
     # Tracked in #324.
     "RUSTSEC-2026-0374",
-    # ctutils 0.4.2 (transitive, via argon2/blake2/digest and phc) is fixed in
-    # 0.4.4, published 2026-10-23 01:04 UTC; the 168-hour dependency cooldown
-    # ends 2026-10-30 01:04 UTC. Upgrade to 0.4.4 and remove then.
-    # Tracked in #339.
-    "RUSTSEC-2026-0385",
 ]
 
 [licenses]
