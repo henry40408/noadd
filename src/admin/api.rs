@@ -77,7 +77,7 @@ impl AppState {
         let manager = self.list_manager.clone();
         self.rebuild
             .clone()
-            .spawn_raw(move || async move { manager.rebuild_filter().await });
+            .spawn_coalesced(move || async move { manager.rebuild_filter().await });
     }
 }
 
@@ -2548,6 +2548,8 @@ async fn trigger_list_update(
         .await
         .map_err(|_err| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Always rebuilds, unlike the daily refresh: it is how an operator recovers
+    // from a rebuild that failed.
     state.trigger_rebuild();
 
     Ok(Json(ListUpdateResponse {

@@ -2931,6 +2931,7 @@ pub async fn filters_lists_update_submit(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Response {
+    // Always rebuilds on success, like the API: the way out of a failed rebuild.
     if state
         .list_manager
         .update_all_lists_no_rebuild()

@@ -119,3 +119,45 @@ async fn test_update_all_lists_no_rebuild_does_not_rebuild() {
         noadd::filter::engine::FilterResult::Blocked { .. }
     ));
 }
+
+#[tokio::test]
+async fn test_store_list_content_reports_whether_content_changed() {
+    let (db, manager) = setup().await;
+    let id = db
+        .add_filter_list("test", "https://example.invalid/list.txt", true)
+        .await
+        .unwrap();
+    let current_row = || async {
+        db.get_filter_lists()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|l| l.id == id)
+            .unwrap()
+    };
+
+    let one_rule = "||ads.example.com^\n";
+    let first = manager
+        .store_list_content(&current_row().await, one_rule)
+        .await
+        .unwrap();
+    assert!(first.changed);
+    assert_eq!(first.rule_count, 1);
+
+    let same = manager
+        .store_list_content(&current_row().await, one_rule)
+        .await
+        .unwrap();
+    assert!(!same.changed);
+    assert_eq!(same.rule_count, 1);
+
+    let edited = manager
+        .store_list_content(
+            &current_row().await,
+            "||ads.example.com^\n||b.example.com^\n",
+        )
+        .await
+        .unwrap();
+    assert!(edited.changed);
+    assert_eq!(edited.rule_count, 2);
+}
