@@ -426,15 +426,31 @@ fn spawn_list_updates(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = list_manager.update_all_lists_no_rebuild().await {
-                        tracing::warn!(
-                            event = "filter.list_refresh_failed",
-                            error = %e,
-                            "failed to update filter lists; keeping previous lists"
+                    // A failed refresh still rebuilds: it may have updated some lists.
+                    let any_changed = match list_manager.update_all_lists_no_rebuild().await {
+                        Ok(changed) => changed,
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "filter.list_refresh_failed",
+                                error = %e,
+                                "failed to update filter lists; keeping previous lists"
+                            );
+                            true
+                        }
+                    };
+                    let stale_after_failure = rebuild
+                        .state()
+                        .last_failed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if !any_changed && !stale_after_failure {
+                        tracing::debug!(
+                            event = "filter.rebuild_skipped",
+                            "no list content changed; keeping the current filter"
                         );
+                        continue;
                     }
                     let mgr = list_manager.clone();
-                    rebuild.clone().spawn_raw(move || async move {
+                    rebuild.clone().spawn_coalesced(move || async move {
                         mgr.rebuild_filter().await
                     });
                 }

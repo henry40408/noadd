@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
-use crate::db::Database;
+use crate::db::{Database, FilterListRow};
 use crate::filter::engine::{CUSTOM_LIST_ID, FilterEngine, ListMeta};
 use crate::filter::parser::{RuleAction, parse_list, parse_rule};
 
@@ -29,6 +29,13 @@ pub const DEFAULT_LISTS: &[(&str, &str, bool)] = &[
         false,
     ),
 ];
+
+/// Result of refreshing one list.
+pub struct ListUpdate {
+    pub rule_count: usize,
+    /// False when the download matched what was stored.
+    pub changed: bool,
+}
 
 #[derive(Clone)]
 pub struct ListManager {
@@ -151,12 +158,15 @@ impl ListManager {
         Ok(())
     }
 
-    /// Download a list by ID and store it; returns the number of parsed rules.
-    pub async fn download_and_update_list(&self, list_id: i64) -> Result<usize, ListError> {
+    /// Download a list by ID and store it.
+    pub async fn download_and_update_list(&self, list_id: i64) -> Result<ListUpdate, ListError> {
         let lists = self.db.get_filter_lists().await?;
         let list = lists.iter().find(|l| l.id == list_id);
         let Some(list) = list else {
-            return Ok(0);
+            return Ok(ListUpdate {
+                rule_count: 0,
+                changed: false,
+            });
         };
 
         let client = reqwest::Client::builder()
@@ -166,24 +176,48 @@ impl ListManager {
 
         let content = client.get(&list.url).send().await?.text().await?;
 
-        self.db.set_filter_list_content(list_id, &content).await?;
+        self.store_list_content(list, &content).await
+    }
 
-        let parsed = parse_list(&content);
-        let rule_count = parsed.len();
-
+    /// Store freshly downloaded content. Identical content is not rewritten and
+    /// not re-parsed; only the download time moves.
+    pub async fn store_list_content(
+        &self,
+        list: &FilterListRow,
+        content: &str,
+    ) -> Result<ListUpdate, ListError> {
         let now = crate::now_unix();
+        let unchanged = self
+            .db
+            .get_filter_list_content(list.id)
+            .await?
+            .is_some_and(|stored| stored == content);
+        if unchanged {
+            self.db
+                .update_filter_list_stats(list.id, now, list.rule_count)
+                .await?;
+            return Ok(ListUpdate {
+                rule_count: usize::try_from(list.rule_count).unwrap_or(0),
+                changed: false,
+            });
+        }
 
+        self.db.set_filter_list_content(list.id, content).await?;
+        let rule_count = parse_list(content).len();
         self.db
-            .update_filter_list_stats(list_id, now, rule_count as i64)
+            .update_filter_list_stats(list.id, now, rule_count as i64)
             .await?;
-
-        Ok(rule_count)
+        Ok(ListUpdate {
+            rule_count,
+            changed: true,
+        })
     }
 
     /// Download all enabled lists. Does **not** rebuild the filter engine.
     ///
-    /// Downloads run concurrently, at most four at a time.
-    pub async fn update_all_lists_no_rebuild(&self) -> Result<(), ListError> {
+    /// Downloads run concurrently, at most four at a time. Returns whether any
+    /// list's content changed, i.e. whether a rebuild would produce anything new.
+    pub async fn update_all_lists_no_rebuild(&self) -> Result<bool, ListError> {
         let lists = self.db.get_filter_lists().await?;
 
         let sem = Arc::new(tokio::sync::Semaphore::new(4));
@@ -199,14 +233,17 @@ impl ListManager {
         }
         // Per-list failures are expected; aggregate them into one warn.
         let mut failures: Vec<String> = Vec::new();
+        let mut any_changed = false;
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok((list_id, name, Ok(rule_count))) => {
+                Ok((list_id, name, Ok(update))) => {
+                    any_changed |= update.changed;
                     tracing::info!(
                         event = "filter.list_updated",
                         list_id,
                         name = %name,
-                        rule_count,
+                        rule_count = update.rule_count,
+                        changed = update.changed,
                         "updated filter list"
                     );
                 }
@@ -227,7 +264,7 @@ impl ListManager {
             );
         }
 
-        Ok(())
+        Ok(any_changed)
     }
 
     /// Download all enabled lists and rebuild the filter.

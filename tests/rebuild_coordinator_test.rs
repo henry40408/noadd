@@ -105,4 +105,44 @@ async fn failed_rebuild_clears_flag() {
         .unwrap();
     // A failed rebuild must not leave the coordinator stuck "rebuilding".
     assert!(!state.rebuilding.load(Ordering::Relaxed));
+    // It is remembered, so a refresh that changed nothing still retries.
+    assert!(state.last_failed.load(Ordering::Relaxed));
+
+    coord
+        .clone()
+        .spawn_raw(|| async { Ok::<_, std::io::Error>(()) })
+        .await
+        .unwrap();
+    assert!(!state.last_failed.load(Ordering::Relaxed));
+}
+
+/// Requests that arrive while a rebuild runs collapse into one follow-up run:
+/// it reads the latest state anyway, and one is still needed because the
+/// running rebuild may have read before the change.
+#[tokio::test]
+async fn coalesced_requests_collapse_into_one_follow_up() {
+    let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let coord = RebuildCoordinator::new();
+    let spawn = |coord: &std::sync::Arc<RebuildCoordinator>| {
+        let runs = runs.clone();
+        coord.clone().spawn_coalesced(move || async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<_, std::io::Error>(())
+        })
+    };
+
+    let first = spawn(&coord).expect("the first request always runs");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let second = spawn(&coord).expect("a request during a run queues a follow-up");
+    assert!(spawn(&coord).is_none());
+    assert!(spawn(&coord).is_none());
+
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+
+    let third = spawn(&coord).expect("the flag is cleared once the follow-up ran");
+    third.await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 3);
 }

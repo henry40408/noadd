@@ -15,6 +15,8 @@ const STATUS_CHANNEL_CAPACITY: usize = 16;
 
 pub struct RebuildCoordinator {
     lock: Mutex<()>,
+    /// A coalescable task is waiting for `lock` and has not read state yet.
+    queued: AtomicBool,
     state: Arc<RebuildState>,
     status: broadcast::Sender<RebuildStatus>,
 }
@@ -24,6 +26,8 @@ pub struct RebuildState {
     pub rebuilding: AtomicBool,
     pub started_at: AtomicI64,
     pub last_duration_ms: AtomicU64,
+    /// The latest rebuild failed, so the live engine may be stale.
+    pub last_failed: AtomicBool,
 }
 
 impl RebuildState {
@@ -51,6 +55,7 @@ impl RebuildCoordinator {
         let (status, _rx) = broadcast::channel(STATUS_CHANNEL_CAPACITY);
         Arc::new(Self {
             lock: Mutex::new(()),
+            queued: AtomicBool::new(false),
             state: Arc::new(RebuildState::default()),
             status,
         })
@@ -85,8 +90,40 @@ impl RebuildCoordinator {
         Fut: Future<Output = Result<(), E>> + Send,
         E: std::fmt::Display + Send + 'static,
     {
+        self.spawn_task(false, f)
+    }
+
+    /// Like [`Self::spawn_raw`], for a rebuild that reads the latest state when
+    /// it runs: while one such task is still waiting for the lock, another
+    /// request adds nothing, so it returns `None`.
+    ///
+    /// The waiting task clears the flag *before* it reads state, so a request
+    /// made after that point queues a new task and is never lost.
+    pub fn spawn_coalesced<F, Fut, E>(self: Arc<Self>, f: F) -> Option<JoinHandle<()>>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), E>> + Send,
+        E: std::fmt::Display + Send + 'static,
+    {
+        if self.queued.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some(self.spawn_task(true, f))
+    }
+
+    fn spawn_task<F, Fut, E>(self: Arc<Self>, coalesced: bool, f: F) -> JoinHandle<()>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), E>> + Send,
+        E: std::fmt::Display + Send + 'static,
+    {
         tokio::spawn(async move {
             let _guard = self.lock.lock().await;
+            if coalesced {
+                // An RMW, so it acquires from a dropped request's `swap` and the
+                // state that request wrote is visible to the read below.
+                self.queued.swap(false, Ordering::AcqRel);
+            }
             self.state.started_at.store(now_unix(), Ordering::Relaxed);
             self.state.rebuilding.store(true, Ordering::Relaxed);
             self.publish();
@@ -99,6 +136,9 @@ impl RebuildCoordinator {
             self.state.rebuilding.store(false, Ordering::Relaxed);
             // After the flag and duration update, so a completion never carries
             // the previous rebuild's numbers.
+            self.state
+                .last_failed
+                .store(result.is_err(), Ordering::Relaxed);
             self.publish();
             if let Err(e) = result {
                 tracing::warn!(
