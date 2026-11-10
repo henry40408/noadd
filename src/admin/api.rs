@@ -28,6 +28,7 @@ use crate::admin::auth::{
     verify_password,
 };
 use crate::admin::events;
+use crate::admin::forward_auth::normalize_username;
 use crate::admin::stats;
 use crate::cache::DnsCache;
 use crate::db::{Database, LogFilter, NewApiKey, NewSession, QueryLogEntry};
@@ -1183,10 +1184,10 @@ pub(crate) async fn create_first_operator(
         );
         return Err(SetupError::BadToken);
     }
-    let username = username.trim();
-    if username.is_empty() || username.chars().count() > 64 {
+    let Some(username) = normalize_username(username) else {
         return Err(SetupError::Invalid("invalid username".to_string()));
-    }
+    };
+    let username = username.as_str();
     validate_new_password(password, &[username]).map_err(SetupError::Invalid)?;
     // Argon2 is CPU-heavy; keep it off the async workers so a burst of setups cannot stall them.
     let password_owned = password.to_string();
@@ -1598,10 +1599,10 @@ pub(crate) async fn create_operator(
         username,
         password,
     } = new_operator;
-    let username = username.trim();
-    if username.is_empty() || username.chars().count() > 64 {
+    let Some(username) = normalize_username(username) else {
         return Err(OperatorError::Invalid("invalid username".to_string()));
-    }
+    };
+    let username = username.as_str();
     if let Err(error) = validate_new_password(password, &[username]) {
         return Err(OperatorError::Invalid(error));
     }

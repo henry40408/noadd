@@ -2865,6 +2865,39 @@ async fn create_and_list_operators() {
     assert_eq!(res.status(), StatusCode::CONFLICT);
 }
 
+/// One username rule for every way an account is created: control characters are refused
+/// by setup and by the operator form alike.
+#[tokio::test]
+async fn operator_usernames_with_control_characters_are_refused() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bo\tb","password":"long-enough-pass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"ad\tmin","password":"correct-horse-battery"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn cannot_delete_last_operator() {
     let (app, token) = setup().await;
