@@ -2,8 +2,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use noadd::admin::auth::{
     RateLimiter, SESSION_IDLE_TIMEOUT_SECS, SESSION_MAX_AGE_SECS, SessionInfo, generate_token,
-    hash_password, new_session_store, prune_expired, revoke_session, session_log_id,
-    spend_verify_cost, store_session, sweep_expired, validate_session, verify_password,
+    hash_password, hash_password_blocking, new_session_store, password_work_available,
+    password_work_limit, prune_expired, revoke_session, session_log_id, spend_verify_cost,
+    spend_verify_cost_blocking, store_session, sweep_expired, validate_session, verify_password,
+    verify_password_blocking,
 };
 use noadd::db::{Database, NewSession};
 use tempfile::tempdir;
@@ -294,4 +296,49 @@ fn test_rate_limiter_blocks_over_limit() {
     assert!(!limiter.check(ip));
 
     assert!(limiter.check(other_ip));
+}
+
+#[tokio::test]
+async fn blocking_hash_then_verify_round_trips() {
+    let hash = hash_password_blocking("correct horse").await.unwrap();
+
+    assert!(hash.starts_with("$argon2"));
+    assert!(
+        verify_password_blocking("correct horse", &hash)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !verify_password_blocking("wrong horse", &hash)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn blocking_verify_reports_an_unparseable_hash_as_an_error() {
+    // Must stay `Err` (not `Ok(false)`) so callers map it to an internal error.
+    assert!(verify_password_blocking("anything", "!").await.is_err());
+}
+
+/// Concurrency itself is hard to observe without hooks into the work, so this checks the
+/// limiter's two testable properties: it is sized to the core count, and permits are
+/// returned after work (otherwise the limit would shrink until sign-in hangs).
+///
+/// Relies on nextest's process-per-test isolation: the limiter is a process-wide static, so
+/// another test in the same process could hold permits and break the idle assertions.
+#[tokio::test]
+async fn password_work_limiter_is_sized_and_releases_permits() {
+    assert!(password_work_limit() >= 1);
+    assert_eq!(password_work_available(), password_work_limit());
+
+    // Exceed the limit so some tasks must queue behind others.
+    let tasks: Vec<_> = (0..password_work_limit() + 2)
+        .map(|_| tokio::spawn(spend_verify_cost_blocking("any password")))
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(password_work_available(), password_work_limit());
 }
