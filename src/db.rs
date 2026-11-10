@@ -1533,6 +1533,31 @@ impl Database {
         Ok(id)
     }
 
+    /// Create the first operator, atomically: the row is inserted only while `users` is
+    /// empty. Returns `None` when an account already exists, so concurrent first-run
+    /// setups cannot both win the way a separate count-then-insert would let them.
+    pub async fn create_first_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        created_at: i64,
+    ) -> Result<Option<i64>, DbError> {
+        let username = username.to_string();
+        let password_hash = password_hash.to_string();
+        let id = self
+            .conn
+            .call(move |conn| {
+                let inserted = conn.execute(
+                    "INSERT INTO users (username, password_hash, created_at) \
+                     SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM users)",
+                    params![username, password_hash, created_at],
+                )?;
+                Ok((inserted > 0).then(|| conn.last_insert_rowid()))
+            })
+            .await?;
+        Ok(id)
+    }
+
     /// Create a passwordless operator provisioned from a trusted forward-auth
     /// header; its hash is
     /// [`NO_PASSWORD_SENTINEL`](crate::admin::auth::NO_PASSWORD_SENTINEL).

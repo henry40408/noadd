@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use cucumber::{given, then, when};
-use noadd_e2e::api::{ADMIN_PASSWORD, ADMIN_USERNAME, SESSION_COOKIE};
+use noadd_e2e::api::{ADMIN_PASSWORD, ADMIN_USERNAME, Api, SESSION_COOKIE};
 use noadd_e2e::browser::override_summary;
 use noadd_e2e::dom::{Page, StepResult, ensure};
 use noadd_e2e::world::NoaddWorld;
@@ -52,7 +52,7 @@ async fn go_to_tab(page: &Page, tab: &str) -> Result<()> {
 /// Drives the boot screen to a signed-in shell, whichever state the instance is
 /// in: unconfigured (setup), configured but signed out (login), or already
 /// authenticated (a session cookie the runner replayed).
-async fn ensure_signed_in(page: &Page) -> Result<()> {
+async fn ensure_signed_in(page: &Page, api: &Api) -> Result<()> {
     page.goto("/").await?;
 
     let shell = page.testid("app-shell");
@@ -72,6 +72,7 @@ async fn ensure_signed_in(page: &Page) -> Result<()> {
         page.testid("setup-password-confirm")
             .fill(ADMIN_PASSWORD)
             .await?;
+        page.testid("setup-token").fill(&api.setup_token()?).await?;
         page.testid("setup-submit").click().await?;
     } else if login_pw.is_visible().await? {
         page.testid("login-username").fill(ADMIN_USERNAME).await?;
@@ -102,7 +103,8 @@ async fn set_list_enabled(page: &Page, name: &str, enabled: bool) -> Result<()> 
 
 #[given("I am signed in to the admin UI")]
 async fn signed_in(world: &mut NoaddWorld) -> StepResult {
-    ensure_signed_in(world.page()?).await?;
+    let api = world.api()?;
+    ensure_signed_in(world.page()?, &api).await?;
     Ok(())
 }
 
@@ -177,6 +179,13 @@ async fn enter_confirmation(world: &mut NoaddWorld, password: String) -> StepRes
         .testid("setup-password-confirm")
         .fill(&password)
         .await?;
+    Ok(())
+}
+
+#[when("I enter the setup token printed to the server stderr")]
+async fn enter_setup_token(world: &mut NoaddWorld) -> StepResult {
+    let token = world.api()?.setup_token()?;
+    world.page()?.testid("setup-token").fill(&token).await?;
     Ok(())
 }
 

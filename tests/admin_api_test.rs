@@ -168,6 +168,7 @@ async fn build_app_opts(
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
     (
         router,
@@ -1414,6 +1415,7 @@ async fn test_setup_initial_password() {
         registry: registry.clone(),
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
 
     let response = app
@@ -1424,7 +1426,7 @@ async fn test_setup_initial_password() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"admin","password":"newpassphrase1"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"newpassphrase1"}"#,
                 ))
                 .unwrap(),
         )
@@ -1456,6 +1458,7 @@ async fn test_setup_initial_password() {
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
     let response = app2
         .oneshot(
@@ -1464,7 +1467,7 @@ async fn test_setup_initial_password() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"admin","password":"another-passphrase"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"another-passphrase"}"#,
                 ))
                 .unwrap(),
         )
@@ -2122,7 +2125,7 @@ async fn setup_rejects_short_password_with_400() {
         .header("content-type", "application/json")
         // One under the 12-character minimum, so an off-by-one still fails.
         .body(Body::from(
-            r#"{"username":"admin","password":"Yx7#qvLm2R!"}"#,
+            r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"Yx7#qvLm2R!"}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2148,7 +2151,7 @@ async fn setup_accepts_a_password_at_the_minimum_length_with_200() {
         .header("content-type", "application/json")
         // Exactly the 12-character minimum.
         .body(Body::from(
-            r#"{"username":"admin","password":"Yx7#qvLm2Rk!"}"#,
+            r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"Yx7#qvLm2Rk!"}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2175,7 +2178,7 @@ async fn setup_rejects_an_over_long_password_with_400() {
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
         .body(Body::from(format!(
-            r#"{{"username":"admin","password":"{too_long}"}}"#
+            r#"{{"setup_token":"ABCDE-FGHJK","username":"admin","password":"{too_long}"}}"#
         )))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2202,7 +2205,7 @@ async fn setup_accepts_a_password_at_the_maximum_length_with_200() {
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
         .body(Body::from(format!(
-            r#"{{"username":"admin","password":"{at_max}"}}"#
+            r#"{{"setup_token":"ABCDE-FGHJK","username":"admin","password":"{at_max}"}}"#
         )))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2222,7 +2225,7 @@ async fn password_length_is_counted_in_characters_not_bytes() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"username":"admin","password":"{eleven_chars}"}}"#
+                    r#"{{"setup_token":"ABCDE-FGHJK","username":"admin","password":"{eleven_chars}"}}"#
                 )))
                 .unwrap(),
         )
@@ -2244,7 +2247,7 @@ async fn password_length_is_counted_in_characters_not_bytes() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"username":"admin","password":"{hundred_chars}"}}"#
+                    r#"{{"setup_token":"ABCDE-FGHJK","username":"admin","password":"{hundred_chars}"}}"#
                 )))
                 .unwrap(),
         )
@@ -2265,7 +2268,7 @@ async fn setup_already_configured_returns_409() {
         .uri("/api/auth/setup")
         .header("content-type", "application/json")
         .body(Body::from(
-            r#"{"username":"admin","password":"another-long-pw"}"#,
+            r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"another-long-pw"}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2862,6 +2865,39 @@ async fn create_and_list_operators() {
     assert_eq!(res.status(), StatusCode::CONFLICT);
 }
 
+/// One username rule for every way an account is created: control characters are refused
+/// by setup and by the operator form alike.
+#[tokio::test]
+async fn operator_usernames_with_control_characters_are_refused() {
+    let (app, token) = setup().await;
+    let res = app
+        .oneshot(authed(
+            "POST",
+            "/api/users",
+            &token,
+            Some(r#"{"username":"bo\tb","password":"long-enough-pass"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"ad\tmin","password":"correct-horse-battery"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn cannot_delete_last_operator() {
     let (app, token) = setup().await;
@@ -2987,7 +3023,7 @@ async fn every_set_password_endpoint_rejects_a_guessable_password() {
                     .uri("/api/auth/setup")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"username":"admin","password":"{weak}"}}"#
+                        r#"{{"setup_token":"ABCDE-FGHJK","username":"admin","password":"{weak}"}}"#
                     )))
                     .unwrap(),
             )
@@ -3047,7 +3083,7 @@ async fn a_rejected_password_explains_itself() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"admin","password":"password1234"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"password1234"}"#,
                 ))
                 .unwrap(),
         )
@@ -3077,7 +3113,7 @@ async fn a_rejected_password_explains_itself() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"admin","password":"Yx7#qvLm2R"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"admin","password":"Yx7#qvLm2R"}"#,
                 ))
                 .unwrap(),
         )
@@ -3580,7 +3616,7 @@ async fn setup_creates_first_operator_when_empty() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"root","password":"hunter2passphrase"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"root","password":"hunter2passphrase"}"#,
                 ))
                 .unwrap(),
         )
@@ -4649,7 +4685,7 @@ async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     let res = app
         .oneshot(form_post(
             "/setup",
-            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery&setup_token=ABCDE-FGHJK",
         ))
         .await
         .unwrap();
@@ -4674,6 +4710,107 @@ async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     );
 }
 
+/// Setup trims the username it stores, so the automatic sign-in that follows (and any
+/// later login) must resolve the same account from the padded input.
+#[tokio::test]
+async fn the_wizard_signs_in_an_operator_whose_username_was_padded() {
+    let app = unconfigured_app().await;
+    let res = app
+        .clone()
+        .oneshot(form_post(
+            "/setup",
+            "username=+admin+&password=correct-horse-battery&confirm=correct-horse-battery&setup_token=ABCDE-FGHJK",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/"),
+        "automatic sign-in failed and fell back to /login"
+    );
+
+    let login = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":" admin ","password":"correct-horse-battery"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+}
+
+fn setup_json(token: Option<&str>) -> Request<Body> {
+    let token_field = token.map_or(String::new(), |t| format!(r#""setup_token":"{t}","#));
+    Request::builder()
+        .method("POST")
+        .uri("/api/auth/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{{token_field}"username":"admin","password":"correct-horse-battery"}}"#
+        )))
+        .unwrap()
+}
+
+/// A missing or wrong token is a 403 and creates nothing; the right one, in any case or
+/// hyphenation, still works afterwards.
+#[tokio::test]
+async fn setup_requires_the_setup_token() {
+    let app = unconfigured_app().await;
+    for token in [None, Some("ZZZZZ-ZZZZZ"), Some("ABCDE")] {
+        let res = app.clone().oneshot(setup_json(token)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "token {token:?}");
+    }
+    let res = app
+        .clone()
+        .oneshot(setup_json(Some(" abcde fghjk ")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_wizard_refuses_a_wrong_setup_token_and_keeps_the_username() {
+    let app = unconfigured_app().await;
+    let res = app
+        .oneshot(form_post(
+            "/setup",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery&setup_token=nope",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("setup token"));
+    assert!(html.contains("value=\"admin\""));
+}
+
+/// Wrong guesses are never refunded: the sixth attempt from one address is throttled even
+/// when it carries the right token.
+#[tokio::test]
+async fn setup_token_guesses_are_rate_limited() {
+    let app = unconfigured_app().await;
+    for _ in 0..5 {
+        let res = app
+            .clone()
+            .oneshot(setup_json(Some("ZZZZZ-ZZZZZ")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+    let res = app.oneshot(setup_json(Some("ABCDE-FGHJK"))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// The confirmation field is the form's own, so the page handler checks it —
 /// not `create_first_operator`, which the JSON endpoint shares.
 #[tokio::test]
@@ -4682,7 +4819,7 @@ async fn the_wizard_re_renders_when_the_confirmation_does_not_match() {
     let res = app
         .oneshot(form_post(
             "/setup",
-            "username=admin&password=correct-horse-battery&confirm=something-else",
+            "username=admin&password=correct-horse-battery&confirm=something-else&setup_token=ABCDE-FGHJK",
         ))
         .await
         .unwrap();
@@ -5045,7 +5182,7 @@ async fn a_flash_notice_is_shown_once_and_cleared() {
         .clone()
         .oneshot(form_post(
             "/setup",
-            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery",
+            "username=admin&password=correct-horse-battery&confirm=correct-horse-battery&setup_token=ABCDE-FGHJK",
         ))
         .await
         .unwrap();
@@ -5112,7 +5249,7 @@ async fn the_wizard_reports_why_a_password_was_rejected() {
     let res = app
         .oneshot(form_post(
             "/setup",
-            "username=admin&password=short&confirm=short",
+            "username=admin&password=short&confirm=short&setup_token=ABCDE-FGHJK",
         ))
         .await
         .unwrap();

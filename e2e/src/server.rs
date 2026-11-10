@@ -79,9 +79,15 @@ impl Server {
                 "--log-format".as_ref(),
                 "json".as_ref(),
             ])
-            .stdout(Stdio::null())
-            // Inherited, so a refusal to start shows in the test output.
-            .stderr(Stdio::inherit())
+            // Files, because the first-run setup token is only ever printed to stderr (see
+            // `setup_token_for_port`) and `tracing` writes to stdout, which must never carry
+            // it. A failed start echoes stderr from `wait_healthy`.
+            .stdout(Stdio::from(
+                std::fs::File::create(stdout_log_path(self.http)).context("creating stdout log")?,
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(stderr_log_path(self.http)).context("creating stderr log")?,
+            ))
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawning noadd at {}", binary.display()))?;
@@ -181,13 +187,61 @@ impl Server {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        bail!("noadd did not answer {url} within {STARTUP_TIMEOUT:?}")
+        let stderr = std::fs::read_to_string(stderr_log_path(self.http)).unwrap_or_default();
+        bail!("noadd did not answer {url} within {STARTUP_TIMEOUT:?}; its stderr:\n{stderr}")
     }
 }
 
 /// Where every instance's database lives (gitignored); [`Server::fresh`] wipes its own.
 pub fn tmp_dir() -> PathBuf {
     crate_dir().join(".tmp")
+}
+
+fn stdout_log_path(http: u16) -> PathBuf {
+    tmp_dir().join(format!("stdout-{http}.log"))
+}
+
+fn stderr_log_path(http: u16) -> PathBuf {
+    tmp_dir().join(format!("stderr-{http}.log"))
+}
+
+/// The first-run setup token the instance on this HTTP port printed at startup.
+///
+/// Read from the stderr file [`Server::start`] redirects to, the way an operator would
+/// read it from the log. There is no environment variable or flag that sets it.
+///
+/// # Errors
+///
+/// Fails when the log is missing or has no token, as on an already-configured instance.
+pub fn setup_token_for_port(http: u16) -> Result<String> {
+    const MARKER: &str = "first-run setup token: ";
+    let path = stderr_log_path(http);
+    let log =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let token = log
+        .lines()
+        .find_map(|line| {
+            line.split_once(MARKER)
+                .map(|(_, token)| token.trim().to_string())
+        })
+        .with_context(|| format!("no setup token in {}", path.display()))?;
+    // The token belongs on stderr's one dedicated line, never in the structured log, which
+    // `tracing` writes to stdout.
+    let stdout_path = stdout_log_path(http);
+    let stdout = std::fs::read_to_string(&stdout_path)
+        .with_context(|| format!("reading {}", stdout_path.display()))?;
+    anyhow::ensure!(
+        !stdout.contains(&token),
+        "setup token leaked into {}",
+        stdout_path.display()
+    );
+    let occurrences = log.matches(&token).count();
+    anyhow::ensure!(
+        occurrences == 1,
+        "setup token appears {occurrences} times in {}; it must not reach the log",
+        path.display()
+    );
+    Ok(token)
 }
 
 async fn remove_db(db: &Path) -> Result<()> {

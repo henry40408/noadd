@@ -14,6 +14,10 @@ ignore = [
     # (latest), which still depends on it. Remove once askama drops it.
     # Tracked in #324.
     "RUSTSEC-2026-0374",
+    # libsqlite3-sys bundles a vulnerable SQLite (CVE-2026-119375); the fix needs
+    # rusqlite 0.41, but tokio-rusqlite 0.8.0 requires 0.40. Remove once
+    # tokio-rusqlite supports 0.41. Tracked in #350.
+    "RUSTSEC-2026-0459",
 ]
 
 [licenses]

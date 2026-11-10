@@ -78,6 +78,7 @@ async fn build_app() -> axum::Router {
         ),
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     })
 }
 

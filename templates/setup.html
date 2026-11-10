@@ -23,8 +23,13 @@
               <label for="setup-pw2">confirm:</label>
               <input type="password" id="setup-pw2" name="confirm" autocomplete="new-password" data-testid="setup-password-confirm">
             </div>
+            <div class="login-line">
+              <label for="setup-token">setup token:</label>
+              <input type="text" id="setup-token" name="setup_token" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX" data-testid="setup-token">
+            </div>
             <button type="submit" class="btn btn-primary boot-submit" id="setup-btn" data-testid="setup-submit">create account</button>
             <div class="boot-hint">minimum {{ min_password_length }} characters — a few unrelated words work best</div>
+            <div class="boot-hint">setup token: printed to the server's stderr when noadd started with no operator</div>
           </form>
         </div>
       </div>

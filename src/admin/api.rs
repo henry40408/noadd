@@ -28,6 +28,7 @@ use crate::admin::auth::{
     verify_password,
 };
 use crate::admin::events;
+use crate::admin::forward_auth::normalize_username;
 use crate::admin::stats;
 use crate::cache::DnsCache;
 use crate::db::{Database, LogFilter, NewApiKey, NewSession, QueryLogEntry};
@@ -68,6 +69,8 @@ pub struct AppState {
     pub registry: Arc<RegistryClient>,
     pub trusted_proxies: Arc<TrustedProxies>,
     pub forward_auth: Option<Arc<crate::admin::forward_auth::ForwardAuthConfig>>,
+    /// First-run setup secret; see [`crate::admin::auth::SetupToken`].
+    pub setup_token: Arc<crate::admin::auth::SetupToken>,
 }
 
 impl AppState {
@@ -1012,6 +1015,9 @@ fn build_session_cookie(token: String, cookie_secure: bool) -> Cookie<'static> {
 pub struct SetupRequest {
     pub username: String,
     pub password: String,
+    /// The token printed to the server's stderr at startup.
+    #[serde(default)]
+    pub setup_token: String,
 }
 
 #[derive(Serialize)]
@@ -1110,23 +1116,45 @@ fn internal_error() -> (StatusCode, Json<ApiErrorResponse>) {
     )
 }
 
+/// What a wrong or missing setup token is told, by both setup entrances.
+pub(crate) const SETUP_TOKEN_REFUSAL: &str =
+    "setup token is missing or wrong; it is printed to the server's stderr at startup";
+
 /// Why first-run setup was refused. Only [`SetupError::Invalid`] carries a message, the one
 /// the operator can act on.
 pub(crate) enum SetupError {
     /// Forward auth is configured, so the wizard does not apply.
     Disabled,
     AlreadyConfigured,
+    RateLimited,
+    /// The setup token is missing or wrong.
+    BadToken,
     Invalid(String),
     Internal,
+}
+
+/// Everything first-run setup needs from a request.
+pub(crate) struct SetupAttempt<'a> {
+    pub connect: Option<&'a ConnectInfo<SocketAddr>>,
+    pub headers: &'a HeaderMap,
+    pub username: &'a str,
+    pub password: &'a str,
+    pub setup_token: &'a str,
 }
 
 /// Create the first operator account. The only setup path, shared by `POST /api/auth/setup`
 /// and `POST /setup`: its guards are what stop a second account being claimed.
 pub(crate) async fn create_first_operator(
     state: &AppState,
-    username: &str,
-    password: &str,
+    attempt: SetupAttempt<'_>,
 ) -> Result<(), SetupError> {
+    let SetupAttempt {
+        connect,
+        headers,
+        username,
+        password,
+        setup_token,
+    } = attempt;
     // Under forward auth the first proxied request provisions the operator (`health`
     // reports `needs_setup: false`); leaving setup open would let anyone bypassing the
     // proxy claim the first account before then.
@@ -1142,44 +1170,87 @@ pub(crate) async fn create_first_operator(
     if count > 0 {
         return Err(SetupError::AlreadyConfigured);
     }
-    let username = username.trim();
-    if username.is_empty() || username.chars().count() > 64 {
-        return Err(SetupError::Invalid("invalid username".to_string()));
+    // Throttle, then token, then the password work: the token is what keeps a stranger from
+    // reaching Argon2 or the insert, and attempts are never refunded.
+    let ip = client_ip(state, connect, headers);
+    if !state.setup_token.allow_attempt(ip) {
+        return Err(SetupError::RateLimited);
     }
+    if !state.setup_token.matches(setup_token) {
+        tracing::warn!(
+            event = "setup.token_rejected",
+            %ip,
+            "first-run setup token missing or wrong"
+        );
+        return Err(SetupError::BadToken);
+    }
+    let Some(username) = normalize_username(username) else {
+        return Err(SetupError::Invalid("invalid username".to_string()));
+    };
+    let username = username.as_str();
     validate_new_password(password, &[username]).map_err(SetupError::Invalid)?;
-    let hash = hash_password(password).map_err(|_err| SetupError::Internal)?;
+    // Argon2 is CPU-heavy; keep it off the async workers so a burst of setups cannot stall them.
+    let password_owned = password.to_string();
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password_owned))
+        .await
+        .map_err(|_err| SetupError::Internal)?
+        .map_err(|_err| SetupError::Internal)?;
+    // The count above is only a fast path; this insert is the arbiter when setups race.
     state
         .db
-        .create_user(username, &hash, crate::now_unix())
+        .create_first_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_err| SetupError::Internal)?;
+        .map_err(|_err| SetupError::Internal)?
+        .ok_or(SetupError::AlreadyConfigured)?;
+    state.setup_token.clear();
     Ok(())
 }
 
 async fn setup(
     State(state): State<AppState>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, (StatusCode, Json<ApiErrorResponse>)> {
-    create_first_operator(&state, &body.username, &body.password)
-        .await
-        .map_err(|err| match err {
-            SetupError::Disabled => (
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse {
-                    error: "setup is disabled when forward auth is configured".to_string(),
-                }),
-            ),
-            SetupError::AlreadyConfigured => (
-                StatusCode::CONFLICT,
-                Json(ApiErrorResponse {
-                    error: "already configured".to_string(),
-                }),
-            ),
-            SetupError::Invalid(error) => {
-                (StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error }))
-            }
-            SetupError::Internal => internal_error(),
-        })?;
+    create_first_operator(
+        &state,
+        SetupAttempt {
+            connect: connect.as_deref(),
+            headers: &headers,
+            username: &body.username,
+            password: &body.password,
+            setup_token: &body.setup_token,
+        },
+    )
+    .await
+    .map_err(|err| match err {
+        SetupError::Disabled => (
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse {
+                error: "setup is disabled when forward auth is configured".to_string(),
+            }),
+        ),
+        SetupError::AlreadyConfigured => (
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse {
+                error: "already configured".to_string(),
+            }),
+        ),
+        SetupError::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorResponse {
+                error: "too many attempts".to_string(),
+            }),
+        ),
+        SetupError::BadToken => (
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse {
+                error: SETUP_TOKEN_REFUSAL.to_string(),
+            }),
+        ),
+        SetupError::Invalid(error) => (StatusCode::BAD_REQUEST, Json(ApiErrorResponse { error })),
+        SetupError::Internal => internal_error(),
+    })?;
     Ok(Json(SetupResponse { success: true }))
 }
 
@@ -1528,10 +1599,10 @@ pub(crate) async fn create_operator(
         username,
         password,
     } = new_operator;
-    let username = username.trim();
-    if username.is_empty() || username.chars().count() > 64 {
+    let Some(username) = normalize_username(username) else {
         return Err(OperatorError::Invalid("invalid username".to_string()));
-    }
+    };
+    let username = username.as_str();
     if let Err(error) = validate_new_password(password, &[username]) {
         return Err(OperatorError::Invalid(error));
     }

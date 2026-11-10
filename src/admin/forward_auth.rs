@@ -125,10 +125,11 @@ impl ForwardAuthConfig {
     }
 }
 
-/// Trim and validate a header value as a username: non-empty, at most
-/// [`MAX_USERNAME_LEN`] characters, and free of control characters (which could
-/// smuggle terminal escapes into logs).
-fn normalize_username(raw: &str) -> Option<String> {
+/// Trim and validate a username: non-empty, at most [`MAX_USERNAME_LEN`] characters, and
+/// free of control characters (which could smuggle terminal escapes into logs). The one
+/// rule for every way an account is created; sign-in deliberately does not apply it, so
+/// accounts that predate it can still log in.
+pub fn normalize_username(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.chars().count() > MAX_USERNAME_LEN {
         return None;

@@ -125,6 +125,7 @@ async fn build(
         registry,
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
 
     (router, db, token)
@@ -501,7 +502,7 @@ async fn setup_is_refused_when_forward_auth_is_configured() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
@@ -528,7 +529,7 @@ async fn setup_still_works_without_forward_auth() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
@@ -536,6 +537,72 @@ async fn setup_still_works_without_forward_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(db.count_users().await.unwrap(), 1, "operator was created");
+}
+
+/// The browser wizard obeys the same forward-auth guard as the JSON endpoint.
+#[tokio::test]
+async fn wizard_post_is_refused_when_forward_auth_is_configured() {
+    let (app, db) = build_app_without_operator(Some(forward_auth_cfg())).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=eve&password=vault-quartz-nimbus-84&confirm=vault-quartz-nimbus-84&setup_token=ABCDE-FGHJK",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        db.count_users().await.unwrap(),
+        0,
+        "no operator was created"
+    );
+}
+
+/// Concurrent first-run setups with different usernames must create exactly one
+/// operator; the losers answer 409, never 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setups_create_exactly_one_operator() {
+    const ATTEMPTS: usize = 5; // the per-IP setup attempt limit
+    let (app, db) = build_app_without_operator(None).await;
+
+    let mut tasks = Vec::new();
+    for n in 0..ATTEMPTS {
+        let app = app.clone();
+        tasks.push(tokio::spawn(async move {
+            let body = format!(r#"{{"setup_token":"ABCDE-FGHJK","username":"eve{n}","password":"vault-quartz-nimbus-84"}}"#);
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/setup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }));
+    }
+    let mut statuses = Vec::new();
+    for task in tasks {
+        statuses.push(task.await.unwrap());
+    }
+
+    let ok = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    let conflict = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(ok, 1, "exactly one setup wins: {statuses:?}");
+    assert_eq!(conflict, ATTEMPTS - 1, "the rest answer 409: {statuses:?}");
+    assert_eq!(db.count_users().await.unwrap(), 1);
 }
 
 /// A forward-auth caller logging out gets 200 with the proxy logout URL, so the

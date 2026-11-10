@@ -77,7 +77,7 @@ sudo ./target/release/noadd
 ./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Open `http://127.0.0.1:8080` to create your operator account (username + password). Passwords must be 12–128 characters and pass a [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs) guessability check — noadd has no second factor, so the password is the whole defence. Common passwords, keyboard runs and anything built from your username are refused with the reason; a few unrelated words clears the bar easily. The check runs offline. Further operators and active sessions are managed on the Account page.
+Open `http://127.0.0.1:8080` to create your operator account (username + password + setup token). On start with no operator, noadd prints a one-time setup token (`XXXXX-XXXXX`) to stderr (`noadd: first-run setup token: ...`; `docker logs <container>` shows it); paste it into the setup form, or send it as `setup_token` to `POST /api/auth/setup`. It lives in memory only, so a restart before setup issues a new one, and it proves you can read the server's output rather than just reach its port. Case, hyphen and spaces are ignored, and attempts are limited per address. Passwords must be 12–128 characters and pass a [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs) guessability check — noadd has no second factor, so the password is the whole defence. Common passwords, keyboard runs and anything built from your username are refused with the reason; a few unrelated words clears the bar easily. The check runs offline. Further operators and active sessions are managed on the Account page.
 
 ### Docker
 
