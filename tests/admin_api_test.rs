@@ -4674,6 +4674,42 @@ async fn the_wizard_creates_the_first_operator_and_signs_them_in() {
     );
 }
 
+/// Setup trims the username it stores, so the automatic sign-in that follows (and any
+/// later login) must resolve the same account from the padded input.
+#[tokio::test]
+async fn the_wizard_signs_in_an_operator_whose_username_was_padded() {
+    let app = unconfigured_app().await;
+    let res = app
+        .clone()
+        .oneshot(form_post(
+            "/setup",
+            "username=+admin+&password=correct-horse-battery&confirm=correct-horse-battery",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/"),
+        "automatic sign-in failed and fell back to /login"
+    );
+
+    let login = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":" admin ","password":"correct-horse-battery"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+}
+
 /// The confirmation field is the form's own, so the page handler checks it —
 /// not `create_first_operator`, which the JSON endpoint shares.
 #[tokio::test]
