@@ -24,8 +24,8 @@ use utoipa_scalar::Scalar;
 
 use crate::admin::auth::{
     RateLimiter, SessionInfo, SessionStore, generate_token, has_no_password, hash_api_key,
-    hash_password, session_log_id, spend_verify_cost, store_session, validate_session,
-    verify_password,
+    hash_password_blocking, session_log_id, spend_verify_cost_blocking, store_session,
+    validate_session, verify_password_blocking,
 };
 use crate::admin::events;
 use crate::admin::forward_auth::normalize_username;
@@ -652,6 +652,15 @@ impl axum::extract::FromRequestParts<AppState> for AuthedUser {
     }
 }
 
+/// Whether a password check lets the caller through. Locks are checked again after the
+/// verify because requests queue for an Argon2 permit: each passed `is_locked` before any
+/// failure was counted, so without this the queue depth, not the lockout, would bound how
+/// many guesses land. A correct guess against a now-locked account is refused exactly like
+/// a wrong one, so the response is no oracle.
+fn accept_after_verify(valid: bool, locked: bool) -> bool {
+    valid && !locked
+}
+
 /// Count a password failure against `user_id`, logging a lockout when one starts or extends.
 /// The event carries `user_id`, never the username.
 fn note_account_failure(state: &AppState, user_id: i64, ip: std::net::IpAddr, endpoint: &str) {
@@ -892,7 +901,7 @@ pub(crate) async fn start_password_session(
         .map_err(|_err| LoginError::Internal)?
     else {
         // Same Argon2 cost as a real account, so timing does not reveal the username.
-        spend_verify_cost(password);
+        spend_verify_cost_blocking(password).await;
         log_failed();
         return Err(LoginError::Invalid);
     };
@@ -901,7 +910,7 @@ pub(crate) async fn start_password_session(
     // password. Must precede `verify_password` (which would 500 on the sentinel), and pads
     // the Argon2 cost so neither status nor timing reveals a proxy-provisioned account.
     if has_no_password(&auth.password_hash) {
-        spend_verify_cost(password);
+        spend_verify_cost_blocking(password).await;
         log_failed();
         return Err(LoginError::Invalid);
     }
@@ -909,15 +918,19 @@ pub(crate) async fn start_password_session(
     // Only for a resolved username: an unknown one is never counted, so it can never be
     // locked, and the lockout cannot become an enumeration oracle. Padded for timing too.
     if state.lockout.is_locked(auth.id) {
-        spend_verify_cost(password);
+        spend_verify_cost_blocking(password).await;
         log_failed();
         return Err(LoginError::Invalid);
     }
 
-    let valid =
-        verify_password(password, &auth.password_hash).map_err(|_err| LoginError::Internal)?;
+    let valid = verify_password_blocking(password, &auth.password_hash)
+        .await
+        .map_err(|_err| LoginError::Internal)?;
+    let locked = state.lockout.is_locked(auth.id);
     if !valid {
         note_account_failure(state, auth.id, ip, "login");
+    }
+    if !accept_after_verify(valid, locked) {
         log_failed();
         return Err(LoginError::Invalid);
     }
@@ -1189,11 +1202,8 @@ pub(crate) async fn create_first_operator(
     };
     let username = username.as_str();
     validate_new_password(password, &[username]).map_err(SetupError::Invalid)?;
-    // Argon2 is CPU-heavy; keep it off the async workers so a burst of setups cannot stall them.
-    let password_owned = password.to_string();
-    let hash = tokio::task::spawn_blocking(move || hash_password(&password_owned))
+    let hash = hash_password_blocking(password)
         .await
-        .map_err(|_err| SetupError::Internal)?
         .map_err(|_err| SetupError::Internal)?;
     // The count above is only a fast path; this insert is the arbiter when setups race.
     state
@@ -1339,12 +1349,17 @@ pub(crate) async fn confirm_password(
         return Err(ReauthError::Invalid);
     }
     if state.lockout.is_locked(user_id) {
-        spend_verify_cost(password);
+        spend_verify_cost_blocking(password).await;
         return Err(ReauthError::Invalid);
     }
-    let ok = verify_password(password, &hash).map_err(|_err| ReauthError::Internal)?;
+    let ok = verify_password_blocking(password, &hash)
+        .await
+        .map_err(|_err| ReauthError::Internal)?;
+    let locked = state.lockout.is_locked(user_id);
     if !ok {
         note_account_failure(state, user_id, ip, "reauth");
+    }
+    if !accept_after_verify(ok, locked) {
         tracing::warn!(
             event = "auth.failed",
             method = "password",
@@ -1606,7 +1621,9 @@ pub(crate) async fn create_operator(
     if let Err(error) = validate_new_password(password, &[username]) {
         return Err(OperatorError::Invalid(error));
     }
-    let hash = hash_password(password).map_err(|_err| OperatorError::Internal)?;
+    let hash = hash_password_blocking(password)
+        .await
+        .map_err(|_err| OperatorError::Internal)?;
     match state
         .db
         .create_user(username, &hash, crate::now_unix())
@@ -1783,13 +1800,17 @@ pub(crate) async fn change_password_for_session(
     }
     // Same account lockout as sign-in.
     if state.lockout.is_locked(user_id) {
-        spend_verify_cost(current_password);
+        spend_verify_cost_blocking(current_password).await;
         return Err(PasswordChangeError::WrongPassword);
     }
-    let ok =
-        verify_password(current_password, &hash).map_err(|_err| PasswordChangeError::Internal)?;
+    let ok = verify_password_blocking(current_password, &hash)
+        .await
+        .map_err(|_err| PasswordChangeError::Internal)?;
+    let locked = state.lockout.is_locked(user_id);
     if !ok {
         note_account_failure(state, user_id, ip, "change_password");
+    }
+    if !accept_after_verify(ok, locked) {
         tracing::warn!(
             event = "auth.failed",
             method = "password",
@@ -1801,7 +1822,9 @@ pub(crate) async fn change_password_for_session(
         return Err(PasswordChangeError::WrongPassword);
     }
     state.lockout.record_success(user_id);
-    let new_hash = hash_password(new_password).map_err(|_err| PasswordChangeError::Internal)?;
+    let new_hash = hash_password_blocking(new_password)
+        .await
+        .map_err(|_err| PasswordChangeError::Internal)?;
     state
         .db
         .update_user_password(user_id, &new_hash)
@@ -3896,6 +3919,22 @@ mod openapi_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod accept_after_verify_tests {
+    use super::accept_after_verify;
+
+    /// The lock-after-check race needs a lock to appear while a request waits for its
+    /// Argon2 permit, which cannot be staged deterministically through a handler; this
+    /// pins the decision those handlers delegate to.
+    #[test]
+    fn only_a_correct_password_on_an_unlocked_account_is_accepted() {
+        assert!(accept_after_verify(true, false));
+        assert!(!accept_after_verify(true, true));
+        assert!(!accept_after_verify(false, false));
+        assert!(!accept_after_verify(false, true));
     }
 }
 
