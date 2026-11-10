@@ -536,6 +536,88 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     }
 }
 
+/// Why an off-thread password operation failed.
+#[derive(Debug, thiserror::Error)]
+pub enum PasswordTaskError {
+    #[error("password hashing failed: {0}")]
+    Hash(#[from] argon2::password_hash::Error),
+    /// The blocking task panicked or was cancelled. Callers treat it as an
+    /// internal error, never as a verdict on the password.
+    #[error("password task did not complete: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    /// The concurrency limiter was closed. Also an internal error.
+    #[error("password work limiter closed: {0}")]
+    Limiter(#[from] tokio::sync::AcquireError),
+}
+
+/// Bounds concurrent Argon2 work. Tokio's blocking pool admits up to 512 threads and each
+/// Argon2 run holds about 19 MiB, so unbounded `spawn_blocking` would let a burst exhaust
+/// memory; matching the core count caps that. It does not by itself bound lockout bypass:
+/// requests queued here already passed `is_locked`, so callers re-check the lock after the
+/// verify (`accept_after_verify` in `api.rs`).
+static PASSWORD_WORK_LIMITER: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+/// Number of password operations allowed to run at once.
+pub fn password_work_limit() -> usize {
+    // Unknown parallelism falls back to 2: 1 would let a single slow hash block every
+    // other sign-in, and a larger guess risks the memory cost above.
+    std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get)
+}
+
+fn password_work_limiter() -> &'static Arc<tokio::sync::Semaphore> {
+    PASSWORD_WORK_LIMITER
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(password_work_limit())))
+}
+
+/// Permits not currently held; equals [`password_work_limit`] when idle.
+pub fn password_work_available() -> usize {
+    password_work_limiter().available_permits()
+}
+
+/// Run `work` on the blocking pool once a limiter permit is free. The permit moves into
+/// the task, so it is held until the work finishes even if the caller is cancelled
+/// meanwhile: a dropped request cannot start unbounded extra work.
+async fn run_password_work<T, F>(work: F) -> Result<T, PasswordTaskError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Arc::clone(password_work_limiter()).acquire_owned().await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let output = work();
+        drop(permit);
+        output
+    })
+    .await?)
+}
+
+/// [`hash_password`] on the blocking pool. Argon2 takes tens of milliseconds of
+/// CPU, which would otherwise stall every task sharing the async worker.
+pub async fn hash_password_blocking(password: &str) -> Result<String, PasswordTaskError> {
+    let password = password.to_owned();
+    Ok(run_password_work(move || hash_password(&password)).await??)
+}
+
+/// [`verify_password`] on the blocking pool; see [`hash_password_blocking`].
+pub async fn verify_password_blocking(
+    password: &str,
+    hash: &str,
+) -> Result<bool, PasswordTaskError> {
+    let password = password.to_owned();
+    let hash = hash.to_owned();
+    Ok(run_password_work(move || verify_password(&password, &hash)).await??)
+}
+
+/// [`spend_verify_cost`] on the blocking pool, queued behind the same limiter as real
+/// verifications so padded and real paths wait alike. The result is discarded, so a
+/// failure only costs the timing padding and is logged.
+pub async fn spend_verify_cost_blocking(password: &str) {
+    let password = password.to_owned();
+    if let Err(error) = run_password_work(move || spend_verify_cost(&password)).await {
+        tracing::error!(%error, "timing-equalisation task did not complete");
+    }
+}
+
 /// Argon2 hash of a fixed, unusable string with the real parameters, so
 /// verifying against it costs what a real verification does.
 static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
