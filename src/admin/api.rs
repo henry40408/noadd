@@ -1148,11 +1148,13 @@ pub(crate) async fn create_first_operator(
     }
     validate_new_password(password, &[username]).map_err(SetupError::Invalid)?;
     let hash = hash_password(password).map_err(|_err| SetupError::Internal)?;
+    // The count above is only a fast path; this insert is the arbiter when setups race.
     state
         .db
-        .create_user(username, &hash, crate::now_unix())
+        .create_first_user(username, &hash, crate::now_unix())
         .await
-        .map_err(|_err| SetupError::Internal)?;
+        .map_err(|_err| SetupError::Internal)?
+        .ok_or(SetupError::AlreadyConfigured)?;
     Ok(())
 }
 
