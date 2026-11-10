@@ -82,6 +82,7 @@ async fn build_app() -> (axum::Router, Database, noadd::admin::auth::SessionStor
         registry,
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     };
     (admin_router(state), db, sessions)
 }

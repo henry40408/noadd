@@ -61,16 +61,37 @@ impl Api {
             .unwrap_or(false))
     }
 
+    /// The setup token this instance printed at startup.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the base URL has no port or the instance printed no token.
+    pub fn setup_token(&self) -> Result<String> {
+        let port = self
+            .base
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
+            .context("base URL has no port")?;
+        crate::server::setup_token_for_port(port)
+    }
+
     /// Creates the first operator. Idempotent: a 409 (one exists) is success.
     ///
     /// # Errors
     ///
     /// Fails on any status other than 200 or 409.
     pub async fn setup(&self, username: &str, password: &str) -> Result<()> {
+        // Empty when the instance is already configured: the 409 below is then expected.
+        let setup_token = self.setup_token().unwrap_or_default();
         let res = self
             .client
             .post(format!("{}/api/auth/setup", self.base))
-            .json(&json!({ "username": username, "password": password }))
+            .json(&json!({
+                "username": username,
+                "password": password,
+                "setup_token": setup_token,
+            }))
             .send()
             .await
             .context("POST /api/auth/setup")?;

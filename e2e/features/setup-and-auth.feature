@@ -15,6 +15,7 @@ Feature: First-run setup and authentication
     When I enter "testuser" as the username
     And I enter "correct horse battery staple" as the new password
     And I enter "a different password" as the confirmation
+    And I enter the setup token printed to the server stderr
     And I submit the setup form
     Then I see a setup error about the passwords not matching
     And the admin password has still not been set
@@ -26,6 +27,7 @@ Feature: First-run setup and authentication
     When I enter "testuser" as the username
     And I enter "hunter2" as the new password
     And I enter "hunter2" as the confirmation
+    And I enter the setup token printed to the server stderr
     And I submit the setup form
     Then I see a setup error about the password being too short
     And the admin password has still not been set
@@ -37,6 +39,7 @@ Feature: First-run setup and authentication
     When I enter "testuser" as the username
     And I enter "correct horse battery staple" as the new password
     And I enter "correct horse battery staple" as the confirmation
+    And I enter the setup token printed to the server stderr
     And I submit the setup form
     # Setup auto-logs-in, so a successful setup lands directly on the dashboard.
     Then I land on the dashboard

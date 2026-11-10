@@ -113,6 +113,7 @@ async fn setup_with_db() -> (axum::Router, String, Database) {
         registry,
         trusted_proxies: std::sync::Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth: None,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
     (router, token, db)
 }

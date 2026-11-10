@@ -25,10 +25,10 @@ use std::net::SocketAddr;
 use crate::admin::api::{
     ApiKeyError, AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginAttempt, LoginError,
     MIN_PASSWORD_LENGTH, NewOperator, OperatorError, PasswordChange, PasswordChangeError,
-    ReauthError, RuleError, SessionActor, SessionRevocation, SettingsError, SetupError,
-    apply_settings, change_password_for_session, create_custom_rule, create_filter_list,
-    create_first_operator, create_operator, end_session, issue_api_key, modify_filter_list,
-    needs_setup, remove_operator, start_password_session,
+    ReauthError, RuleError, SETUP_TOKEN_REFUSAL, SessionActor, SessionRevocation, SettingsError,
+    SetupAttempt, SetupError, apply_settings, change_password_for_session, create_custom_rule,
+    create_filter_list, create_first_operator, create_operator, end_session, issue_api_key,
+    modify_filter_list, needs_setup, remove_operator, start_password_session,
 };
 
 /// The sign-in screen.
@@ -917,6 +917,8 @@ pub struct SetupForm {
     username: String,
     password: String,
     confirm: String,
+    #[serde(default)]
+    setup_token: String,
 }
 
 /// `POST /setup`.
@@ -951,7 +953,14 @@ pub async fn setup_submit(
         );
     }
 
-    if let Err(err) = create_first_operator(&state, &form.username, &form.password).await {
+    let attempt = SetupAttempt {
+        connect: connect.as_deref(),
+        headers: &headers,
+        username: &form.username,
+        password: &form.password,
+        setup_token: &form.setup_token,
+    };
+    if let Err(err) = create_first_operator(&state, attempt).await {
         let (status, message) = match err {
             SetupError::Disabled => (
                 StatusCode::FORBIDDEN,
@@ -960,6 +969,11 @@ pub async fn setup_submit(
             SetupError::AlreadyConfigured => {
                 (StatusCode::CONFLICT, "already configured".to_string())
             }
+            SetupError::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts, try again later".to_string(),
+            ),
+            SetupError::BadToken => (StatusCode::FORBIDDEN, SETUP_TOKEN_REFUSAL.to_string()),
             SetupError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
             SetupError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,

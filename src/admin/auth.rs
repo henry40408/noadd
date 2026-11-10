@@ -68,6 +68,106 @@ pub fn generate_token() -> String {
         .collect()
 }
 
+/// Alphabet of the first-run setup token: Crockford base32, no `I`, `L`, `O`, `U`.
+const SETUP_TOKEN_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const SETUP_TOKEN_GROUP_LEN: usize = 5;
+
+/// One-time secret printed to the server's stderr at startup while no operator exists, and
+/// required by first-run setup. It proves the caller can read the server's stderr, so a
+/// stranger who reaches an unconfigured instance first cannot claim it. Memory only.
+///
+/// Also owns the per-IP throttle on setup attempts: a separate budget from sign-in, so
+/// setting up does not spend the login attempts of the operator it just created.
+pub struct SetupToken {
+    token: Mutex<Option<String>>,
+    attempts: RateLimiter,
+}
+
+/// Setup attempts allowed per source address per window, wrong or right.
+const SETUP_ATTEMPTS: u32 = 5;
+const SETUP_WINDOW_SECS: u64 = 60;
+
+impl SetupToken {
+    fn with_token(token: Option<String>) -> Self {
+        Self {
+            token: Mutex::new(token),
+            attempts: RateLimiter::new(SETUP_ATTEMPTS, SETUP_WINDOW_SECS),
+        }
+    }
+
+    /// Spend one setup attempt for `ip`; `false` when it is over budget. Never refunded.
+    pub fn allow_attempt(&self, ip: IpAddr) -> bool {
+        if !self.attempts.check(ip) {
+            return false;
+        }
+        self.attempts.record(ip);
+        true
+    }
+
+    /// A fresh random token: 10 symbols of 5 bits each, 50 bits.
+    pub fn generate() -> Self {
+        let mut rng = rand::rng();
+        let token: String = (0..SETUP_TOKEN_GROUP_LEN * 2)
+            .map(|_| {
+                char::from(SETUP_TOKEN_ALPHABET[rng.random_range(0..SETUP_TOKEN_ALPHABET.len())])
+            })
+            .collect();
+        Self::with_token(Some(token))
+    }
+
+    /// A known token, for tests that need to submit it.
+    pub fn fixed(token: &str) -> Self {
+        Self::with_token(Some(Self::normalize(token)))
+    }
+
+    /// No token: setup refuses every attempt. Used when setup is not available.
+    pub fn none() -> Self {
+        Self::with_token(None)
+    }
+
+    /// The token as shown to the operator (`XXXXX-XXXXX`), if one is still live.
+    pub fn display(&self) -> Option<String> {
+        let guard = self.token.lock();
+        let token = guard.as_ref()?;
+        let (head, tail) = token.split_at(SETUP_TOKEN_GROUP_LEN.min(token.len()));
+        Some(format!("{head}-{tail}"))
+    }
+
+    /// Compare a submitted token, ignoring case, hyphens and whitespace, in constant time.
+    pub fn matches(&self, submitted: &str) -> bool {
+        let guard = self.token.lock();
+        let Some(expected) = guard.as_ref() else {
+            return false;
+        };
+        let submitted = Self::normalize(submitted);
+        if submitted.len() != expected.len() {
+            return false;
+        }
+        let diff = submitted
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        diff == 0
+    }
+
+    /// Evict throttle entries whose window elapsed; returns how many.
+    pub fn prune_attempts(&self) -> usize {
+        self.attempts.prune()
+    }
+
+    /// Forget the token once an operator exists.
+    pub fn clear(&self) {
+        *self.token.lock() = None;
+    }
+
+    fn normalize(raw: &str) -> String {
+        raw.chars()
+            .filter(|c| *c != '-' && !c.is_whitespace())
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    }
+}
+
 /// Session cookie name on a plain-HTTP deployment.
 pub const SESSION_COOKIE: &str = "session";
 
@@ -658,6 +758,37 @@ impl RateLimiter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setup_token_generates_two_groups_from_the_alphabet() {
+        let shown = SetupToken::generate().display().unwrap();
+        let (head, tail) = shown.split_once('-').unwrap();
+        assert_eq!((head.len(), tail.len()), (5, 5));
+        assert!(
+            shown
+                .chars()
+                .filter(|c| *c != '-')
+                .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c))
+        );
+    }
+
+    #[test]
+    fn setup_token_match_ignores_case_hyphens_and_whitespace() {
+        let token = SetupToken::fixed("ABCDE-FGHJK");
+        assert!(token.matches("abcde-fghjk"));
+        assert!(token.matches(" ABCDEFGHJK "));
+        assert!(!token.matches("ABCDE-FGHJM"));
+        assert!(!token.matches(""));
+    }
+
+    #[test]
+    fn a_cleared_or_absent_setup_token_matches_nothing() {
+        let token = SetupToken::fixed("ABCDE-FGHJK");
+        token.clear();
+        assert!(!token.matches("ABCDE-FGHJK"));
+        assert!(token.display().is_none());
+        assert!(!SetupToken::none().matches(""));
+    }
+
     use super::*;
 
     #[test]

@@ -125,6 +125,7 @@ async fn build(
         registry,
         trusted_proxies: Arc::new(noadd::net::TrustedProxies::default()),
         forward_auth,
+        setup_token: std::sync::Arc::new(noadd::admin::auth::SetupToken::fixed("ABCDE-FGHJK")),
     });
 
     (router, db, token)
@@ -501,7 +502,7 @@ async fn setup_is_refused_when_forward_auth_is_configured() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
@@ -528,7 +529,7 @@ async fn setup_still_works_without_forward_auth() {
                 .uri("/api/auth/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"username":"eve","password":"vault-quartz-nimbus-84"}"#,
+                    r#"{"setup_token":"ABCDE-FGHJK","username":"eve","password":"vault-quartz-nimbus-84"}"#,
                 ))
                 .unwrap(),
         )
@@ -550,7 +551,7 @@ async fn wizard_post_is_refused_when_forward_auth_is_configured() {
                 .uri("/setup")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "username=eve&password=vault-quartz-nimbus-84&confirm=vault-quartz-nimbus-84",
+                    "username=eve&password=vault-quartz-nimbus-84&confirm=vault-quartz-nimbus-84&setup_token=ABCDE-FGHJK",
                 ))
                 .unwrap(),
         )
@@ -568,14 +569,14 @@ async fn wizard_post_is_refused_when_forward_auth_is_configured() {
 /// operator; the losers answer 409, never 500.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_setups_create_exactly_one_operator() {
-    const ATTEMPTS: usize = 8;
+    const ATTEMPTS: usize = 5; // the per-IP setup attempt limit
     let (app, db) = build_app_without_operator(None).await;
 
     let mut tasks = Vec::new();
     for n in 0..ATTEMPTS {
         let app = app.clone();
         tasks.push(tokio::spawn(async move {
-            let body = format!(r#"{{"username":"eve{n}","password":"vault-quartz-nimbus-84"}}"#);
+            let body = format!(r#"{{"setup_token":"ABCDE-FGHJK","username":"eve{n}","password":"vault-quartz-nimbus-84"}}"#);
             app.oneshot(
                 Request::builder()
                     .method("POST")

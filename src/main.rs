@@ -191,6 +191,8 @@ async fn main() -> anyhow::Result<()> {
         http_addr: args.http_addr.clone(),
         tls_enabled,
     };
+    let setup_token = Arc::new(announce_setup_token(&db, forward_auth.is_some()).await?);
+    let setup_token_for_prune = setup_token.clone();
     let admin_routes = admin_router(AppState {
         db: db.clone(),
         sessions: session_store,
@@ -210,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         registry: registry.clone(),
         trusted_proxies: trusted_proxies.clone(),
         forward_auth,
+        setup_token,
     });
 
     spawn_session_maintenance(session_store_for_flush, db_for_flush);
@@ -235,8 +238,11 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_rate_limit_pruning(
         ip_rate_limiter.clone(),
-        login_limiter_for_prune,
-        invalid_session_limiter_for_prune,
+        vec![
+            ("login", login_limiter_for_prune),
+            ("invalid_session", invalid_session_limiter_for_prune),
+        ],
+        setup_token_for_prune,
         shutdown_tx.subscribe(),
     );
     spawn_upstream_probe(forwarder.clone(), shutdown_tx.subscribe());
@@ -266,6 +272,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// While no operator exists (and forward auth does not provision one), mint the setup
+/// token and print it to stderr. Never to `tracing`: log lines get filtered, shipped and
+/// retained, and the token is a credential until setup completes.
+async fn announce_setup_token(
+    db: &Database,
+    forward_auth_enabled: bool,
+) -> anyhow::Result<noadd::admin::auth::SetupToken> {
+    if forward_auth_enabled || db.count_users().await? > 0 {
+        return Ok(noadd::admin::auth::SetupToken::none());
+    }
+    let token = noadd::admin::auth::SetupToken::generate();
+    if let Some(shown) = token.display() {
+        eprintln!("noadd: first-run setup token: {shown}");
+        tracing::info!(
+            event = "setup.token_issued",
+            "first-run setup token issued; see stderr"
+        );
+    }
+    Ok(token)
 }
 
 /// Prunes old query logs and runs database maintenance every hour until
@@ -464,8 +491,8 @@ fn spawn_list_updates(
 /// cannot grow the maps without bound; the admin limiters too.
 fn spawn_rate_limit_pruning(
     dns_limiter: Arc<IpRateLimiter>,
-    login_limiter: Arc<RateLimiter>,
-    invalid_session_limiter: Arc<RateLimiter>,
+    admin_limiters: Vec<(&'static str, Arc<RateLimiter>)>,
+    setup_token: Arc<noadd::admin::auth::SetupToken>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
     tokio::spawn(async move {
@@ -474,11 +501,16 @@ fn spawn_rate_limit_pruning(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    let admin_pruned = admin_limiters
+                        .iter()
+                        .map(|(scope, limiter)| (*scope, limiter.prune()));
                     for (scope, removed) in [
                         ("dns", dns_limiter.prune(std::time::Duration::from_secs(600))),
-                        ("login", login_limiter.prune()),
-                        ("invalid_session", invalid_session_limiter.prune()),
-                    ] {
+                        ("setup", setup_token.prune_attempts()),
+                    ]
+                    .into_iter()
+                    .chain(admin_pruned)
+                    {
                         if removed > 0 {
                             tracing::debug!(
                                 event = "ratelimit.buckets_pruned",
