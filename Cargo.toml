@@ -14,9 +14,6 @@ opt-level = "s"
 anyhow = "1"
 arc-swap = "1"
 argon2 = "0.6"
-# `askama_web`'s `axum-0.8` feature must track the axum version below.
-askama = "0.16"
-askama_web = { version = "0.16", default-features = false, features = ["derive", "axum-0.8"] }
 axum = "0.8"
 axum-extra = { version = "0.12", default-features = false, features = ["cookie"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
@@ -27,6 +24,8 @@ dashmap = "6"
 hickory-proto = "0.26"
 hickory-resolver = { version = "0.26", default-features = false, features = ["https-aws-lc-rs", "tls-aws-lc-rs", "tokio", "webpki-roots"] }
 include_dir = "0.7"
+# The `axum` feature must track the axum version above.
+maud = { version = "0.27", features = ["axum"] }
 mime_guess = "2"
 moka = { version = "0.12", default-features = false, features = ["future"] }
 parking_lot = "0.13"

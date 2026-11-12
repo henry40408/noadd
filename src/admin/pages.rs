@@ -9,8 +9,6 @@
 //! ([`crate::admin::csrf`]) refuses a cross-origin form post on every unsafe
 //! method before it reaches a handler.
 
-use askama::Template;
-use askama_web::WebTemplate;
 use axum::{
     Form,
     extract::{ConnectInfo, Extension, FromRequestParts, Query, State},
@@ -21,6 +19,8 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+
+mod views;
 
 use crate::admin::api::{
     ApiKeyError, AppState, AuthedUser, CLEAR_SITE_DATA, ListError, LoginAttempt, LoginError,
@@ -35,8 +35,6 @@ use crate::admin::api::{
 ///
 /// `error` and `username` let a refused sign-in re-render with the message and
 /// the typed username intact, which a redirect would discard.
-#[derive(Template, WebTemplate)]
-#[template(path = "login.html")]
 pub struct LoginTemplate {
     version: &'static str,
     error: Option<String>,
@@ -45,8 +43,6 @@ pub struct LoginTemplate {
 }
 
 /// The first-run wizard. Same re-render contract as [`LoginTemplate`].
-#[derive(Template, WebTemplate)]
-#[template(path = "setup.html")]
 pub struct SetupTemplate {
     error: Option<String>,
     username: String,
@@ -232,8 +228,6 @@ async fn next_step_target(state: &AppState, path: &str, headers: &HeaderMap) -> 
 ///
 /// `error_field` names the field a rejected save objected to, so the template
 /// puts the message next to that input. Empty when there is nothing to report.
-#[derive(Template, WebTemplate)]
-#[template(path = "settings.html")]
 pub struct SettingsTemplate {
     shell: ShellData,
     upstream_servers: String,
@@ -293,8 +287,6 @@ pub struct ApiKeyView {
 /// in the form itself — no dialog, and the same path with or without
 /// JavaScript. [`crate::admin::api::confirm_password`] is the one place this
 /// and `POST /api/auth/reauth` check a password.
-#[derive(Template, WebTemplate)]
-#[template(path = "account.html")]
 pub struct AccountTemplate {
     shell: ShellData,
     username: String,
@@ -368,8 +360,6 @@ pub struct CustomRuleView {
 /// Works without JavaScript: the domain test is a GET (the verdict lives in
 /// the URL), every mutation a POST that redirects, and `edit_id` expands a row
 /// into an edit form — which, with JavaScript, is a dialog instead.
-#[derive(Template, WebTemplate)]
-#[template(path = "filters.html")]
 pub struct FiltersTemplate {
     shell: ShellData,
     lists: Vec<FilterListView>,
@@ -421,8 +411,6 @@ pub struct TopRowView {
 ///
 /// The chart is the exception — `app.js` draws it — and without scripting the
 /// card says so.
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard.html")]
 pub struct DashboardTemplate {
     shell: ShellData,
 
@@ -506,8 +494,6 @@ pub struct RangeOptionView {
 /// breakdowns) for `app.js` to fold; everything else is a plain `now - range`
 /// window rendered on the server. The range picks the server's window, so the
 /// switcher is links and the range lives in the URL.
-#[derive(Template, WebTemplate)]
-#[template(path = "stats.html")]
 pub struct StatsTemplate {
     shell: ShellData,
     /// `"7d"` / `"30d"` / `"90d"`, for the card titles.
@@ -526,8 +512,7 @@ pub struct StatsTemplate {
     health: Vec<StatCardView>,
 }
 
-/// One `<option>`, with `selected` decided here — comparing `String` to `&&str`
-/// in askama is awkward.
+/// One `<option>`, with `selected` decided here rather than in the view.
 pub struct OptionView {
     value: String,
     selected: bool,
@@ -561,8 +546,6 @@ pub struct LogRowView {
 /// Every filter and the page number live in the URL, so the page works without
 /// JavaScript: the filters are a GET form, the pager two links. The live tail
 /// needs the event stream, so its button ships hidden.
-#[derive(Template, WebTemplate)]
-#[template(path = "logs.html")]
 pub struct LogsTemplate {
     shell: ShellData,
     rows: Vec<LogRowView>,
@@ -595,6 +578,60 @@ pub struct LogsTemplate {
     /// Whether any filter is applied: an empty table then means "nothing
     /// matched" rather than "nothing has happened yet".
     filtered: bool,
+}
+
+impl IntoResponse for LoginTemplate {
+    fn into_response(self) -> Response {
+        views::auth::login(&self).into_response()
+    }
+}
+
+impl IntoResponse for SetupTemplate {
+    fn into_response(self) -> Response {
+        views::auth::setup(&self).into_response()
+    }
+}
+
+impl IntoResponse for SettingsTemplate {
+    fn into_response(self) -> Response {
+        views::settings::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for AccountTemplate {
+    fn into_response(self) -> Response {
+        views::account::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for FiltersTemplate {
+    fn into_response(self) -> Response {
+        views::filters::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for DashboardTemplate {
+    fn into_response(self) -> Response {
+        views::dashboard::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for StatsTemplate {
+    fn into_response(self) -> Response {
+        views::stats::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for LogsTemplate {
+    fn into_response(self) -> Response {
+        views::logs::render(&self).into_response()
+    }
+}
+
+impl IntoResponse for RegistryTemplate {
+    fn into_response(self) -> Response {
+        views::registry::render(&self).into_response()
+    }
 }
 
 /// An authenticated operator for a *page* request.
@@ -3131,8 +3168,6 @@ pub struct RegistryFailureView {
 /// A page (not a modal) so it works without JavaScript: three filters in the
 /// URL and one form posting what is ticked. The registry is a third party, so
 /// `load_failed` is a rendered state whose retry is a link to the same URL.
-#[derive(Template, WebTemplate)]
-#[template(path = "registry.html")]
 pub struct RegistryTemplate {
     shell: ShellData,
     /// What the search box keeps.

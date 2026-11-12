@@ -6466,7 +6466,7 @@ async fn the_add_form_carries_the_current_view() {
     let html = registry_html(&app, &token, "?q=beta&group=2&deprecated=1").await;
     // Separators are escaped in the attribute; a browser reads them as `&`.
     assert!(
-        html.contains(r#"action="/filters/registry/add?q=beta&#38;group=2&#38;deprecated=1""#),
+        html.contains(r#"action="/filters/registry/add?q=beta&amp;group=2&amp;deprecated=1""#),
         "the form did not carry the view it was submitted from"
     );
 }
@@ -6600,7 +6600,7 @@ async fn the_stats_page_renders_its_readings() {
     let series: serde_json::Value = {
         let start = html.find(r#"data-series=""#).expect("no data-series") + 13;
         let end = start + html[start..].find('"').unwrap();
-        serde_json::from_str(&html[start..end].replace("&#34;", "\"")).unwrap()
+        serde_json::from_str(&html[start..end].replace("&quot;", "\"")).unwrap()
     };
     let sum = |key: &str| {
         series[key]
