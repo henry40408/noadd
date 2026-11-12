@@ -1679,7 +1679,7 @@ class FiltersPage extends HTMLElement {
     }
   }
 
-  // Redraw the table and cards in the shape of `templates/filters.html`, forms
+  // Redraw the table and cards in the shape of `views/filters.rs`, forms
   // included, so the same bindings apply to either.
   async loadLists() {
     try {

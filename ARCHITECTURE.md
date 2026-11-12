@@ -183,13 +183,13 @@ Each user-defined token is a URL path, `/dns-query/my-token`. The access policy 
 
 Routing, authentication and every page body are server-side; vanilla-JS web components (no framework, no build step) enhance the rendered markup in place.
 
-`src/admin/pages.rs` renders askama templates from `templates/`. Every page path resolves the session before writing anything, redirecting to `/login?next=…` (or `/setup` when no operator exists). `/login` and `/setup` are plain `<form method="post">` pages that work without JavaScript; navigation is ordinary links.
+`src/admin/pages.rs` holds the handlers and the maud views live in `src/admin/pages/views/`. Every page path resolves the session before writing anything, redirecting to `/login?next=…` (or `/setup` when no operator exists). `/login` and `/setup` are plain `<form method="post">` pages that work without JavaScript; navigation is ordinary links.
 
 Password sign-in exists once, in `start_password_session` (`src/admin/api.rs`), called by both `POST /api/auth/login` and `POST /login`. The rate limit, the constant Argon2 cost that makes an unknown username indistinguishable from a wrong password, the per-account lockout and the audit events all live there; a second copy is how one path silently loses the timing padding. `create_first_operator` is the same for setup.
 
 A `next` destination must be an absolute same-origin path (`safe_next`): an off-origin redirect after sign-in would make noadd's own URL phishing bait. `//host` and `/\host` (which browsers normalise to it) are refused too.
 
-`templates/shell.html` renders the shell — topbar, both nav bars, status bar, one-shot notices — and each page template wraps its body in the page's custom element, which upgrades in place. `app.js` builds no page and re-derives nothing the template decided (e.g. the active nav item).
+`views::layout::shell` renders the shell — topbar, both nav bars, status bar, one-shot notices — and each page view wraps its body in the page's custom element, which upgrades in place. `app.js` builds no page and re-derives nothing the template decided (e.g. the active nav item).
 
 The no-JavaScript exceptions — the dashboard's 24-hour chart, the statistics charts, and the query log's live tail — each say so in place. The statistics charts bucket by the *viewer's* calendar, which needs a UTC offset the request does not carry, so the page ships quarter-hour counts on UTC boundaries and `app.js` folds them (exact, since every offset in use is a whole number of quarter hours). One-shot notices ride a flash cookie cleared by the response that renders them, never a query parameter that survives refreshes and shared links.
 
@@ -349,7 +349,7 @@ An hourly task prunes query logs older than the retention window, then runs `PRA
 | `moka` | DNS response cache |
 | `fst` | Finite state transducer for exact-match filter sets |
 | `arc-swap` | Lock-free atomic pointer swap |
-| `askama` | Compile-time HTML templates |
+| `maud` | Compile-time HTML templates (`html!` macro) |
 | `argon2` | Password hashing |
 | `rustls` | TLS |
 | `mimalloc` | Global allocator (returns rebuild memory to the OS) |

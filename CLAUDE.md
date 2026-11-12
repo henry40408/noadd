@@ -67,15 +67,15 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 
 ## Admin UI
 
-**Routing and authentication are server-side.** `src/admin/pages.rs` renders `templates/` (askama). Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing HTML, redirecting to `/login?next=…` or `/setup`. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is plain links; no client-side router.
+**Routing and authentication are server-side.** `src/admin/pages.rs` holds the handlers and page structs; the maud views are in `src/admin/pages/views/`. Each page path — `/`, `/stats`, `/logs`, `/filters`, `/filters/registry`, `/settings`, `/account` — resolves the session *before* writing HTML, redirecting to `/login?next=…` or `/setup`. `/login` and `/setup` are real `<form method="post">` pages that work without JavaScript. Navigation is plain links; no client-side router.
 
 Sign-in and setup need **no CSRF token**: tower-http's `CsrfLayer` (wired in `admin_router`; documented and its rejections logged in `src/admin/csrf.rs`) is a header-based origin guard over every unsafe method, refusing cross-origin form posts before any handler.
 
 Password sign-in lives **only** in `start_password_session` (`src/admin/api.rs`), shared by `POST /api/auth/login` and `POST /login`; first-run account creation likewise in `create_first_operator`. Rate limiting, constant Argon2 cost, lockout and audit events are all there — do not grow a second path.
 
-**The shell is server-rendered** (`templates/shell.html`): topbar, both nav bars, status bar, one-shot notices. `app.js` must not re-derive what it decided — e.g. the active nav item is a class set from the path. The nav table is `NAV` (`src/admin/pages.rs`), driving both the desktop strip and the mobile F-key bar.
+**The shell is server-rendered** (`views::layout::shell`): topbar, both nav bars, status bar, one-shot notices. `app.js` must not re-derive what it decided — e.g. the active nav item is a class set from the path. The nav table is `NAV` (`src/admin/pages.rs`), driving both the desktop strip and the mobile F-key bar.
 
-Page bodies are **vanilla-JS web components — no framework, no build step** — in `admin-ui/dist/app.css` and `app.js`. No `index.html`, **no SPA fallback**: an unmatched path 404s. The directory is embedded via `include_dir!` (`ADMIN_UI`, `src/admin/api.rs`), so edit `app.js`, `app.css` or `templates/`, then `cargo build`. Assets get a per-file content-hash `ETag` + `Cache-Control: no-cache`; server-rendered pages get `no-store` from the same layer, which applies only when a response declares no policy.
+Page bodies are **vanilla-JS web components — no framework, no build step** — in `admin-ui/dist/app.css` and `app.js`. No `index.html`, **no SPA fallback**: an unmatched path 404s. The directory is embedded via `include_dir!` (`ADMIN_UI`, `src/admin/api.rs`), so edit `app.js`, `app.css` or the views, then `cargo build`. Assets get a per-file content-hash `ETag` + `Cache-Control: no-cache`; server-rendered pages get `no-store` from the same layer, which applies only when a response declares no policy.
 
 One-shot notices ride a **flash cookie** (`Flash`, `src/admin/pages.rs`), cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
 
@@ -83,14 +83,14 @@ One-shot notices ride a **flash cookie** (`Flash`, `src/admin/pages.rs`), cleare
 
 Settings is the worked example.
 
-- The template `{% extends "shell.html" %}` and fills `{% block page %}`; its struct embeds `ShellData` as `shell`.
+- The view builds the page body and passes it to `layout::shell`; its struct embeds `ShellData` as `shell`. `views` is a child module of `pages`, so it reads the page structs' private fields.
 - **Wrap the body in the page's custom element** (`<settings-page>…</settings-page>`), which upgrades in place; `app.js` enhances the markup and never mounts a page.
 - Validation lives in **one** function shared with the JSON endpoint (`apply_settings`), returning a field-tagged error so the form shows it by the input while the API returns a bare 400.
 - A successful POST redirects with a flash; a rejected one re-renders **with the submitted values** at 400/401 — never 200.
 - When `app.js` enhances a form it removes (not hides) the no-JS submit row (`#settings-save-row`), and any submit button it takes over must `preventDefault()`.
 - **`load()` must not refill server-rendered fields**, or it overwrites what the operator typed before the response landed.
 
-⚠️ A `querySelector` returning `null` in `connectedCallback` throws and **silently kills every binding after it**. When moving markup to a template, check every id `app.js` reaches for still exists.
+⚠️ A `querySelector` returning `null` in `connectedCallback` throws and **silently kills every binding after it**. When moving markup, check every id `app.js` reaches for still exists.
 
 Filters — a page whose body is *a list of things*:
 
@@ -143,7 +143,8 @@ Statistics — readings in a **chosen window**, and what the server cannot rende
 - **One statement per rollup family.** The page's reads are `stats_scan_since` (quarter + metrics rollups) and `traffic_lists_since` (top domains, distinct-domain count, top clients) in `src/db.rs`, via `compute_range_stats` (`src/admin/stats.rs`). `stats_scan_since` streams rows and folds in Rust, telling its four arms apart by a leading column. A new reading is folded out of one of these, not added as a statement.
 - **A total nobody can count cheaply is maintained.** `query_logs`' row count lives in `settings` (`query_log_count`), moved by the insert batch, the prune and Clear All inside their own transactions; the Database Health card and the unfiltered pager (`count_logs`) read it. A fourth write path to `query_logs` must move it too, in its own transaction (`bump_log_count`, or `set_log_count` as Clear All does).
 - **The rollups (`query_stats_*`, ARCHITECTURE.md *Rollups*) must always equal a recount of `query_logs`.** Inserts are covered by the `query_logs_maintain_stats` trigger; a new path that *deletes* from `query_logs` must unwind them in its own transaction, as `prune_logs_before` (`unwind_stats_rollups`) and Clear All do.
-- Four bar lists share **one askama macro** (`templates/_macros.html`); `{% call … %}` needs a matching `{% endcall %}` in askama 0.16, and `{% include %}` cannot see a loop variable.
+- Four bar lists share **one function** (`bar_row` in `views/stats.rs`).
+- **maud drops source whitespace.** Put an explicit `" "` between inline siblings (text beside an element, two links in a row); only whitespace between block tags is safe to omit. maud also does not escape `'`, which is fine inside the double-quoted attributes it always emits.
 
 Account — **actions that need a password proof**:
 
