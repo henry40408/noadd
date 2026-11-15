@@ -393,8 +393,7 @@ async fn markers_match(world: &mut NoaddWorld) -> StepResult {
     let mismatches = page.eval(MARKER_COLOURS).await?;
     let mismatches: Vec<String> = mismatches
         .as_array()
-        .map(|rows| rows.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|rows| rows.iter().map(ToString::to_string).collect());
     ensure(
         mismatches.is_empty(),
         format!("stat markers not matching their value colour: {mismatches:?}"),
@@ -579,8 +578,7 @@ async fn no_inline_handlers(world: &mut NoaddWorld) -> StepResult {
         .await?;
     let handlers: Vec<String> = handlers
         .as_array()
-        .map(|names| names.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|names| names.iter().map(ToString::to_string).collect());
     ensure(
         handlers.is_empty(),
         format!("inline event handlers injected onto filter list rows: {handlers:?}"),

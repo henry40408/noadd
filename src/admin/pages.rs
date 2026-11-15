@@ -1060,8 +1060,7 @@ pub struct LogsQuery {
 impl LogsQuery {
     /// The filters, trimmed, with empty strings treated as "not applied".
     fn applied(&self) -> (String, String, String, String) {
-        let clean =
-            |value: Option<&String>| value.map(|v| v.trim().to_string()).unwrap_or_default();
+        let clean = |value: Option<&String>| value.map_or_default(|v| v.trim().to_string());
         (
             clean(self.q.as_ref()),
             clean(self.action.as_ref()),
@@ -1625,47 +1624,41 @@ pub async fn stats_page(
         latency_card("Latency p99", latency.map_or(0, |l| l.p99_ms), "text-red"),
     ];
 
-    let series_json = serde_json::to_string(
-        &range_stats
-            .as_ref()
-            .map(|s| s.series.clone())
-            .unwrap_or_default(),
-    )
-    .expect("a series of integers always serializes");
+    let series_json =
+        serde_json::to_string(&range_stats.as_ref().map_or_default(|s| s.series.clone()))
+            .expect("a series of integers always serializes");
 
-    let (query_types, outcomes, top_domains, top_clients) = range_stats
-        .map(|s| {
-            (
-                bar_rows(s.metrics.query_types),
-                bar_rows(s.metrics.outcomes),
-                bar_rows(
-                    s.domains
-                        .top
-                        .into_iter()
-                        .map(|d| (d.domain, d.count))
-                        .collect(),
-                ),
-                // Name a `DoH` client by IP and token; the IP alone would merge
-                // every token behind one proxy.
-                bar_rows(
-                    s.clients
-                        .into_iter()
-                        .map(|c| {
-                            let label = match c.doh_token {
-                                Some(token) if !token.is_empty() => {
-                                    format!("{} · {token}", c.client_ip)
-                                }
-                                _ => c.client_ip,
-                            };
-                            (label, c.count)
-                        })
-                        .collect(),
-                ),
-            )
-        })
-        .unwrap_or_default();
+    let (query_types, outcomes, top_domains, top_clients) = range_stats.map_or_default(|s| {
+        (
+            bar_rows(s.metrics.query_types),
+            bar_rows(s.metrics.outcomes),
+            bar_rows(
+                s.domains
+                    .top
+                    .into_iter()
+                    .map(|d| (d.domain, d.count))
+                    .collect(),
+            ),
+            // Name a `DoH` client by IP and token; the IP alone would merge
+            // every token behind one proxy.
+            bar_rows(
+                s.clients
+                    .into_iter()
+                    .map(|c| {
+                        let label = match c.doh_token {
+                            Some(token) if !token.is_empty() => {
+                                format!("{} · {token}", c.client_ip)
+                            }
+                            _ => c.client_ip,
+                        };
+                        (label, c.count)
+                    })
+                    .collect(),
+            ),
+        )
+    });
 
-    let health_cards = health.map(build_health_cards).unwrap_or_default();
+    let health_cards = health.map_or_default(build_health_cards);
 
     let ranges = ["7d", "30d", "90d"]
         .into_iter()
@@ -1880,8 +1873,7 @@ async fn render_account(
     let confirm_operator_name = operators
         .iter()
         .find(|o| o.id == view.confirm_operator_id)
-        .map(|o| o.username.clone())
-        .unwrap_or_default();
+        .map_or_default(|o| o.username.clone());
     // An id naming nobody expands nothing.
     let confirm_operator_id = if confirm_operator_name.is_empty() {
         0

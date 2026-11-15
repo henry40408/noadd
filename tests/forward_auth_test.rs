@@ -619,8 +619,7 @@ async fn forward_auth_logout_with_configured_url_returns_redirect() {
     let clear_site_data = resp
         .headers()
         .get("clear-site-data")
-        .map(|v| v.to_str().unwrap().to_string())
-        .unwrap_or_default();
+        .map_or_default(|v| v.to_str().unwrap().to_string());
     assert_eq!(clear_site_data, r#""cache", "cookies", "storage""#);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await

@@ -4041,8 +4041,7 @@ async fn logout_cookie_session_revokes_and_clears_cookie() {
     let set_cookie = res
         .headers()
         .get("set-cookie")
-        .map(|v| v.to_str().unwrap().to_string())
-        .unwrap_or_default();
+        .map_or_default(|v| v.to_str().unwrap().to_string());
     assert!(
         set_cookie.contains("session="),
         "logout must clear the session cookie: {set_cookie}"
@@ -4077,8 +4076,7 @@ async fn logout_sends_clear_site_data() {
     let header = res
         .headers()
         .get("clear-site-data")
-        .map(|v| v.to_str().unwrap().to_string())
-        .unwrap_or_default();
+        .map_or_default(|v| v.to_str().unwrap().to_string());
     assert_eq!(header, r#""cache", "cookies", "storage""#);
     assert!(
         !header.contains("executionContexts"),

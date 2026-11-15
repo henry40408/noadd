@@ -261,20 +261,17 @@ impl Page {
     /// Fails when the script cannot run.
     pub async fn requests(&self) -> Result<Vec<(String, String)>> {
         let raw = self.eval("return window.__requests || [];").await?;
-        Ok(raw
-            .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|entry| {
-                        (
-                            entry["method"].as_str().unwrap_or_default().to_string(),
-                            entry["url"].as_str().unwrap_or_default().to_string(),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(raw.as_array().map_or_default(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry["method"].as_str().unwrap_or_default().to_string(),
+                        entry["url"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        }))
     }
 
     /// How many recorded requests were `method` against a URL containing `path`.
