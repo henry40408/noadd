@@ -1,0 +1,14 @@
+Boolean flags with an optional value (--cookie-secure, --hsts)
+
+Rust: clap `num_args = 0..=1, default_missing_value = "true"` on Option<bool>
+(src/config.rs). Derived from clap semantics, NOT measured: the rewrite
+relays may not run cargo, and no Rust binary is available.
+
+  --hsts            -> true
+  --hsts=false      -> false
+  --hsts false      -> false (clap consumes the following non-flag token as the value)
+  --hsts true       -> true
+
+Go's flag package does not take a space-separated bool value, so Step 4
+(options.go) needs a pre-pass that joins "--hsts false" into "--hsts=false".
+Re-verify against a Rust binary when one is available.
