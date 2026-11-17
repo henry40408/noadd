@@ -30,7 +30,7 @@ func RequestClientIP(r *http.Request, trusted TrustedProxies) netip.Addr {
 func ClientIP(peer netip.Addr, header http.Header, trusted TrustedProxies) netip.Addr {
 	// A dual-stack listener reports IPv4 peers as ::ffff:a.b.c.d; one form per
 	// client keeps rate-limit keys and query-log entries consistent.
-	peer = peer.Unmap()
+	peer = peer.Unmap().WithZone("")
 
 	trustHeaders := !peer.IsValid() || peer.IsLoopback() || trusted.Contains(peer)
 	if trustHeaders {

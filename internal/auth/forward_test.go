@@ -113,3 +113,11 @@ func TestNormalizeUsername(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentifyTrustsLinkLocalPeerWithZone(t *testing.T) {
+	forward := mustForwardAuth(t, "Remote-User", "fe80::/10", "")
+	user, ok := forward.Identify(requestFrom("[fe80::1%eth0]:1", "Remote-User", "alice"))
+	if !ok || user != "alice" {
+		t.Fatalf("user=%q ok=%v; a zoned link-local peer inside the allow-list must be trusted", user, ok)
+	}
+}

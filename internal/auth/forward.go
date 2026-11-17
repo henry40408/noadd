@@ -87,8 +87,9 @@ func (f *ForwardAuth) Identify(r *http.Request) (user string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	// Dual-stack listeners report IPv4 peers as ::ffff:a.b.c.d.
-	if !f.trusted.Contains(peer.Addr().Unmap()) {
+	// Dual-stack listeners report IPv4 peers as ::ffff:a.b.c.d. A zone is
+	// dropped because Prefix.Contains never matches a zoned address.
+	if !f.trusted.Contains(peer.Addr().Unmap().WithZone("")) {
 		return "", false
 	}
 	// A repeated header (a client value the proxy failed to strip plus its own)

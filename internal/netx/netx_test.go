@@ -142,3 +142,15 @@ func TestRequestClientIPFailsClosedOnUnparseablePeer(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestClientIPTrustsLinkLocalProxyWithZone(t *testing.T) {
+	trusted := mustTrusted(t, "fe80::/10")
+	header := http.Header{"X-Forwarded-For": []string{"203.0.113.9"}}
+	got := ClientIP(addr("fe80::1%eth0"), header, trusted)
+	if got != addr("203.0.113.9") {
+		t.Fatalf("ClientIP = %v; the forwarded address must be honoured", got)
+	}
+	if peer := ClientIP(addr("fe80::1%eth0"), nil, trusted); peer.Zone() != "" {
+		t.Fatalf("peer %v keeps its zone, so rate-limit keys would split per interface", peer)
+	}
+}
