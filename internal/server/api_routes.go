@@ -126,6 +126,11 @@ func (a *api) registerFilterRoutes(t *routeTable) {
 	t.handleFunc(delete, "/api/rules/{id}", a.authed(a.deleteRule))
 	t.handleFunc(post, "/api/filter/check", a.authed(a.filterCheck))
 
+	t.handleFunc(get, "/api/logs", a.authed(a.getLogs))
+	t.handleFunc(delete, "/api/logs", a.authed(a.deleteLogs))
+	// No session: the DoH token in the path is the credential.
+	t.handleFunc(get, "/api/mobileconfig/{token}", a.getMobileConfig)
+
 	t.handleFunc(get, "/api/upstream/health", a.authed(a.upstreamHealth))
 	t.handleFunc(get, "/api/upstream/latency", a.authed(a.upstreamLatency))
 }
