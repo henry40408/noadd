@@ -32,3 +32,12 @@ func TestVersionIsNeverEmpty(t *testing.T) {
 		t.Fatal("empty version")
 	}
 }
+
+func TestUserAgentCarriesTheVersion(t *testing.T) {
+	t.Cleanup(func() { version = "" })
+	version = "1.2.3"
+	want := "noadd/1.2.3 (DNS ad-blocker; +https://github.com/henry40408/noadd)"
+	if got := UserAgent(); got != want {
+		t.Fatalf("UserAgent() = %q, want %q", got, want)
+	}
+}

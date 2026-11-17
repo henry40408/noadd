@@ -30,3 +30,8 @@ func buildInfoVersion() string {
 	}
 	return v
 }
+
+// UserAgent is the User-Agent of every outgoing HTTP request.
+func UserAgent() string {
+	return "noadd/" + Version() + " (DNS ad-blocker; +https://github.com/henry40408/noadd)"
+}

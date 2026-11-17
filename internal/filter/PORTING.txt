@@ -62,3 +62,25 @@ measured in a linux/arm64 container on the same machine, so the comparison is in
     130 ns, upper-case query 115 ns (1 allocation). Rust baseline is end to end over UDP
     (p50 0.11 ms), which is dominated by the network path, so it is not comparable here.
     The end-to-end UDP number is re-measured in Step 9 when the handler exists.
+
+Step 7: lists, rebuild coordinator, registry (src/filter/lists.rs, rebuild.rs, src/registry.rs)
+
+Layout
+  Rust ListManager is split: lists.go (DefaultLists, Downloader, Manager: seed, download,
+  store, update-all) and build.go (Manager.Rebuild). rebuild.go is the Coordinator.
+  internal/registry/registry.go is the registry client; version.UserAgent() replaces
+  noadd::user_agent().
+Tests
+  filter_lists_test.rs 5 + rebuild_coordinator_test.rs 6 + registry_test.rs 3 = 14 Rust
+  tests, all ported (lists_test.go, rebuild_test.go, registry_test.go). Added: the full
+  download -> store -> rebuild path against httptest (User-Agent, 404 body treated as a
+  list, list order priority), version.UserAgent, a registry entry without homepage.
+Deviations
+  - Coordinator.Spawn/SpawnCoalesced return a done channel instead of a JoinHandle, and
+    take func() error; the task closes over its own context.
+  - Subscribers get a buffered channel (16) and lose messages when full, like a lagging
+    tokio broadcast receiver; Status() gives the live state.
+  - Registry JSON decoding is lenient: a missing required field becomes its zero value
+    where serde would fail with a parse error.
+  - Registry List does not coalesce concurrent misses (same as Rust).
+  - After a rebuild Go calls debug.FreeOSMemory() in place of mimalloc's mi_collect.
