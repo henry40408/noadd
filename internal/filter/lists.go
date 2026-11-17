@@ -45,6 +45,16 @@ func NewDownloader(userAgent string) *Downloader {
 // Fetch returns the body at url. Like the Rust client it does not look at the
 // status code: an error page becomes a list with no rules.
 func (d *Downloader) Fetch(ctx context.Context, url string) (string, error) {
+	return d.get(ctx, url, false)
+}
+
+// FetchChecked is Fetch that treats an HTTP error status as a failure, for a
+// caller that must not store an error page as a list.
+func (d *Downloader) FetchChecked(ctx context.Context, url string) (string, error) {
+	return d.get(ctx, url, true)
+}
+
+func (d *Downloader) get(ctx context.Context, url string, failOnStatus bool) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -55,6 +65,9 @@ func (d *Downloader) Fetch(ctx context.Context, url string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = response.Body.Close() }()
+	if failOnStatus && response.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP status %s for url (%s)", response.Status, url)
+	}
 	body, err := io.ReadAll(response.Body)
 	return string(body), err
 }

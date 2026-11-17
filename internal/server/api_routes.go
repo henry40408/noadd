@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -28,6 +29,15 @@ func (t *routeTable) handleFunc(method, path string, h http.HandlerFunc) {
 	t.handle(method, path, h)
 }
 
+// refusedMethods are answered 405 on a path that does not handle them. A
+// method-less fallback pattern would conflict with wildcard routes such as
+// "PUT /api/lists/{id}" next to "POST /api/lists/update", so each method gets
+// its own pattern. HEAD is covered by GET.
+var refusedMethods = []string{
+	http.MethodGet, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+}
+
 // mount registers every path on mux.
 func (t *routeTable) mount(mux *http.ServeMux) {
 	for path, methods := range t.byPath {
@@ -40,12 +50,20 @@ func (t *routeTable) mount(mux *http.ServeMux) {
 			}
 		}
 		sort.Strings(allowed)
-		allow := strings.Join(allowed, ", ")
-		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Allow", allow)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		})
+		refuse := methodNotAllowed(strings.Join(allowed, ", "))
+		for _, method := range refusedMethods {
+			if !slices.Contains(allowed, method) {
+				mux.Handle(method+" "+path, refuse)
+			}
+		}
 	}
+}
+
+func methodNotAllowed(allow string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", allow)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
 }
 
 // registerAPIRoutes adds the admin JSON API.
@@ -55,6 +73,7 @@ func (a *api) registerAPIRoutes(t *routeTable) {
 		post   = http.MethodPost
 		delete = http.MethodDelete
 	)
+	a.registerFilterRoutes(t)
 	// Sign-in, setup and health need no auth.
 	t.handleFunc(post, "/api/auth/login", a.login)
 	t.handleFunc(post, "/api/auth/setup", a.setup)
@@ -80,4 +99,33 @@ func (a *api) registerAPIRoutes(t *routeTable) {
 	t.handleFunc(get, "/api/api-keys", a.authed(a.listAPIKeys))
 	t.handleFunc(post, "/api/api-keys", a.reauthed(a.createAPIKey))
 	t.handleFunc(delete, "/api/api-keys/{id}", a.authed(a.deleteAPIKey))
+}
+
+// registerFilterRoutes adds settings, lists, rules and upstream routes.
+func (a *api) registerFilterRoutes(t *routeTable) {
+	const (
+		get    = http.MethodGet
+		post   = http.MethodPost
+		put    = http.MethodPut
+		delete = http.MethodDelete
+	)
+	t.handleFunc(get, "/api/settings", a.authed(a.getSettings))
+	t.handleFunc(put, "/api/settings", a.authed(a.putSettings))
+
+	t.handleFunc(get, "/api/lists", a.authed(a.getLists))
+	t.handleFunc(post, "/api/lists", a.authed(a.addList))
+	t.handleFunc(post, "/api/lists/batch", a.authed(a.batchAddLists))
+	t.handleFunc(post, "/api/lists/update", a.authed(a.triggerListUpdate))
+	t.handleFunc(put, "/api/lists/{id}", a.authed(a.updateList))
+	t.handleFunc(delete, "/api/lists/{id}", a.authed(a.deleteList))
+	t.handleFunc(post, "/api/lists/{id}/check", a.authed(a.checkListURL))
+	t.handleFunc(get, "/api/registry/filters", a.authed(a.getRegistryFilters))
+
+	t.handleFunc(get, "/api/rules", a.authed(a.getRules))
+	t.handleFunc(post, "/api/rules", a.authed(a.addRule))
+	t.handleFunc(delete, "/api/rules/{id}", a.authed(a.deleteRule))
+	t.handleFunc(post, "/api/filter/check", a.authed(a.filterCheck))
+
+	t.handleFunc(get, "/api/upstream/health", a.authed(a.upstreamHealth))
+	t.handleFunc(get, "/api/upstream/latency", a.authed(a.upstreamLatency))
 }

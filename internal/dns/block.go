@@ -45,6 +45,21 @@ func BlockConfigFromSettings(mode, v4, v6 string) BlockConfig {
 	}
 }
 
+// ValidBlockMode reports whether raw, trimmed, names a block mode exactly.
+func ValidBlockMode(raw string) bool {
+	switch BlockMode(strings.TrimSpace(raw)) {
+	case BlockNullIP, BlockNXDomain, BlockRefused, BlockCustomIP:
+		return true
+	}
+	return false
+}
+
+// ValidCustomIPv4 reports whether raw, trimmed, is an IPv4 address.
+func ValidCustomIPv4(raw string) bool { return parseIPv4(raw).IsValid() }
+
+// ValidCustomIPv6 reports whether raw, trimmed, is an IPv6 address.
+func ValidCustomIPv6(raw string) bool { return parseIPv6(raw).IsValid() }
+
 func parseBlockMode(raw string) BlockMode {
 	switch mode := BlockMode(strings.TrimSpace(raw)); mode {
 	case BlockNullIP, BlockNXDomain, BlockRefused, BlockCustomIP:

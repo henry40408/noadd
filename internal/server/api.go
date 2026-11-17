@@ -14,8 +14,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/henry40408/noadd/internal/auth"
+	"github.com/henry40408/noadd/internal/cache"
 	"github.com/henry40408/noadd/internal/db"
+	"github.com/henry40408/noadd/internal/dnsserver"
+	"github.com/henry40408/noadd/internal/filter"
 	"github.com/henry40408/noadd/internal/netx"
+	"github.com/henry40408/noadd/internal/registry"
+	"github.com/henry40408/noadd/internal/upstream"
 )
 
 const (
@@ -46,6 +51,17 @@ type APIDeps struct {
 	ServerInfo   ServerInfo
 	// Version is the build version reported by /api/health.
 	Version string
+	// Filter is the live rule engine; ListManager downloads lists and rebuilds
+	// it; Rebuild serializes those rebuilds.
+	Filter      *filter.Holder
+	ListManager *filter.Manager
+	Rebuild     *filter.Coordinator
+	Registry    *registry.Client
+	// Forwarder, Cache and Handler are the DNS side that runtime settings
+	// reconfigure.
+	Forwarder *upstream.Forwarder
+	Cache     *cache.Cache
+	Handler   *dnsserver.Handler
 	// Now is the clock for expiry and reauth stamps; nil means time.Now.
 	Now func() time.Time
 }

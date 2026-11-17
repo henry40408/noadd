@@ -11,7 +11,13 @@ import (
 	"time"
 
 	"github.com/henry40408/noadd/internal/auth"
+	"github.com/henry40408/noadd/internal/cache"
 	"github.com/henry40408/noadd/internal/db"
+	"github.com/henry40408/noadd/internal/dnsserver"
+	"github.com/henry40408/noadd/internal/filter"
+	"github.com/henry40408/noadd/internal/registry"
+	"github.com/henry40408/noadd/internal/upstream"
+	"github.com/henry40408/noadd/internal/version"
 )
 
 const testSetupToken = "ABCDE-FGHJK"
@@ -67,6 +73,8 @@ func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
 		ServerInfo:            ServerInfo{DNSAddr: "127.0.0.1:53", HTTPAddr: "127.0.0.1:3000"},
 		Version:               "test",
 	}
+	harness.wireFilterSide(ctx, database)
+	t.Cleanup(harness.settleRebuilds)
 	handler, err := New(Deps{API: &harness.deps, Slog: logs.logger()})
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +84,46 @@ func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
 		harness.seedOperator("admin", "admin")
 	}
 	return harness
+}
+
+// wireFilterSide gives the API a real engine, list manager, forwarder, cache
+// and DNS handler. The forwarder's only upstream is unroutable, so nothing
+// leaves the machine.
+func (h *apiHarness) wireFilterSide(ctx context.Context, database *db.DB) {
+	holder := filter.NewHolder(filter.NewFromNamed(nil, nil))
+	h.deps.Filter = holder
+	h.deps.ListManager = &filter.Manager{DB: database, Holder: holder, Downloader: filter.NewDownloader(version.UserAgent())}
+	h.deps.Rebuild = filter.NewCoordinator()
+	h.deps.Registry = registry.NewClient("http://127.0.0.1:1/filters.json", time.Minute, version.UserAgent())
+	h.deps.Forwarder = upstream.New(ctx, upstream.Config{Servers: []string{"0.250.250.254:15353"}})
+	h.deps.Cache = cache.New(cache.Config{CapacityBytes: 1 << 20, StaleWindow: time.Minute})
+	h.deps.Handler = dnsserver.New(dnsserver.Config{Filter: holder, Cache: h.deps.Cache, Forwarder: h.deps.Forwarder})
+}
+
+// eventually polls until condition holds; rebuilds run in the background, so
+// a test waits for their visible effect.
+func (h *apiHarness) eventually(condition func() bool) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			h.t.Fatal("condition not met in time")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// settleRebuilds waits until background rebuilds go quiet, so none outlives
+// the database.
+func (h *apiHarness) settleRebuilds() {
+	for quiet := 0; quiet < 5; {
+		if h.deps.Rebuild.Status().Rebuilding {
+			quiet = 0
+		} else {
+			quiet++
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // seedOperator inserts an operator directly (bypassing the password policy,
