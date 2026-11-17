@@ -22,13 +22,15 @@ func queryOptional[T any](ctx context.Context, pool *sql.DB, query string, args 
 }
 
 // inWriteTx runs fn in one transaction on the writer connection and commits
-// only when fn succeeds.
-func (d *DB) inWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+// only when fn succeeds. Like exec it ignores the caller's cancellation; fn
+// receives the detached context and must use it for its statements.
+func (d *DB) inWriteTx(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error) error {
+	ctx = context.WithoutCancel(ctx)
 	tx, err := d.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -42,7 +44,7 @@ func (d *DB) GetSetting(ctx context.Context, key string) (string, bool, error) {
 
 // SetSetting inserts or replaces a setting.
 func (d *DB) SetSetting(ctx context.Context, key, value string) error {
-	_, err := d.writer.ExecContext(ctx,
+	_, err := d.exec(ctx,
 		"INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 		key, value)
 	return err

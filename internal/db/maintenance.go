@@ -20,7 +20,7 @@ const (
 func (d *DB) PruneLogsBefore(ctx context.Context, timestamp int64) (int64, error) {
 	timestampMs := timestamp * 1000
 	var deleted int64
-	err := d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	err := d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := unwindStatsRollups(ctx, tx, timestampMs); err != nil {
 			return err
 		}

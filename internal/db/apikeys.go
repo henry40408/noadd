@@ -32,7 +32,7 @@ type APIKeyRow struct {
 
 // InsertAPIKey stores a key and returns its id.
 func (d *DB) InsertAPIKey(ctx context.Context, key NewAPIKey) (int64, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		`INSERT INTO api_keys (user_id, name, token_hash, prefix, created_at, expires_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
 		key.UserID, key.Name, key.TokenHash, key.Prefix, key.CreatedAt, key.ExpiresAt)
@@ -65,7 +65,7 @@ func (d *DB) ListAPIKeysForUser(ctx context.Context, userID int64) ([]APIKeyRow,
 // DeleteAPIKey removes a key scoped to its owner and reports whether a row
 // went away.
 func (d *DB) DeleteAPIKey(ctx context.Context, id, userID int64) (bool, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		"DELETE FROM api_keys WHERE id = ?1 AND user_id = ?2", id, userID)
 	if err != nil {
 		return false, err
@@ -96,7 +96,7 @@ func (d *DB) ValidateAPIKey(ctx context.Context, tokenHash string, now int64) (u
 	if !stale {
 		return userID, true, nil
 	}
-	_, err = d.writer.ExecContext(ctx, "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2", now, id)
+	_, err = d.exec(ctx, "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2", now, id)
 	if err != nil {
 		return 0, false, err
 	}

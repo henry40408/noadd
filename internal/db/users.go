@@ -50,7 +50,7 @@ const (
 
 // CreateUser inserts an operator and returns its id.
 func (d *DB) CreateUser(ctx context.Context, username, passwordHash string, createdAt int64) (int64, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		"INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
 		username, passwordHash, createdAt)
 	if err != nil {
@@ -63,7 +63,7 @@ func (d *DB) CreateUser(ctx context.Context, username, passwordHash string, crea
 // while users is empty, so concurrent first-run setups cannot both win. The
 // bool is false when an account already exists.
 func (d *DB) CreateFirstUser(ctx context.Context, username, passwordHash string, createdAt int64) (int64, bool, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		`INSERT INTO users (username, password_hash, created_at) SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM users)`,
 		username, passwordHash, createdAt)
 	if err != nil {
@@ -101,7 +101,7 @@ func (d *DB) GetUserPasswordHash(ctx context.Context, id int64) (string, bool, e
 
 // UpdateUserPassword replaces a user's password hash.
 func (d *DB) UpdateUserPassword(ctx context.Context, id int64, passwordHash string) error {
-	_, err := d.writer.ExecContext(ctx,
+	_, err := d.exec(ctx,
 		"UPDATE users SET password_hash = ?1 WHERE id = ?2", passwordHash, id)
 	return err
 }
@@ -136,7 +136,7 @@ func (d *DB) CountUsers(ctx context.Context) (int64, error) {
 // deletions cannot remove the last two operators.
 func (d *DB) DeleteUser(ctx context.Context, id int64) (DeleteUserOutcome, error) {
 	outcome := UserNotFound
-	err := d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	err := d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var count int64
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
 			return err

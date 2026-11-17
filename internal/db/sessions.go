@@ -43,7 +43,7 @@ type LoadedSession struct {
 
 // InsertSession stores a session and returns its id.
 func (d *DB) InsertSession(ctx context.Context, session NewSession) (int64, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		`INSERT INTO sessions (token_hash, user_id, created_at, last_seen, ip, user_agent)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
 		session.TokenHash, session.UserID, session.CreatedAt, session.LastSeen, session.IP, session.UserAgent)
@@ -55,7 +55,7 @@ func (d *DB) InsertSession(ctx context.Context, session NewSession) (int64, erro
 
 // DeleteSessionByTokenHash removes one session.
 func (d *DB) DeleteSessionByTokenHash(ctx context.Context, tokenHash string) error {
-	_, err := d.writer.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash = ?1", tokenHash)
+	_, err := d.exec(ctx, "DELETE FROM sessions WHERE token_hash = ?1", tokenHash)
 	return err
 }
 
@@ -63,13 +63,13 @@ func (d *DB) DeleteSessionByTokenHash(ctx context.Context, tokenHash string) err
 // caller can evict the in-memory entry. RETURNING leaves no
 // select-then-delete window for a concurrent revoke of the same id.
 func (d *DB) DeleteSessionByID(ctx context.Context, id int64) (string, bool, error) {
-	return queryOptional[string](ctx, d.writer,
+	return queryOptional[string](context.WithoutCancel(ctx), d.writer,
 		"DELETE FROM sessions WHERE id = ?1 RETURNING token_hash", id)
 }
 
 // DeleteAllSessions removes every session and returns how many.
 func (d *DB) DeleteAllSessions(ctx context.Context) (int64, error) {
-	result, err := d.writer.ExecContext(ctx, "DELETE FROM sessions")
+	result, err := d.exec(ctx, "DELETE FROM sessions")
 	if err != nil {
 		return 0, err
 	}
@@ -78,7 +78,7 @@ func (d *DB) DeleteAllSessions(ctx context.Context) (int64, error) {
 
 // DeleteSessionsExcept removes every session but one (log out other devices).
 func (d *DB) DeleteSessionsExcept(ctx context.Context, keepTokenHash string) (int64, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		"DELETE FROM sessions WHERE token_hash != ?1", keepTokenHash)
 	if err != nil {
 		return 0, err
@@ -92,9 +92,9 @@ func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keepTok
 	var result sql.Result
 	var err error
 	if keepTokenHash == nil {
-		result, err = d.writer.ExecContext(ctx, "DELETE FROM sessions WHERE user_id = ?1", userID)
+		result, err = d.exec(ctx, "DELETE FROM sessions WHERE user_id = ?1", userID)
 	} else {
-		result, err = d.writer.ExecContext(ctx,
+		result, err = d.exec(ctx,
 			"DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2", userID, *keepTokenHash)
 	}
 	if err != nil {
@@ -127,7 +127,7 @@ func (d *DB) ListSessions(ctx context.Context) ([]SessionRow, error) {
 // PurgeExpiredSessions removes sessions past either timeout and returns how
 // many. now and the timeouts are in seconds.
 func (d *DB) PurgeExpiredSessions(ctx context.Context, maxAgeSecs, idleSecs, now int64) (int64, error) {
-	result, err := d.writer.ExecContext(ctx, purgeExpiredSessionsSQL, now-maxAgeSecs, now-idleSecs)
+	result, err := d.exec(ctx, purgeExpiredSessionsSQL, now-maxAgeSecs, now-idleSecs)
 	if err != nil {
 		return 0, err
 	}
@@ -138,7 +138,7 @@ func (d *DB) PurgeExpiredSessions(ctx context.Context, maxAgeSecs, idleSecs, now
 // transaction so the purge and the read agree.
 func (d *DB) LoadSessions(ctx context.Context, maxAgeSecs, idleSecs, now int64) ([]LoadedSession, error) {
 	var out []LoadedSession
-	err := d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	err := d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, purgeExpiredSessionsSQL, now-maxAgeSecs, now-idleSecs); err != nil {
 			return err
 		}
@@ -171,7 +171,7 @@ func (d *DB) FlushSessionsLastSeen(ctx context.Context, entries []SessionLastSee
 	if len(entries) == 0 {
 		return nil
 	}
-	return d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	return d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		for _, entry := range entries {
 			if _, err := tx.ExecContext(ctx,
 				"UPDATE sessions SET last_seen = ?1 WHERE token_hash = ?2", entry.LastSeen, entry.TokenHash); err != nil {

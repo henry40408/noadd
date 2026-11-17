@@ -38,6 +38,14 @@ var readerPragmas = []string{
 	"temp_store(MEMORY)",
 }
 
+// exec runs a write on the writer connection. The write is detached from the
+// caller's cancellation: a client disconnect must not interrupt it, or memory
+// and the database would disagree about what was changed (as the Rust
+// tokio-rusqlite calls, which always run to completion, do not).
+func (d *DB) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return d.writer.ExecContext(context.WithoutCancel(ctx), query, args...)
+}
+
 // DB is one writer connection plus a pool of read-only connections. Under WAL
 // the readers run concurrently with the writer and never see uncommitted rows.
 type DB struct {

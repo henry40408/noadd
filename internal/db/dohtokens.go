@@ -29,7 +29,7 @@ func (d *DB) GetDohTokens(ctx context.Context) ([]DohTokenRow, error) {
 
 // AddDohToken inserts a token and returns its id.
 func (d *DB) AddDohToken(ctx context.Context, token string) (int64, error) {
-	result, err := d.writer.ExecContext(ctx, "INSERT INTO doh_tokens (token) VALUES (?1)", token)
+	result, err := d.exec(ctx, "INSERT INTO doh_tokens (token) VALUES (?1)", token)
 	if err != nil {
 		return 0, err
 	}
@@ -38,7 +38,7 @@ func (d *DB) AddDohToken(ctx context.Context, token string) (int64, error) {
 
 // DeleteDohToken removes a token by id.
 func (d *DB) DeleteDohToken(ctx context.Context, id int64) error {
-	_, err := d.writer.ExecContext(ctx, "DELETE FROM doh_tokens WHERE id = ?1", id)
+	_, err := d.exec(ctx, "DELETE FROM doh_tokens WHERE id = ?1", id)
 	return err
 }
 

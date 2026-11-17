@@ -40,7 +40,7 @@ type QueryLogFilter struct {
 // InsertQueryLogs writes a batch and moves the maintained row count in the
 // same transaction.
 func (d *DB) InsertQueryLogs(ctx context.Context, entries []QueryLogEntry) error {
-	return d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	return d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		stmt, err := tx.PrepareContext(ctx,
 			"INSERT INTO query_logs ("+queryLogColumns+") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
 		if err != nil {
@@ -143,7 +143,7 @@ func (d *DB) CountLogs(ctx context.Context, filter QueryLogFilter) (int64, error
 // DeleteAllLogs empties the log and every rollup, and zeroes the count, in
 // one transaction.
 func (d *DB) DeleteAllLogs(ctx context.Context) error {
-	return d.inWriteTx(ctx, func(tx *sql.Tx) error {
+	return d.inWriteTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		statements := []string{
 			"DELETE FROM query_logs",
 			"DELETE FROM query_stats_quarter",

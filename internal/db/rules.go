@@ -18,7 +18,7 @@ func (d *DB) HasCustomRule(ctx context.Context, rule string) (bool, error) {
 
 // AddCustomRule inserts a rule and returns its id.
 func (d *DB) AddCustomRule(ctx context.Context, rule, ruleType string) (int64, error) {
-	result, err := d.writer.ExecContext(ctx,
+	result, err := d.exec(ctx,
 		"INSERT INTO custom_rules (rule, rule_type) VALUES (?1, ?2)", rule, ruleType)
 	if err != nil {
 		return 0, err
@@ -56,6 +56,6 @@ func (d *DB) scanCustomRules(ctx context.Context, query string, args ...any) ([]
 
 // DeleteCustomRule removes a rule by id.
 func (d *DB) DeleteCustomRule(ctx context.Context, id int64) error {
-	_, err := d.writer.ExecContext(ctx, "DELETE FROM custom_rules WHERE id = ?1", id)
+	_, err := d.exec(ctx, "DELETE FROM custom_rules WHERE id = ?1", id)
 	return err
 }
