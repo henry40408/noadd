@@ -313,7 +313,7 @@ pub fn admin_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(crate::headers::security_headers))
 }
 
-static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
+static ADMIN_UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/internal/assets/static");
 
 /// Strong, quoted `ETag` from a content hash. `DefaultHasher` uses fixed keys, so the digest
 /// is stable across restarts of the same binary. Not derived from `GIT_VERSION`: a `-dirty`

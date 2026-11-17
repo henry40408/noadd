@@ -9,7 +9,7 @@ noadd is a single-binary, self-hosted DNS ad-blocker (plain DNS + DNS-over-HTTPS
 ## Commands
 
 ```bash
-cargo build                              # debug; embeds admin-ui/dist, runs build.rs
+cargo build                              # debug; embeds internal/assets/static, runs build.rs
 cargo nextest run                        # root workspace tests — nextest, not `cargo test` (CI uses nextest); `e2e/` is the exception, below
 cargo nextest run filter_engine          # by name substring
 cargo nextest run -E 'test(parse_hosts)' # nextest filterset
@@ -61,7 +61,7 @@ Two Playwright conveniences are rebuilt in `e2e/src/` — look there first when 
 
 ## Build-time behavior (`build.rs`)
 
-- Renders `admin-ui/dist/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
+- Renders `internal/assets/static/favicon.svg` into a 180px `apple-touch-icon.png` via `resvg`.
 - Stamps `GIT_VERSION` from the `GIT_VERSION` env var when set (a literal `dev` or empty value counts as unset), else from `git describe --tags --always --dirty`; it falls back to `dev` if `git describe` fails (e.g. no `.git`). `.dockerignore` excludes `.git`, so Docker builds pass `--build-arg GIT_VERSION=...`; without it the image is labelled `dev`.
 - Releases use `gh release create --generate-notes`; never edit the manifest `version` or add a `CHANGELOG.md`.
 
@@ -75,7 +75,7 @@ Password sign-in lives **only** in `start_password_session` (`src/admin/api.rs`)
 
 **The shell is server-rendered** (`views::layout::shell`): topbar, both nav bars, status bar, one-shot notices. `app.js` must not re-derive what it decided — e.g. the active nav item is a class set from the path. The nav table is `NAV` (`src/admin/pages.rs`), driving both the desktop strip and the mobile F-key bar.
 
-Page bodies are **vanilla-JS web components — no framework, no build step** — in `admin-ui/dist/app.css` and `app.js`. No `index.html`, **no SPA fallback**: an unmatched path 404s. The directory is embedded via `include_dir!` (`ADMIN_UI`, `src/admin/api.rs`), so edit `app.js`, `app.css` or the views, then `cargo build`. Assets get a per-file content-hash `ETag` + `Cache-Control: no-cache`; server-rendered pages get `no-store` from the same layer, which applies only when a response declares no policy.
+Page bodies are **vanilla-JS web components — no framework, no build step** — in `internal/assets/static/app.css` and `app.js`. No `index.html`, **no SPA fallback**: an unmatched path 404s. The directory is embedded via `include_dir!` (`ADMIN_UI`, `src/admin/api.rs`), so edit `app.js`, `app.css` or the views, then `cargo build`. Assets get a per-file content-hash `ETag` + `Cache-Control: no-cache`; server-rendered pages get `no-store` from the same layer, which applies only when a response declares no policy.
 
 One-shot notices ride a **flash cookie** (`Flash`, `src/admin/pages.rs`), cleared by the response that renders them — never the query string, which survives refreshes, bookmarks and shared links.
 

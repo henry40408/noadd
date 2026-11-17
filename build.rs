@@ -23,8 +23,8 @@ fn render_apple_touch_icon(out_dir: &Path) {
 
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
-    let svg_path = manifest_dir.join("admin-ui/dist/favicon.svg");
-    println!("cargo:rerun-if-changed=admin-ui/dist/favicon.svg");
+    let svg_path = manifest_dir.join("internal/assets/static/favicon.svg");
+    println!("cargo:rerun-if-changed=internal/assets/static/favicon.svg");
 
     let svg_str = fs::read_to_string(&svg_path).expect("failed to read favicon.svg");
     // Strip the source SVG's rounded-corner so iOS applies its own

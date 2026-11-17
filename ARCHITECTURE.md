@@ -195,7 +195,7 @@ The no-JavaScript exceptions — the dashboard's 24-hour chart, the statistics c
 
 There is no `index.html` and no SPA fallback; an unmatched path 404s.
 
-`admin-ui/dist/` (`app.css`, `app.js`) is embedded with `include_dir` and served with a per-file content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate and get `304` when unchanged. Server-rendered pages get `no-store` from the `no_store` layer.
+`internal/assets/static/` (`app.css`, `app.js`) is embedded with `include_dir` and served with a per-file content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate and get `304` when unchanged. Server-rendered pages get `no-store` from the `no_store` layer.
 
 All pushes ride one connection, `GET /api/events`: a `ping` heartbeat for the status indicator, `rebuild` edges for the rebuild banner, a `stats` snapshot every 10 s for the dashboard (`?stats=1`), and the live tail (`?logs=1`). One connection because the indicator is on every page and a browser without HTTP/2 gets only six per origin.
 

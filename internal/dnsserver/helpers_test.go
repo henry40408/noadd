@@ -155,6 +155,8 @@ type handlerOptions struct {
 	maxInflight  int
 	logCapacity  int
 	logResults   bool
+	// upstreamTimeout defaults to 10 s.
+	upstreamTimeout time.Duration
 }
 
 func newTestHandler(t testing.TB, options handlerOptions) *testHandler {
@@ -170,8 +172,12 @@ func newTestHandler(t testing.TB, options handlerOptions) *testHandler {
 	if options.upstreamAddr != "" {
 		servers = []string{options.upstreamAddr}
 	}
+	timeout := options.upstreamTimeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
 	forwarder := upstream.New(context.Background(), upstream.Config{
-		Servers: servers, Timeout: 10 * time.Second, Logger: quietLogger(),
+		Servers: servers, Timeout: timeout, Logger: quietLogger(),
 	})
 	responses := cache.New(cache.Config{CapacityBytes: 64 << 20})
 	logger := &recordingLogger{capacity: options.logCapacity}
