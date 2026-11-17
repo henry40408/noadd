@@ -86,7 +86,9 @@ type Handler struct {
 	block      atomic.Pointer[dns.BlockConfig]
 	inflight   *dns.Group[cache.Key]
 	refreshing *dns.RefreshSet[cache.Key]
-	permits    chan struct{} // nil means unlimited
+	// truncate is a field so a test can make it panic.
+	truncate func(query, response []byte) []byte
+	permits  chan struct{} // nil means unlimited
 
 	// lifetime bounds background refreshes; Close cancels it.
 	lifetime       context.Context
@@ -112,6 +114,7 @@ func New(cfg Config) *Handler {
 	if cfg.MaxInflight > 0 {
 		h.permits = make(chan struct{}, cfg.MaxInflight)
 	}
+	h.truncate = dns.TruncateForUDP
 	h.SetBlockConfig(cfg.Block)
 	h.lifetime, h.cancelLifetime = context.WithCancel(context.Background())
 	return h

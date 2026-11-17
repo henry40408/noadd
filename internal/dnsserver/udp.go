@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -54,11 +55,24 @@ func (h *Handler) ServeUDP(ctx context.Context, conn *net.UDPConn) error {
 
 func (h *Handler) answerDatagram(ctx context.Context, conn *net.UDPConn, source netip.AddrPort, query []byte) {
 	response := h.respond(ctx, Request{Bytes: query, ClientIP: source.Addr()}, "udp", source)
-	// Truncate (TC) to the client's advertised size, 512 without EDNS, so it
-	// retries over TCP.
-	response = dns.TruncateForUDP(query, response)
+	response = h.truncateRecovering(query, response)
 	if _, err := conn.WriteToUDPAddrPort(response, source); err != nil {
 		h.log.Debug("failed to send response", "event", "dns.send_failed", "transport", "udp",
 			"client", source, "error", err)
 	}
+}
+
+// truncateRecovering truncates (TC) the response to the client's advertised
+// size, 512 without EDNS, so it retries over TCP. It re-parses upstream data,
+// which can panic the DNS library; that must not end the process, so the
+// client gets SERVFAIL instead.
+func (h *Handler) truncateRecovering(query, response []byte) (result []byte) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.log.Error("UDP truncation panicked; answering SERVFAIL", "event", "dns.truncate_panicked",
+				"panic", fmt.Sprint(recovered))
+			result = dns.BuildServfail(query)
+		}
+	}()
+	return h.truncate(query, response)
 }
