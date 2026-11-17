@@ -24,3 +24,18 @@ Deviations from the Rust behaviour
     from HashMap iteration and was not defined.
   - Rust tests that only exercised the rusqlite API (test_read_conn_opens...)
     are covered by db_test.go (reader is read-only, WAL visibility, pragmas).
+
+One-to-one ports (rust_db_test.go, rust_stats_test.go, rust_concurrency_test.go)
+  tests/db_test.rs 27 tests, stats_db_test.rs 32, db_concurrency_test.rs 2: 61
+  Rust #[test] functions, 61 Go tests (the 29/41/4 "fn" counts include 13
+  helpers). Same fixtures, same assertions, same boundaries. The Rust file has
+  no DST case: tz_offset is one fixed number per request, so the stats tests
+  cover whole-hour, half-hour, three-quarter-hour and 7-minute offsets, plus
+  every window start inside/on a quarter and hour boundary.
+  Not ported here, belongs to a later step:
+  - session_log_salt_is_persisted (load_or_create_session_log_salt: auth).
+  - test_create_user_no_password: the verify_password-on-sentinel assertion.
+  - compute_summary_* (3 tests): the compute_summary call is internal/stats;
+    the Go tests assert the same ratios from SummaryMultiSince, and the
+    purge-boundary test restates the in-memory predicate (memoryExpired) until
+    internal/auth has prune_expired.
