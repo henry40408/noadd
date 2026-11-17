@@ -10,14 +10,12 @@ import (
 	"testing"
 )
 
-// The Rust tests drove the whole admin router, where a request the guard lets
-// through reaches the auth layer and gets 401. The admin API is ported in
-// Step 14, so the stub below stands in for it; Step 14 repeats the 401
-// assertions against the real routes.
-func unauthorisedStub() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	})
+// realAdmin is the whole admin handler over the real API routes, so a request
+// the guard lets through reaches the auth layer and gets its 401, as in the
+// Rust tests.
+func realAdmin(t *testing.T, logs *capturedLogs) http.Handler {
+	t.Helper()
+	return newAPIHarness(t, harnessOptions{logs: logs}).handler
 }
 
 type capturedLogs struct{ buffer bytes.Buffer }
@@ -43,8 +41,8 @@ func (c *capturedLogs) events(t *testing.T) []map[string]any {
 	return events
 }
 
-func postLogout(logs *capturedLogs, headers map[string]string) *httptest.ResponseRecorder {
-	chain := adminChain(unauthorisedStub(), logs.logger())
+func postLogout(t *testing.T, logs *capturedLogs, headers map[string]string) *httptest.ResponseRecorder {
+	chain := realAdmin(t, logs)
 	request := httptest.NewRequest("POST", "/api/auth/logout", nil)
 	request.Host = ""
 	for name, value := range headers {
@@ -61,7 +59,7 @@ func postLogout(logs *capturedLogs, headers map[string]string) *httptest.Respons
 
 // Rust: csrf_test.rs sec_fetch_site_cross_site_is_rejected
 func TestCrossSiteFetchIsRejected(t *testing.T) {
-	response := postLogout(&capturedLogs{}, map[string]string{"Sec-Fetch-Site": "cross-site"})
+	response := postLogout(t, &capturedLogs{}, map[string]string{"Sec-Fetch-Site": "cross-site"})
 	if response.Code != http.StatusForbidden || response.Body.Len() != 0 {
 		t.Fatalf("status = %d, body = %q (want an empty 403)", response.Code, response.Body.String())
 	}
@@ -69,7 +67,7 @@ func TestCrossSiteFetchIsRejected(t *testing.T) {
 
 // Rust: csrf_test.rs origin_host_mismatch_is_rejected
 func TestOriginHostMismatchIsRejected(t *testing.T) {
-	response := postLogout(&capturedLogs{}, map[string]string{"Origin": "https://evil.test", "Host": "app.test"})
+	response := postLogout(t, &capturedLogs{}, map[string]string{"Origin": "https://evil.test", "Host": "app.test"})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -77,19 +75,19 @@ func TestOriginHostMismatchIsRejected(t *testing.T) {
 
 // Rust: csrf_test.rs same_origin_request_reaches_handler
 func TestSameOriginRequestReachesTheHandler(t *testing.T) {
-	response := postLogout(&capturedLogs{}, map[string]string{"Sec-Fetch-Site": "same-origin"})
+	response := postLogout(t, &capturedLogs{}, map[string]string{"Sec-Fetch-Site": "same-origin"})
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want the handler's 401", response.Code)
 	}
 	// "none" is a user-initiated navigation such as the address bar.
-	if got := postLogout(&capturedLogs{}, map[string]string{"Sec-Fetch-Site": "none"}).Code; got != http.StatusUnauthorized {
+	if got := postLogout(t, &capturedLogs{}, map[string]string{"Sec-Fetch-Site": "none"}).Code; got != http.StatusUnauthorized {
 		t.Fatalf("Sec-Fetch-Site: none = %d", got)
 	}
 }
 
 // Rust: csrf_test.rs csrf_rejection_is_not_stored
 func TestCSRFRejectionIsNotStored(t *testing.T) {
-	response := postLogout(&capturedLogs{}, map[string]string{"Sec-Fetch-Site": "cross-site"})
+	response := postLogout(t, &capturedLogs{}, map[string]string{"Sec-Fetch-Site": "cross-site"})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -103,7 +101,7 @@ func TestCSRFRejectionIsNotStored(t *testing.T) {
 
 // Rust: csrf_test.rs header_less_client_reaches_handler
 func TestHeaderLessClientReachesTheHandler(t *testing.T) {
-	if got := postLogout(&capturedLogs{}, nil).Code; got != http.StatusUnauthorized {
+	if got := postLogout(t, &capturedLogs{}, nil).Code; got != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 from the handler", got)
 	}
 }
@@ -111,7 +109,7 @@ func TestHeaderLessClientReachesTheHandler(t *testing.T) {
 // Rust: csrf_test.rs rejection_records_the_classification_inputs
 func TestRejectionRecordsTheClassificationInputs(t *testing.T) {
 	logs := &capturedLogs{}
-	response := postLogout(logs, map[string]string{"Origin": "https://evil.test", "Host": "app.test"})
+	response := postLogout(t, logs, map[string]string{"Origin": "https://evil.test", "Host": "app.test"})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -140,7 +138,7 @@ func TestRejectionRecordsTheClassificationInputs(t *testing.T) {
 // Rust: csrf_test.rs a_browser_stated_cross_site_rejection_is_logged_under_its_own_reason
 func TestBrowserStatedCrossSiteIsLoggedAsCrossSite(t *testing.T) {
 	logs := &capturedLogs{}
-	postLogout(logs, map[string]string{
+	postLogout(t, logs, map[string]string{
 		"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.test", "Host": "app.test",
 	})
 	event := logs.events(t)[0]
@@ -152,7 +150,7 @@ func TestBrowserStatedCrossSiteIsLoggedAsCrossSite(t *testing.T) {
 // Rust: csrf_test.rs a_same_site_post_from_a_sibling_subdomain_is_refused
 func TestSameSitePostFromASiblingSubdomainIsRefused(t *testing.T) {
 	logs := &capturedLogs{}
-	response := postLogout(logs, map[string]string{
+	response := postLogout(t, logs, map[string]string{
 		"Sec-Fetch-Site": "same-site", "Origin": "https://evil.app.test", "Host": "app.test",
 	})
 	if response.Code != http.StatusForbidden {
@@ -165,7 +163,7 @@ func TestSameSitePostFromASiblingSubdomainIsRefused(t *testing.T) {
 
 // Rust: csrf_test.rs a_same_site_post_is_refused_even_when_its_origin_matches_host
 func TestSameSitePostIsRefusedEvenWhenOriginMatchesHost(t *testing.T) {
-	response := postLogout(&capturedLogs{}, map[string]string{
+	response := postLogout(t, &capturedLogs{}, map[string]string{
 		"Sec-Fetch-Site": "same-site", "Origin": "https://app.test", "Host": "app.test",
 	})
 	if response.Code != http.StatusForbidden {
@@ -181,7 +179,7 @@ func TestOriginFallbackRejectsAnAuthorityThatDiffersFromHost(t *testing.T) {
 		{"http://[::1]:9000", "[::1]:8080", "an IPv6 literal is compared the same way"},
 		{"https://other.app.test", "app.test", "a sibling subdomain is another origin"},
 	} {
-		response := postLogout(&capturedLogs{}, map[string]string{"Origin": c.origin, "Host": c.host})
+		response := postLogout(t, &capturedLogs{}, map[string]string{"Origin": c.origin, "Host": c.host})
 		if response.Code != http.StatusForbidden {
 			t.Errorf("Origin %s / Host %s must be rejected: %s (got %d)", c.origin, c.host, c.why, response.Code)
 		}
@@ -196,7 +194,7 @@ func TestOriginFallbackPassesAnAuthorityThatMatchesHost(t *testing.T) {
 		// A TLS-terminating proxy: the comparison ignores the scheme.
 		{"https://app.test", "app.test"},
 	} {
-		response := postLogout(&capturedLogs{}, map[string]string{"Origin": c.origin, "Host": c.host})
+		response := postLogout(t, &capturedLogs{}, map[string]string{"Origin": c.origin, "Host": c.host})
 		if response.Code == http.StatusForbidden {
 			t.Errorf("Origin %s / Host %s must reach the handler", c.origin, c.host)
 		}
@@ -217,7 +215,7 @@ func TestEachRejectionIsLoggedUnderTheReasonThatDecidedIt(t *testing.T) {
 		{map[string]string{"Origin": "https://evil.test", "Host": "app.test"}, "origin_mismatch"},
 	} {
 		logs := &capturedLogs{}
-		response := postLogout(logs, c.headers)
+		response := postLogout(t, logs, c.headers)
 		if response.Code != http.StatusForbidden {
 			t.Errorf("%v: status = %d", c.headers, response.Code)
 			continue
@@ -231,15 +229,15 @@ func TestEachRejectionIsLoggedUnderTheReasonThatDecidedIt(t *testing.T) {
 // Rust: csrf_test.rs a_request_the_guard_allows_logs_nothing
 func TestAllowedRequestLogsNothing(t *testing.T) {
 	logs := &capturedLogs{}
-	postLogout(logs, nil)
-	postLogout(logs, map[string]string{"Sec-Fetch-Site": "same-origin"})
+	postLogout(t, logs, nil)
+	postLogout(t, logs, map[string]string{"Sec-Fetch-Site": "same-origin"})
 	if logs.buffer.Len() != 0 {
 		t.Fatalf("the guard logged on requests it passed: %s", logs.buffer.String())
 	}
 }
 
 func TestSafeMethodsAreNeverChecked(t *testing.T) {
-	chain := adminChain(unauthorisedStub(), (&capturedLogs{}).logger())
+	chain := realAdmin(t, &capturedLogs{})
 	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
 		request := httptest.NewRequest(method, "/api/health", nil)
 		request.Header.Set("Sec-Fetch-Site", "cross-site")
@@ -252,7 +250,7 @@ func TestSafeMethodsAreNeverChecked(t *testing.T) {
 }
 
 func TestEveryStateChangingMethodIsChecked(t *testing.T) {
-	chain := adminChain(unauthorisedStub(), (&capturedLogs{}).logger())
+	chain := realAdmin(t, &capturedLogs{})
 	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
 		request := httptest.NewRequest(method, "/api/rules/1", nil)
 		request.Header.Set("Sec-Fetch-Site", "cross-site")
@@ -266,7 +264,7 @@ func TestEveryStateChangingMethodIsChecked(t *testing.T) {
 
 func TestLoggedValuesAreTruncatedAndFlagNonASCII(t *testing.T) {
 	logs := &capturedLogs{}
-	postLogout(logs, map[string]string{"Origin": strings.Repeat("a", 400), "Host": "app.test"})
+	postLogout(t, logs, map[string]string{"Origin": strings.Repeat("a", 400), "Host": "app.test"})
 	origin, _ := logs.events(t)[0]["origin"].(string)
 	if len(origin) != logSafeMax {
 		t.Fatalf("origin = %d bytes, want %d", len(origin), logSafeMax)

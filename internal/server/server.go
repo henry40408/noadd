@@ -23,6 +23,8 @@ type Deps struct {
 	HSTS              bool
 	HSTSMaxAgeSeconds uint64
 	Slog              *slog.Logger
+	// API is the admin JSON API; nil leaves its routes unmounted.
+	API *APIDeps
 }
 
 // New builds the handler for the single HTTP listener. DoH sits beside the
@@ -67,6 +69,11 @@ func newAdminHandler(deps Deps, logger *slog.Logger) (http.Handler, error) {
 	}
 
 	mux := http.NewServeMux()
+	if deps.API != nil {
+		routes := newRouteTable()
+		newAPI(*deps.API, logger).registerAPIRoutes(routes)
+		routes.mount(mux)
+	}
 	mux.Handle("/"+appleTouchIconFile, appleTouchIconHandler(icon))
 	mux.Handle("/", static)
 	return adminChain(mux, logger), nil
