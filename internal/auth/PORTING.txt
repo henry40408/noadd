@@ -1,0 +1,37 @@
+Step 11: auth primitives (src/admin/auth.rs, forward_auth.rs, the policy in
+api.rs) and internal/netx (src/net.rs, moved here from Step 12 because
+forward auth needs TrustedProxies and trusted_proxies_test.rs is its spec).
+
+Tests: auth.rs unit 20 + admin_auth_test.rs 15 + forward_auth.rs unit 16 +
+trusted_proxies_test.rs 41 (a case table) ported, plus expiry-boundary,
+backwards-clock, abandoned-caller and malformed-PHC cases. api_key_auth.rs is
+HTTP-level and moves with the admin API (Step 14); the SQL it exercises is
+covered in internal/db.
+
+Rust-parity evidence:
+- testdata/password_vectors.json: 3 Rust PHC hashes verify, 3 token digests match.
+- testdata/zxcvbn_scores.json: 198 passwords sent to Rust 0.41.1
+  POST /api/users/me/password (username "admin"); only accept/reject is
+  observable. TestPolicyParityWithRust logs the differences.
+- One-off manual check: a Go HashPassword hash, stored in a DB created by
+  internal/db, logged in through the Rust 0.41.1 image (200; wrong password 401).
+
+Deviations:
+- zxcvbn: the Go port (ccojocar/zxcvbn-go v1.0.4) has no feedback text, so a
+  rejection always reads "it is too easy to guess" (Rust's fallback wording).
+  30 of 198 verdicts differ from Rust: Go is stricter on 19 (dates, some
+  phrases), weaker on 11 (short repeats such as "abababababab" and repeated CJK
+  phrases). Plan section 7 decision 3 default (a) applied: keep the Go score.
+- Clocks are injected (Config.Now / constructor argument); Rust used
+  Instant/now_unix globals. The audit salt is a Manager field, not a global.
+- Argon2 verify supports argon2id and argon2i, v=19 only (x/crypto has no
+  argon2d or v=16); memory cost over 1 GiB is rejected as an invalid hash.
+- PasswordWork replaces spawn_blocking + Semaphore: a goroutine per call under
+  a channel semaphore sized to NumCPU; the slot is held until the work ends
+  even if the caller's context is cancelled.
+- netx.ClientIP takes (peer, header, trusted) with the zero Addr meaning "no
+  connection info"; RequestClientIP fails closed (headers untrusted) when
+  r.RemoteAddr does not parse. Header values that are not visible ASCII are
+  not specially rejected for X-Forwarded-For (Go has no to_str failure).
+- Session audit events go to an optional *slog.Logger (event field kept); the
+  logging stack itself is decided in the entrypoint step.
