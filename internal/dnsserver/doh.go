@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	mdns "github.com/miekg/dns"
 
@@ -102,7 +103,14 @@ func (d *DoH) serveGet(w http.ResponseWriter, r *http.Request) {
 	d.answer(w, r, query, tokenName)
 }
 
+// dohBodyTimeout bounds reading a POST body, which is read before the token
+// check; a variable so a test can shorten it.
+var dohBodyTimeout = 10 * time.Second
+
 func (d *DoH) servePost(w http.ResponseWriter, r *http.Request) {
+	// Per request, so it cannot affect other responses on the server. The error
+	// is ignored: a writer without deadline support only loses the bound.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(dohBodyTimeout))
 	body, err := readLimitedBody(w, r)
 	if err != nil {
 		writeBodyError(w, err)
