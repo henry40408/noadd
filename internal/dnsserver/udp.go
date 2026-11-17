@@ -1,0 +1,64 @@
+package dnsserver
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/netip"
+	"sync"
+	"time"
+
+	"github.com/henry40408/noadd/internal/dns"
+)
+
+// maxUDPSize is the receive buffer: 4096 for EDNS (RFC 6891), not the classic
+// 512.
+const maxUDPSize = 4096
+
+// ServeUDP answers queries arriving on conn, one goroutine per datagram, until
+// ctx ends. It then waits for the queries still in flight, which can still
+// answer, closes conn and returns nil. A read error is logged and skipped, as
+// the Rust listener does.
+//
+// Concurrency is bounded by the handler's MaxInflight, not here: excess
+// goroutines wait for a permit.
+func (h *Handler) ServeUDP(ctx context.Context, conn *net.UDPConn) error {
+	// Interrupts the blocked read but leaves writes working for the queries in
+	// flight.
+	stopped := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer stopped()
+	h.log.Info("DNS listener started", "event", "dns.listener_started", "transport", "udp", "addr", conn.LocalAddr())
+
+	defer conn.Close()
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
+
+	buffer := make([]byte, maxUDPSize)
+	for {
+		length, source, err := conn.ReadFromUDPAddrPort(buffer)
+		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		if err != nil {
+			h.log.Debug("failed to receive datagram", "event", "dns.recv_failed", "transport", "udp", "error", err)
+			continue
+		}
+		query := append([]byte(nil), buffer[:length]...)
+		inflight.Add(1)
+		go func() {
+			defer inflight.Done()
+			h.answerDatagram(ctx, conn, source, query)
+		}()
+	}
+}
+
+func (h *Handler) answerDatagram(ctx context.Context, conn *net.UDPConn, source netip.AddrPort, query []byte) {
+	response := h.respond(ctx, Request{Bytes: query, ClientIP: source.Addr()}, "udp", source)
+	// Truncate (TC) to the client's advertised size, 512 without EDNS, so it
+	// retries over TCP.
+	response = dns.TruncateForUDP(query, response)
+	if _, err := conn.WriteToUDPAddrPort(response, source); err != nil {
+		h.log.Debug("failed to send response", "event", "dns.send_failed", "transport", "udp",
+			"client", source, "error", err)
+	}
+}
