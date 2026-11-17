@@ -1,0 +1,56 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "395"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "total_today": 200,
+  "blocked_today": 80,
+  "total_7d": 200,
+  "blocked_7d": 80,
+  "total_30d": 200,
+  "blocked_30d": 80,
+  "block_ratio_today": 0.4,
+  "block_ratio_7d": 0.4,
+  "block_ratio_30d": 0.4,
+  "cache_hit_rate_today": 0.925,
+  "cache_hit_rate_7d": 0.925,
+  "cache_hit_rate_30d": 0.925,
+  "avg_response_ms_today": 0.03333333333333333,
+  "avg_response_ms_7d": 0.03333333333333333,
+  "avg_response_ms_30d": 0.03333333333333333,
+  "queries_1m": 200
+ }
+}

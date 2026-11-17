@@ -1,0 +1,27 @@
+{
+ "status": 304,
+ "headers": [
+  [
+   "etag",
+   "\"5cfec8610c318452\""
+  ],
+  [
+   "cache-control",
+   "no-cache"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ]
+ ],
+ "note": "",
+ "body": ""
+}

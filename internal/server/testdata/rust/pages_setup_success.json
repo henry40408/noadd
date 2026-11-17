@@ -1,0 +1,47 @@
+{
+ "status": 303,
+ "headers": [
+  [
+   "location",
+   "/"
+  ],
+  [
+   "set-cookie",
+   "noadd_flash=<COOKIE>; HttpOnly; SameSite=Lax; Path=/"
+  ],
+  [
+   "set-cookie",
+   "session=<COOKIE>; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "0"
+  ]
+ ],
+ "note": "",
+ "body": ""
+}

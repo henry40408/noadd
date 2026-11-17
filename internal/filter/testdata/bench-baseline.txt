@@ -1,0 +1,21 @@
+Rust baseline for the 1.2M-rule filter engine, measured on the released image
+ghcr.io/henry40408/noadd:0.41.1 (linux/arm64 container on OrbStack, Apple Silicon). There is no
+tests/filter_engine_bench.rs: the relays may not run cargo, so the Rust numbers come from the binary.
+
+Input list (deterministic; the Go benchmark must generate the identical file):
+  for i in 0 .. 1_199_999, one line each:
+    i%4==0  "0.0.0.0 host{i}.bench{i%977}.example"
+    i%4==1  "||ads{i}.cdn{i%503}.test^"
+    i%4==2  "tracker{i}.example.org"
+    i%4==3  "@@||ok{i}.bench.test^" if i%40==3, else "||beacon{i}.bench.test^"
+  sha256 of the file (LF line endings, trailing newline): 65b6e790a07311c45529a6ee6ba835322c59f5b0aae0b6e08dd36ebb738ec735
+  => 1,170,000 block rules, 30,000 allow rules.
+
+Measured (one list loaded through POST /api/lists + /api/lists/update):
+  rebuild log: filter engine rebuilt block_count=1170000 allow_count=30000 parse_ms=56 elapsed_ms=447
+  container memory: 30 MiB idle -> 106 MiB after the rebuild (118 MiB after 3000 queries), so the
+    engine and list text cost about 75 MiB; the Go engine must stay within the plan's budget (section 6).
+  plain DNS over UDP, 3000 sequential queries (one third blocked, one third allow-listed, one third
+    unlisted -> fake upstream), localhost through Docker port mapping:
+    p50 0.11 ms, p99 1.41 ms, 5583 qps single connection.
+  /api/filter/check: host4.bench4.example -> blocked (list "bench"), ok3.bench.test -> allowed rule ok3.bench.test.

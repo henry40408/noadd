@@ -1,0 +1,82 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "721"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "logs": [
+   {
+    "authenticated_data": false,
+    "blocked": true,
+    "cached": false,
+    "client_ip": "192.168.215.1",
+    "doh_token": "beta-token",
+    "domain": "ads.example.com",
+    "query_type": "A",
+    "response_ms": "<MS>",
+    "result": "0.0.0.0",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": true,
+    "cached": false,
+    "client_ip": "192.168.215.1",
+    "doh_token": null,
+    "domain": "adserver.list-two.test",
+    "query_type": "A",
+    "response_ms": "<MS>",
+    "result": "0.0.0.0",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": true,
+    "cached": false,
+    "client_ip": "192.168.215.1",
+    "doh_token": "beta-token",
+    "domain": "ads.list-one.test",
+    "query_type": "A",
+    "response_ms": "<MS>",
+    "result": "0.0.0.0",
+    "timestamp": "<TS>",
+    "upstream": null
+   }
+  ],
+  "total": 54
+ }
+}

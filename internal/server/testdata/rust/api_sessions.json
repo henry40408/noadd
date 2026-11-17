@@ -1,0 +1,49 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "133"
+  ]
+ ],
+ "note": "",
+ "body": [
+  {
+   "id": 1,
+   "username": "admin",
+   "created_at": "<TS>",
+   "last_seen": "<TS>",
+   "ip": "192.168.215.1",
+   "user_agent": null,
+   "is_current": true
+  }
+ ]
+}

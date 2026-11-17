@@ -1,0 +1,56 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "234"
+  ]
+ ],
+ "note": "",
+ "body": [
+  {
+   "id": 1,
+   "name": "ci-expiring",
+   "prefix": "<APIKEY>",
+   "created_at": "<TS>",
+   "last_used_at": null,
+   "expires_at": 4102444800
+  },
+  {
+   "id": 2,
+   "name": "ci-forever",
+   "prefix": "<APIKEY>",
+   "created_at": "<TS>",
+   "last_used_at": null,
+   "expires_at": null
+  }
+ ]
+}

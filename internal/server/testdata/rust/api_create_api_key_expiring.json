@@ -1,0 +1,44 @@
+{
+ "status": 201,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "108"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "id": 1,
+  "name": "ci-expiring",
+  "prefix": "<APIKEY>",
+  "token": "<APIKEY>"
+ }
+}

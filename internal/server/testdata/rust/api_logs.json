@@ -1,0 +1,108 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "1216"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "logs": [
+   {
+    "authenticated_data": false,
+    "blocked": true,
+    "cached": false,
+    "client_ip": "192.168.215.1",
+    "doh_token": null,
+    "domain": "ads.example.com",
+    "query_type": "AAAA",
+    "response_ms": "<MS>",
+    "result": "::",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": true,
+    "cached": false,
+    "client_ip": "192.168.215.1",
+    "doh_token": "beta-token",
+    "domain": "ads.example.com",
+    "query_type": "A",
+    "response_ms": "<MS>",
+    "result": "0.0.0.0",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": false,
+    "cached": true,
+    "client_ip": "192.168.215.1",
+    "doh_token": null,
+    "domain": "allowed.example.com",
+    "query_type": "MX",
+    "response_ms": "<MS>",
+    "result": "10 mail.example.com.",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": false,
+    "cached": true,
+    "client_ip": "192.168.215.1",
+    "doh_token": "alpha-token",
+    "domain": "allowed.example.com",
+    "query_type": "AAAA",
+    "response_ms": "<MS>",
+    "result": "2001:db8::1",
+    "timestamp": "<TS>",
+    "upstream": null
+   },
+   {
+    "authenticated_data": false,
+    "blocked": false,
+    "cached": true,
+    "client_ip": "192.168.215.1",
+    "doh_token": null,
+    "domain": "allowed.example.com",
+    "query_type": "A",
+    "response_ms": "<MS>",
+    "result": "93.184.216.34, 93.184.216.35",
+    "timestamp": "<TS>",
+    "upstream": null
+   }
+  ],
+  "total": 200
+ }
+}

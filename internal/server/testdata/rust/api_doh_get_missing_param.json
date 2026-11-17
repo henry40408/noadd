@@ -1,0 +1,15 @@
+{
+ "status": 400,
+ "headers": [
+  [
+   "content-type",
+   "text/plain; charset=utf-8"
+  ],
+  [
+   "content-length",
+   "55"
+  ]
+ ],
+ "note": "",
+ "body": "Failed to deserialize query string: missing field `dns`"
+}
