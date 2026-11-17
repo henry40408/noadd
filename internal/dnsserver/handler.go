@@ -7,6 +7,7 @@ package dnsserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -339,6 +340,14 @@ func (h *Handler) startStaleRefresh(key cache.Key, raw []byte) {
 		// Clears the marker even on panic, or one bad refresh would block the
 		// key forever.
 		defer h.refreshing.End(key)
+		// A malformed upstream answer can panic the DNS library; a background
+		// task must not take the whole process down.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				h.log.Error("stale refresh panicked", "event", "cache.stale_refresh_panicked",
+					"panic", fmt.Sprint(recovered))
+			}
+		}()
 		h.refresh(key, query)
 	}()
 }
