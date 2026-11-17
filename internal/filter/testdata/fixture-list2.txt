@@ -1,0 +1,2000 @@
+||site2990.net^
+site2894.example
+||site2981.io^
+||site1733.example^
+||site390.com^
+||site942.test
+||SITE484.ORG^
+::1 ip6-localhost
+||sub4.site2582.test^
+||site2542.com^
+||site563.net^
+127.0.0.1 site1384.example # note
+||sub2.site1585.org
+||sub1.site1124.org
+||SITE1869.EXAMPLE^
+site2034.org
+||site943.net
+||site1345.net^
+@@||site1336.net^
+site1099.example
+||site1082.net^
+site2690.org
+127.0.0.1 site1027.com # note
+||sub2.site1187.test
+||sub3.site1052.io
+::1 ip6-localhost
+||
+||site2378.co.uk^
+site1902.io
+sub4.site2493.org
+||site1495.co.uk
+||site582.io
+||site2640.io^
+sub3.site2437.net
+0.0.0.0 site2120.net
+  
+0.0.0.0 site1576.co.uk
+||site863.io^
+||site2567.net
+0.0.0.0 site452.org
+||SITE417.IO^
+bad rule here
+site962.com
+0.0.0.0 sub2.site1287.org
+||site539.test^
+||site2393.co.uk
+||site237.net^
+0.0.0.0 site1560.net
+||site1316.example^
+0.0.0.0 site1813.io
+||SUB4.SITE2986.IO^
+127.0.0.1 sub3.site1194.net # note
+||site2388.test^
+127.0.0.1 sub0.site2877.co.uk # note
+||site1535.io^
+0.0.0.0 site1547.com
+||site1450.org^
+SUB0.SITE17.IO
+||site552.example^
+||site1364.com^
+||site990.test^
+||site735.test^
+||SITE2191.EXAMPLE^
+0.0.0.0 site202.org
+||SITE1938.CO.UK^
+||site2623.org^
+||site296.com^
+||site2631.com
+||sub4.site1365.example^
+||sub2.site1447.net^
+sub2.site1769.io
+||sub4.site982.com^
+||SITE1136.CO.UK^
+||sub0.site2587.example
+0.0.0.0 site1394.org
+0.0.0.0 sub3.site956.co.uk
+site1928.test
+127.0.0.1 site905.io # note
+||sub2.site2422.test^
+||site1003.com
+site2953.io
+0.0.0.0 site2287.net
+||sub4.site2979.net
+||sub1.site1026.org^
+site910.net
+0.0.0.0 site2591.net
+||site187.test
+! c
+||SITE785.COM
+localhost
+site2750.io
+site2408.co.uk
+||site1460.co.uk^
+||sub3.site1114.test^
+0.0.0.0 site663.net
+||site1656.com
+||sub3.site86.example
+||site138.net^
+0.0.0.0 site1391.co.uk
+||site373.net^
+site208.test
+0.0.0.0 site1377.net
+! c
+0.0.0.0 site56.io
+0.0.0.0 site2655.org
+0.0.0.0 site2476.test
+||SITE1722.NET^
+||site465.test^
+||site2895.co.uk
+||site615.io
+||site2826.com^
+0.0.0.0 site814.com
+||site2902.com
+||sub1.site385.org
+||site907.io
+||sub4.site2150.net^
+127.0.0.1 localhost
+||SITE2473.EXAMPLE
+||site161.net^
+||sub1.site2867.example^
+0.0.0.0 SUB0.SITE2308.IO
+0.0.0.0 site2621.co.uk
+||site1497.co.uk^
+0.0.0.0 site1039.co.uk
+||site1763.io^
+@@||site82.test^
+sub2.site611.test
+||sub1.site985.example^
+@@||sub3.site1641.net^
+||SITE2889.TEST^
+||sub2.site1597.org^
+@@||site1122.net^
+||site2769.net^
+||sub2.site739.example^
+site2058.co.uk
+@@||site2325.test^
+@@||site444.org^
+||sub3.site440.example^
+||site2729.test^
+site2285.io
+||site872.org
+127.0.0.1 localhost
+127.0.0.1 site239.net # note
+@@||site1245.io^
+||site1879.co.uk^
+site1096.co.uk
+||site1662.test^
+sub4.site2665.test
+site1224.org
+@@||SITE1334.NET^
+||site67.io^
+||SUB3.SITE49.CO.UK^
+||site1001.com
+@@||
+||site2667.org
+0.0.0.0 site2508.example
+site499.com
+0.0.0.0 sub3.site520.io
+sub0.site2746.net
+||site837.org^
+# c
+0.0.0.0 site1482.test
+0.0.0.0 sub4.site2636.test
+sub0.site1304.example
+||sub1.site2721.io
+||site2974.com
+0.0.0.0 sub3.site1590.co.uk
+site2028.com
+||site2264.test^
+0.0.0.0 sub1.site795.co.uk
+site2250.io
+||site1516.example
+||sub3.site1539.test^
+127.0.0.1 site1675.example # note
+||sub1.site409.net^
+0.0.0.0 sub3.site2188.net
+||SUB4.SITE1583.NET
+0.0.0.0 site1219.io
+||site1914.org^
+||SITE2149.COM
+0.0.0.0 sub1.site1540.example
+||site674.com^
+127.0.0.1 sub4.site433.co.uk # note
+0.0.0.0 site2128.co.uk
+||sub3.site2134.co.uk
+||site2839.test^
+0.0.0.0 site2157.com
+site353.test
+0.0.0.0 sub0.site1985.com
+127.0.0.1 site2982.org # note
+||site305.io^
+||site1601.example^
+0.0.0.0 site2539.com
+site1839.co.uk
+@@||site1848.test^
+||site1897.test^
+||site558.test^
+||site1217.test^
+||site1677.com
+||site1741.co.uk^
+@@||sub3.site888.com^
+||site1708.co.uk^
+  
+127.0.0.1 site1159.example # note
+||sub0.site621.co.uk
+||site861.com
+0.0.0.0 site2472.example
+||site391.test^
+site503.test
+0.0.0.0 site2411.test
+||sub0.site277.net^
+||site2998.example^
+0.0.0.0 SITE1419.IO
+||site1470.io^
+@@||sub3.site2925.test^
+0.0.0.0 sub0.site2439.com
+0.0.0.0 site2039.test
+||site749.io
+||site270.net^
+127.0.0.1 site2031.org # note
+sub4.site2779.test
+||sub1.site2068.org
+||site2782.example^
+||site1313.example
+0.0.0.0 site915.com
+0.0.0.0 site1369.com
+0.0.0.0 site769.net
+SUB3.SITE2601.COM
+site1165.co.uk
+||site709.test^
+127.0.0.1 site494.com # note
+||site1952.test^
+||site1892.co.uk^
+||sub1.site1177.test^
+||site124.test^
+||sub3.site1312.org
+||sub1.site1591.net^
+||site1035.io^
+0.0.0.0 site1673.io
+SITE2615.NET
+0.0.0.0 site2869.net
+0.0.0.0 sub1.site2562.org
+||site1087.io
+0.0.0.0 site225.co.uk
+0.0.0.0 site1746.test
+||site1100.example
+127.0.0.1 site294.co.uk # note
+||site1862.test
+||site203.io^
+@@||site2685.io^
+||site2268.org^
+bad rule here
+||site496.test^
+0.0.0.0 sub3.site12.io
+0.0.0.0 SITE1039.CO.UK
+site191.org
+||sub3.site406.com^
+||SITE262.COM^
+sub1.site2916.co.uk
+site1200.org
+127.0.0.1 sub0.site1274.co.uk # note
+||site2241.co.uk
+||site2879.io^
+127.0.0.1 site1148.com # note
+||sub3.site2033.example^
+||sub4.site992.test^
+127.0.0.1 site960.test # note
+||site744.example^
+127.0.0.1 site2800.example # note
+||site927.net^
+||site405.com
+||site51.test^
+||sub0.site2174.io^
+@@||site808.io^
+||SITE1443.COM^
+0.0.0.0 site1459.example
+0.0.0.0
+||site1690.test^
+site2273.com
+||site2745.com^
+site2214.com
+||site1276.net^
+||site713.net^
+
+sub2.site2958.com
+0.0.0.0 site1269.org
+0.0.0.0 SITE788.TEST
+0.0.0.0 sub0.site2760.com
+||site1467.net^
+||site2819.example^
+||SUB2.SITE862.IO^
+||site1376.org^
+||sub2.site2081.com^
+0.0.0.0 sub3.site628.co.uk
+||site1633.example^
+||sub2.site1473.org
+||site1302.org
+||SITE1019.CO.UK
+||site492.org^
+||sub1.site2260.test^
+0.0.0.0 site1796.com
+bad rule here
+@@||site2541.org^
+127.0.0.1 site1654.net # note
+||site303.com
+||sub1.site487.example^
+||site289.org
+||
+0.0.0.0 site2579.org
+||site2747.test^
+127.0.0.1 site2909.io # note
+! c
+||sub1.site1055.net^
+||site1235.org^
+||site2829.org^
+@@||sub3.site2116.com^
+@@||SITE520.IO^
+||site1437.co.uk^
+||SITE1300.NET^
+||site269.net^
+127.0.0.1 site1667.co.uk # note
+||site2822.com
+||sub2.site2748.co.uk^
+||site1997.test^
+@@||
+||SITE2724.NET^
+@@||site2402.net^
+0.0.0.0 site1264.co.uk
+||site2156.org
+||
+0.0.0.0
+||site258.io^
+||sub4.site657.net^
+0.0.0.0 sub3.site618.com
+||site1844.com^
+||site2823.net^
+0.0.0.0 SITE1549.CO.UK
+||sub2.site2671.org^
+site1359.net
+||site2891.example
+@@||SITE1661.NET^
+||site1826.io^
+||site1568.com^
+||site661.io
+||sub3.site2893.com
+0.0.0.0 sub2.site613.example
+||site1947.io^
+sub0.site1496.com
+||site2596.io^
+0.0.0.0 site193.io
+||site2742.io
+127.0.0.1 site974.io # note
+||site2984.net^
+||site1837.org^
+||site1145.org^
+||SITE2333.NET^
+||site1174.io^
+0.0.0.0 site1140.io
+127.0.0.1 site760.co.uk # note
+||site451.org
+||SITE2371.CO.UK
+
+sub1.site238.org
+||site196.example^
+sub0.site1199.com
+||site1652.net^
+||site1546.org
+0.0.0.0 site1106.test
+||site502.co.uk^
+127.0.0.1 site1097.net # note
+127.0.0.1 site96.example # note
+||site2111.co.uk^
+||sub1.site1063.test^
+||site435.org^
+||site1225.example^
+||sub0.site2205.net
+0.0.0.0 sub4.site2421.com
+||site1191.test^
+||site176.example^
+0.0.0.0 site309.co.uk
+||SITE866.EXAMPLE^
+||site1701.co.uk
+||sub1.site779.com^
+||site386.co.uk^
+||site961.org
+127.0.0.1 sub4.site1053.net # note
+||site2277.io
+0.0.0.0 sub3.site1542.net
+||sub1.site2647.co.uk^
+||site2942.com^
+||SITE2808.CO.UK^
+0.0.0.0 site1160.org
+||site886.io
+||sub3.site14.io^
+||sub0.site2399.org^
+||site2545.co.uk
+||sub2.site1936.com^
+0.0.0.0 site2064.test
+||site2183.net^
+||sub3.site30.co.uk^
+site1137.co.uk
+site411.example
+||site882.example
+0.0.0.0 site777.com
+@@||sub1.site2105.net^
+0.0.0.0 sub3.site1403.net
+site2219.co.uk
+0.0.0.0 site2735.co.uk
+@@||sub0.site994.net^
+||site777.com^
+||site1342.net^
+  
+||site2256.com^
+0.0.0.0 site2258.com
+||site2465.co.uk^
+127.0.0.1 SUB3.SITE1658.CO.UK # note
+||site1691.io
+||site2460.co.uk
+0.0.0.0 sub1.site1885.co.uk
+||site2765.co.uk^
+localhost
+||site2917.example
+127.0.0.1 sub0.site475.test # note
+127.0.0.1 sub3.site2799.org # note
+0.0.0.0 sub0.site2318.test
+0.0.0.0 site1536.test
+||site2386.co.uk^
+0.0.0.0 SITE44.EXAMPLE
+||site2697.co.uk^
+||sub0.site425.co.uk^
+0.0.0.0 site1138.net
+site2520.test
+site2338.example
+||sub0.site2418.io^
+||sub4.site2080.com^
+@@||site2501.example^
+||site2740.com^
+0.0.0.0 site2951.test
+@@||site2269.org^
+||sub0.site2274.org^
+||site2251.co.uk^
+127.0.0.1 sub0.site2226.co.uk # note
+||sub0.site1865.net^
+sub2.site517.com
+||site1744.net^
+||site2556.test^
+0.0.0.0 sub2.site2899.co.uk
+||site524.co.uk^
+||site637.co.uk^
+site577.com
+||sub0.site2552.co.uk^
+||site1960.example^
+127.0.0.1 site91.net # note
+||sub1.site1671.com^
+0.0.0.0 site158.io
+127.0.0.1 site1904.net # note
+::1 ip6-localhost
+@@||SITE2206.NET^
+0.0.0.0 site1073.io
+||site1092.example^
+||site2224.com
+0.0.0.0 SITE1740.EXAMPLE
+||SITE1478.IO^
+0.0.0.0 SITE1267.CO.UK
+0.0.0.0 site2403.example
+0.0.0.0 site2572.co.uk
+0.0.0.0 site1681.test
+||sub2.site791.co.uk
+||sub1.site75.org
+||sub0.site301.io
+site1258.co.uk
+||sub3.site240.example^
+||site2053.org^
+||site50.net^
+||site2692.co.uk^
+127.0.0.1 sub2.site2162.example # note
+||site600.co.uk^
+site363.org
+||site2782.example
+SITE662.COM
+bad rule here
+||site2473.example^
+||site1483.com
+||sub1.site1970.org^
+0.0.0.0
+site1987.co.uk
+0.0.0.0 site2812.co.uk
+||site1955.test
+site2793.net
+||site2901.io^
+site2700.net
+site1646.net
+127.0.0.1 site2616.test # note
+127.0.0.1 SITE64.IO # note
+site2465.co.uk
+127.0.0.1 site1506.io # note
+||site2425.test^
+||site1719.net^
+||site1607.example
+0.0.0.0 site109.org
+||SITE2302.COM^
+||SITE2424.EXAMPLE^
+||site1916.com
+||site2164.example^
+||site1948.com^
+||site2766.example
+||site2717.com^
+@@||sub2.site2533.example^
+||site2944.example
+||site2252.test^
+||site1529.io^
+||SITE1477.CO.UK
+||site692.net
+sub4.site2604.com
+0.0.0.0 site2365.net
+# c
+||site234.org^
+||site2012.example
+||site1878.net
+||site1704.co.uk^
+0.0.0.0 SUB2.SITE923.ORG
+||site2990.net^
+@@||site839.org^
+site399.io
+0.0.0.0 site247.test
+||site2187.example^
+0.0.0.0 site1695.io
+||site2147.org^
+@@||SUB3.SITE1610.CO.UK^
+127.0.0.1 site412.net # note
+SUB4.SITE2007.NET
+127.0.0.1 site2672.com # note
+0.0.0.0 SITE771.COM
+site180.example
+0.0.0.0 site372.co.uk
+127.0.0.1 localhost
+||site110.com^
+bad rule here
+||SUB2.SITE1683.EXAMPLE^
+||sub0.site1951.test^
+||site597.io^
+||site1129.net^
+||site1260.test^
+site1787.net
+! c
+bad rule here
+0.0.0.0 sub4.site1070.com
+||site500.org^
+127.0.0.1 site1193.test # note
+site37.net
+||sub4.site2500.io^
+@@||sub3.site575.example^
+@@||
+||site1472.org^
+127.0.0.1 sub1.site153.co.uk # note
+||sub3.site2441.org^
+||site774.org
+||site188.io^
+||site2004.org
+0.0.0.0 sub2.site2962.com
+||site1575.com
+||sub3.site669.io^
+||sub0.site346.net^
+||site1413.org
+||site232.example^
+0.0.0.0 sub2.site1587.io
+0.0.0.0 site802.net
+||SUB0.SITE1282.TEST^
+0.0.0.0 site2571.com
+||site2849.com^
+site267.example
+||site760.co.uk^
+0.0.0.0
+127.0.0.1 localhost
+0.0.0.0 site2869.net
+||sub0.site84.org
+::1 ip6-localhost
+||site601.net^
+0.0.0.0 sub2.site474.example
+site2681.example
+site1586.io
+localhost
+||site1209.com^
+0.0.0.0 SUB2.SITE262.COM
+sub0.site977.net
+0.0.0.0 site1024.test
+||site2070.org^
+||sub2.site2900.test^
+||
+site750.io
+||site933.co.uk
+||site354.example
+||sub1.site623.co.uk^
+||site1020.example^
+@@||site2197.test^
+||site636.test^
+0.0.0.0 site216.co.uk
+||sub1.site580.net
+@@||site1121.io^
+0.0.0.0 site273.example
+||site2559.example
+@@||site2011.net^
+site2148.test
+0.0.0.0 sub1.site1767.co.uk
+bad rule here
+||site876.example^
+||sub2.site26.org^
+||site2418.io^
+||sub4.site951.net^
+||sub2.site1659.org^
+0.0.0.0 site2036.org
+0.0.0.0 SUB0.SITE1918.ORG
+||site1329.example^
+||site1009.org^
+0.0.0.0 site114.io
+||SUB3.SITE1045.COM
+0.0.0.0 site1898.example
+@@||site1166.example^
+0.0.0.0 sub1.site652.com
+bad rule here
+@@||site1500.net^
+0.0.0.0 SITE1695.IO
+||sub1.site639.co.uk
+||site2675.com^
+site2107.io
+||site327.org^
+0.0.0.0 site2850.test
+||sub3.site2882.example^
+||sub1.site908.example^
+||site1909.org^
+0.0.0.0
+||site1383.com
+site376.co.uk
+SITE2609.CO.UK
+||site929.example^
+||SITE920.ORG^
+||SITE282.CO.UK^
+||site2860.org^
+||sub1.site2131.example^
+0.0.0.0 sub2.site680.com
+||sub3.site1374.co.uk^
+||site1164.com^
+sub2.site2971.net
+||site1311.com
+0.0.0.0 site2853.net
+site184.org
+0.0.0.0 sub2.site473.io
+||sub3.site805.io^
+SITE1226.COM
+||site2573.example^
+||site1133.org^
+||SITE758.COM^
+||sub0.site1716.co.uk^
+||site2368.co.uk^
+@@||sub3.site2491.example^
+||site590.io^
+site352.example
+0.0.0.0 site1338.io
+||site2998.example^
+||site1678.co.uk
+0.0.0.0 site1800.co.uk
+||site1112.co.uk^
+127.0.0.1 localhost
+||site2689.org^
+@@||SITE328.IO^
+0.0.0.0 site518.net
+0.0.0.0 sub2.site2661.co.uk
+site1990.example
+0.0.0.0 site2272.co.uk
+||site1843.com^
+127.0.0.1 site1306.co.uk # note
+0.0.0.0 sub2.site2306.example
+||site952.com^
+0.0.0.0 site1451.org
+||sub0.site1440.com
+0.0.0.0 sub2.site835.io
+||sub0.site2988.net
+||site2339.io
+||site1816.test
+||site1398.co.uk^
+||sub3.site2906.io
+sub1.site1651.test
+||site98.example^
+||SITE2136.EXAMPLE
+@@||site2288.net^
+||site2851.net
+@@||site1071.io^
+||sub3.site1643.test^
+@@||sub4.site1653.example^
+||site1379.test^
+site266.org
+site2876.net
+0.0.0.0 site142.org
+||SUB3.SITE2352.CO.UK^
+||sub2.site1333.example
+||sub1.site1062.org^
+||sub3.site1485.test^
+0.0.0.0 site2883.io
+||SITE1125.COM^
+127.0.0.1 site548.test # note
+||sub1.site2247.net^
+||SITE865.ORG
+||SITE1183.TEST^
+||site2313.test^
+sub1.site2910.example
+127.0.0.1 site1563.test # note
+||sub1.site756.test^
+site271.com
+sub2.site1321.org
+||sub3.site729.co.uk
+sub0.site963.co.uk
+||site1229.com^
+sub4.site550.net
+::1 ip6-localhost
+0.0.0.0 sub1.site2632.com
+||site478.test^
+||site885.io
+||site2229.org^
+SITE2396.IO
+0.0.0.0 site536.net
+site1713.io
+sub4.site1205.test
+||site430.test^
+
+sub3.site1079.co.uk
+0.0.0.0 SUB2.SITE459.NET
+site2153.net
+localhost
+||site1503.example
+||site394.co.uk^
+site726.io
+site308.net
+||site696.co.uk^
+||sub3.site641.test
+||sub0.site1526.co.uk^
+||site2857.org^
+||site345.co.uk^
+0.0.0.0 sub2.site2401.io
+
+bad rule here
+site433.co.uk
+0.0.0.0 site142.org
+||site842.test^
+site1297.org
+0.0.0.0 sub3.site1435.net
+||site2351.com^
+||site2122.io
+||site1941.com^
+site1603.example
+0.0.0.0 sub0.site1223.net
+127.0.0.1 site1513.test # note
+127.0.0.1 site1246.org # note
+site1751.com
+||sub0.site226.example^
+@@||site1185.io^
+0.0.0.0 site2834.example
+# c
+||sub3.site545.test^
+||site544.co.uk^
+127.0.0.1 localhost
+0.0.0.0 site1635.test
+0.0.0.0 site1334.net
+0.0.0.0 site1139.test
+127.0.0.1 sub1.site2536.io # note
+0.0.0.0 site2445.com
+  
+0.0.0.0 site751.com
+@@||site1748.net^
+||site462.net^
+0.0.0.0 site2764.com
+127.0.0.1 sub1.site349.com # note
+||site2866.example^
+site543.io
+sub1.site2406.co.uk
+sub2.site170.io
+||site2892.io^
+||site1688.com^
+@@||SITE1608.CO.UK^
+0.0.0.0 site2837.net
+0.0.0.0 site2041.org
+sub3.site2448.test
+||site1505.com^
+||site510.test^
+site2557.net
+||sub2.site2534.org
+||sub4.site1969.io^
+site1449.example
+0.0.0.0 sub2.site2345.io
+site1056.net
+sub4.site79.com
+site2216.example
+||site1424.net^
+127.0.0.1 SUB1.SITE1628.IO # note
+0.0.0.0 sub4.site23.org
+SITE697.EXAMPLE
+||site2481.net
+||sub1.site817.net
+0.0.0.0 site1100.example
+||SITE530.ORG^
+||site613.example^
+||site554.co.uk^
+||site736.test
+0.0.0.0 site1394.org
+0.0.0.0
+sub2.site171.co.uk
+||site1896.test^
+||SITE2905.ORG
+127.0.0.1 site2886.net # note
+||site2852.com^
+||site1414.org
+@@||site2109.io^
+0.0.0.0
+site2146.test
+||sub3.site2992.net
+||site2875.example
+0.0.0.0 sub2.site540.example
+0.0.0.0 site683.com
+@@||sub1.site2809.co.uk^
+||site2249.net
+||sub4.site1756.net
+0.0.0.0 sub3.site1808.net
+0.0.0.0 SITE1872.COM
+||SITE702.COM
+||sub4.site2336.com
+||site2411.test^
+||sub0.site1479.example
+||sub4.site1303.co.uk
+||site37.net
+||site2386.co.uk
+||site2113.co.uk
+@@||site1875.org^
+||site1909.org^
+||site1644.test
+127.0.0.1 site1330.com # note
+@@||site1604.com^
+0.0.0.0 site950.co.uk
+||sub4.site2881.com
+site824.io
+||sub4.site192.org
+||site1738.co.uk^
+||site1709.io^
+127.0.0.1 sub2.site218.net # note
+site2215.org
+||site2861.co.uk^
+||sub1.site1157.example
+@@||SITE521.IO^
+||site1066.com^
+||site344.example^
+||site81.net
+||site1765.net
+0.0.0.0 sub1.site2413.com
+0.0.0.0
+||site2459.org^
+||site661.io^
+SITE818.COM
+||site2231.test
+||site1581.net^
+127.0.0.1 site1893.example # note
+||site672.org^
+||site828.org
+127.0.0.1 site452.org # note
+||site916.org
+||site2243.co.uk
+@@||site2132.test^
+||sub0.site1268.example^
+||sub4.site583.org^
+::1 ip6-localhost
+0.0.0.0 site2578.example
+@@||site1606.com^
+||site2062.test^
+||site195.net
+||site120.io
+||site2248.io^
+||site909.net^
+0.0.0.0 site855.com
+||site732.net^
+||site2689.org
+||SITE1882.IO
+0.0.0.0 SITE984.COM
+||SUB4.SITE1857.CO.UK
+||site981.example^
+0.0.0.0 site738.example
+site1774.net
+sub3.site789.org
+||site25.net
+0.0.0.0 sub0.site2946.io
+127.0.0.1 site1557.example # note
+site293.example
+site2098.org
+||SITE259.EXAMPLE
+||site2005.example
+||sub0.site1462.com
+||site1315.io^
+@@||site1330.com^
+||SITE1805.IO
+0.0.0.0 site455.io
+site853.test
+0.0.0.0 site1278.co.uk
+||sub2.site1086.com^
+||sub1.site1299.net^
+0.0.0.0 site123.test
+||sub4.site2617.org
+||site2069.org^
+0.0.0.0 site650.com
+site315.io
+0.0.0.0 site48.org
+||site804.test
+||site1233.co.uk^
+||site159.co.uk
+||site2920.test^
+||site576.test^
+||sub3.site121.net
+site2715.net
+site559.org
+site2915.net
+0.0.0.0 sub2.site1830.test
+SITE770.CO.UK
+||SITE2217.ORG
+sub4.site1270.net
+sub1.site1537.io
+||site1961.com^
+||sub2.site228.co.uk^
+||site2200.example
+site2873.com
+sub0.site2470.org
+0.0.0.0 site1151.co.uk
+@@||site566.net^
+sub4.site2.net
+||site1370.io^
+||site1372.test^
+0.0.0.0 site2278.test
+||site2945.net^
+site2673.com
+0.0.0.0 site2768.com
+0.0.0.0 site461.test
+SUB3.SITE2544.NET
+||sub4.site527.io
+@@||sub1.site1427.com^
+||site1368.net
+||site1649.net^
+||sub2.site2651.io^
+||site485.org^
+@@||site2362.org^
+@@||site1046.co.uk^
+||site313.co.uk
+127.0.0.1 site2929.com # note
+||site1441.com
+||sub3.site568.org^
+||sub2.site762.co.uk^
+||site2278.test
+||site1532.test^
+sub1.site1831.net
+||site2085.org^
+||site2483.io
+||site2830.org^
+127.0.0.1 site728.io # note
+||site2471.com^
+||sub1.site919.org^
+0.0.0.0 site1650.net
+127.0.0.1 localhost
+sub2.site563.net
+::1 ip6-localhost
+||sub2.site2001.io^
+0.0.0.0 sub0.site1642.com
+||site768.net
+sub3.site2643.co.uk
+||sub4.site1971.test^
+||site2964.com^
+||site705.org^
+||site134.net
+site1949.org
+SITE1208.COM
+||sub4.site1056.net
+site2569.net
+||sub3.site469.net^
+0.0.0.0 sub4.site704.org
+site2246.test
+||site656.co.uk^
+@@||site2420.example^
+@@||
+||site118.io^
+||site1639.example^
+0.0.0.0 sub1.site1361.net
+0.0.0.0 site2857.org
+||site2561.com
+||site1295.io^
+||site2702.example^
+0.0.0.0 sub1.site2057.io
+||site1454.test^
+0.0.0.0
+||site2921.io^
+0.0.0.0 site2348.com
+||site1371.com
+site1057.org
+0.0.0.0 sub0.site1993.com
+||site1115.test^
+||site61.org^
+||sub2.site2145.org^
+||sub1.site20.net^
+sub4.site707.net
+127.0.0.1 site2898.net # note
+||SITE902.CO.UK^
+||site2718.test^
+||site268.com^
+@@||site1519.example^
+||site506.co.uk^
+site2827.org
+||site741.org^
+site1251.net
+site205.test
+||sub2.site276.example
+0.0.0.0 site1266.example
+0.0.0.0 site2896.test
+||site2305.io^
+||site1899.io^
+||SITE2280.CO.UK
+||site2108.org
+||SITE456.NET^
+sub2.site481.io
+0.0.0.0 site917.co.uk
+localhost
+||sub4.site2387.io^
+||site2414.net^
+SITE378.IO
+||site2858.io^
+sub2.site1754.net
+||SITE2251.CO.UK
+@@||site210.io^
+||site2423.net
+0.0.0.0 site302.org
+site2032.net
+||sub1.site497.com^
+||site2976.org^
+||site584.com^
+0.0.0.0 site2499.test
+||site1509.net^
+0.0.0.0 site1688.com
+site1308.co.uk
+||sub0.site1061.com^
+||site489.io^
+||site1228.example^
+site1286.org
+||site2067.example
+@@||sub4.site419.io^
+||sub3.site1240.example^
+||site1203.org^
+||SITE619.COM^
+SUB0.SITE595.EXAMPLE
+||site60.io
+||site1471.example
+0.0.0.0 site769.net
+||site1743.org^
+@@||site1553.com^
+127.0.0.1 sub0.site2326.co.uk # note
+||site1392.net
+@@||site1851.co.uk^
+0.0.0.0 site131.example
+||site1174.io
+||SITE512.TEST
+||site437.example^
+127.0.0.1 site1583.net # note
+0.0.0.0
+||site2750.io^
+||sub3.site880.com^
+0.0.0.0 SITE379.IO
+||sub3.site634.co.uk^
+0.0.0.0 SUB4.SITE1859.EXAMPLE
+||site2092.example^
+0.0.0.0 site526.com
+0.0.0.0 site1299.net
+localhost
+0.0.0.0 site841.com
+0.0.0.0 site1156.example
+@@||site1811.org^
+||sub4.site775.net^
+||site609.example^
+bad rule here
+||site2625.org^
+||site2303.test^
+0.0.0.0 SITE1176.COM
+SUB3.SITE2571.COM
+||site477.org^
+||site1150.com^
+0.0.0.0 site1326.io
+127.0.0.1 site2155.com # note
+SITE658.COM
+||site1163.net
+site825.io
+||SUB4.SITE2316.COM^
+||site2253.example^
+||site1117.co.uk^
+0.0.0.0 sub1.site1439.test
+||site818.com
+||site284.net^
+0.0.0.0 site736.test
+0.0.0.0 site144.test
+0.0.0.0 site2563.co.uk
+||sub0.site2020.org^
+||site1622.test
+||site485.org^
+||site2456.net
+127.0.0.1 site2914.com # note
+localhost
+site1321.org
+||site1448.com^
+0.0.0.0 site2074.co.uk
+||site1179.example^
+@@||site1959.example^
+||sub0.site1626.com^
+||site2778.com^
+127.0.0.1 site388.test # note
+||site867.example^
+||SITE2518.TEST
+||site816.net
+0.0.0.0 site1750.org
+0.0.0.0 sub0.site854.example
+||site1930.com
+site772.co.uk
+0.0.0.0 site9.example
+||sub1.site1382.org^
+||site2048.net^
+0.0.0.0 site2355.io
+@@||sub0.site765.example^
+
+||site1922.example
+SITE724.TEST
+||site767.com
+site2714.example
+sub3.site783.org
+0.0.0.0 SITE365.TEST
+bad rule here
+sub2.site2733.io
+@@||site143.io^
+||site1515.com^
+@@||site1810.com^
+
+0.0.0.0 site148.org
+0.0.0.0 site70.example
+||site757.example^
+||sub1.site2121.example^
+||sub2.site148.org
+||site2574.io^
+0.0.0.0 site2934.io
+127.0.0.1 sub2.site2559.example # note
+||SITE1402.CO.UK^
+0.0.0.0 site1480.org
+||site2443.example
+@@||SITE2317.CO.UK^
+site2115.org
+||sub4.site22.com^
+||sub0.site745.example
+||
+||site857.com
+127.0.0.1 SITE586.IO # note
+0.0.0.0 site1346.com
+||sub4.site2959.test
+||site2911.net
+site2553.org
+||site2170.test^
+0.0.0.0 site1144.example
+site2137.example
+||site52.example^
+||site2669.co.uk^
+||site2024.co.uk
+||sub4.site2597.org^
+0.0.0.0 site9.example
+0.0.0.0
+0.0.0.0 sub1.site1870.com
+127.0.0.1 site2820.net # note
+0.0.0.0
+::1 ip6-localhost
+||site1806.test^
+||site1155.co.uk
+0.0.0.0 site1324.example
+||site2321.example^
+site1331.io
+||sub4.site2404.net^
+||site2000.test^
+site2978.co.uk
+||site1869.example^
+localhost
+0.0.0.0 sub0.site2961.com
+! c
+0.0.0.0 site2240.io
+0.0.0.0 site1850.co.uk
+site578.co.uk
+||site31.co.uk^
+||SUB4.SITE1453.IO^
+||sub1.site864.example
+||site204.io^
+site1360.co.uk
+||SUB3.SITE2292.ORG
+0.0.0.0 site1984.com
+||SUB3.SITE2312.CO.UK^
+0.0.0.0 site1804.com
+||site853.test
+||sub3.site1573.net^
+||site616.org^
+||sub1.site1531.example
+||site2139.io^
+||site1616.io^
+0.0.0.0 SUB3.SITE348.COM
+0.0.0.0 site1809.com
+site2037.net
+||site782.test^
+||site900.org^
+||site1646.net
+||sub2.site1728.org^
+||site2069.org
+@@||sub2.site306.example^
+0.0.0.0 sub0.site347.example
+site1932.test
+0.0.0.0 site968.org
+@@||site2810.io^
+@@||SITE702.COM^
+@@||site1562.test^
+||site2474.io
+||site1802.example^
+||site157.co.uk^
+0.0.0.0
+sub3.site2666.io
+||sub1.site1396.io^
+0.0.0.0 site2269.org
+0.0.0.0 SITE2154.COM
+||site2901.io^
+||site2393.co.uk^
+0.0.0.0 site849.test
+||site1504.co.uk^
+||site2042.test^
+0.0.0.0 site413.com
+0.0.0.0 sub4.site126.net
+0.0.0.0 SITE2706.IO
+||SITE404.IO^
+@@||sub3.site2583.net^
+||sub3.site2663.example^
+0.0.0.0 site807.org
+||sub4.site2775.co.uk
+||sub4.site28.io^
+||sub1.site1992.co.uk
+0.0.0.0 site2531.io
+||sub4.site2261.com^
+@@||site2127.co.uk^
+||site78.test
+localhost
+0.0.0.0 site2980.test
+@@||site2953.io^
+0.0.0.0 sub0.site838.example
+||SITE1936.COM^
+||site173.io^
+0.0.0.0 sub2.site1674.com
+||site557.test^
+site2450.io
+@@||site264.io^
+||site1092.example^
+||site1113.test
+||site1925.io^
+||sub1.site612.net^
+||site602.example^
+0.0.0.0 site2323.example
+||site790.io^
+||site257.com
+||sub3.site1116.test^
+0.0.0.0 site2263.example
+||site2009.org^
+127.0.0.1 sub1.site625.co.uk # note
+||site2154.com
+||sub1.site2230.io^
+||SITE709.TEST
+127.0.0.1 sub1.site1244.net # note
+||sub1.site1729.net^
+||site2394.co.uk^
+127.0.0.1 localhost
+0.0.0.0 site1839.co.uk
+site2524.org
+||site1238.test^
+0.0.0.0 site2265.example
+||sub0.site1181.org^
+||site1167.test^
+0.0.0.0 sub3.site398.net
+||site273.example
+127.0.0.1 site1847.com # note
+||site2281.co.uk^
+SITE2315.ORG
+||sub4.site1152.org^
+0.0.0.0 sub3.site2694.net
+||site2211.net^
+||site2783.io^
+0.0.0.0 site2029.net
+0.0.0.0 sub2.site493.com
+localhost
+||site290.com
+||site1784.org^
+0.0.0.0 site2019.com
+site2897.example
+||site1487.co.uk^
+||site460.com^
+||site968.org^
+||site1964.co.uk^
+||site2554.com^
+||site806.net
+||site1049.example^
+127.0.0.1 site167.net # note
+site13.example
+127.0.0.1 localhost
+||sub4.site1791.net^
+site1759.test
+@@||SITE1465.COM^
+@@||site2950.com^
+||sub3.site1981.test^
+SITE1974.EXAMPLE
+||SITE986.IO^
+site1152.org
+||site2014.test
+||site654.org^
+@@||site2385.co.uk^
+SITE844.ORG
+0.0.0.0 site1214.net
+||site2603.io^
+||sub3.site2523.com
+||site423.co.uk
+site325.io
+||site36.co.uk^
+sub3.site135.net
+||site1047.test^
+0.0.0.0 sub2.site1855.example
+site1178.io
+@@||site342.com^
+||site194.co.uk
+||site1624.test^
+||site1.test^
+||sub1.site2838.test
+||sub3.site2627.org^
+||site773.org^
+||site1555.org^
+||site2654.org^
+sub1.site2841.com
+0.0.0.0 SITE1559.COM
+0.0.0.0 sub2.site2772.example
+||site988.co.uk^
+  
+||site681.co.uk^
+||site1691.io^
+||site1407.co.uk^
+||sub1.site93.io
+0.0.0.0 site2390.co.uk
+site2798.io
+||site1340.net^
+||SITE2658.COM^
+127.0.0.1 sub4.site1828.net # note
+127.0.0.1 site2203.net # note
+127.0.0.1 SITE1945.COM # note
+@@||site2512.co.uk^
+||site2522.net^
+127.0.0.1 sub3.site59.com # note
+0.0.0.0 sub1.site2194.example
+0.0.0.0 SITE599.NET
+||sub3.site456.net^
+||sub3.site441.co.uk^
+||site1785.com^
+||site1857.co.uk
+||site1071.io^
+127.0.0.1 localhost
+0.0.0.0 site1247.example
+||site1484.net^
+! c
+||site557.test^
+@@||sub0.site2927.co.uk^
+||site2220.io^
+||site1876.io^
+0.0.0.0 site1895.example
+0.0.0.0 site1835.test
+||site2646.com^
+||site655.example
+site369.test
+@@||site2802.io^
+||site2802.io^
+||site2607.io^
+||sub1.site894.com^
+||site1254.com^
+||site1957.com
+||SITE136.EXAMPLE
+site1557.example
+site1886.test
+0.0.0.0
+0.0.0.0 site734.org
+||sub1.site38.com^
+0.0.0.0 sub4.site2192.co.uk
+||sub2.site112.example^
+@@||site2469.io^
+||sub1.site1861.example
+||sub0.site2856.net^
+127.0.0.1 sub0.site1395.test # note
+||sub3.site71.io^
+0.0.0.0 site1348.com
+||sub1.site2114.co.uk^
+127.0.0.1 site1501.org # note
+@@||site206.com^
+||sub4.site1929.com
+site930.net
+||site1841.org^
+||sub2.site740.test^
+||site784.example^
+0.0.0.0 site1408.org
+bad rule here
+||site2178.example^
+||site2363.com^
+0.0.0.0 sub1.site311.net
+0.0.0.0 sub2.site892.io
+site1335.co.uk
+bad rule here
+site395.io
+||SITE1924.NET^
+@@||site918.org^
+@@||site2831.co.uk^
+! c
+site2624.test
+||site2184.com^
+0.0.0.0 site341.test
+site2688.test
+||sub4.site1595.org^
+||site2065.org^
+||site399.io^
+||SITE1538.TEST^
+||sub4.site1596.org
+||site1858.example^
+0.0.0.0 SITE1795.EXAMPLE
+0.0.0.0 site2555.org
+||site2923.test
+||sub2.site2167.test^
+@@||sub3.site1906.example^
+||site2387.io^
+0.0.0.0 site1552.com
+0.0.0.0 site207.com
+0.0.0.0 sub2.site893.org
+||site507.co.uk
+||site897.test^
+||site2463.org
+0.0.0.0 sub1.site1868.io
+SUB4.SITE906.COM
+||site1134.net^
+0.0.0.0 SITE2599.IO
+||site965.org^
+0.0.0.0 site1836.net
+0.0.0.0 site2671.org
+127.0.0.1 SITE2038.COM # note
+localhost
+bad rule here
+0.0.0.0 sub0.site1698.net
+0.0.0.0 sub4.site2030.io
+||site1920.co.uk^
+127.0.0.1 localhost
+127.0.0.1 site1143.io # note
+||site100.com^
+@@||site1217.test^
+||site630.com^
+||site436.example^
+0.0.0.0 site43.test
+127.0.0.1 localhost
+0.0.0.0 site1260.test
+site1832.test
+||site141.example
+||site2855.com^
+||sub1.site1222.org^
+||site394.co.uk
+||site2159.com
+sub0.site212.co.uk
+||site2725.org^
+||site2178.example^
+@@||site871.example^
+127.0.0.1 site164.net # note
+site638.co.uk
+||site877.io^
+site504.co.uk
+0.0.0.0 site820.co.uk
+site646.io
+0.0.0.0 site2634.co.uk
+||sub0.site2791.org^
+||sub1.site2446.example
+0.0.0.0 site1491.example
+0.0.0.0 site403.org
+||site34.net
+||site133.net^
+||site1710.org^
+||site2816.test
+||site3.org
+||sub1.site1059.example
+||SITE1631.TEST^
+||site1820.example^
+||site146.org^
+||sub3.site251.org^
+@@||site2476.test^
+0.0.0.0 sub2.site151.example
+||site1588.co.uk^
+  
+||site691.test^
+@@||site155.test^
+||SUB4.SITE48.ORG^
+site666.org
+||site1108.test
+localhost
+||site2335.example^
+127.0.0.1 site183.net # note
+||sub1.site946.example^
+@@||site361.com^
+||site2395.test^
+site2477.co.uk
+||site1637.org
+0.0.0.0 sub3.site1216.com
+||site1907.net^
+||sub0.site2373.net^
+site831.net
+||site2056.com^
+||sub3.site1198.com^
+||site2045.example^
+||sub2.site2678.co.uk^
+||site2478.test^
+@@||site89.net^
+||site2127.co.uk
+||sub2.site2586.io^
+||site690.io
+@@||
+||site657.net^
+||site2550.example^
+127.0.0.1 site1349.io # note
+0.0.0.0 site182.test
+@@||sub2.site1279.example^
+||sub0.site397.io
+||site1300.net^
+0.0.0.0 site2798.io
+0.0.0.0 sub1.site722.test
+||sub4.site562.co.uk^
+||SITE2072.EXAMPLE
+@@||site1346.com^
+||site549.org
+sub0.site2943.io
+0.0.0.0 site2235.co.uk
+||site881.com^
+site1048.com
+||SUB2.SITE1927.CO.UK^
+||SITE991.TEST
+sub1.site1406.net
+||site927.net^
+0.0.0.0 site1245.io
+||site334.org^
+||site1776.com^
+||site2282.org^
+0.0.0.0 site420.io
+127.0.0.1 sub0.site1054.test # note
+0.0.0.0 sub1.site468.test
+site229.net
+||site1913.org^
+0.0.0.0 site282.co.uk
+0.0.0.0 site1442.test
+||sub3.site1676.org^
+||sub4.site644.co.uk^
+||site2452.net^
+||site1846.io^
+0.0.0.0 site382.io
+0.0.0.0 sub1.site830.io
+0.0.0.0 sub4.site1173.net
+||sub0.site1924.net
+||sub3.site2468.com^
+0.0.0.0 sub4.site556.test
+||sub2.site1499.org
+||sub4.site700.test^
+0.0.0.0 site685.test
+||site401.net^
+0.0.0.0 site767.com
+127.0.0.1 site426.com # note
+||site588.io
+||site2888.org^
+||sub2.site1078.com
+||site1725.co.uk
+127.0.0.1 sub4.site2957.io # note
+@@||sub2.site1145.org^
+0.0.0.0 site2550.example
+||site893.org^
+||site699.org
+||sub2.site1534.test^
+||site2713.io^
+||sub1.site881.com^
+||sub1.site1561.co.uk^
+  
+||sub2.site1615.test
+0.0.0.0 site1988.net
+127.0.0.1 site2548.co.uk # note
+||site54.example^
+||sub3.site1912.net^
+0.0.0.0 sub0.site949.io
+||site2687.io
+@@||site2841.com^
+0.0.0.0 site645.test
+||sub2.site2381.net^
+||sub2.site29.com^
+||SITE2570.COM^
+  
+site2703.org
+||site2261.com
+0.0.0.0 site1132.io
+||site203.io^
+||site1663.example^
+0.0.0.0 site1523.test
+@@||SITE1107.EXAMPLE^
+||sub3.site747.co.uk
+||site1461.org
+||site585.test^
+0.0.0.0 sub0.site2712.com
+site1456.io
+||sub0.site2680.example^
+127.0.0.1 sub2.site2938.net # note
+||sub0.site2939.org^
+0.0.0.0 site912.co.uk
+site2023.example
+0.0.0.0 site2498.test
+0.0.0.0 sub3.site1908.com
+||site2668.co.uk
+||site890.test^
+site2756.co.uk
+0.0.0.0 site483.com
+127.0.0.1 site2276.com # note
+||site39.example^
+0.0.0.0 site821.example
+||site418.net
+||sub1.site973.co.uk^
+site1600.test
+||site1366.co.uk
+site241.test
+127.0.0.1 site87.example # note
+# c
+127.0.0.1 site2598.com # note
+0.0.0.0 site1072.test
+||site2271.net
+site731.example
+||site1356.co.uk^
+0.0.0.0 site1668.example
+||sub1.site271.com^
+0.0.0.0 sub0.site443.org
+||site2514.example
+  
+||site1183.test^
+||site2092.example^
+||site236.net^
+site2908.example
+site2255.co.uk
+sub2.site1272.test
+||site1801.com^
+||site1632.com^
+SITE556.TEST
+||sub1.site332.example
+||site2532.example
+127.0.0.1 localhost
+site2817.com
+0.0.0.0 site2839.test
+||site318.example^
+||site495.io^
+||site517.com^
+||site1570.io^
+sub0.site2755.org
+site742.com
+||sub2.site1259.test^
+||site11.example^
+0.0.0.0 site2185.co.uk
+||site1363.org
+site2744.org
+site2490.com
+||site1696.org^
+||sub2.site859.com
+||site2314.org^
+||site754.net
+::1 ip6-localhost
+||sub2.site76.test
+@@||site2738.org^
+||site2407.example^
+site939.co.uk
+0.0.0.0 sub3.site125.example
+||site1416.org^
+0.0.0.0 site1349.io
+0.0.0.0 SITE1906.EXAMPLE
+127.0.0.1 sub3.site1203.org # note
+||SUB4.SITE1126.CO.UK^
+0.0.0.0 site2736.org
+sub1.site1204.io
+||site952.com
+0.0.0.0 site2051.co.uk
+0.0.0.0 SUB2.SITE758.COM
+||site1931.test
+||site2077.example^
+0.0.0.0 site13.example
+||site2006.io
+127.0.0.1 site737.net # note
+site179.io
+||SITE165.NET
+127.0.0.1 site641.test # note
+||SITE480.CO.UK^
+127.0.0.1 site831.net # note
+0.0.0.0 site67.io
+||sub2.site2190.io^
+bad rule here
+||sub0.site798.test^
+||site1807.io^
+||site1337.org^
+||sub3.site2035.io
+||SITE1976.EXAMPLE
+SITE288.TEST
+0.0.0.0 SITE1689.TEST
+site2117.test
+||site384.example^
+||site1106.test^
+0.0.0.0 site2412.co.uk
+||site1591.net
+||sub3.site2257.net^
+@@||site2511.com^
+127.0.0.1 site2584.example # note
+||SUB2.SITE2960.COM
+sub3.site1429.co.uk
+0.0.0.0 site2902.com
+SITE1633.EXAMPLE
+0.0.0.0 sub3.site2097.org
+site1776.com
+||site252.test^
+0.0.0.0 site317.org
+||sub2.site449.net
+||site2698.com^
+0.0.0.0 site1493.co.uk
+0.0.0.0 site602.example
+sub1.site1405.net
+||sub3.site2095.io^
+||site703.net^
+||site185.co.uk
+0.0.0.0 sub1.site139.org
+||site343.com^
+site2487.example
+||site2364.com^
+||site320.io
+0.0.0.0 site1428.org
+||site360.com
+||sub0.site2486.net^
+||site608.com^
+||site928.io^
+site385.org
+site1213.example
+0.0.0.0 sub2.site314.io
+localhost
+127.0.0.1 site2734.co.uk # note
+||site384.example
+||site1455.co.uk
+||site1864.test^
+127.0.0.1 site2572.co.uk # note
+||site2182.io^
+||sub2.site594.io^
+127.0.0.1 site1598.co.uk # note
+||sub1.site1880.co.uk
+||site1319.example^
+||SITE1021.ORG^
+||site2684.io^
+||site1165.co.uk^
+||site250.com
+||sub1.site1230.net
+||site2340.co.uk^
+0.0.0.0 sub2.site1572.net
+::1 ip6-localhost
+||site1844.com^
+sub2.site2577.com
+||site2931.net^
+@@||site1915.com^
+@@||sub4.site263.test^
+127.0.0.1 SITE1636.EXAMPLE # note
+||sub3.site312.org^
+||site2870.net^
+
+||site2110.example^
+||site1605.test^
+0.0.0.0 site1735.com
+0.0.0.0 site1625.com
+||sub0.site1397.com
+||site2762.example^
+::1 ip6-localhost
+0.0.0.0 sub4.site836.test
+||site1889.test^
+0.0.0.0 sub2.site1749.co.uk
+
+sub0.site149.io
+||site2141.co.uk^
+@@||SITE1773.COM^
+||site2149.com^
+0.0.0.0 site1833.io
+0.0.0.0 site700.test
+@@||site2725.org^
+||sub4.site604.example^
+0.0.0.0 sub0.site102.test
+site95.net
+||sub3.site1814.io^
+||sub1.site1845.co.uk^
+sub3.site245.co.uk
+sub1.site2626.example
+||sub1.site2679.io^
+0.0.0.0 site645.test
+@@||site64.io^
+127.0.0.1 site2874.example # note
+! c
+# c
+||site2098.org^
+site774.org
+0.0.0.0 site2956.org
+0.0.0.0 site1172.test
+0.0.0.0 site2547.org
+||site2431.example
+||sub2.site687.co.uk^
+||sub2.site993.co.uk^
+||SUB3.SITE2461.ORG
+127.0.0.1 site1794.com # note
+||sub4.site2000.test^
+sub0.site355.co.uk
+0.0.0.0 site2054.test
+||site1524.co.uk^
+||sub2.site2161.org
+||site453.test^
+||site1702.net^
+||site1522.io^
+127.0.0.1 site2759.example # note
+||site1758.com
+127.0.0.1 site1296.net # note
+||SUB2.SITE1742.EXAMPLE^
+0.0.0.0 sub3.site2842.test
+@@||site331.com^
+0.0.0.0 site19.com
+||sub1.site2594.com
+||sub2.site2367.test
+||site852.co.uk^
+127.0.0.1 site1541.test # note
+site1958.example
+||SITE1692.COM^
+||site1308.co.uk
+0.0.0.0 sub2.site708.example
+0.0.0.0 sub2.site1657.net
+||site1171.net^
+0.0.0.0 sub2.site2025.net
+||site1168.co.uk^
+||site323.com^
+@@||SITE1315.IO^
+||site2133.net
+||site1007.test^
+0.0.0.0 site1417.example
+||sub4.site1256.org^
+0.0.0.0 site1518.co.uk
+0.0.0.0 sub3.site2728.example
+0.0.0.0 site1577.example
+||site1332.net^
+bad rule here
+||site851.com^
+0.0.0.0 site471.example
+||sub1.site1339.com^
+0.0.0.0 SUB4.SITE2371.CO.UK
+sub1.site2204.net
+||site1731.org^
+||site1494.org^
+||SITE442.NET^
+site1354.com
+0.0.0.0 SUB4.SITE1730.ORG
+||site1407.co.uk^
+0.0.0.0 SITE778.IO
+||SUB0.SITE1252.TEST^
+@@||site928.io^
+0.0.0.0 site2517.test
+sub2.site1700.co.uk
+127.0.0.1 SITE41.NET # note
+0.0.0.0 site763.example
+||SUB1.SITE2796.IO^
+sub4.site1550.com
+site1873.org
+||sub3.site2930.io
+@@||sub3.site1541.test^
+||sub1.site3.org^
+||site633.test^
+sub2.site2152.example
+||sub4.site1307.org
+127.0.0.1 site1956.org # note
+||sub2.site516.org^
+0.0.0.0 sub3.site2050.test
+site669.io
+0.0.0.0 site1310.test
+||site776.io^
+||site207.com
+0.0.0.0 site152.io
+127.0.0.1 site552.example # note
+0.0.0.0 sub3.site1180.test
+0.0.0.0 sub2.site1917.com
+||SITE1189.TEST
+0.0.0.0 site803.io
+||site217.io^
+0.0.0.0 sub0.site2457.test
+||SITE2294.ORG^
+||sub0.site6.test^
+site833.org
+||sub3.site113.org^
+127.0.0.1 site578.co.uk # note
+0.0.0.0 site2228.org
+||sub3.site679.net^
+||site2940.example^
+0.0.0.0 site845.net
+||site1243.com^
+||site632.example
+||site951.net^
+||site1158.net^
+||
+||site565.test
+0.0.0.0 SUB0.SITE1940.EXAMPLE
+0.0.0.0 SITE1051.CO.UK
+||site2797.co.uk^
+||site1415.io^
+0.0.0.0 site999.co.uk
+||site2928.com
+||site547.com
+0.0.0.0 site686.com
+||site2884.co.uk^
+||site587.org
+||site1347.io^
+||sub4.site2275.test
+||site1823.test^
+||sub0.site2969.org^
+site2754.io
+site2232.example
+||site1696.org^
+site2688.test
+||site2527.co.uk
+||site280.com^
+@@||
+
+||site508.org
+@@||site2295.test^
+0.0.0.0 sub1.site1717.org
+||site224.co.uk^
+0.0.0.0 site1008.io
+||sub0.site1594.example^
+0.0.0.0 site2121.example
+||site2763.com^
+0.0.0.0 sub2.site1344.io
+||sub1.site2618.example^
+0.0.0.0 site799.co.uk
+localhost
+||site1398.co.uk^
+||site2555.org^
+||sub3.site2329.io^
+||site1978.com
+||SUB2.SITE806.NET^
+||site2435.com^
+site2561.com
+0.0.0.0 site249.org
+||SITE340.ORG^
+@@||
+site422.co.uk
+||sub4.site1900.com
+||SITE549.ORG
+||site1483.com^
+||SUB0.SITE975.ORG^
+||site1619.com^
+127.0.0.1 sub1.site4.com # note
+@@||sub2.site1687.test^
+||site1469.test
+||site2835.test
+site2653.io
+||SITE2668.CO.UK^
+||sub0.site2429.org^
+site579.org
+bad rule here
+||site190.example^
+||site97.example^
+site1101.co.uk
+site501.com
+||site1391.co.uk^
+||SITE1037.TEST^
+sub4.site1109.com
+0.0.0.0 sub1.site414.test
+||site1620.com
+||site2104.example^
+||site2972.co.uk
+0.0.0.0 SITE1130.CO.UK
+||sub2.site1824.io^
+site1891.com
+||site261.io^
+||site1197.net^
+||site1798.org^
+127.0.0.1 SITE2502.COM # note
+sub3.site2633.com
+||sub3.site2236.net^
+0.0.0.0 site2270.example
+@@||sub0.site1327.example^
+||sub3.site1459.example^
+127.0.0.1 site953.co.uk # note
+||site1650.net
+||SITE1525.NET^
+||sub4.site1425.org^
+# c
+||site1196.io^
+||site1350.net^
+||site2965.test^
+SUB4.SITE2519.ORG
+sub0.site2926.org
+||SITE668.EXAMPLE
+||site2937.test^
