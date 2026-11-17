@@ -55,6 +55,9 @@ func (h *Handler) ServeTCP(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+// tcpWriteTimeout bounds each response write; a variable so a test can shorten it.
+var tcpWriteTimeout = 10 * time.Second
+
 func (h *Handler) serveConn(ctx context.Context, conn net.Conn) {
 	peer := peerAddrPort(conn)
 	for {
@@ -70,6 +73,9 @@ func (h *Handler) serveConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		response := h.respond(ctx, Request{Bytes: query, ClientIP: peer.Addr()}, "tcp", peer)
+		// A client that never reads would otherwise block this goroutine, and
+		// so shutdown, forever.
+		_ = conn.SetWriteDeadline(time.Now().Add(tcpWriteTimeout))
 		if err := writeFrame(conn, response); err != nil {
 			h.log.Debug("failed to send response", "event", "dns.send_failed", "transport", "tcp",
 				"client", peer, "error", err)
