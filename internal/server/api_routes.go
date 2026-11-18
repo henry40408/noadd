@@ -74,6 +74,12 @@ func (a *api) registerAPIRoutes(t *routeTable) {
 		delete = http.MethodDelete
 	)
 	a.registerFilterRoutes(t)
+	a.registerStatsRoutes(t)
+	t.handleFunc(get, "/api/openapi.json", a.authed(a.getOpenAPI))
+	t.handleFunc(get, "/api/docs", a.authed(a.getDocs))
+	if a.Events != nil {
+		t.handleFunc(get, "/api/events", a.authed(a.streamEvents))
+	}
 	// Sign-in, setup and health need no auth.
 	t.handleFunc(post, "/api/auth/login", a.login)
 	t.handleFunc(post, "/api/auth/setup", a.setup)

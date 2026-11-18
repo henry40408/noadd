@@ -14,7 +14,9 @@ import (
 	"github.com/henry40408/noadd/internal/cache"
 	"github.com/henry40408/noadd/internal/db"
 	"github.com/henry40408/noadd/internal/dnsserver"
+	"github.com/henry40408/noadd/internal/events"
 	"github.com/henry40408/noadd/internal/filter"
+	"github.com/henry40408/noadd/internal/querylog"
 	"github.com/henry40408/noadd/internal/registry"
 	"github.com/henry40408/noadd/internal/upstream"
 	"github.com/henry40408/noadd/internal/version"
@@ -34,6 +36,8 @@ type apiHarness struct {
 	userID   int64
 	logs     *capturedLogs
 	deps     APIDeps
+	// stopStreams ends open event streams; see APIDeps.StopStreams.
+	stopStreams chan struct{}
 }
 
 type harnessOptions struct {
@@ -74,6 +78,7 @@ func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
 		Version:               "test",
 	}
 	harness.wireFilterSide(ctx, database)
+	harness.wireEventSide(ctx, database)
 	t.Cleanup(harness.settleRebuilds)
 	handler, err := New(Deps{API: &harness.deps, Slog: logs.logger()})
 	if err != nil {
@@ -98,6 +103,22 @@ func (h *apiHarness) wireFilterSide(ctx context.Context, database *db.DB) {
 	h.deps.Forwarder = upstream.New(ctx, upstream.Config{Servers: []string{"0.250.250.254:15353"}})
 	h.deps.Cache = cache.New(cache.Config{CapacityBytes: 1 << 20, StaleWindow: time.Minute})
 	h.deps.Handler = dnsserver.New(dnsserver.Config{Filter: holder, Cache: h.deps.Cache, Forwarder: h.deps.Forwarder})
+}
+
+// wireEventSide gives the API a tick hub and a running query logger, and a
+// stop channel that the test closes (or, by default, the cleanup does).
+func (h *apiHarness) wireEventSide(ctx context.Context, database *db.DB) {
+	h.deps.Events = events.New(8)
+	logger := querylog.New(querylog.Config{Sink: database, FlushThreshold: 1000, FlushInterval: time.Hour, Logger: h.logs.logger()})
+	runCtx, stopLogger := context.WithCancel(ctx)
+	go logger.Run(runCtx)
+	h.t.Cleanup(func() {
+		stopLogger()
+		_ = logger.Close(5 * time.Second)
+	})
+	h.deps.LogEvents = logger
+	h.stopStreams = make(chan struct{})
+	h.deps.StopStreams = h.stopStreams
 }
 
 // eventually polls until condition holds; rebuilds run in the background, so

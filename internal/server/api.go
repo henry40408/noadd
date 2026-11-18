@@ -17,8 +17,10 @@ import (
 	"github.com/henry40408/noadd/internal/cache"
 	"github.com/henry40408/noadd/internal/db"
 	"github.com/henry40408/noadd/internal/dnsserver"
+	"github.com/henry40408/noadd/internal/events"
 	"github.com/henry40408/noadd/internal/filter"
 	"github.com/henry40408/noadd/internal/netx"
+	"github.com/henry40408/noadd/internal/querylog"
 	"github.com/henry40408/noadd/internal/registry"
 	"github.com/henry40408/noadd/internal/upstream"
 )
@@ -62,6 +64,14 @@ type APIDeps struct {
 	Forwarder *upstream.Forwarder
 	Cache     *cache.Cache
 	Handler   *dnsserver.Handler
+	// Events is the tick source behind /api/events; LogEvents feeds its log
+	// events. A nil Events leaves the stream unmounted.
+	Events    *events.Hub
+	LogEvents *querylog.Logger
+	// StopStreams is closed when the HTTP server starts shutting down, which
+	// ends every open event stream; Shutdown would otherwise wait on them.
+	// Wire it with http.Server.RegisterOnShutdown.
+	StopStreams <-chan struct{}
 	// Now is the clock for expiry and reauth stamps; nil means time.Now.
 	Now func() time.Time
 }
