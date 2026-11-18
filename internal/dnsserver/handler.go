@@ -89,6 +89,9 @@ type Handler struct {
 	// truncate is a field so a test can make it panic.
 	truncate func(query, response []byte) []byte
 	permits  chan struct{} // nil means unlimited
+	// datagramSlots bounds the goroutines serving UDP datagrams, running or
+	// waiting for a permit; nil means unlimited.
+	datagramSlots chan struct{}
 
 	// lifetime bounds background refreshes; Close cancels it.
 	lifetime       context.Context
@@ -113,6 +116,7 @@ func New(cfg Config) *Handler {
 	}
 	if cfg.MaxInflight > 0 {
 		h.permits = make(chan struct{}, cfg.MaxInflight)
+		h.datagramSlots = make(chan struct{}, cfg.MaxInflight*datagramBacklogFactor)
 	}
 	h.truncate = dns.TruncateForUDP
 	h.SetBlockConfig(cfg.Block)
@@ -200,6 +204,25 @@ func (h *Handler) Handle(ctx context.Context, request Request) (Response, error)
 	}
 	h.logQuery(request, asked, decided, start, result)
 	return Response{Bytes: decided.bytes, MinTTL: decided.minTTL}, nil
+}
+
+// datagramBacklogFactor lets as many datagrams wait for a permit as may run.
+const datagramBacklogFactor = 2
+
+// reserveDatagramSlot admits one UDP datagram. When the backlog is full it
+// reports false and the caller drops the datagram: UDP clients retry, and a
+// goroutine per datagram would otherwise grow without bound behind a slow
+// upstream.
+func (h *Handler) reserveDatagramSlot() (release func(), ok bool) {
+	if h.datagramSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case h.datagramSlots <- struct{}{}:
+		return func() { <-h.datagramSlots }, true
+	default:
+		return nil, false
+	}
 }
 
 func (h *Handler) acquirePermit(ctx context.Context) (release func(), err error) {

@@ -21,8 +21,8 @@ const maxUDPSize = 4096
 // answer, closes conn and returns nil. A read error is logged and skipped, as
 // the Rust listener does.
 //
-// Concurrency is bounded by the handler's MaxInflight, not here: excess
-// goroutines wait for a permit.
+// Running queries are bounded by the handler's MaxInflight; up to as many more
+// wait for a permit, and datagrams beyond that are dropped.
 func (h *Handler) ServeUDP(ctx context.Context, conn *net.UDPConn) error {
 	// Interrupts the blocked read but leaves writes working for the queries in
 	// flight.
@@ -44,10 +44,16 @@ func (h *Handler) ServeUDP(ctx context.Context, conn *net.UDPConn) error {
 			h.log.Debug("failed to receive datagram", "event", "dns.recv_failed", "transport", "udp", "error", err)
 			continue
 		}
+		release, admitted := h.reserveDatagramSlot()
+		if !admitted {
+			h.log.Debug("dropped datagram; too many queries in flight", "event", "dns.datagram_dropped", "transport", "udp", "client", source)
+			continue
+		}
 		query := append([]byte(nil), buffer[:length]...)
 		inflight.Add(1)
 		go func() {
 			defer inflight.Done()
+			defer release()
 			h.answerDatagram(ctx, conn, source, query)
 		}()
 	}
