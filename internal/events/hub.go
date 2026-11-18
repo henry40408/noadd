@@ -137,7 +137,7 @@ type Source struct {
 	Snapshot func(ctx context.Context, now int64) (any, error)
 }
 
-// Config configures Run.
+// Config configures Run. Now defaults to the wall clock in milliseconds.
 type Config struct {
 	Interval time.Duration
 	Source   Source
@@ -150,6 +150,9 @@ type Config struct {
 func (h *Hub) Run(ctx context.Context, cfg Config) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Now == nil {
+		cfg.Now = func() int64 { return time.Now().UnixMilli() }
 	}
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()

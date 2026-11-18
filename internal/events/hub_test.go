@@ -236,3 +236,24 @@ func TestTrafficProbeIsSkippedOnceLatched(t *testing.T) {
 		t.Fatal("a latched hub must not pay for the question")
 	}
 }
+
+// The entrypoint passes no clock; Run must supply the wall clock itself.
+func TestRunWithoutClockStampsTicksWithWallClock(t *testing.T) {
+	hub := New(8)
+	subscription := hub.Subscribe(false)
+	defer subscription.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		hub.Run(ctx, Config{Interval: fast, Source: plainSource()})
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	before := time.Now().UnixMilli()
+	if tick := nextTick(t, subscription); tick.At < before-1000 {
+		t.Fatalf("tick at %d is not the wall clock around %d", tick.At, before)
+	}
+}
