@@ -208,3 +208,25 @@ func RepoRoot() string {
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(file), "..", "..", "..")
 }
+
+// recountLogs recomputes the maintained query_logs row count that a seed
+// bypasses. An upsert: the row exists only once noadd has migrated.
+const recountLogs = "INSERT INTO settings (key, value) SELECT 'query_log_count', COUNT(*) FROM query_logs WHERE true " +
+	"ON CONFLICT(key) DO UPDATE SET value = excluded.value;\n"
+
+// Seed runs SQL against the stopped database with the sqlite3 CLI: history
+// that real DNS traffic would be slow to produce. The instance must be
+// stopped, because fixtures rewrite settings noadd reads at boot.
+func (s *Server) Seed(sql string) error {
+	if s.cmd != nil {
+		return fmt.Errorf("seed the database while the server is stopped: %s is still running", s.dbPath)
+	}
+	// Output is discarded: PRAGMA results would land in the test log.
+	seeding := exec.Command("sqlite3", s.dbPath)
+	seeding.Stdin = strings.NewReader(sql + "\n" + recountLogs)
+	seeding.Stderr = os.Stderr
+	if err := seeding.Run(); err != nil {
+		return fmt.Errorf("running sqlite3 (install it, or the seeded specs cannot run): %w", err)
+	}
+	return nil
+}
