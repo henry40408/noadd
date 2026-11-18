@@ -1,10 +1,10 @@
 # Without this file `COPY . .` ships a multi-gigabyte context.
 
-# Shadowed by the builder's target cache mount anyway.
-/target
-
-# e2e is a separate cargo workspace; none of it reaches the binary.
+# e2e is a separate module; none of it reaches the binary.
 /e2e
+
+# Local build output.
+/bin
 
 # Local runtime state — the SQLite DB carries password hashes and sessions.
 **/*.sqlite3

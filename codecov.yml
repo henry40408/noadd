@@ -1,6 +1,6 @@
-# main.rs only wires a live process together and is not unit-testable.
+# main.go only wires a live process together; the binary tests cover it.
 ignore:
-  - "src/main.rs"
+  - "cmd/noadd/main.go"
 
 coverage:
   status:

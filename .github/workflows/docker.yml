@@ -28,7 +28,7 @@ jobs:
       - name: Resolve build version
         id: version
         run: echo "value=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
-      # No qemu: zig cross-compiles both targets on the native builder.
+      # No qemu: the builder runs natively and Go cross-compiles both targets.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
