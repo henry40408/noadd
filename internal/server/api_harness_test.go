@@ -27,7 +27,7 @@ const testSetupToken = "ABCDE-FGHJK"
 // apiHarness is the admin router over a real database, with an operator
 // "admin" (password "admin") and one signed-in session.
 type apiHarness struct {
-	t        *testing.T
+	t        testing.TB
 	handler  http.Handler
 	db       *db.DB
 	sessions *auth.Manager
@@ -50,7 +50,7 @@ type harnessOptions struct {
 	registryURL string
 }
 
-func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
+func newAPIHarness(t testing.TB, options harnessOptions) *apiHarness {
 	t.Helper()
 	ctx := context.Background()
 	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -246,14 +246,14 @@ func (h *apiHarness) authed(method, path, body string) *httptest.ResponseRecorde
 	return h.do(request{method: method, path: path, body: body, cookie: h.token})
 }
 
-func decodeBody(t *testing.T, recorder *httptest.ResponseRecorder, into any) {
+func decodeBody(t testing.TB, recorder *httptest.ResponseRecorder, into any) {
 	t.Helper()
 	if err := json.Unmarshal(recorder.Body.Bytes(), into); err != nil {
 		t.Fatalf("body %q: %v", recorder.Body.String(), err)
 	}
 }
 
-func wantStatus(t *testing.T, recorder *httptest.ResponseRecorder, want int) {
+func wantStatus(t testing.TB, recorder *httptest.ResponseRecorder, want int) {
 	t.Helper()
 	if recorder.Code != want {
 		t.Fatalf("status = %d, want %d (body %q)", recorder.Code, want, recorder.Body.String())

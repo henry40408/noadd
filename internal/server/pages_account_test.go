@@ -17,43 +17,51 @@ func formBody(pairs ...string) string {
 	return values.Encode()
 }
 
-func TestParseExpiryDate(t *testing.T) {
-	cases := []struct {
-		raw     string
-		want    int64
-		isNil   bool
-		wantErr bool
-	}{
-		{raw: "", isNil: true},
-		{raw: "  ", isNil: true},
-		{raw: "1970-01-01", want: 86_399},
-		{raw: " 2024-02-29 ", want: 1709251199},
-		{raw: "2023-02-29", wantErr: true},
-		{raw: "2024-13-01", wantErr: true},
-		{raw: "2024-00-10", wantErr: true},
-		{raw: "2024-01-32", wantErr: true},
-		{raw: "2024-01", wantErr: true},
-		{raw: "2024-01-01-01", wantErr: true},
-		{raw: "10000-01-01", wantErr: true},
-		{raw: "tomorrow", wantErr: true},
-		{raw: "2024--01", wantErr: true},
+func wantExpiry(t *testing.T, raw string, want int64) {
+	t.Helper()
+	got, valid := parseExpiryDate(raw)
+	if !valid || got == nil || *got != want {
+		t.Errorf("parseExpiryDate(%q) = %v, %v; want %d", raw, got, valid, want)
 	}
-	for _, c := range cases {
-		got, valid := parseExpiryDate(c.raw)
-		if c.wantErr {
-			if valid {
-				t.Errorf("%q: accepted", c.raw)
-			}
-			continue
-		}
-		if !valid {
-			t.Errorf("%q: rejected", c.raw)
-			continue
-		}
-		if c.isNil != (got == nil) || (got != nil && *got != c.want) {
-			t.Errorf("%q: got %v, want %d (nil %v)", c.raw, got, c.want, c.isNil)
+}
+
+func wantExpiryRejected(t *testing.T, bad ...string) {
+	t.Helper()
+	for _, raw := range bad {
+		if _, valid := parseExpiryDate(raw); valid {
+			t.Errorf("%q was accepted", raw)
 		}
 	}
+}
+
+func TestAnExpiryDateLastsUntilThatDayIsOver(t *testing.T) {
+	// Blank means a key that never expires, not one expiring at the epoch.
+	for _, blank := range []string{"", "   "} {
+		if got, valid := parseExpiryDate(blank); !valid || got != nil {
+			t.Errorf("%q = %v, %v", blank, got, valid)
+		}
+	}
+	wantExpiry(t, "1970-01-01", 86_399)
+	wantExpiry(t, "1970-01-02", 86_400+86_399)
+	// Before the epoch counts backwards.
+	wantExpiry(t, "1969-12-31", -1)
+	// 2000 is a leap year (the 400 rule), 2100 is not (the 100 rule).
+	wantExpiry(t, "2000-03-01", 11_017*86_400+86_399)
+	wantExpiry(t, "2100-03-01", 47_541*86_400+86_399)
+	wantExpiry(t, " 2024-02-29 ", 1709251199)
+	wantExpiryRejected(t, "not-a-date", "2027-13-01", "2027-01-32", "2027-01", "2027-01-01-01", "2024--01")
+}
+
+func TestAnExpiryDateMustExistOnTheCalendar(t *testing.T) {
+	// Days that overflow their month used to roll into the next one.
+	wantExpiryRejected(t, "2027-02-29", "2027-02-30", "2027-02-31", "2027-04-31", "2100-02-29", "2027-00-10", "2027-01-00")
+	// Leap days are real in leap years (the 4 and 400 rules).
+	wantExpiry(t, "2028-02-29", 21_243*86_400+86_399)
+	wantExpiry(t, "2000-02-29", 11_016*86_400+86_399)
+}
+
+func TestAnExpiryYearOutOfRangeIsRejectedNotWrapped(t *testing.T) {
+	wantExpiryRejected(t, "9223372036854775807-12-31", "10000-01-01", "2147483648-01-01", "2147483647-01-01")
 }
 
 func TestSettingsPageRendersDefaultsAndStoredValues(t *testing.T) {

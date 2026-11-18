@@ -17,7 +17,7 @@ const eventWait = 5 * time.Second
 
 // sseClient reads one /api/events connection.
 type sseClient struct {
-	t      *testing.T
+	t      testing.TB
 	cancel context.CancelFunc
 	frames chan string
 	closed chan struct{}
