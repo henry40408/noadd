@@ -129,6 +129,61 @@ jobs:
           # Dependabot PRs cannot read repository secrets.
           fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}
 
+  mutation:
+    name: mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # `--diff` needs the base branch's history, not a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Gremlins derives each mutant's timeout from how long its coverage run
+      # took. A cached test result makes that near zero, so nearly every mutant
+      # "times out", which the efficacy score ignores: the job would pass
+      # without testing anything.
+      - run: go clean -testcache
+      # Never pass `--test-cpu`: gremlins v0.6.0 builds a single `-cpu 2`
+      # argument from it, so every mutant's `go test` fails and counts as
+      # killed. GOMAXPROCS limits the CPUs instead.
+      - name: Mutate the whole module (push)
+        if: github.event_name != 'pull_request'
+        env:
+          GOMAXPROCS: "2"
+        run: |
+          set -o pipefail
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --workers 2 . 2>&1 | tee "$RUNNER_TEMP/mutation.log"
+      - name: Mutate the changed lines (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GOMAXPROCS: "2"
+        run: |
+          # Stream the output so a killed runner still leaves a log. Two
+          # workers with two CPUs each keep a whole-module diff within the
+          # runner's memory.
+          status=0
+          set -o pipefail
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --workers 2 \
+            --diff "origin/$BASE_REF" . 2>&1 | tee "$RUNNER_TEMP/mutation.log" || status=$?
+          set +o pipefail
+          # A diff with no mutable Go line (docs, CI only) yields zero mutants,
+          # which gremlins scores as 0% and so fails the threshold. That is not
+          # a low score, so treat it as a pass.
+          if [ "$status" -ne 0 ] \
+            && grep -q '^Killed: 0, Lived: 0, Not covered: 0$' "$RUNNER_TEMP/mutation.log" \
+            && grep -q '^Timed out: 0, ' "$RUNNER_TEMP/mutation.log"; then
+            echo "No mutants in the changed lines; nothing to test."
+            exit 0
+          fi
+          exit "$status"
+
   e2e:
     name: e2e
     runs-on: ubuntu-latest
