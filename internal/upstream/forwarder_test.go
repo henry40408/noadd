@@ -452,3 +452,54 @@ func TestFailureReasonNamesTheRealCause(t *testing.T) {
 		}
 	}
 }
+
+func classifyReply(rcode int, qtype uint16, mutate func(*dns.Msg)) verdict {
+	reply := new(dns.Msg)
+	reply.SetQuestion("example.com.", qtype)
+	reply.Response = true
+	reply.Rcode = rcode
+	mutate(reply)
+	return classify(reply)
+}
+
+func TestClassifyAnswerSectionDecidesPositiveOrNegative(t *testing.T) {
+	record := func(name string, rrtype uint16) dns.RR {
+		return &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: rrtype, Class: dns.ClassINET}}
+	}
+	cases := []struct {
+		name  string
+		qtype uint16
+		build func(*dns.Msg)
+		want  verdict
+	}{
+		{"A with answer", dns.TypeA, func(m *dns.Msg) { m.Answer = []dns.RR{record("other.", dns.TypeA)} }, verdictPositive},
+		{"A with only authority", dns.TypeA, func(m *dns.Msg) { m.Ns = []dns.RR{record("example.com.", dns.TypeSOA)} }, verdictNegative},
+		{"A with matching record in extra", dns.TypeA, func(m *dns.Msg) { m.Extra = []dns.RR{record("EXAMPLE.com", dns.TypeA)} }, verdictPositive},
+		{"ANY with record about the name", dns.TypeANY, func(m *dns.Msg) { m.Answer = []dns.RR{record("example.com", dns.TypeTXT)} }, verdictPositive},
+		{"ANY with record about another name", dns.TypeANY, func(m *dns.Msg) { m.Answer = []dns.RR{record("other.com.", dns.TypeTXT)} }, verdictNegative},
+		{"SOA covering the name", dns.TypeSOA, func(m *dns.Msg) { m.Ns = []dns.RR{record("com.", dns.TypeSOA)} }, verdictPositive},
+		{"SOA of an unrelated zone", dns.TypeSOA, func(m *dns.Msg) { m.Ns = []dns.RR{record("org.", dns.TypeSOA)} }, verdictNegative},
+	}
+	for _, tc := range cases {
+		if got := classifyReply(dns.RcodeSuccess, tc.qtype, tc.build); got != tc.want {
+			t.Errorf("%s: verdict %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyWithoutQuestionIsNegative(t *testing.T) {
+	if got := classify(&dns.Msg{}); got != verdictNegative {
+		t.Fatalf("verdict = %d, want negative", got)
+	}
+}
+
+func TestClassifyFailureRcodesAndTruncation(t *testing.T) {
+	for _, rcode := range []int{dns.RcodeServerFailure, dns.RcodeRefused, 16} {
+		if got := classifyReply(rcode, dns.TypeA, func(*dns.Msg) {}); got != verdictFailure {
+			t.Errorf("rcode %d: verdict %d, want failure", rcode, got)
+		}
+	}
+	if got := classifyReply(dns.RcodeSuccess, dns.TypeA, func(m *dns.Msg) { m.Truncated = true }); got != verdictFailure {
+		t.Errorf("truncated: verdict %d, want failure", got)
+	}
+}
