@@ -44,6 +44,12 @@ func (e *Element) ClickJS() error {
 	return err
 }
 
+// ScrollIntoView scrolls the element to the middle of the viewport at once.
+func (e *Element) ScrollIntoView() error {
+	_, err := callOn[chromedp.Void](e, "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }")
+	return err
+}
+
 // Blur removes the keyboard focus from the element.
 func (e *Element) Blur() error {
 	_, err := callOn[chromedp.Void](e, "function() { this.blur(); }")

@@ -224,9 +224,15 @@ func (l Locator) SelectValue(value string) error {
 	return l.act("selecting in", func(e *Element) error { return selectValue(e, l.String(), value) })
 }
 
-// ViewportRect is the first match's box in viewport coordinates.
+// ViewportRect is the first match's box in viewport coordinates, after
+// scrolling it into view: a point off screen cannot be tapped.
 func (l Locator) ViewportRect() (Rect, error) {
-	return read(l, (*Element).Box)
+	return read(l, func(e *Element) (Rect, error) {
+		if err := e.ScrollIntoView(); err != nil {
+			return Rect{}, err
+		}
+		return e.Box()
+	})
 }
 
 // ViewportCentre is the centre of the first match in viewport coordinates.

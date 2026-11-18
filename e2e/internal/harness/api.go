@@ -107,8 +107,21 @@ func (a *API) postJSON(path string, body any) (*http.Response, error) {
 	return a.client.Do(request)
 }
 
-// GetJSON fetches a JSON endpoint as the operator the session belongs to.
+// GetJSON fetches an endpoint that answers a JSON object.
 func (a *API) GetJSON(session, path string) (map[string]any, error) {
+	decoded, err := a.GetJSONValue(session, path)
+	if err != nil {
+		return nil, err
+	}
+	object, ok := decoded.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s did not answer a JSON object", path)
+	}
+	return object, nil
+}
+
+// GetJSONValue fetches an endpoint whose JSON may be an array or an object.
+func (a *API) GetJSONValue(session, path string) (any, error) {
 	request, err := a.authedGet(context.Background(), session, path)
 	if err != nil {
 		return nil, err
@@ -121,7 +134,7 @@ func (a *API) GetJSON(session, path string) (map[string]any, error) {
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s answered %d", path, response.StatusCode)
 	}
-	var decoded map[string]any
+	var decoded any
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decoding %s: %w", path, err)
 	}

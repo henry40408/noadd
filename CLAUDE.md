@@ -48,7 +48,7 @@ E2E_FEATURES=features/dashboard.feature go test -mod=vendor -count=1 .   # comma
 - Run e2e one at a time, niced, and check afterwards that no `noadd` or Chrome process is left.
 - Every `Expect*` helper in `e2e/internal/harness` polls for 30 s and reports the last value seen. Text is `textContent`, not rendered text: the UI uppercases badges in CSS, so assert against the markup.
 - Run `gofmt`, `go vet` and staticcheck inside `e2e/` as well.
-- The former Rust-only regression specs (no-JS pages, settings autosave, live tail, chart touch, account actions) and the screenshot generator are not ported yet; see git history before the cutover commit.
+- The former Rust-only regression specs (no-JS pages, settings autosave, live tail, chart touch, statistics charts, account actions) are ported to Go in `e2e/spec_*_test.go` and run with the rest of `go test` in `e2e/`. The screenshot-capturing binary is not ported (only its seed, `e2e/internal/harness/seed_screenshots.go`); see git history before the cutover commit.
 
 ## Build-time behavior
 
