@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -72,15 +73,38 @@ func (b *syncBuffer) String() string {
 	return b.data.String()
 }
 
-// freePort returns a port nothing listens on, for both TCP and UDP.
+// nextPort hands out ports below the OS's ephemeral range, which outgoing
+// connections draw from. An ephemeral port taken from the OS and released can
+// be claimed by a parallel test's connection before noadd binds it.
+var nextPort atomic.Int32
+
+func init() { nextPort.Store(20000 + int32(os.Getpid()%10000)) }
+
+// freePort returns a port nothing listens on, for both TCP and UDP. Each call
+// yields a different port, so one instance never gets the same port twice.
 func freePort(t *testing.T) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for range 1000 {
+		port := int(nextPort.Add(1))
+		if port > 30000 {
+			nextPort.Store(20000)
+			continue
+		}
+		address := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			continue
+		}
+		packet, err := net.ListenPacket("udp", address)
+		_ = listener.Close()
+		if err != nil {
+			continue
+		}
+		_ = packet.Close()
+		return port
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
+	t.Fatal("no free port in 20000-30000")
+	return 0
 }
 
 // instance is one running noadd.
