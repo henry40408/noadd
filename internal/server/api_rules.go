@@ -25,8 +25,45 @@ type addRuleResponse struct {
 	ID int64 `json:"id"`
 }
 
-// addRule handles POST /api/rules. The parse decides allow or block and is the
-// validation; an existing rule is a no-op 200 with id 0.
+// ruleFailure is why a custom rule could not be added.
+type ruleFailure int
+
+const (
+	// ruleUnparseable: the text is not a rule in any supported syntax.
+	ruleUnparseable ruleFailure = iota + 1
+	ruleInternal
+)
+
+// createCustomRule adds a custom rule and returns its id, or 0 when the exact
+// text already exists. The parse decides allow or block and is the validation,
+// shared by POST /api/rules and the pages' forms.
+func (a *api) createCustomRule(r *http.Request, raw string) (id int64, failure ruleFailure) {
+	rule := strings.TrimSpace(raw)
+	parsed, ok := filter.ParseLine(rule)
+	if !ok {
+		return 0, ruleUnparseable
+	}
+	ruleType := "block"
+	if parsed.Action == filter.ActionAllow {
+		ruleType = "allow"
+	}
+	ctx := writeCtx(r)
+	exists, err := a.DB.HasCustomRule(ctx, rule)
+	if err != nil {
+		return 0, ruleInternal
+	}
+	if exists {
+		return 0, 0
+	}
+	id, err = a.DB.AddCustomRule(ctx, rule, ruleType)
+	if err != nil {
+		return 0, ruleInternal
+	}
+	a.triggerRebuild(r)
+	return id, 0
+}
+
+// addRule handles POST /api/rules: an existing rule is a no-op 200 with id 0.
 func (a *api) addRule(w http.ResponseWriter, r *http.Request, _ authedUser) {
 	var body addRuleRequest
 	if !decodeJSON(w, r, &body) {
@@ -36,33 +73,17 @@ func (a *api) addRule(w http.ResponseWriter, r *http.Request, _ authedUser) {
 		missingField(w, "rule")
 		return
 	}
-	rule := strings.TrimSpace(*body.Rule)
-	parsed, ok := filter.ParseLine(rule)
-	if !ok {
+	id, failure := a.createCustomRule(r, *body.Rule)
+	switch {
+	case failure == ruleUnparseable:
 		writeStatus(w, http.StatusBadRequest)
-		return
-	}
-	ruleType := "block"
-	if parsed.Action == filter.ActionAllow {
-		ruleType = "allow"
-	}
-	ctx := writeCtx(r)
-	exists, err := a.DB.HasCustomRule(ctx, rule)
-	if err != nil {
+	case failure != 0:
 		writeStatus(w, http.StatusInternalServerError)
-		return
-	}
-	if exists {
+	case id == 0:
 		writeJSON(w, http.StatusOK, addRuleResponse{ID: 0})
-		return
+	default:
+		writeJSON(w, http.StatusCreated, addRuleResponse{ID: id})
 	}
-	id, err := a.DB.AddCustomRule(ctx, rule, ruleType)
-	if err != nil {
-		writeStatus(w, http.StatusInternalServerError)
-		return
-	}
-	a.triggerRebuild(r)
-	writeJSON(w, http.StatusCreated, addRuleResponse{ID: id})
 }
 
 // deleteRule handles DELETE /api/rules/{id}.

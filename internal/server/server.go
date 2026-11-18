@@ -71,7 +71,9 @@ func newAdminHandler(deps Deps, logger *slog.Logger) (http.Handler, error) {
 	mux := http.NewServeMux()
 	if deps.API != nil {
 		routes := newRouteTable()
-		newAPI(*deps.API, logger).registerAPIRoutes(routes)
+		admin := newAPI(*deps.API, logger)
+		admin.registerAPIRoutes(routes)
+		admin.registerPageRoutes(routes)
 		routes.mount(mux)
 	}
 	mux.Handle("/"+appleTouchIconFile, appleTouchIconHandler(icon))
