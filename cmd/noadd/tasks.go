@@ -136,8 +136,11 @@ func probeUpstreams(ctx context.Context, interval time.Duration, forwarder *upst
 func dashboardSource(database *db.DB) events.Source {
 	return events.Source{
 		HasAnyQueryLogs: database.HasAnyQueryLogs,
-		Snapshot: func(ctx context.Context, now int64) (any, error) {
-			snapshot, err := stats.ComputeSnapshot(ctx, database, now)
+		// The hub's clock is in milliseconds; ComputeSnapshot takes seconds. A
+		// millisecond value reads as a date far in the future, so every window
+		// is empty and the dashboard blanks out on the first tick.
+		Snapshot: func(ctx context.Context, nowMs int64) (any, error) {
+			snapshot, err := stats.ComputeSnapshot(ctx, database, nowMs/1000)
 			if err != nil {
 				return nil, err
 			}

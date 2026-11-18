@@ -108,3 +108,26 @@ func TestTickerRunsWorkAndStopsWithTheContext(t *testing.T) {
 		t.Fatal("ticker ignored cancel")
 	}
 }
+
+// The hub hands the source a millisecond clock. Reading it as seconds empties
+// every window, which blanked the dashboard on the first tick.
+func TestDashboardSourceReadsTheHubClockAsMilliseconds(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+	nowMs := time.Now().UnixMilli()
+	err := database.InsertQueryLogs(ctx, []db.QueryLogEntry{{Timestamp: nowMs - 1000, Domain: "example.com", QueryType: "A", ClientIP: "10.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := dashboardSource(database).Snapshot(ctx, nowMs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := got.(*stats.DashboardSnapshot)
+	if !ok {
+		t.Fatalf("snapshot type %T", got)
+	}
+	if snapshot.Summary.TotalToday != 1 || len(snapshot.TopDomains) != 1 {
+		t.Fatalf("total_today=%d top_domains=%d, want 1 and 1", snapshot.Summary.TotalToday, len(snapshot.TopDomains))
+	}
+}
