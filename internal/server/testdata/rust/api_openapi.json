@@ -1,0 +1,1125 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "18620"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "openapi": "3.1.0",
+  "info": {
+   "title": "noadd API",
+   "description": "Programmatic access to noadd.",
+   "license": {
+    "name": "MIT",
+    "identifier": "MIT"
+   },
+   "version": "0.1.0"
+  },
+  "paths": {
+   "/api/api-keys": {
+    "get": {
+     "tags": [
+      "api-keys"
+     ],
+     "summary": "List the caller's own API keys.",
+     "description": "Requires an operator (session or API key). Metadata only, never the secret.",
+     "operationId": "list_api_keys",
+     "responses": {
+      "200": {
+       "description": "API keys for the caller",
+       "content": {
+        "application/json": {
+         "schema": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/ApiKeyRow"
+          }
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "post": {
+     "tags": [
+      "api-keys"
+     ],
+     "summary": "Create a new API key for the calling operator.",
+     "description": "Requires a session with a recent password proof (`POST /api/auth/reauth`, or sign-in);\nan API key cannot mint another. The key inherits the caller's permissions. The secret\n`token` is returned only here; afterwards only `prefix` identifies the key.",
+     "operationId": "create_api_key",
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CreateApiKeyRequest"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "201": {
+       "description": "API key created; token shown once",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/CreateApiKeyResponse"
+         }
+        }
+       }
+      },
+      "400": {
+       "description": "Invalid name"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/api-keys/{id}": {
+    "delete": {
+     "tags": [
+      "api-keys"
+     ],
+     "summary": "Delete one of the caller's own API keys.",
+     "description": "Requires an operator (session or API key). Another operator's key answers 404, not\nrevealing it exists.",
+     "operationId": "delete_api_key",
+     "parameters": [
+      {
+       "name": "id",
+       "in": "path",
+       "description": "API key id",
+       "required": true,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "Deleted"
+      },
+      "404": {
+       "description": "Not found or not owned by caller"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/filter/check": {
+    "post": {
+     "tags": [
+      "filter"
+     ],
+     "summary": "Check what the filter engine would decide for a domain, without querying DNS.",
+     "description": "Requires an operator (session or API key). Evaluates the live engine and answers\n`{\"action\": \"blocked\", \"rule\": ..., \"list\": ...}` or `{\"action\": \"allowed\", \"rule\": ...}`\n(`rule` omitted when no allow rule matched).",
+     "operationId": "filter_check",
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/FilterCheckRequest"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "200": {
+       "description": "Filter decision for the domain",
+       "content": {
+        "application/json": {
+         "schema": {}
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/health": {
+    "get": {
+     "tags": [
+      "system"
+     ],
+     "summary": "Report basic service health.",
+     "description": "Unauthenticated, so monitoring and setup can call it before any operator exists.\nReports whether initial setup is still pending.",
+     "operationId": "health",
+     "responses": {
+      "200": {
+       "description": "Service health",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/HealthResponse"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "/api/lists": {
+    "get": {
+     "tags": [
+      "lists"
+     ],
+     "summary": "List all configured filter lists.",
+     "description": "Requires an operator (session or API key). Includes built-in and user-added lists.",
+     "operationId": "get_lists",
+     "responses": {
+      "200": {
+       "description": "All filter lists",
+       "content": {
+        "application/json": {
+         "schema": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/FilterListResponse"
+          }
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "post": {
+     "tags": [
+      "lists"
+     ],
+     "summary": "Add a new filter list by URL.",
+     "description": "Requires an operator (session or API key). The list is created enabled but not fetched;\ncall `POST /api/lists/update` (or wait for the periodic refresh) to download it and\nrebuild the filter engine.",
+     "operationId": "add_list",
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AddListRequest"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "201": {
+       "description": "List created",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/AddListResponse"
+         }
+        }
+       }
+      },
+      "400": {
+       "description": "Missing name, or a URL noadd cannot fetch"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/lists/{id}": {
+    "put": {
+     "tags": [
+      "lists"
+     ],
+     "summary": "Update a filter list's enabled state, name, and/or URL.",
+     "description": "Requires an operator (session or API key). `enabled` applies on its own; name and URL\nonly when both are given. Triggers an async filter-engine rebuild.",
+     "operationId": "update_list",
+     "parameters": [
+      {
+       "name": "id",
+       "in": "path",
+       "description": "List id",
+       "required": true,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      }
+     ],
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/UpdateListRequest"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "200": {
+       "description": "List updated"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "delete": {
+     "tags": [
+      "lists"
+     ],
+     "summary": "Delete a filter list.",
+     "description": "Requires an operator (session or API key). Triggers an async filter-engine rebuild.",
+     "operationId": "delete_list",
+     "parameters": [
+      {
+       "name": "id",
+       "in": "path",
+       "description": "List id",
+       "required": true,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "List deleted"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/logs": {
+    "get": {
+     "tags": [
+      "logs"
+     ],
+     "summary": "List recent DNS query logs, most recent first.",
+     "description": "Supports pagination and filters; returns `logs` plus the `total` matching the filters.",
+     "operationId": "get_logs",
+     "parameters": [
+      {
+       "name": "limit",
+       "in": "query",
+       "description": "Maximum number of log entries to return (default 100).",
+       "required": false,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      },
+      {
+       "name": "offset",
+       "in": "query",
+       "description": "Number of entries to skip from the most recent, for pagination (default 0).",
+       "required": false,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      },
+      {
+       "name": "search",
+       "in": "query",
+       "description": "Case-insensitive substring to match against the queried domain.",
+       "required": false,
+       "schema": {
+        "type": "string"
+       }
+      },
+      {
+       "name": "blocked",
+       "in": "query",
+       "description": "Filter by outcome: `true` returns only blocked queries, `false` only allowed.",
+       "required": false,
+       "schema": {
+        "type": "boolean"
+       }
+      },
+      {
+       "name": "token",
+       "in": "query",
+       "description": "Restrict to queries served through a specific `DoH` URL token.",
+       "required": false,
+       "schema": {
+        "type": "string"
+       }
+      },
+      {
+       "name": "query_type",
+       "in": "query",
+       "description": "Filter by DNS record type (e.g. `A`, `AAAA`, `HTTPS`).",
+       "required": false,
+       "schema": {
+        "type": "string"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "Matching query logs and total count",
+       "content": {
+        "application/json": {
+         "schema": {}
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "delete": {
+     "tags": [
+      "logs"
+     ],
+     "summary": "Delete all DNS query logs.",
+     "description": "Permanently clears the entire query-log history.",
+     "operationId": "delete_logs",
+     "responses": {
+      "200": {
+       "description": "All query logs were deleted"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/rules": {
+    "get": {
+     "tags": [
+      "rules"
+     ],
+     "summary": "List all custom allow/block rules.",
+     "description": "Requires an operator (session or API key). Returned in the syntax they were added in.",
+     "operationId": "get_rules",
+     "responses": {
+      "200": {
+       "description": "All custom rules",
+       "content": {
+        "application/json": {
+         "schema": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/CustomRuleRow"
+          }
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "post": {
+     "tags": [
+      "rules"
+     ],
+     "summary": "Add a custom allow/block rule.",
+     "description": "Requires an operator (session or API key). A new rule returns 201 with its id; an\nexisting one is a no-op 200 with `id: 0`; unparseable text is a 400. Triggers an async\nfilter-engine rebuild.",
+     "operationId": "add_rule",
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AddRuleRequest"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "200": {
+       "description": "Rule already existed",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/AddRuleResponse"
+         }
+        }
+       }
+      },
+      "201": {
+       "description": "Rule created",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/AddRuleResponse"
+         }
+        }
+       }
+      },
+      "400": {
+       "description": "Unparseable rule"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/rules/{id}": {
+    "delete": {
+     "tags": [
+      "rules"
+     ],
+     "summary": "Delete a custom allow/block rule.",
+     "description": "Requires an operator (session or API key). Triggers an async filter-engine rebuild.",
+     "operationId": "delete_rule",
+     "parameters": [
+      {
+       "name": "id",
+       "in": "path",
+       "description": "Rule id",
+       "required": true,
+       "schema": {
+        "type": "integer",
+        "format": "int64"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "Deleted"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/server-info": {
+    "get": {
+     "tags": [
+      "system"
+     ],
+     "summary": "Get the server's bound addresses and TLS status.",
+     "description": "Requires an operator (session or API key).",
+     "operationId": "get_server_info",
+     "responses": {
+      "200": {
+       "description": "Server addresses and TLS status",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/ServerInfo"
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/settings": {
+    "get": {
+     "tags": [
+      "settings"
+     ],
+     "summary": "Get the current runtime settings.",
+     "description": "Requires an operator (session or API key). Only known setting keys are returned.",
+     "operationId": "get_settings",
+     "responses": {
+      "200": {
+       "description": "Current settings",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/SettingsMap"
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    },
+    "put": {
+     "tags": [
+      "settings"
+     ],
+     "summary": "Update one or more runtime settings.",
+     "description": "Requires an operator (session or API key). Only keys in the body change; everything is\nvalidated before anything is written, so a bad value rejects the whole request.\nUpstream, strategy, DNSSEC and block-mode changes apply without a restart.",
+     "operationId": "put_settings",
+     "requestBody": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SettingsMap"
+        }
+       }
+      },
+      "required": true
+     },
+     "responses": {
+      "200": {
+       "description": "Settings saved"
+      },
+      "400": {
+       "description": "Invalid setting value"
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   },
+   "/api/stats/summary": {
+    "get": {
+     "tags": [
+      "stats"
+     ],
+     "summary": "Get aggregate query statistics for today, the last 7 days, and the last 30 days.",
+     "description": "Requires an operator (session or API key). Totals, block ratio, cache hit rate and\naverage response time per window, plus the last minute's query rate.",
+     "operationId": "get_stats_summary",
+     "responses": {
+      "200": {
+       "description": "Aggregate query statistics",
+       "content": {
+        "application/json": {
+         "schema": {
+          "$ref": "#/components/schemas/Summary"
+         }
+        }
+       }
+      }
+     },
+     "security": [
+      {
+       "api_key": []
+      }
+     ]
+    }
+   }
+  },
+  "components": {
+   "schemas": {
+    "AddListRequest": {
+     "type": "object",
+     "required": [
+      "name",
+      "url"
+     ],
+     "properties": {
+      "name": {
+       "type": "string",
+       "description": "Display name for the list."
+      },
+      "url": {
+       "type": "string",
+       "description": "URL the list's contents are fetched from."
+      }
+     }
+    },
+    "AddListResponse": {
+     "type": "object",
+     "required": [
+      "id"
+     ],
+     "properties": {
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Id of the newly created filter list."
+      }
+     }
+    },
+    "AddRuleRequest": {
+     "type": "object",
+     "required": [
+      "rule"
+     ],
+     "properties": {
+      "rule": {
+       "type": "string",
+       "description": "Rule text in hosts-file or Adblock-style syntax, e.g.\n`ads.example.com` or `@@allow.example.com`."
+      }
+     }
+    },
+    "AddRuleResponse": {
+     "type": "object",
+     "required": [
+      "id"
+     ],
+     "properties": {
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Id of the created rule, or `0` if it already existed."
+      }
+     }
+    },
+    "ApiKeyRow": {
+     "type": "object",
+     "required": [
+      "id",
+      "name",
+      "prefix",
+      "created_at"
+     ],
+     "properties": {
+      "created_at": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Unix timestamp (seconds) the key was created."
+      },
+      "expires_at": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "format": "int64",
+       "description": "Unix timestamp (seconds) after which the key stops working, if any."
+      },
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Key id."
+      },
+      "last_used_at": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "format": "int64",
+       "description": "Unix timestamp (seconds) the key was last used to authenticate, if ever."
+      },
+      "name": {
+       "type": "string",
+       "description": "Human-readable label given at creation time."
+      },
+      "prefix": {
+       "type": "string",
+       "description": "Short, non-secret prefix used to identify the key; the full secret\nis never returned again after creation."
+      }
+     }
+    },
+    "CreateApiKeyRequest": {
+     "type": "object",
+     "required": [
+      "name"
+     ],
+     "properties": {
+      "expires_at": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "format": "int64",
+       "description": "Optional Unix timestamp (seconds) after which the key stops working.\nOmit or `null` for a key that never expires."
+      },
+      "name": {
+       "type": "string",
+       "description": "Human-readable label for the key (1-64 characters), e.g. `\"ci\"`."
+      }
+     }
+    },
+    "CreateApiKeyResponse": {
+     "type": "object",
+     "required": [
+      "id",
+      "name",
+      "prefix",
+      "token"
+     ],
+     "properties": {
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Id of the newly created key."
+      },
+      "name": {
+       "type": "string",
+       "description": "The label given at creation time."
+      },
+      "prefix": {
+       "type": "string",
+       "description": "Short, non-secret prefix used to identify the key afterwards."
+      },
+      "token": {
+       "type": "string",
+       "description": "Full secret — shown only in this create response, never again."
+      }
+     }
+    },
+    "CustomRuleRow": {
+     "type": "object",
+     "required": [
+      "id",
+      "rule",
+      "rule_type"
+     ],
+     "properties": {
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Rule id."
+      },
+      "rule": {
+       "type": "string",
+       "description": "Rule text in hosts-file or Adblock-style syntax."
+      },
+      "rule_type": {
+       "type": "string",
+       "description": "Either `\"block\"` or `\"allow\"`."
+      }
+     }
+    },
+    "FilterCheckRequest": {
+     "type": "object",
+     "required": [
+      "domain"
+     ],
+     "properties": {
+      "domain": {
+       "type": "string",
+       "description": "Domain to evaluate, e.g. `\"ads.example.com\"`; a trailing dot is stripped."
+      }
+     }
+    },
+    "FilterListResponse": {
+     "type": "object",
+     "description": "A filter list, plus what removing it would cost. `FilterListRow`'s fields are spelled out\nrather than flattened so the `OpenAPI` document shows one flat object.",
+     "required": [
+      "id",
+      "name",
+      "url",
+      "enabled",
+      "last_updated",
+      "rule_count"
+     ],
+     "properties": {
+      "enabled": {
+       "type": "boolean",
+       "description": "Whether the list's rules are currently applied by the filter engine."
+      },
+      "id": {
+       "type": "integer",
+       "format": "int64",
+       "description": "List id."
+      },
+      "last_updated": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Unix timestamp (seconds) the list was last downloaded, or `0` if never."
+      },
+      "name": {
+       "type": "string",
+       "description": "Display name."
+      },
+      "rule_count": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Number of rules parsed out of the list's content on last download."
+      },
+      "unique_rules": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "format": "int64",
+       "description": "Rules no other loaded list provides: what removing this list would unblock. `null`\nwhen it contributes no rules (disabled, empty, or failed to download)."
+      },
+      "url": {
+       "type": "string",
+       "description": "Source URL the list's contents are fetched from."
+      }
+     }
+    },
+    "HealthResponse": {
+     "type": "object",
+     "required": [
+      "status",
+      "needs_setup",
+      "version"
+     ],
+     "properties": {
+      "needs_setup": {
+       "type": "boolean",
+       "description": "True when no operator exists yet and `POST /api/auth/setup` must be called first.\nAlways false under forward auth, where the first proxied request provisions one."
+      },
+      "status": {
+       "type": "string",
+       "description": "Always `\"ok\"` while the process is up and serving requests."
+      },
+      "version": {
+       "type": "string",
+       "description": "Build version string (from `git describe`)."
+      }
+     }
+    },
+    "ServerInfo": {
+     "type": "object",
+     "required": [
+      "dns_addr",
+      "http_addr",
+      "tls_enabled"
+     ],
+     "properties": {
+      "dns_addr": {
+       "type": "string",
+       "description": "Address the plain-DNS listener is bound to, e.g. `0.0.0.0:53`."
+      },
+      "http_addr": {
+       "type": "string",
+       "description": "Address the admin/DoH HTTP(S) listener is bound to."
+      },
+      "tls_enabled": {
+       "type": "boolean",
+       "description": "Whether the HTTP listener is serving TLS (ACME or user-provided certs)."
+      }
+     }
+    },
+    "SettingsMap": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string",
+      "description": "Flattened key/value pairs, e.g. `upstream_servers`, `upstream_strategy`,\n`log_retention_days`, `dnssec_disabled`, `block_mode`."
+     }
+    },
+    "Summary": {
+     "type": "object",
+     "description": "`Default` is all zeroes: what the dashboard renders when the read fails,\nand what an appliance that has answered nothing reports anyway.",
+     "required": [
+      "total_today",
+      "blocked_today",
+      "total_7d",
+      "blocked_7d",
+      "total_30d",
+      "blocked_30d",
+      "block_ratio_today",
+      "block_ratio_7d",
+      "block_ratio_30d",
+      "cache_hit_rate_today",
+      "cache_hit_rate_7d",
+      "cache_hit_rate_30d",
+      "avg_response_ms_today",
+      "avg_response_ms_7d",
+      "avg_response_ms_30d",
+      "queries_1m"
+     ],
+     "properties": {
+      "avg_response_ms_30d": {
+       "type": "number",
+       "format": "double",
+       "description": "Average response time in milliseconds over the trailing 30 days."
+      },
+      "avg_response_ms_7d": {
+       "type": "number",
+       "format": "double",
+       "description": "Average response time in milliseconds over the trailing 7 days."
+      },
+      "avg_response_ms_today": {
+       "type": "number",
+       "format": "double",
+       "description": "Average response time in milliseconds over the trailing 24 hours."
+      },
+      "block_ratio_30d": {
+       "type": "number",
+       "format": "double",
+       "description": "`blocked_30d / total_30d`, or `0` if there were no queries in the window."
+      },
+      "block_ratio_7d": {
+       "type": "number",
+       "format": "double",
+       "description": "`blocked_7d / total_7d`, or `0` if there were no queries in the window."
+      },
+      "block_ratio_today": {
+       "type": "number",
+       "format": "double",
+       "description": "`blocked_today / total_today`, or `0` if there were no queries in the window."
+      },
+      "blocked_30d": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Queries blocked in the trailing 30 days."
+      },
+      "blocked_7d": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Queries blocked in the trailing 7 days."
+      },
+      "blocked_today": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Queries blocked by the filter engine in the trailing 24 hours."
+      },
+      "cache_hit_rate_30d": {
+       "type": "number",
+       "format": "double",
+       "description": "Fraction of allowed queries in the trailing 30 days answered from cache."
+      },
+      "cache_hit_rate_7d": {
+       "type": "number",
+       "format": "double",
+       "description": "Fraction of allowed queries in the trailing 7 days answered from cache."
+      },
+      "cache_hit_rate_today": {
+       "type": "number",
+       "format": "double",
+       "description": "Fraction of allowed queries in the trailing 24 hours answered from cache."
+      },
+      "queries_1m": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Queries handled in the last 60 seconds (a rough current-rate indicator)."
+      },
+      "total_30d": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Total queries handled in the trailing 30 days."
+      },
+      "total_7d": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Total queries handled in the trailing 7 days."
+      },
+      "total_today": {
+       "type": "integer",
+       "format": "int64",
+       "description": "Total queries handled in the trailing 24 hours."
+      }
+     }
+    },
+    "UpdateListRequest": {
+     "type": "object",
+     "properties": {
+      "enabled": {
+       "type": [
+        "boolean",
+        "null"
+       ],
+       "description": "If present, enables or disables the list."
+      },
+      "name": {
+       "type": [
+        "string",
+        "null"
+       ],
+       "description": "New display name; only applied if `url` is also present."
+      },
+      "url": {
+       "type": [
+        "string",
+        "null"
+       ],
+       "description": "New source URL; only applied if `name` is also present."
+      }
+     }
+    }
+   },
+   "securitySchemes": {
+    "api_key": {
+     "type": "http",
+     "scheme": "bearer",
+     "description": "noadd API key: `Authorization: Bearer noadd_…`"
+    }
+   }
+  },
+  "tags": [
+   {
+    "name": "system"
+   },
+   {
+    "name": "settings"
+   },
+   {
+    "name": "lists"
+   },
+   {
+    "name": "rules"
+   },
+   {
+    "name": "filter"
+   },
+   {
+    "name": "stats"
+   },
+   {
+    "name": "api-keys"
+   },
+   {
+    "name": "logs"
+   }
+  ]
+ }
+}

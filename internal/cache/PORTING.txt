@@ -1,0 +1,26 @@
+Step 8: DNS cache and single-flight (src/cache.rs, src/dns/inflight.rs)
+
+Tests
+  Rust: cache.rs 7 + tests/cache_test.rs 6 + inflight.rs 4 = 17 -> all ported (cache_test.go,
+  internal/dns/inflight_test.go; each names its Rust test). Tests use a fake clock, no sleeps.
+  tests/coalescing_test.rs (3) and tests/stale_stampede_test.rs (3 of 4) drive DnsHandler, which
+  is Step 12. Here they are ported at the Group / RefreshSet level (same assertions on fetch and
+  refresh counts). The handler-level versions, and test_non_dnssec_client_gets_ad_stripped_but_
+  log_keeps_verdict, are due in Step 12.
+  cache_memory_bench.rs: the two test fns are ported (spare capacity -> cap==len check; serving
+  leaves the entry unchanged). Rust bench cache_hit_bench / inflight_contention_bench /
+  cache_memory_bench -> BenchmarkCacheHit, BenchmarkInflightContention, BenchmarkCacheMemory.
+  The Rust benches need a handler and cargo, so BenchmarkCacheHit measures Get + copy +
+  ApplyElapsed only (65 ns/op, 1 alloc, parallel on 4 procs).
+
+Deviations
+  - Eviction is per shard: 16 shards, each CapacityBytes/16, LRU by container/list. moka is
+    global and approximate. An entry heavier than one shard's share is refused (Rust admits up
+    to the total). With the 64 KiB DNS maximum this matters only below ~1 MiB of capacity.
+  - Get has no `now` argument: the clock comes from Config.Now (plan rule 3).
+  - Group and RefreshSet are generic over the key, because internal/dns cannot import
+    internal/cache (cache uses dns.TTLOffsets). RefreshSet is the handler's `refreshing`
+    DashMap, put here beside the Group.
+  - Put copies the response into an exact-size buffer (Rust shrinks the Vec it owns).
+  - BenchmarkCacheMemory compares with the Rust weigher formula (365 + domain + wire + offsets),
+    not a measured Rust value: no cargo. 10k entries: 423 heap bytes/entry vs 493 weight.

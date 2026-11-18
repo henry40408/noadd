@@ -1,0 +1,43 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "text/html; charset=utf-8"
+  ],
+  [
+   "set-cookie",
+   "noadd_flash=<COOKIE>; Path=/; Max-Age=0; Expires=Mon, 17 Nov 2025 15:29:42 GMT"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "9123"
+  ]
+ ],
+ "note": "",
+ "body_golden": "internal/views/testdata/flash_filters_saved.golden.html"
+}

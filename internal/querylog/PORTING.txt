@@ -1,0 +1,18 @@
+Step 10: query logger and event hub (src/logger.rs, src/admin/events.rs)
+
+Tests: tests/logger_test.rs 4 + event_hub_test.rs 2 + events.rs unit 4 = 10, all
+ported (each test names its Rust test), plus drop/timeout/failure cases.
+
+Deviations:
+- Logger.Log takes db.QueryLogEntry, not QueryContext. QueryContext -> entry
+  (query type string, client IP string, blocked) moves to the handler port
+  (Step 12), which already holds the data.
+- Slow subscribers: tokio broadcast skips a lagging receiver's messages; here
+  the subscriber is dropped and its channel closed (plan Step 10).
+- Log never blocks (try-send semantics, as handler.rs); a full queue drops.
+- Close(timeout) replaces "drop every sender": Go cannot close a channel that
+  handlers may still send on. After Close, Log returns false.
+- events.Hub does not compute the snapshot: Run takes a Source with
+  HasAnyQueryLogs and Snapshot, so the stats port (later step) plugs in.
+  Snapshot is typed any.
+- StatsGuard is Subscription.Close; Subscribe(wantStats) registers the claim.

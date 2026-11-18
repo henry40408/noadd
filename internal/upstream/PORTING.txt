@@ -1,0 +1,19 @@
+Step 9: upstream forwarder (src/upstream/forwarder.rs, tests/upstream_test.rs)
+
+Decisions pinned by the Rust wire fixtures (internal/dns/testdata/wire, 062-065, 076-086, 092):
+- UDP TC=1 is a failure, not a TCP retry. The Rust pool (hickory) had no TCP
+  connection to retry on, so a truncated upstream answer ended as SERVFAIL for
+  the client. The plan said "TC -> TCP retry"; that was overridden by the
+  fixtures. No 0x20 case randomisation either.
+- Failure rcodes follow hickory: SERVFAIL, REFUSED, FORMERR, NOTIMP, BADVERS and
+  truncation fail over to the next upstream. NXDOMAIN / NODATA are negative
+  answers and are rebuilt (authority section kept, no AA/AD, OPT only if the
+  client sent one).
+- Responses to a client without DO lose DNSSEC records and AD; OPT is removed in
+  prepare and re-added only when the client sent one.
+- Hostnames resolve once at startup to the first address (geo-routed PoP pin).
+
+Deviations:
+- tests/upstream_test.rs hit real resolvers; the Go tests use local UDP, DoT
+  and DoH fakes (self-signed, injected TLSConfig and Resolver).
+- Time-dependent constants come through Config (plan rule 3).

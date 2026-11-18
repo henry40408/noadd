@@ -1,0 +1,27 @@
+Step 12: DNS handler, rate limiter, UDP and TCP listeners
+(src/dns/handler.rs, ratelimit.rs, udp.rs, tcp.rs)
+
+Tests: handler_test.rs 12 (3 TTL tests were ported with dns.PatchTTL), integration_test.rs 2,
+tcp_test.rs 2, coalescing_test.rs 3, stale_stampede_test.rs 4, ratelimit.rs 5 unit tests: all
+ported; each test names its Rust twin. handler.rs unit tests (cache TTL, truncate, synth, block)
+live in internal/dns since Step 3. Extra: UDP listener, shutdown, OPT strip, TC=1 -> SERVFAIL,
+AD on hits, mapped-IPv4 bucket sharing, permit wait with a cancelled context.
+
+Deviations:
+- Package is internal/dnsserver, not internal/dns: cache imports dns, so the handler cannot live there.
+- Handler.Handle(ctx, Request) takes netip.Addr; v4-mapped addresses are unmapped for limiter key and log.
+- The semaphore sits in Handle (as in Rust), not in the UDP loop: excess datagrams become waiting
+  goroutines, each holding its own exact-size copy of the packet. Same overload shape as Rust tasks.
+- A Go panic would kill the process where a tokio task panic would not: respond() recovers and
+  answers SERVFAIL.
+- Shutdown: ServeUDP/ServeTCP stop reading on ctx end, let queries in flight finish and answer, then
+  close. TCP interrupts idle reads with a read deadline. Rust just drops the tasks.
+- Stale refresh goroutines run under a handler-lifetime context; Handler.Close cancels and waits.
+- Query log rows have no matched_rule/matched_list/action (db.QueryLogEntry never stored them);
+  a rate-limited row has blocked=false, like Rust. Unknown record types log as "Unknown" (hickory).
+- Result summary: other RData types print the miekg presentation form, not hickory's Display.
+- Network tests use a local fake UDP upstream (the Rust allow tests needed the Internet).
+- Not measured: UDP QPS vs Rust (no Go main until Step 17). In-process, Apple M5, parallel 4:
+  HandleCached 209 ns/op 8 allocs, HandleBlocked 200 ns/op 14 allocs. Rust inflight_contention
+  bench (ignored there) not ported: its cold-miss cost is dominated by the fake upstream.
+- Limiter prune loop (Rust: main.rs, every 600 s) belongs to Step 17.

@@ -1,0 +1,50 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "application/json"
+  ],
+  [
+   "cache-control",
+   "no-cache, no-store, must-revalidate, max-age=0"
+  ],
+  [
+   "pragma",
+   "no-cache"
+  ],
+  [
+   "expires",
+   "0"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "content-length",
+   "276"
+  ]
+ ],
+ "note": "",
+ "body": {
+  "db_size_bytes": 155648,
+  "reclaimable_bytes": 0,
+  "fragmentation_ratio": 0.0,
+  "total_log_count": 200,
+  "oldest_log_timestamp": 1794929367,
+  "log_retention_days": 30,
+  "avg_new_rows_per_day": 200.0,
+  "bytes_per_log": 778.24,
+  "log_coverage_days": 1.226851851851852e-06,
+  "projected_full_bytes": 4669440
+ }
+}

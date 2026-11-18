@@ -7,6 +7,9 @@ on:
 
 # One run per ref; a newer push cancels the older one, except on tags, which
 # publish a specific version.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -21,6 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Full history + tags, or `git describe` falls back to a bare SHA.
           fetch-depth: 0
       # `.git` is not in the build context, so resolve the version here. No
@@ -28,7 +32,7 @@ jobs:
       - name: Resolve build version
         id: version
         run: echo "value=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
-      # No qemu: zig cross-compiles both targets on the native builder.
+      # No qemu: the builder runs natively and Go cross-compiles both targets.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:

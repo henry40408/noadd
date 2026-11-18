@@ -1,0 +1,86 @@
+Step 6: filter parser and engine (src/filter/parser.rs, src/filter/engine.rs)
+
+Tests
+  Rust: tests/filter_parser_test.rs 11 + parser.rs unit 1 = 12; tests/filter_engine_test.rs 9
+  + engine.rs unit 9 (7 unique-rule, 2 trie regression) = 18. All 30 are ported one-to-one
+  (parser_test.go, engine_test.go; each Go test names its Rust test in a comment). Not
+  ported: fx_hasher_separates_zero_padded_keys, because the Go build uses no hash map.
+  Added: TestParseListHandlesCRLF, TestDuplicateRulesResolveLikeRust,
+  TestMoreThan64ListsShareTheTopBit, TestEngineMatchesRustOnFixture,
+  TestHolderSwapUnderLoad (run with -race).
+  Rust tests/filter_lists_test.rs and rebuild_coordinator_test.rs belong to Step 7.
+
+Fixture (testdata/fixture-list{1,2,3}.txt, verdicts.txt)
+  Three generated lists (2000 lines each, mixed ||, @@||, hosts, plain, comments, upper case,
+  shared domains across lists) and 3866 query verdicts (2073 blocked, 257 allowed by a rule,
+  1536 allowed without) captured from the Rust image ghcr.io/henry40408/noadd:0.41.1 through
+  POST /api/filter/check. The plan asked for a 10k-line sample; this is 6k lines because
+  no real-world list was captured in Step 1 and the generated one already covers every
+  rule form and the cross-list priority cases.
+
+Engine data structures (plan section 3.1)
+  Chosen: option B for the exact sets (sorted packed arena: data []byte, offsets []uint32,
+  lists []uint16, binary search). Option A (vellum) was not needed and not added; option C
+  (map) was not written, because B already beats the Rust numbers. Tries use the Rust flat
+  layout (u16 terminal, u32 child count, 10-byte child entries, notTerminal 0xFFFF).
+  The tries are built without maps: rules are sorted label by label from the right, then
+  one recursive pass groups them and writes nodes and labels directly. The unique-rule
+  count is computed in the same pass (ancestor mask) plus one walk per exact rule.
+  The four builds run in goroutines, like Rust's thread::scope.
+
+Behaviour kept from Rust
+  - Priority: allow exact, allow subdomain, block exact, block subdomain.
+  - Duplicate block rules: exact set keeps the FIRST list; trie keeps the LAST list.
+  - Trie lookup returns the first terminal going from the TLD down (shortest rule).
+  - Rule domains are never case-folded by the engine; only the query is, and only when it
+    holds an ASCII upper-case byte.
+  - List index >= 63 shares bit 63 in the unique-rule mask. List index 65535 is the
+    notTerminal marker (same as Rust).
+  - Duplicates inside one list count twice in the unique-rule total.
+
+Deviations
+  - strings.ToLower has no final-sigma context rule that Rust's to_lowercase has; it differs
+    only for non-ASCII domains containing a capital sigma.
+  - Rust panics when a trie rule has a label longer than 65535 bytes; Go skips subdomain
+    rules whose whole domain is longer than 65535 bytes (they cannot match a DNS name).
+  - strings.Fields / TrimSpace use Go's Unicode space table; Rust's split_whitespace and trim
+    use White_Space. The two tables agree except for a few control characters; DNS list
+    files do not contain them.
+  - Verdict is {Blocked, Rule, List}; an allowed verdict has no list and an empty Rule
+    when no allow rule matched.
+
+Benchmarks (Apple M5 native, GOMAXPROCS=4; Rust baseline from testdata/bench-baseline.txt,
+measured in a linux/arm64 container on the same machine, so the comparison is indicative)
+  List: 1,170,000 block + 30,000 allow rules, sha256 checked by the benchmark.
+  rebuild (parse + build): Go 432-438 ms (BenchmarkEngineBuild1M2, 3 runs of 8) vs Rust 447 ms
+    => about 2-3% faster, no regression over 5%.
+  memory kept by the engine after the input is garbage: 33.4 MiB (HeapBytes), 35.4 MiB heap
+    retained (BenchmarkHeap). Rust: about +75 MiB for engine plus list text in the process.
+    Peak RSS of the whole benchmark process (it also holds the 45 MB generated text and the
+    parsed rules) is 290 MiB; Rust's peak was not measured.
+  Check(): exact block 56 ns, subdomain block 185 ns, allow 62 ns, miss 55 ns, deep miss
+    130 ns, upper-case query 115 ns (1 allocation). Rust baseline is end to end over UDP
+    (p50 0.11 ms), which is dominated by the network path, so it is not comparable here.
+    The end-to-end UDP number is re-measured in Step 9 when the handler exists.
+
+Step 7: lists, rebuild coordinator, registry (src/filter/lists.rs, rebuild.rs, src/registry.rs)
+
+Layout
+  Rust ListManager is split: lists.go (DefaultLists, Downloader, Manager: seed, download,
+  store, update-all) and build.go (Manager.Rebuild). rebuild.go is the Coordinator.
+  internal/registry/registry.go is the registry client; version.UserAgent() replaces
+  noadd::user_agent().
+Tests
+  filter_lists_test.rs 5 + rebuild_coordinator_test.rs 6 + registry_test.rs 3 = 14 Rust
+  tests, all ported (lists_test.go, rebuild_test.go, registry_test.go). Added: the full
+  download -> store -> rebuild path against httptest (User-Agent, 404 body treated as a
+  list, list order priority), version.UserAgent, a registry entry without homepage.
+Deviations
+  - Coordinator.Spawn/SpawnCoalesced return a done channel instead of a JoinHandle, and
+    take func() error; the task closes over its own context.
+  - Subscribers get a buffered channel (16) and lose messages when full, like a lagging
+    tokio broadcast receiver; Status() gives the live state.
+  - Registry JSON decoding is lenient: a missing required field becomes its zero value
+    where serde would fail with a parse error.
+  - Registry List does not coalesce concurrent misses (same as Rust).
+  - After a rebuild Go calls debug.FreeOSMemory() in place of mimalloc's mi_collect.

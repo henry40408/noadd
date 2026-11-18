@@ -1,12 +1,12 @@
 # noadd
 
-> A self-hosted DNS ad-blocker with DNS-over-HTTPS support, built in Rust.
+> A self-hosted DNS ad-blocker with DNS-over-HTTPS support, built in Go.
 
 [![CI](https://github.com/henry40408/noadd/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/noadd/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/henry40408/noadd/graph/badge.svg)](https://codecov.io/gh/henry40408/noadd)
 [![Release](https://img.shields.io/github/v/release/henry40408/noadd)](https://github.com/henry40408/noadd/releases/latest)
 [![License](https://img.shields.io/github/license/henry40408/noadd)](LICENSE.txt)
-[![Rust toolchain](https://img.shields.io/badge/dynamic/toml?url=https://raw.githubusercontent.com/henry40408/noadd/main/rust-toolchain.toml&query=$.toolchain.channel&label=rust%20toolchain&logo=rust)](https://www.rust-lang.org/)
+[![Go version](https://img.shields.io/github/go-mod/go-version/henry40408/noadd)](https://go.dev/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/henry40408/noadd)
 [![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
 [![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
@@ -52,7 +52,7 @@ The admin UI follows your OS's dark/light preference and adapts to phones with a
 - **SQLite storage** — config, query logs, and stats in a single file
 - **Hot-swap filters** — update lists without restarting, zero query interruption
 - **DNSSEC transparency** — sets DO on upstream queries, shows the upstream's AD verdict as a badge in the query log, and tailors OPT/DNSSEC records to each client's own EDNS/DO profile (default on, toggle in Settings); hop-by-hop protection needs a `tls://` upstream and DoH to devices
-- **Low resident memory** — mimalloc returns the filter-rebuild working set to the OS, keeping RSS low on small devices (e.g. Raspberry Pi)
+- **Low resident memory** — a compact filter engine and a returned-to-the-OS rebuild working set keep RSS low on small devices (e.g. Raspberry Pi)
 
 ## Out of Scope
 
@@ -68,16 +68,16 @@ noadd intentionally keeps a narrow focus. The following are **not** supported, a
 ## Quick Start
 
 ```bash
-cargo build --release
+go build -o bin/noadd ./cmd/noadd
 
 # Start with default settings (DNS on 0.0.0.0:53, HTTP on 127.0.0.1:8080)
-sudo ./target/release/noadd
+sudo ./bin/noadd
 
 # Or use custom ports (no root needed)
-./target/release/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
+./bin/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
-Open `http://127.0.0.1:8080` to create your operator account (username + password + setup token). On start with no operator, noadd prints a one-time setup token (`XXXXX-XXXXX`) to stderr (`noadd: first-run setup token: ...`; `docker logs <container>` shows it); paste it into the setup form, or send it as `setup_token` to `POST /api/auth/setup`. It lives in memory only, so a restart before setup issues a new one, and it proves you can read the server's output rather than just reach its port. Case, hyphen and spaces are ignored, and attempts are limited per address. Passwords must be 12–128 characters and pass a [zxcvbn](https://github.com/shssoichiro/zxcvbn-rs) guessability check — noadd has no second factor, so the password is the whole defence. Common passwords, keyboard runs and anything built from your username are refused with the reason; a few unrelated words clears the bar easily. The check runs offline. Further operators and active sessions are managed on the Account page.
+Open `http://127.0.0.1:8080` to create your operator account (username + password + setup token). On start with no operator, noadd prints a one-time setup token (`XXXXX-XXXXX`) to stderr (`noadd: first-run setup token: ...`; `docker logs <container>` shows it); paste it into the setup form, or send it as `setup_token` to `POST /api/auth/setup`. It lives in memory only, so a restart before setup issues a new one, and it proves you can read the server's output rather than just reach its port. Case, hyphen and spaces are ignored, and attempts are limited per address. Passwords must be 12–128 characters and pass a [zxcvbn](https://github.com/ccojocar/zxcvbn-go) guessability check — noadd has no second factor, so the password is the whole defence. Common passwords, keyboard runs and anything built from your username are refused with the reason; a few unrelated words clears the bar easily. The check runs offline. Further operators and active sessions are managed on the Account page.
 
 ### Docker
 
@@ -139,7 +139,10 @@ Options:
       --forward-auth-logout-url <FORWARD_AUTH_LOGOUT_URL>
                                      Proxy/SSO logout URL to send the browser to on logout [env: NOADD_FORWARD_AUTH_LOGOUT_URL]
   -h, --help                         Print help
+      --version                      Print the version and exit
 ```
+
+The log level is set only through the `NOADD_LOG_LEVEL` environment variable (`debug`, `info`, `warn` or `error`; default `info`); there is no flag. `RUST_LOG`, which earlier releases read, is **retired**: noadd refuses to start while it is set (even empty), naming the replacement.
 
 ## Testing DNS
 
@@ -163,7 +166,7 @@ dig @127.0.0.1 -p 5353 ads.google.com A
 mkcert -install
 mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
 
-./target/release/noadd \
+./bin/noadd \
   --dns-addr 127.0.0.1:5353 \
   --http-addr 127.0.0.1:3443 \
   --tls-cert cert.pem \
@@ -173,12 +176,14 @@ mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1
 ### Let's Encrypt (ACME)
 
 ```bash
-./target/release/noadd \
+./bin/noadd \
   --http-addr 0.0.0.0:443 \
   --acme-domain dns.example.com \
   --acme-email you@example.com \
   --acme-prod
 ```
+
+The Go releases use a different certificate cache format than the Rust ones, so the first start after upgrading ignores an old `acme-cache` directory and requests a new certificate (mind Let's Encrypt's rate limits on production).
 
 ### HSTS
 
@@ -223,14 +228,14 @@ its subnet.
 
 ```bash
 # SWAG/nginx in another container on the Docker bridge
-./target/release/noadd --trusted-proxies 172.18.0.0/16
+./bin/noadd --trusted-proxies 172.18.0.0/16
 ```
 
 Behind Cloudflare, also list Cloudflare's published ranges, since the edge is
 the hop your proxy appends:
 
 ```bash
-./target/release/noadd --trusted-proxies 172.18.0.0/16,173.245.48.0/20,103.21.244.0/22,…
+./bin/noadd --trusted-proxies 172.18.0.0/16,173.245.48.0/20,103.21.244.0/22,…
 ```
 
 Alternatively, have the fronting proxy collapse the chain to one trustworthy
@@ -364,7 +369,7 @@ logout only clears noadd's own state — the proxy re-injects the header on the
 next request, so the user must log out at the proxy.
 
 ```bash
-./target/release/noadd --forward-auth-header Remote-User \
+./bin/noadd --forward-auth-header Remote-User \
   --forward-auth-trusted-proxies 172.18.0.0/16
 ```
 
@@ -457,48 +462,33 @@ at **`/api/openapi.json`**; both require authentication (session or API key).
 
 ```bash
 # Run tests
-cargo nextest run
+go test -race ./...
 
 # Check formatting + lints
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+gofmt -l .
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
 # Run in dev mode
-RUST_LOG=noadd=debug cargo run -- --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
+NOADD_LOG_LEVEL=debug go run ./cmd/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080
 ```
 
 ### End-to-end tests
 
 Browser tests for the admin UI live in [`e2e/`](e2e/), built with
-[cucumber](https://github.com/cucumber-rs/cucumber) and
-[thirtyfour](https://github.com/stevepryde/thirtyfour). `e2e/` is its own cargo
-workspace, and the suites start the `noadd` binary themselves (throwaway ports
-and databases), so build it first:
+[godog](https://github.com/cucumber/godog) and
+[chromedp](https://github.com/chromedp/chromedp). `e2e/` is its own Go module,
+and the suite starts the `noadd` binary itself (throwaway ports and databases),
+so build it first:
 
 ```bash
-cargo build                  # embeds the admin UI into the binary
+go build -o bin/noadd ./cmd/noadd   # embeds the admin UI into the binary
 cd e2e
-cargo test --test e2e        # the Gherkin features
-cargo test --test specs      # the regression specs
+go test -count=1 .                  # the Gherkin features
 ```
 
-A local Chrome or Chromium is required: the driver manager downloads a matching
-chromedriver on demand, but not the browser.
-
-Gherkin features are in `e2e/features/` with steps in `e2e/tests/e2e/steps.rs`;
-regression specs are in `e2e/tests/specs/`. Both run in CI's `e2e` job.
-
-### Regenerating README screenshots
-
-`docs/screenshots/` is produced by seeding a throwaway database with ~90 days of
-fake traffic, booting `noadd`, and capturing every page in a real browser.
-Re-run it after any visual admin-UI change and commit the PNGs:
-
-```bash
-cargo build                  # embeds the current admin UI into the binary
-cd e2e
-cargo run --bin screenshots
-```
+A local Chrome or Chromium is required; set `E2E_CHROME` to pin the binary.
+Gherkin features are in `e2e/features/` and run in CI's `e2e` job.
 
 ## License
 

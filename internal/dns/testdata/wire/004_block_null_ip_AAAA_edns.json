@@ -1,0 +1,22 @@
+{
+ "name": "block_null_ip_AAAA_edns",
+ "note": "",
+ "settings": {
+  "upstream_servers": "0.250.250.254:15353",
+  "upstream_strategy": "sequential",
+  "block_mode": "null_ip",
+  "block_custom_ipv4": "",
+  "block_custom_ipv6": "",
+  "dnssec_disabled": "false"
+ },
+ "steps": [
+  {
+   "transport": "udp",
+   "request": "ab010100000100000000000103616473076578616d706c6503636f6d00001c000100002904d0000000000000",
+   "response": "ab018180000100010000000003616473076578616d706c6503636f6d00001c0001c00c001c00010000012c001000000000000000000000000000000000",
+   "upstream": null,
+   "sleep_before_s": 0,
+   "upstream_calls": 0
+  }
+ ]
+}

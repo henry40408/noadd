@@ -1,0 +1,27 @@
+Step 13: HTTP foundation and DoH
+(src/headers.rs, src/admin/csrf.rs, src/admin/api.rs static_response/serve_static,
+src/dns/doh.rs -> internal/dnsserver/doh.go)
+
+Tests: doh_test.rs 8 and csrf_test.rs 14 ported (each names its Rust twin), headers.rs 3 unit tests,
+static/apple-touch-icon goldens, plus extras (parse-before-authorise order, 2 MiB body limit,
+405s, policy trimming, token name in the log, trusted-proxy client IP, form decoding).
+
+Moved: admin-ui/dist/{app.css,app.js,favicon.svg} -> internal/assets/static (Rust include_dir! and
+build.rs paths updated; Rust's embedded dir now also holds apple-touch-icon.png, which its own
+route shadows).
+
+Deviations:
+- ETag keeps Rust's DefaultHasher digest (SipHash-1-3, zero keys, length prefix), implemented in
+  etag.go, so the goldens' ETags match and client caches survive the switch.
+- csrf.rejected reason is derived from the request headers: http.CrossOriginProtection.Check
+  returns unexported errors. The decision (Check) is the library's; Sec-Fetch-Site matching is
+  exact-case there, case-insensitive in tower-http (browsers send lowercase).
+- ServeMux cleans paths: GET //x and /../x answer 307 to the cleaned path where Rust answered 404.
+- DoH: a failed doh_access_policy lookup allows tokenless access (as Rust's `if let Ok(Some(..))`),
+  now with a warning log. Flagged for review (fail-open).
+- DoH parse order follows axum extractors: query parameter / body (400, 413) before token and
+  policy checks; POST content type before token. Query decoding is lenient like serde_urlencoded.
+- http.Server: ReadHeaderTimeout 10 s, IdleTimeout 120 s (Rust had none), no Read/WriteTimeout so
+  SSE survives.
+- Admin routes other than static are Step 14; csrf tests use a stub admin handler (the 401
+  assertions of csrf_test.rs are repeated against the real routes then).

@@ -5,66 +5,91 @@ on:
     branches: [main]
   pull_request:
 
-# One run per ref; a newer push cancels the older run.
+permissions:
+  contents: read
+
+# A newer push cancels the older run of the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
+# Pin every `uses:` to the commit SHA of an exact release tag (never a floating
+# major like `v2`): Dependabot identifies a pin by the tag pointing at it, and a
+# SHA no tag points at gets "updated" to unreleased branch HEADs.
 
 jobs:
+  # The licence allow-list below is enforced with go-licenses, the advisory
+  # check with govulncheck.
+  deps:
+    name: deps
+    runs-on: ubuntu-latest
+    env:
+      # The root module allows only these. `e2e/` additionally allows MPL-2.0
+      # (godog pulls in go-immutable-radix, go-memdb and golang-lru); MPL-2.0
+      # must not reach the root module, which ships in the image.
+      ALLOWED_LICENSES: Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MIT-0,Zlib,Unlicense,CC0-1.0,Unicode-3.0,BSL-1.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go mod tidy -diff
+      - run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor go.mod go.sum)"
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # go-licenses needs GOROOT set explicitly, else it fails on the standard
+      # library with "does not have module info". The module's own LICENSE is
+      # not a dependency, so it is ignored.
+      - run: |
+          GOROOT="$(go env GOROOT)" go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+            --include_tests --ignore github.com/henry40408/noadd \
+            --allowed_licenses="$ALLOWED_LICENSES"
+      # `e2e/` is a separate Go module with its own vendor directory.
+      - run: go mod tidy -diff
+        working-directory: e2e
+      - run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor go.mod go.sum)"
+        working-directory: e2e
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: e2e
+      # `--include_tests` because the Gherkin and browser libraries are test
+      # dependencies of this module.
+      - run: |
+          GOROOT="$(go env GOROOT)" go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+            --include_tests --ignore github.com/henry40408/noadd/e2e \
+            --allowed_licenses="$ALLOWED_LICENSES,MPL-2.0"
+        working-directory: e2e
+
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-  lint-e2e:
-    name: lint-e2e
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          fetch-depth: 0
-
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          # `e2e` is its own workspace; unnamed, its dependencies go uncached.
-          workspaces: e2e
-
-      # Deliberately outside `cargo deny`: the browser stack's licences aren't
-      # on the allow-list, and none of it ships in the image.
-      - name: Check formatting (e2e)
+          go-version-file: go.mod
+      - run: |
+          unformatted="$(git ls-files -z '*.go' | grep -zvE '(^|/)vendor/' | xargs -0 gofmt -l 2>&1)"
+          echo "$unformatted"
+          test -z "$unformatted"
+      - run: go vet -mod=vendor ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - run: go vet -mod=vendor ./...
         working-directory: e2e
-        run: cargo fmt --check
-
-      - name: Clippy (e2e)
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
         working-directory: e2e
-        run: cargo clippy --all-targets -- -D warnings
-
-  deny:
-    name: deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
-        with:
-          tool: cargo-deny@0.18.9
-      - name: cargo deny check
-        run: cargo deny check
+      # CI and the Dockerfile read the Go version from the root go.mod only, so
+      # the nested module must not drift from it.
+      - run: |
+          root="$(grep -E '^(go|toolchain) ' go.mod)"
+          nested="$(grep -E '^(go|toolchain) ' e2e/go.mod)"
+          test "$root" = "$nested" || { echo "e2e/go.mod differs from go.mod:"; echo "$root"; echo "--"; echo "$nested"; exit 1; }
 
   test:
     name: test
@@ -72,18 +97,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: cargo-nextest
-
-      - name: Run tests
-        run: cargo nextest run
+          go-version-file: go.mod
+      - run: go test -mod=vendor -race ./...
 
   coverage:
     name: coverage
@@ -91,62 +109,157 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-      # cargo-llvm-cov installs llvm-tools-preview itself.
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: cargo-llvm-cov
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
-        with:
-          tool: cargo-nextest
-
+          go-version-file: go.mod
+      # `-coverprofile` ignores the binary cmd/noadd's TestMain execs; with
+      # NOADD_COVERDIR set it builds that binary with `-cover`.
       - name: Generate coverage
-        run: cargo llvm-cov nextest --lcov --output-path lcov.info
-
+        run: |
+          NOADD_COVERDIR="$PWD/covdata" go test -mod=vendor -coverprofile=coverage.out ./...
+          go tool covdata textfmt -i=covdata -o coverage-bin.out
+          tail -n +2 coverage-bin.out >> coverage.out
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: henry40408/noadd
-          files: lcov.info
+          files: coverage.out
+          # Dependabot PRs cannot read repository secrets.
           fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}
+
+  # Each shard mutates a slice of the module on its own runner; a single job
+  # over the whole module ran past the 60 minute limit. `exclude` is the
+  # complement of the slice, as one gremlins file regexp (RE2 has no lookahead,
+  # so it cannot say "everything except"). Shards hold about 250-310 mutants
+  # each. Small packages share a shard so one lived mutant does not drag a
+  # tiny shard far under the threshold. Every shard still runs the whole
+  # module's tests for coverage, so a mutant covered only by another package's
+  # tests is not miscounted as not covered.
+  mutation-shard:
+    name: mutation-shard (${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: server-api
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|auth|cache|db|dns|dnsserver|events|filter|logging|netx|querylog|registry|stats|tlsserve|upstream|version|views)/|^internal/server/(pages|helpers|etag|flash|headers|server|static)'
+          - name: server-pages
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|auth|cache|db|dns|dnsserver|events|filter|logging|netx|querylog|registry|stats|tlsserve|upstream|version|views)/|^internal/server/(api|csrf)'
+          - name: db
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|auth|cache|dns|dnsserver|events|filter|logging|netx|querylog|registry|server|stats|tlsserve|upstream|version|views)/'
+          - name: auth-upstream
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|cache|db|dns|dnsserver|events|filter|logging|netx|querylog|registry|server|stats|tlsserve|version|views)/'
+          - name: filter-dnsserver
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|auth|cache|db|dns|events|logging|netx|querylog|registry|server|stats|tlsserve|upstream|version|views)/'
+          - name: views-stats
+            exclude: '^(e2e|vendor|cmd)/|^internal/(assets|auth|cache|db|dns|dnsserver|events|filter|logging|netx|querylog|registry|server|tlsserve|upstream|version)/'
+          - name: small-packages
+            exclude: '^(e2e|vendor)/|^internal/(auth|db|dnsserver|filter|server|stats|upstream|views)/'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # `--diff` needs the base branch's history, not a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Gremlins derives each mutant's timeout from how long its coverage run
+      # took. A cached test result makes that near zero, so nearly every mutant
+      # "times out", which the efficacy score ignores: the job would pass
+      # without testing anything.
+      - run: go clean -testcache
+      # Never pass `--test-cpu`: gremlins v0.6.0 builds a single `-cpu 2`
+      # argument from it, so every mutant's `go test` fails and counts as
+      # killed. GOMAXPROCS limits the CPUs instead.
+      - name: Mutate the shard (push)
+        if: github.event_name != 'pull_request'
+        env:
+          GOMAXPROCS: "2"
+          SHARD_EXCLUDE: ${{ matrix.shard.exclude }}
+        run: |
+          set -o pipefail
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --workers 2 --exclude-files "$SHARD_EXCLUDE" . 2>&1 | tee "$RUNNER_TEMP/mutation.log"
+      - name: Mutate the changed lines of the shard (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GOMAXPROCS: "2"
+          SHARD_EXCLUDE: ${{ matrix.shard.exclude }}
+        run: |
+          # Stream the output so a killed runner still leaves a log. Two
+          # workers with two CPUs each keep a whole-module diff within the
+          # runner's memory.
+          status=0
+          set -o pipefail
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --workers 2 --exclude-files "$SHARD_EXCLUDE" \
+            --diff "origin/$BASE_REF" . 2>&1 | tee "$RUNNER_TEMP/mutation.log" || status=$?
+          set +o pipefail
+          # A shard whose diff has no mutable Go line (docs, CI only, or other
+          # shards' files) yields zero mutants, which gremlins scores as 0% and
+          # so fails the threshold. That is not a low score, so treat it as a
+          # pass.
+          if [ "$status" -ne 0 ] \
+            && grep -q '^Killed: 0, Lived: 0, Not covered: 0$' "$RUNNER_TEMP/mutation.log" \
+            && grep -q '^Timed out: 0, ' "$RUNNER_TEMP/mutation.log"; then
+            echo "No mutants in the changed lines; nothing to test."
+            exit 0
+          fi
+          exit "$status"
+      - name: Upload the mutation log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-${{ matrix.shard.name }}
+          path: ${{ runner.temp }}/mutation.log
+          if-no-files-found: ignore
+
+  # The one required check: branch protection names `mutation`, so shards can
+  # be added or renamed without touching it. `always()` makes it run (and fail)
+  # when a shard fails or is cancelled instead of being skipped.
+  mutation:
+    name: mutation
+    runs-on: ubuntu-latest
+    needs: mutation-shard
+    if: always()
+    steps:
+      - name: Require every shard to pass
+        env:
+          SHARDS_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          echo "mutation shards: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = success ]
 
   e2e:
     name: e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+          persist-credentials: false
+          fetch-depth: 0 # full history so the VCS-stamped version resolves
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # `e2e` is its own workspace; unnamed, its dependencies go uncached.
-          workspaces: |
-            .
-            e2e
-
-      # The suites boot this binary; building it first keeps the compile off
-      # their timeouts and embeds the current admin UI.
-      - name: Build noadd (embeds the admin UI)
-        run: cargo build
-
-      # `WebDriver::managed` fetches chromedriver; the runner ships Chrome.
-      - name: Run the Cucumber features
+          go-version-file: go.mod
+      # Prebuild the server the suite launches, keeping the compile off its
+      # timeout.
+      - run: go build -mod=vendor -o bin/noadd ./cmd/noadd
+      # The runner ships Chrome; chromedp starts it itself, so no driver is
+      # needed. Pinned, because chromedp's own search would pick the runner's
+      # Chromium snapshot ahead of google-chrome.
+      - run: google-chrome --version
+      - name: Run E2E tests
         working-directory: e2e
-        run: cargo test --test e2e
-
-      - name: Run the specs
-        working-directory: e2e
-        run: cargo test --test specs
+        env:
+          E2E_CHROME: /usr/bin/google-chrome
+        run: go test -mod=vendor -count=1 -timeout 15m .
 
   lint-workflow:
     name: lint-workflow

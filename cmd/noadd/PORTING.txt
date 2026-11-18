@@ -1,0 +1,19 @@
+Boolean flags with an optional value (--cookie-secure, --hsts, ...)
+
+MEASURED against ghcr.io/henry40408/noadd:0.41.1 (docker run, no cargo):
+
+  --hsts            -> accepted, true
+  --hsts=false      -> accepted, false
+  --hsts false      -> REJECTED: "error: unexpected argument found", exit 2
+  --hsts true       -> REJECTED, same error, exit 2
+  --hsts maybe      -> REJECTED, same error, exit 2
+
+(The earlier version of this file claimed "--hsts false -> false"; that was
+derived from clap semantics and is wrong.)
+
+Go consequence: the flag package already treats "false" in "--hsts false" as a
+positional argument, so Step 4 (options.go) needs NO pre-pass. It must instead
+reject any positional argument with exit code 2 and a clap-like message.
+The plan's Step 4 note about a pre-pass that joins "--hsts false" is obsolete.
+Note: the image entrypoint already passes --dns-addr 0.0.0.0:53; repeating it
+conflicts, so tests of option conflicts must not rely on the image defaults.

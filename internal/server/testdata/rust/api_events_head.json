@@ -1,0 +1,31 @@
+{
+ "status": 200,
+ "headers": [
+  [
+   "content-type",
+   "text/event-stream"
+  ],
+  [
+   "cache-control",
+   "no-cache"
+  ],
+  [
+   "content-security-policy",
+   "frame-ancestors 'none'"
+  ],
+  [
+   "x-frame-options",
+   "DENY"
+  ],
+  [
+   "x-content-type-options",
+   "nosniff"
+  ],
+  [
+   "transfer-encoding",
+   "chunked"
+  ]
+ ],
+ "note": "",
+ "body": "event: rebuild\ndata: {\"rebuilding\":false,\"started_at\":1794929365,\"last_duration_ms\":0}\n\nevent: stats\ndata: {\"summary\":{\"total_today\":200,\"blocked_today\":80,\"total_7d\":200,\"blocked_7d\":80,\"total_30d\":200,\"blocked_30d\":80,\"block_ratio_today\":0.4,\"block_ratio_7d\":0.4,\"block_ratio_30d\":0.4,\"cache_hit_rate_today\":0.925,\"cache_hit_rate_7d\":0.925,\"cache_hit_rate_30d\":0.925,\"avg_response_ms_today\":0.03333333333333333,\"avg_response_ms_7d\":0.03333333333333333,\"avg_response_ms_30d\":0.03333333333333333,\"queries_1m\":200},\"timeline\":[{\"timestamp\":1794929340,\"total\":200,\"blocked\":80}],\"top_domains\":[{\"domain\":\"allowed.example.com\",\"count\":42},{\"domain\":\"ads.example.com\",\"count\":28},{\"domain\":\"ads.list-one.test\",\"count\":13},{\"domain\":\"adserver.list-two.test\",\"count\":13},{\"domain\":\"cname.example.com\",\"count\":13},{\"domain\":\"dnssec.example.com\",\"count\":13},{\"domain\":\"nodata.example.com\",\"count\":13},{\"domain\":\"nxd.example.com\",\"count\":13},{\"domain\":\"ok.ads.example.com\",\"count\":13},{\"domain\":\"ok.list-two.test\",\"count\":13}],\"top_clients\":[{\"client_ip\":\"192.168.215.1\",\"doh_token\":null,\"count\":100},{\"client_ip\":\"192.168.215.1\",\"doh_token\":\"alpha-token\",\"count\":50},{\"client_ip\":\"192.168.215.1\",\"doh_token\":\"beta-token\",\"count\":50}],\"top_upstreams\":[{\"upstream\":\"0.250.250.254:15353\",\"count\":9,\"avg_ms\":0.4444444444444444}]}\n\nevent: ping\ndata: {\"at\":1794929374,\"seq\":1,\"traffic\":true}\n\nevent: stats\ndata: {\"summary\":{\"total_today\":200,\"blocked_today\":80,\"total_7d\":200,\"blocked_7d\":80,\"total_30d\":200,\"blocked_30d\":80,\"block_ratio_today\":0.4,\"block_ratio_7d\":0.4,\"block_ratio_30d\":0.4,\"cache_hit_rate_today\":0.925,\"cache_hit_rate_7d\":0.925,\"cache_hit_rate_30d\":0.925,\"avg_response_ms_today\":0.03333333333333333,\"avg_response_ms_7d\":0.03333333333333333,\"avg_response_ms_30d\":0.03333333333333333,\"queries_1m\":200},\"timeline\":[{\"timestamp\":1794929340,\"total\":200,\"blocked\":80}],\"top_domains\":[{\"domain\":\"allowed.example.com\",\"count\":42},{\"domain\":\"ads.example.com\",\"count\":28},{\"domain\":\"ads.list-one.test\",\"count\":13},{\"domain\":\"adserver.list-two.test\",\"count\":13},{\"domain\":\"cname.example.com\",\"count\":13},{\"domain\":\"dnssec.example.com\",\"count\":13},{\"domain\":\"nodata.example.com\",\"count\":13},{\"domain\":\"nxd.example.com\",\"count\":13},{\"domain\":\"ok.ads.example.com\",\"count\":13},{\"domain\":\"ok.list-two.test\",\"count\":13}],\"top_clients\":[{\"client_ip\":\"192.168.215.1\",\"doh_token\":null,\"count\":100},{\"client_ip\":\"192.168.215.1\",\"doh_token\":\"alpha-token\",\"count\":50},{\"client_ip\":\"192.168.215.1\",\"doh_token\":\"beta-token\",\"count\":50}],\"top_upstreams\":[{\"upstream\":\"0.250.250.254:15353\",\"count\":9,\"avg_ms\":0.4444444444444444}]}\n\n"
+}

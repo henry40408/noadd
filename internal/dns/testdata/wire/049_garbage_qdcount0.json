@@ -1,0 +1,22 @@
+{
+ "name": "garbage_qdcount0",
+ "note": "",
+ "settings": {
+  "upstream_servers": "0.250.250.254:15353",
+  "upstream_strategy": "sequential",
+  "block_mode": "null_ip",
+  "block_custom_ipv4": "",
+  "block_custom_ipv6": "",
+  "dnssec_disabled": "false"
+ },
+ "steps": [
+  {
+   "transport": "udp",
+   "request": "123401000000000000000000",
+   "response": "123481820000000000000000",
+   "upstream": null,
+   "sleep_before_s": 0,
+   "upstream_calls": 0
+  }
+ ]
+}
