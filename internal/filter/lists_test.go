@@ -180,3 +180,16 @@ func TestUpdateAllListsDownloadsAndRebuilds(t *testing.T) {
 	wantBlocked(t, engine, "b.example")
 	wantBlocked(t, engine, "nothing.example")
 }
+
+func TestUpdateAllListsNoRebuildSurvivesPanickingDownload(t *testing.T) {
+	ctx := context.Background()
+	database, manager := newManager(t)
+	manager.Downloader = nil // a nil downloader panics on first use
+	if _, err := database.AddFilterList(ctx, "doomed", "http://x.test/a", true); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := manager.UpdateAllListsNoRebuild(ctx)
+	if err != nil || changed {
+		t.Fatalf("changed=%v err=%v, want the panic reported as a failed list only", changed, err)
+	}
+}

@@ -137,3 +137,19 @@ func TestCoalescedRequestsCollapseIntoOneFollowUp(t *testing.T) {
 		t.Fatalf("runs = %d, want 3", got)
 	}
 }
+
+func TestPanickingTaskResetsStateAndMarksFailure(t *testing.T) {
+	coordinator := NewCoordinator()
+	<-coordinator.Spawn(func() error { panic("boom") })
+
+	if coordinator.Status().Rebuilding {
+		t.Fatal("rebuilding stuck at true after a panic")
+	}
+	if !coordinator.LastFailed() {
+		t.Fatal("a panicking task must count as failed")
+	}
+	<-spawnSleeping(coordinator, time.Millisecond)
+	if coordinator.LastFailed() {
+		t.Fatal("the coordinator must keep working after a panic")
+	}
+}

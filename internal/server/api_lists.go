@@ -342,7 +342,8 @@ func (a *api) addListsBatch(ctx context.Context, items []batchAddItem) batchAddR
 		wg.Add(1)
 		go func() {
 			defer func() { <-slots; wg.Done() }()
-			outcomes[i] = a.addOneList(ctx, strings.TrimSpace(*item.Name), strings.TrimSpace(*item.URL))
+			name, url := strings.TrimSpace(*item.Name), strings.TrimSpace(*item.URL)
+			outcomes[i] = a.addOneList(ctx, name, url)
 		}()
 	}
 	wg.Wait()
@@ -373,20 +374,29 @@ func (a *api) addOneList(ctx context.Context, name, url string) batchOutcome {
 	if err != nil {
 		return fail(err)
 	}
-	rollback := func(cause error) batchOutcome {
-		_ = a.DB.DeleteFilterList(ctx, id)
-		return fail(cause)
-	}
-	content, err := a.ListManager.Downloader.FetchChecked(ctx, url)
+	ruleCount, err := a.downloadIntoList(ctx, id, url)
 	if err != nil {
-		return rollback(err)
+		_ = a.DB.DeleteFilterList(ctx, id)
+		return fail(err)
 	}
-	ruleCount := int64(len(filter.ParseList(content)))
-	if err := a.DB.SetFilterListContent(ctx, id, content); err != nil {
-		return rollback(err)
-	}
-	_ = a.DB.UpdateFilterListStats(ctx, id, time.Now().Unix(), ruleCount)
 	return batchOutcome{added: &batchAddedEntry{ID: id, Name: name, URL: url, RuleCount: ruleCount}}
+}
+
+// downloadIntoList turns a panic into an error so the caller can roll back.
+func (a *api) downloadIntoList(ctx context.Context, id int64, url string) (ruleCount int64, err error) {
+	err = filter.CatchPanic(func() error {
+		content, err := a.ListManager.Downloader.FetchChecked(ctx, url)
+		if err != nil {
+			return err
+		}
+		ruleCount = int64(len(filter.ParseList(content)))
+		if err := a.DB.SetFilterListContent(ctx, id, content); err != nil {
+			return err
+		}
+		_ = a.DB.UpdateFilterListStats(ctx, id, time.Now().Unix(), ruleCount)
+		return nil
+	})
+	return ruleCount, err
 }
 
 // getRegistryFilters handles GET /api/registry/filters.

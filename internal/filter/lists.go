@@ -168,7 +168,11 @@ func (m *Manager) UpdateAllListsNoRebuild(ctx context.Context) (bool, error) {
 		wg.Add(1)
 		go func() {
 			defer func() { <-slots; wg.Done() }()
-			update, err := m.DownloadAndUpdateList(ctx, list.ID)
+			var update ListUpdate
+			err := CatchPanic(func() (err error) {
+				update, err = m.DownloadAndUpdateList(ctx, list.ID)
+				return err
+			})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

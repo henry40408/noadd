@@ -377,3 +377,18 @@ func TestUpstreamLatencyAndHealth(t *testing.T) {
 		t.Fatalf("health = %+v", health)
 	}
 }
+
+func TestBatchAddReportsPanickingDownloadAsFailure(t *testing.T) {
+	h := newAPIHarness(t, harnessOptions{})
+	h.deps.ListManager.Downloader = nil // a nil downloader panics on first use
+	recorder := h.authed("POST", "/api/lists/batch", `{"items":[{"name":"doomed","url":"http://x.test/a"}]}`)
+	wantStatus(t, recorder, http.StatusOK)
+	var response batchAddResponse
+	decodeBody(t, recorder, &response)
+	if len(response.Added) != 0 || len(response.Failed) != 1 || !strings.Contains(response.Failed[0].Error, "panic") {
+		t.Fatalf("response = %+v", response)
+	}
+	if lists := h.listsJSON(); len(lists) != 0 {
+		t.Fatalf("%d lists stored, want the failed one rolled back", len(lists))
+	}
+}

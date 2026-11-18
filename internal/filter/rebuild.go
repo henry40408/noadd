@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -122,7 +123,7 @@ func (c *Coordinator) run(task func() error) {
 	c.publish()
 
 	start := time.Now()
-	err := task()
+	err := CatchPanic(task)
 	c.lastDurationMs.Store(uint64(time.Since(start).Milliseconds()))
 	c.rebuilding.Store(false)
 	// After the flag and the duration, so a completion never carries the
@@ -132,4 +133,15 @@ func (c *Coordinator) run(task func() error) {
 	if err != nil {
 		slog.Warn("rebuild task failed; keeping previous filter", "event", "filter.rebuild_failed", "error", err)
 	}
+}
+
+// CatchPanic runs task and turns a panic into an error. A background
+// goroutine has no caller to recover, so without this a panic ends the process.
+func CatchPanic(task func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return task()
 }
