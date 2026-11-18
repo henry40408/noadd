@@ -10,7 +10,7 @@ noadd is a single-binary DNS ad-blocker. All components run as goroutines in one
                     │                                          │
 Clients ──────────► │  UDP/TCP Listener ──┐                    │
                     │                     ├──► DNS Handler     │
-DoH Clients ──────► │  DoH (axum) ────────┘       │            │
+DoH Clients ──────► │  DoH (net/http) ─────┘       │            │
                     │                         ┌───┴───┐        │
                     │                         │Filter │        │
                     │                         │Engine │        │
@@ -44,7 +44,7 @@ Every synthesized response copies the client's **RD** bit rather than assuming i
 
 `Handler.Handle` (`internal/dnsserver/handler.go`) rejects these before the filter, cache or upstream are touched:
 
-- **Non-`Query` opcodes** → **NOTIMP** (`build_notimp_response`), echoing opcode, ID and question.
+- **Non-`Query` opcodes** → **NOTIMP** (`dns.BuildNotimp`), echoing opcode, ID and question.
 - **EDNS version > 0** → **BADVERS** (RFC 6891 §6.1.3). The extended RCODE 16 is split across header and OPT; the OPT is emitted at version 0 to advertise the highest supported version.
 
 Neither is logged or rate-limited: they carry no domain to attribute.
@@ -147,7 +147,7 @@ Versioned by `PRAGMA user_version`, applied incrementally and forward-only. New 
 
 ### Upstream DNS
 
-`parse_upstreams` splits `upstream_servers` on newlines and commas and validates each entry: `ip[:port]` (plain, default 53), `tls://host[:port]` (DoT, default 853), `https://host[:port][/path]` (DoH, default 443 and `/dns-query`).
+`ParseUpstreams` splits `upstream_servers` on newlines and commas and validates each entry: `ip[:port]` (plain, default 53), `tls://host[:port]` (DoT, default 853), `https://host[:port][/path]` (DoH, default 443 and `/dns-query`).
 
 A bare IP is tried as `SocketAddr`, then as `IpAddr` with port 53. The two never both succeed, and going through `IpAddr` rather than looking for `:` keeps a bare IPv6 literal from being misread as carrying a port. `inet_aton` shorthand and octal forms stay errors; bare hostnames are invalid (no transport to infer).
 
@@ -179,19 +179,19 @@ The no-JavaScript exceptions — the dashboard's 24-hour chart, the statistics c
 
 There is no `index.html` and no SPA fallback; an unmatched path 404s.
 
-`internal/assets/static/` (`app.css`, `app.js`) is embedded with `include_dir` and served with a per-file content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate and get `304` when unchanged. Server-rendered pages get `no-store` from the `no_store` layer.
+`internal/assets/static/` (`app.css`, `app.js`) is embedded with `go:embed` and served with a per-file content-hash `ETag` and `Cache-Control: no-cache`, so browsers revalidate and get `304` when unchanged. Server-rendered pages get `no-store` from the `no_store` layer.
 
 All pushes ride one connection, `GET /api/events`: a `ping` heartbeat for the status indicator, `rebuild` edges for the rebuild banner, a `stats` snapshot every 10 s for the dashboard (`?stats=1`), and the live tail (`?logs=1`). One connection because the indicator is on every page and a browser without HTTP/2 gets only six per origin.
 
 **Session tokens are never stored.** `sessions.token_hash` and the in-memory `SessionStore` key hold an unsalted BLAKE2b digest (`internal/auth/tokens.go`); the raw token exists only in `Set-Cookie` and `Cookie`, so a copied database yields no usable credential. Unsalted is deliberate: the token is 64 random alphanumerics, so there is no dictionary to defend against, and a presented cookie needs an indexed equality lookup. Hashing happens only in `sessionCookieHashes` (`internal/server/helpers.go`) — reading the session cookie directly would reintroduce plaintext. This is distinct from the salted session log ID, which is salted and truncated so a log line cannot be matched to a stolen row. The `user_version` 9 migration dropped every existing session (SQLite cannot hash in SQL, and rehashing in application code would leave plaintext in freelist pages and the WAL); an older binary against a migrated database silently rejects every session.
 
-Sessions expire on two layers: absolute, 7 days (`SESSION_MAX_AGE_SECS`), and idle, 48 hours from `last_seen` (`SESSION_IDLE_TIMEOUT_SECS`). 48 hours is far above OWASP's suggestion on purpose — an appliance tab left open overnight should still be signed in; what matters is that an idle timeout exists. `validate_session` enforces both lazily; `prune_expired` (memory) and `Database::purge_expired_sessions` (table) sweep the rest. `purge_expired_sessions` and the startup `load_sessions` share one SQL predicate, so a session dead to `validate_session` cannot survive a restart. The sweep runs every tenth 60-second `last_seen` flush tick (~10 min), always *after* the flush, or the SQL predicate could purge a session memory still considers alive.
+Sessions expire on two layers: absolute, 7 days (`SESSION_MAX_AGE_SECS`), and idle, 48 hours from `last_seen` (`SESSION_IDLE_TIMEOUT_SECS`). 48 hours is far above OWASP's suggestion on purpose — an appliance tab left open overnight should still be signed in; what matters is that an idle timeout exists. `Manager.Validate` enforces both lazily; `PruneExpired` (memory) and `DB.PurgeExpiredSessions` (table) sweep the rest. `PurgeExpiredSessions` and the startup `LoadSessions` share one SQL predicate, so a session dead to `validate_session` cannot survive a restart. The sweep runs every tenth 60-second `last_seen` flush tick (~10 min), always *after* the flush, or the SQL predicate could purge a session memory still considers alive.
 
 The session cookie is `HttpOnly` and `SameSite=Lax`. `Lax` withholds it from every cross-site `POST`/`PUT`/`DELETE`, all mutations use those methods, and no `CorsLayer` is installed. The one case `Lax` allows over `Strict` — a cross-site top-level `GET` — is harmless because no `GET` handler writes, and `Lax` keeps deep links from outside working. `Secure` is resolved at startup by `config::resolve_cookie_secure` from whether noadd terminates TLS; proxy-terminated deployments opt in with `--cookie-secure`, since a `Secure` cookie over HTTP is silently dropped and would lock operators out. With `Secure` on, the cookie is named `__Host-session` (browser-enforced `Path=/`, no `Domain`, no subdomain overwrite); both names are accepted on read, `__Host-` preferred, so flipping the setting does not invalidate live sessions.
 
 On top of that sits a stateless origin check, a header-based origin guard (`internal/server/csrf.go`), applied to the admin handler chain only — DoH authenticates by URL token and legitimately receives cross-origin `POST /dns-query`. The comments in `csrf.go` document it. For every method but `GET`/`HEAD`/`OPTIONS` it returns `403` to any request a browser marks cross-origin:
 
-- **`Sec-Fetch-Site`** decides when present: `same-origin` and `none` pass, everything else is refused — including `same-site`, which only says the registrable domain matches. That closes `SameSite`'s gap: a sibling subdomain or co-hosted app is same-site and *does* get the cookie (`a_same_site_post_from_a_sibling_subdomain_is_refused`). Falling back to an `Origin`/`Host` comparison there would not suffice, since behind a port-dropping proxy another service on the host can match `Host` (`a_same_site_post_is_refused_even_when_its_origin_matches_host`).
+- **`Sec-Fetch-Site`** decides when present: `same-origin` and `none` pass, everything else is refused — including `same-site`, which only says the registrable domain matches. That closes `SameSite`'s gap: a sibling subdomain or co-hosted app is same-site and *does* get the cookie (`TestSameSitePostFromASiblingSubdomainIsRefused`). Falling back to an `Origin`/`Host` comparison there would not suffice, since behind a port-dropping proxy another service on the host can match `Host` (`TestSameSitePostIsRefusedEvenWhenOriginMatchesHost`).
 - **Without it** (Safari before 16.4), the `Origin` authority — host *and port* — must byte-match the request's (request-target authority, else `Host`); a mismatch or `Origin: null` is refused. Matching the port stops another service on the same host; ignoring scheme lets a TLS-terminating proxy's `Host` match an `https://` `Origin`. It fails behind a proxy that drops the port (nginx's `$host` on a non-default port), which README → *The `Host` header behind a reverse proxy* warns about.
 - **Neither header** means a non-browser client (API key, `curl`, the OS resolver) that sends no ambient cookie; it passes.
 
@@ -203,7 +203,7 @@ A rejection logs `csrf.rejected` with method, path, and all three inputs (`Sec-F
 
 Most `/api/*` endpoints accept the `session` cookie or `Authorization: Bearer <api key>`, unified behind the `AuthedUser` extractor. Session management (`GET /api/sessions`, `DELETE /api/sessions/{id}`) goes through `AuthedUser` too; the cookie is only read to flag `is_current` and to clear it after a self-revoke. Changing your own password (`POST /api/users/me/password`) is the cookie-only endpoint. `GET /api/mobileconfig/{token}` uses its URL token as the sole credential.
 
-A password change revokes the caller's *other* sessions — only that operator's (`revoke_user_sessions_except`, `Database::delete_user_sessions_except`), so containing one account never signs out the team — and **rotates the caller's own token**. The two cover different attackers: revocation ejects live browsers, rotation covers a token leaked through a log, shell history or screenshot. The replacement is stored before the old token is destroyed, so a failure leaves a working session, and the endpoint answers 204 either way (the password write has already committed). Both cookies come from one `build_session_cookie`, shared with login, so rotation cannot drop `HttpOnly` or `Secure`. There is no periodic rotation: it buys little over the absolute timeout and races with in-flight requests. `POST /api/auth/revoke-others` stays global across operators on purpose — it is the "sign everyone else out" panic button.
+A password change revokes the caller's *other* sessions — only that operator's (`RevokeUserSessionsExcept`, `DB.DeleteUserSessionsExcept`), so containing one account never signs out the team — and **rotates the caller's own token**. The two cover different attackers: revocation ejects live browsers, rotation covers a token leaked through a log, shell history or screenshot. The replacement is stored before the old token is destroyed, so a failure leaves a working session, and the endpoint answers 204 either way (the password write has already committed). Both cookies come from one `sessionCookie`, shared with login, so rotation cannot drop `HttpOnly` or `Secure`. There is no periodic rotation: it buys little over the absolute timeout and races with in-flight requests. `POST /api/auth/revoke-others` stays global across operators on purpose — it is the "sign everyone else out" panic button.
 
 API keys are BLAKE2b-hashed at rest and tied to an operator by `ON DELETE CASCADE`, inheriting that operator's permissions; they are managed at `GET/POST/DELETE /api/api-keys` from the Account page (token shown once). Minting a key and adding or removing an operator require `ReauthedUser`: a session must have proved its password within `REAUTH_WINDOW_SECS` (5 min; login counts), forward-auth callers are exempt, and API keys are refused with `password_required`. An OpenAPI 3.1 spec is at `GET /api/openapi.json` with Scalar at `GET /api/docs`; both require authentication to limit pre-auth recon, and cover a core subset of endpoints.
 
@@ -227,7 +227,7 @@ The `noStore` middleware (`internal/server/headers.go`) adds `Cache-Control: no-
 
 Right-to-left matters because common proxies (nginx's `$proxy_add_x_forwarded_for`, Cloudflare) *append*, so `XFF: <forged>, <real client>` arrives through a trustworthy proxy; the leftmost entry is attacker-chosen.
 
-An unreadable entry ends the walk too, since skipping it would reach entries no proxy vouched for. `parse_forwarded_hop` normalises the forms real proxies emit — `1.2.3.4:53821` (Azure, IIS ARR), bracketed IPv6, RFC 7239 `for=` — so they are read rather than ending the walk early.
+An unreadable entry ends the walk too, since skipping it would reach entries no proxy vouched for. `parseForwardedHop` normalises the forms real proxies emit — `1.2.3.4:53821` (Azure, IIS ARR), bracketed IPv6, RFC 7239 `for=` — so they are read rather than ending the walk early.
 
 The trust list must therefore name every hop; an unlisted hop is reported as the client — imprecise, but not aimable. A range that also covers clients (`192.168.1.0/24` for "my LAN") is unsafe: the walk steps over the real client onto whatever it wrote. The list means "only proxies hold these addresses".
 
@@ -268,7 +268,7 @@ A timestamp-first index can only serve a filter by walking the window: on a 1.48
 
 `(blocked, timestamp)` replaces what the dropped metrics index did for the verdict filter (page 20: 102/57 pages without it, 18/12 with).
 
-Across `logs_page_miss_bench`'s 42 readings the query log went from 368 963 page misses to 159 649 on the 1.48 M-row database. Migrating it takes ~3 s on an SSD and leaves a 25% freelist, past `VACUUM_FREELIST_RATIO`, so the first hourly maintenance rewrites the file once — measure on the appliance before relying on either figure there.
+Across the Rust `logs_page_miss_bench`'s 42 readings (no Go counterpart: the pure-Go driver has no page-miss counter) the query log went from 368 963 page misses to 159 649 on the 1.48 M-row database. Migrating it takes ~3 s on an SSD and leaves a 25% freelist, past `VACUUM_FREELIST_RATIO`, so the first hourly maintenance rewrites the file once — measure on the appliance before relying on either figure there.
 
 The query-log index tests in `internal/db` (`queries_test.go`, `migrate_test.go`) bound each filter's reads and check that every database opens to the same indexes; the latter opens databases from versions 9, 10, 11, 16 and fresh, requires the same five indexes, and runs every reader that once named a dropped index.
 
@@ -286,15 +286,15 @@ The version-16 migration fills the rollups from existing rows, replacing rather 
 
 A reader takes whole units from the first one inside its window (`firstWholeUnit`) from a rollup, and only the partial unit the window starts inside from `query_logs` via `idx_query_logs_timestamp`. The newest unit needs no table read, since rollups are written in the rows' own transaction. Both halves are one statement, so one snapshot. `summary_multi_since` tells its three windows apart by which arm a table row came from. `timeline_since` reads `query_stats_quarter` when its bucket is a whole number of quarters and the table otherwise (only while the log is a few hours old).
 
-The dashboard reads only rollups — `SummaryMultiSince`, `TimelineSince`, `TrafficListsSince`, `TopUpstreamsSince`, and `DomainStatsSince` for domain suggestions; a tick went from 10 774 page misses to 227. `dashboard_readings_equal_a_recount_of_the_table` (`tests/stats_db_test.rs`) holds each to a direct table count for windows starting before the data, on an hour, on a quarter, inside each, and after it.
+The dashboard reads only rollups — `SummaryMultiSince`, `TimelineSince`, `TrafficListsSince`, `TopUpstreamsSince`, and `DomainStatsSince` for domain suggestions; a tick went from 10 774 page misses to 227. `TestDashboardReadingsEqualARecountOfTheTable` (`internal/db/rust_stats_test.go`) holds each to a direct table count for windows starting before the data, on an hour, on a quarter, inside each, and after it.
 
-`StatsScanSince` serves the Statistics page as one statement of four arms — `query_stats_quarter` from the earlier window's first whole quarter, `query_stats_metrics_hour` from the range's first whole hour, and the table rows each window starts inside — distinguished by a leading column, so a table row both windows start inside counts once per window. The API-only readers fold the same tables: `window_metrics_since` the metrics rollup, `timeline_multi_since` and `hourly_heatmap_since` the quarter rollup whenever bucket and offset are whole quarters. That is why the API rounds `tz_offset` to the nearest quarter hour; an off-grid offset would count the table. A 30-day visit went from 11 641 page misses to 3 644. `statistics_readings_equal_a_recount_of_the_table` guards it, including offsets for India, Nepal, and a seven-minute one that takes the table path.
+`StatsScanSince` serves the Statistics page as one statement of four arms — `query_stats_quarter` from the earlier window's first whole quarter, `query_stats_metrics_hour` from the range's first whole hour, and the table rows each window starts inside — distinguished by a leading column, so a table row both windows start inside counts once per window. The API-only readers fold the same tables: `window_metrics_since` the metrics rollup, `timeline_multi_since` and `hourly_heatmap_since` the quarter rollup whenever bucket and offset are whole quarters. That is why the API rounds `tz_offset` to the nearest quarter hour; an off-grid offset would count the table. A 30-day visit went from 11 641 page misses to 3 644. `TestStatisticsReadingsEqualARecountOfTheTable` guards it, including offsets for India, Nepal, and a seven-minute one that takes the table path.
 
 ### Measuring these queries
 
 Index work is measured in **page misses** (`SQLITE_DBSTATUS_CACHE_MISS`, 4 KiB pages fetched from the file), not milliseconds: development runs on an SSD, the appliance off an SD card, and a whole-table read can look free on one and take seconds on the other. (`outcome_breakdown_since` stayed uncovered through version 11 because a wall-clock reading hid a 12 173-vs-2 157 page difference.) The page benchmarks in `internal/server/pages_data_test.go` and `internal/db` report time and allocations against `BENCH_DB`, with `BENCH_NOW` pinning the clock for an older copy; the pure-Go driver exposes no page-miss counter, so allocations stand in for it. Distrust a wall-clock reading when the two disagree.
 
-`Database::read_page_cache_stats` and `Database::reset_read_page_accounting` are the instrumentation. The latter turns `mmap_size` off: pages read through the 256 MiB mapping bypass the pager cache and would report almost no misses, though the appliance still faults them in from the card.
+The Rust build measured these with `Database::read_page_cache_stats` and `Database::reset_read_page_accounting`, which the Go build does not have. The latter turned `mmap_size` off: pages read through the 256 MiB mapping bypass the pager cache and would report almost no misses, though the appliance still faults them in from the card.
 
 ### One scan per rollup family, not one per reading
 
@@ -302,13 +302,13 @@ Index work is measured in **page misses** (`SQLITE_DBSTATUS_CACHE_MISS`, 4 KiB p
 
 **Not collected:** `query_logs` does not record which list or rule blocked a query, so there is no blocked-by-list breakdown (it needs a new column and migration); the only per-list figure is the filters page's Impact column, from the live engine. Upstream failure rates and cache internals (entries, evictions, TTL spread) are not collected either.
 
-The Database Health card's row count is not a scan: `SELECT COUNT(*)` walks an index end to end, so the count lives in `settings.query_log_count`, seeded by the version-13 migration and moved inside their own transactions by the only three writes that change the row count — the logger's batch, the hourly prune and Clear All. `total_log_count` falls back to counting if the row is missing. The query log's pager reads the same counter (`read_log_count`, via `count_logs`) whenever no filter is applied.
+The Database Health card's row count is not a scan: `SELECT COUNT(*)` walks an index end to end, so the count lives in `settings.query_log_count`, seeded by the version-13 migration and moved inside their own transactions by the only three writes that change the row count — the logger's batch, the hourly prune and Clear All. `TotalLogCount` falls back to counting if the row is missing. The query log's pager reads the same counter (`readLogCount`, via `CountLogs`) whenever no filter is applied.
 
 `INDEXED BY` is on every statement that reads `query_logs` through an index: the type runs name `idx_query_logs_type_blocked_ts` so each run is the seek the merge depends on; the rollup readers' table arms and the heatmap's table path name `idx_query_logs_timestamp` (the arms read at most one unit, so the rowid lookups are cheap).
 
 Every index migration runs `ANALYZE`: the planner keeps its old plan until `sqlite_stat1` is refreshed, and the hourly `PRAGMA optimize` lets it drift.
 
-The heatmap's table path derives weekday and hour with integer arithmetic on the millisecond timestamp rather than `strftime`, which formats two strings per row; `heatmap_matches_strftime_across_a_full_week` pins the two together.
+The heatmap's table path derives weekday and hour with integer arithmetic on the millisecond timestamp rather than `strftime`, which formats two strings per row; `TestHeatmapMatchesStrftimeAcrossAFullWeek` pins the two together.
 
 ### Read pool and SQLite global state
 

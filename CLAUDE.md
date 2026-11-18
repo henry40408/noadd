@@ -44,7 +44,7 @@ E2E_FEATURES=features/dashboard.feature go test -mod=vendor -count=1 .   # comma
 ```
 
 - A feature's tag (`@app`, `@auth`, `@onboarding`) picks its instance; `e2e_test.go` starts one server per tag (HTTP 14100-14102, DNS = HTTP + 1000). Scenarios run one at a time, in file order.
-- Needs a local Chrome or Chromium. `E2E_CHROME` pins the binary, `E2E_BINARY` the server binary, `E2E_SERVER_LOG` appends every server's stderr to a file (a crashed server otherwise shows only as a refused connection).
+- Needs a local Chrome or Chromium. `E2E_CHROME` pins the binary, `E2E_BINARY` the server binary, `E2E_SERVER_LOG` appends every server's stderr (the setup token and fatal errors; the slog stream goes to stdout and is discarded) to a file, so a crashed server does not show only as a refused connection.
 - Run e2e one at a time, niced, and check afterwards that no `noadd` or Chrome process is left.
 - Every `Expect*` helper in `e2e/internal/harness` polls for 30 s and reports the last value seen. Text is `textContent`, not rendered text: the UI uppercases badges in CSS, so assert against the markup.
 - Run `gofmt`, `go vet` and staticcheck inside `e2e/` as well.
@@ -195,7 +195,7 @@ Query path (`internal/dnsserver/handler.go`): **filter → cache → upstream fo
 
 ## Diagnostic logging
 
-Separate from the `query_logs` table: the `log/slog` stream on stderr, configured in `cmd/noadd` (`--log-format` `full|json`, `NOADD_LOG_LEVEL`, default `info`).
+Separate from the `query_logs` table: the `log/slog` stream on stdout (stderr carries the setup token and fatal errors only), configured in `cmd/noadd` (`--log-format` `full|json`, `NOADD_LOG_LEVEL`, default `info`).
 
 **Every `Debug`/`Info`/`Warn`/`Error` call carries `"event", "domain.action"` as its first field**, every value is a field rather than interpolated, and the message is a static string:
 

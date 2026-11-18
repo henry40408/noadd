@@ -5,10 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# A newer push cancels the older run of the same ref.
 permissions:
   contents: read
 
+# A newer push cancels the older run of the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
