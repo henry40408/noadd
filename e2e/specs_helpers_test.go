@@ -27,6 +27,7 @@ const (
 	pagesNoJSPort      = 14110
 	logsLiveTailPort   = 14111
 	statsChartsPort    = 14112
+	dashboardTickPort  = 14113
 )
 
 // profile says how a spec's browsers are emulated.
