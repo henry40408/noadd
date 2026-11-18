@@ -207,8 +207,14 @@ func TestWorkLimiterIsSizedAndReleasesSlots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if work.Available() != work.Limit() {
-		t.Fatalf("available=%d, want %d", work.Available(), work.Limit())
+	// The slot is released just after the result is delivered, so the count
+	// settles a moment later rather than the instant the last caller returns.
+	deadline := time.Now().Add(10 * time.Second)
+	for work.Available() != work.Limit() {
+		if time.Now().After(deadline) {
+			t.Fatalf("available=%d, want %d", work.Available(), work.Limit())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
