@@ -25,7 +25,8 @@ func concurrencyEntry(i int64) QueryLogEntry {
 }
 
 // A reader and a streaming writer run concurrently under WAL on their own
-// connections; both must finish. Only a generous 5 s ceiling, as in Rust.
+// connections; both must finish. The ceiling only catches a deadlock; Rust used 5 s, but a shared CI runner
+// under -race took 16 s.
 func TestReaderAndWriterRunConcurrentlyWithoutError(t *testing.T) {
 	ctx := context.Background()
 	database := fileDB(t)
@@ -71,8 +72,8 @@ func TestReaderAndWriterRunConcurrentlyWithoutError(t *testing.T) {
 	go func() { group.Wait(); close(finished) }()
 	select {
 	case <-finished:
-	case <-time.After(5 * time.Second):
-		t.Fatal("writer + reader must both complete within 5s")
+	case <-time.After(60 * time.Second):
+		t.Fatal("writer + reader must both complete within 60s")
 	}
 	close(errs)
 	for err := range errs {
