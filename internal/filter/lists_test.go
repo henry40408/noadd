@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -191,5 +193,56 @@ func TestUpdateAllListsNoRebuildSurvivesPanickingDownload(t *testing.T) {
 	changed, err := manager.UpdateAllListsNoRebuild(ctx)
 	if err != nil || changed {
 		t.Fatalf("changed=%v err=%v, want the panic reported as a failed list only", changed, err)
+	}
+}
+
+func TestDownloadRespectsSizeLimit(t *testing.T) {
+	ctx := context.Background()
+	const limit = 16
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		size, _ := strconv.Atoi(r.URL.Query().Get("size"))
+		_, _ = w.Write([]byte(strings.Repeat("a", size)))
+	}))
+	t.Cleanup(server.Close)
+	downloader := NewDownloader("noadd-test")
+	downloader.maxBytes = limit
+
+	body, err := downloader.Fetch(ctx, server.URL+"?size=16")
+	if err != nil || len(body) != limit {
+		t.Fatalf("body at the limit: len %d, err %v", len(body), err)
+	}
+	if _, err := downloader.Fetch(ctx, server.URL+"?size=17"); err == nil {
+		t.Fatal("body over the limit was accepted")
+	}
+}
+
+func TestOversizedDownloadKeepsStoredList(t *testing.T) {
+	ctx := context.Background()
+	var oversized atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if oversized.Load() {
+			_, _ = w.Write([]byte("||new.example^\n||more.example^\n"))
+			return
+		}
+		_, _ = w.Write([]byte("||old.example^\n"))
+	}))
+	t.Cleanup(server.Close)
+	database, manager := newManager(t)
+	id, err := database.AddFilterList(ctx, "a", server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.DownloadAndUpdateList(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	oversized.Store(true)
+	manager.Downloader.maxBytes = int64(len("||old.example^\n"))
+	if _, err := manager.DownloadAndUpdateList(ctx, id); err == nil {
+		t.Fatal("oversized download succeeded")
+	}
+	stored, found, err := database.GetFilterListContent(ctx, id)
+	if err != nil || !found || stored != "||old.example^\n" {
+		t.Errorf("stored list = %q, found %v, err %v", stored, found, err)
 	}
 }

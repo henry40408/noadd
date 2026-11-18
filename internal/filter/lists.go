@@ -29,17 +29,24 @@ var DefaultLists = []DefaultList{
 const (
 	downloadTimeout     = 60 * time.Second
 	concurrentDownloads = 4
+	// maxListBytes bounds what one download may put in memory: a hostile or
+	// broken URL could otherwise stream without end. The Rust version had no
+	// limit; this is well above the largest real lists (tens of MiB at most).
+	maxListBytes = 64 << 20
 )
 
 // Downloader fetches list bodies.
 type Downloader struct {
 	Client    *http.Client
 	UserAgent string
+	// maxBytes is the largest body accepted; a larger one is an error, never a
+	// truncated list.
+	maxBytes int64
 }
 
 // NewDownloader returns a downloader with the 60 s timeout lists get.
 func NewDownloader(userAgent string) *Downloader {
-	return &Downloader{Client: &http.Client{Timeout: downloadTimeout}, UserAgent: userAgent}
+	return &Downloader{Client: &http.Client{Timeout: downloadTimeout}, UserAgent: userAgent, maxBytes: maxListBytes}
 }
 
 // Fetch returns the body at url. Like the Rust client it does not look at the
@@ -68,8 +75,15 @@ func (d *Downloader) get(ctx context.Context, url string, failOnStatus bool) (st
 	if failOnStatus && response.StatusCode >= 400 {
 		return "", fmt.Errorf("HTTP status %s for url (%s)", response.Status, url)
 	}
-	body, err := io.ReadAll(response.Body)
-	return string(body), err
+	// One byte past the limit tells "exactly the limit" from "too large".
+	body, err := io.ReadAll(io.LimitReader(response.Body, d.maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) > d.maxBytes {
+		return "", fmt.Errorf("list at %s is larger than %d bytes", url, d.maxBytes)
+	}
+	return string(body), nil
 }
 
 // ListUpdate is the result of refreshing one list.
