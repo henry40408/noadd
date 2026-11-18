@@ -148,6 +148,18 @@ func TestAuthedRoutesAnswer500WhenTheDatabaseFails(t *testing.T) {
 		{"GET", "/api/stats/v2/highlights", ""},
 		{"GET", "/api/stats/v2/top-domains", ""},
 		{"GET", "/api/stats/v2/top-clients", ""},
+		{"POST", "/api/rules", `{"rule":"ads.example.com"}`},
+		{"POST", "/api/lists", `{"name":"n","url":"https://example.com/l.txt"}`},
+		{"PUT", "/api/lists/1", `{"name":"n","url":"https://example.com/l.txt"}`},
+		{"POST", "/api/lists/1/check", ""},
+		{"PUT", "/api/settings", `{"log_retention_days":"7"}`},
+		{"POST", "/api/users", `{"username":"bob","password":"correct horse battery staple"}`},
+		{"DELETE", "/api/users/99", ""},
+		{"DELETE", "/api/sessions/99", ""},
+		{"POST", "/api/api-keys", `{"name":"ci"}`},
+		{"DELETE", "/api/api-keys/99", ""},
+		{"POST", "/api/auth/revoke-others", ""},
+		{"GET", "/api/mobileconfig/tok", ""},
 	}
 	for _, route := range routes {
 		recorder := h.authed(route.method, route.path, route.body)
@@ -188,4 +200,16 @@ func TestNewInvalidSessionLimiterAllowsThenRefuses(t *testing.T) {
 	if limiter.Check(ip) {
 		t.Fatal("still allowed past the threshold")
 	}
+}
+
+func TestLoginAndSetupAnswer500WhenTheDatabaseFails(t *testing.T) {
+	h := newAPIHarness(t, harnessOptions{})
+	if err := h.db.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	login := h.do(request{method: "POST", path: "/api/auth/login", body: `{"username":"admin","password":"admin"}`})
+	wantStatus(t, login, http.StatusInternalServerError)
+	setup := h.do(request{method: "POST", path: "/api/auth/setup",
+		body: `{"username":"root","password":"correct horse battery staple","setup_token":"` + testSetupToken + `"}`})
+	wantStatus(t, setup, http.StatusInternalServerError)
 }
