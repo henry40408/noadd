@@ -23,6 +23,11 @@ const (
 	invalidSessionWindowSecs  = 60
 )
 
+// NewInvalidSessionLimiter is the limiter APIDeps.InvalidSessionLimiter takes.
+func NewInvalidSessionLimiter() *auth.Limiter {
+	return auth.NewLimiter(invalidSessionMaxAttempts, invalidSessionWindowSecs*time.Second, nil)
+}
+
 // sessionCookieNames lists the cookie names to read, __Host- first.
 var sessionCookieNames = [...]string{hostSessionCookie, plainSessionCookie}
 
