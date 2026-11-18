@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -196,4 +198,24 @@ func TestPruneLeavesRollupsEqualToTheRemainingLogs(t *testing.T) {
 	}
 
 	assertRollupsMatchLogs(t, database)
+}
+
+// VACUUM rewrites the database through the WAL, so the truncating checkpoint
+// after it is what gives that space back; returning early would leave it.
+func TestMaintenanceTruncatesTheWALAfterAVacuum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.sqlite3")
+	database := openDB(t, path)
+	freelistOfAFifth(t, database, 0)
+
+	if err := database.RunMaintenance(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("WAL is %d bytes after maintenance, want 0 (truncated)", info.Size())
+	}
 }
