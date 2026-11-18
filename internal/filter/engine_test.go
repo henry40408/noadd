@@ -290,3 +290,14 @@ func TestMoreThan64ListsShareTheTopBit(t *testing.T) {
 		t.Errorf("unique = %v", unique)
 	}
 }
+
+func TestHeapBytesGrowsWithRules(t *testing.T) {
+	empty := NewFromNamed(nil, nil)
+	loaded := NewFromNamed([]NamedBlockRule{
+		named(blockRule("ads.example.com", true), "list1"),
+		named(blockRule("exact.example.com", false), "list1"),
+	}, []ParsedRule{blockRule("ok.example.com", true)})
+	if loaded.HeapBytes() <= empty.HeapBytes() {
+		t.Fatalf("HeapBytes loaded %d, empty %d", loaded.HeapBytes(), empty.HeapBytes())
+	}
+}
