@@ -97,3 +97,21 @@ func TestUnparseableQueryUsesTheDefaultLimit(t *testing.T) {
 		t.Fatal("expected TC with the 512 default")
 	}
 }
+
+// A response exactly as long as the client's advertised size fits; one byte
+// more is truncated.
+func TestResponseAtTheAdvertisedSizeIsNotTruncated(t *testing.T) {
+	response := responseWithARecords(t, 120, 0)
+	if len(response) <= minUDPSize {
+		t.Fatalf("precondition: %d bytes", len(response))
+	}
+
+	exact := TruncateForUDP(ednsQuery(t, uint16(len(response))), response)
+	if !bytes.Equal(exact, response) {
+		t.Fatal("a response equal to the advertised size was truncated")
+	}
+	oneOver := TruncateForUDP(ednsQuery(t, uint16(len(response)-1)), response)
+	if !mustUnpack(t, oneOver).Truncated {
+		t.Fatal("a response one byte over the advertised size must be truncated")
+	}
+}

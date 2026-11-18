@@ -430,3 +430,68 @@ func TestConcurrentAccessIsRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestWeightCountsFourBytesPerTTLOffset(t *testing.T) {
+	key := testKey("a.test", 1)
+	entry := Entry{Bytes: make([]byte, 10), TTLOffsets: []uint32{1, 2, 3}}
+
+	want := EntryOverheadBytes + int64(len(key.Domain)) + 10 + 4*3
+	if got := Weight(key, entry); got != want {
+		t.Fatalf("weight = %d, want %d", got, want)
+	}
+}
+
+// The stale window is inclusive: an entry exactly TTL+window old is still
+// served stale, and one nanosecond later is gone.
+func TestStaleWindowEdgeIsInclusive(t *testing.T) {
+	const ttl, window = 10 * time.Second, 5 * time.Second
+	for _, c := range []struct {
+		name    string
+		elapsed time.Duration
+		want    State
+	}{
+		{"exactly at the edge", ttl + window, Stale},
+		{"one nanosecond past", ttl + window + time.Nanosecond, Miss},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newFakeClock()
+			cache := newTestCache(bigCapacity, clock, window)
+			key := testKey("edge.test", 1)
+			cache.Put(key, []byte{1}, ttl, false)
+
+			clock.Advance(c.elapsed)
+
+			if _, state := cache.Get(key); state != c.want {
+				t.Fatalf("state = %v, want %v", state, c.want)
+			}
+		})
+	}
+}
+
+// An entry is fresh through exactly its TTL and stale one nanosecond later.
+func TestFreshnessEdgeIsInclusive(t *testing.T) {
+	const ttl = 10 * time.Second
+	for _, c := range []struct {
+		name    string
+		elapsed time.Duration
+		want    State
+	}{
+		{"exactly the TTL", ttl, Fresh},
+		{"one nanosecond past", ttl + time.Nanosecond, Stale},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newFakeClock()
+			cache := newTestCache(bigCapacity, clock, time.Minute)
+			key := testKey("fresh.test", 1)
+			cache.Put(key, []byte{1}, ttl, false)
+
+			clock.Advance(c.elapsed)
+
+			if _, state := cache.Get(key); state != c.want {
+				t.Fatalf("state = %v, want %v", state, c.want)
+			}
+		})
+	}
+}

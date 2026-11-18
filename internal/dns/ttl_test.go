@@ -294,3 +294,59 @@ func TestCacheTTL(t *testing.T) {
 		})
 	}
 }
+
+func TestFieldEndingAtTheBufferEndIsPatched(t *testing.T) {
+	buf := []byte{0, 0, 0, 0, 0, 0, 1, 0}
+
+	ApplyElapsed(buf, []uint32{4}, 100)
+
+	if got := ttlAt(buf, 4); got != 156 {
+		t.Fatalf("TTL = %d, want 156", got)
+	}
+}
+
+func TestSkipNameNeedsBothBytesOfAPointer(t *testing.T) {
+	if _, ok := skipName([]byte{0xC0}, 0); ok {
+		t.Fatal("a pointer cut after its first byte must be rejected")
+	}
+	next, ok := skipName([]byte{0xC0, 0x00}, 0)
+	if !ok || next != 2 {
+		t.Fatalf("complete pointer: next %d, ok %v", next, ok)
+	}
+}
+
+func TestHeaderOnlyMessageIsWalkable(t *testing.T) {
+	offsets, ok := scanTTLOffsets(make([]byte, headerLen))
+	if !ok || len(offsets) != 0 {
+		t.Fatalf("offsets %v, ok %v", offsets, ok)
+	}
+	if _, ok := scanTTLOffsets(make([]byte, headerLen-1)); ok {
+		t.Fatal("a buffer shorter than the header must be rejected")
+	}
+}
+
+func TestRecordWithEmptyRDataEndsExactlyAtTheBufferEnd(t *testing.T) {
+	msg := newResponseMsg(12, "example.com.", mdns.TypeA)
+	msg.Answer = []mdns.RR{&mdns.ANY{Hdr: mdns.RR_Header{
+		Name: "example.com.", Rrtype: mdns.TypeNULL, Class: mdns.ClassINET, Ttl: 300,
+	}}}
+	wire := mustPack(t, msg)
+
+	if offsets := TTLOffsets(wire); len(offsets) != 1 {
+		t.Fatalf("offsets = %v, want one", offsets)
+	}
+}
+
+// Every proper prefix of a message is unwalkable and must neither panic nor
+// yield offsets.
+func TestEveryTruncationIsRejectedWithoutPanicking(t *testing.T) {
+	msg := newResponseMsg(13, "example.com.", mdns.TypeA)
+	msg.Answer = []mdns.RR{aRecord("example.com.", 300, 1)}
+	wire := mustPack(t, msg)
+
+	for length := range wire {
+		if offsets := TTLOffsets(wire[:length]); len(offsets) != 0 {
+			t.Errorf("cut to %d bytes: offsets = %v, want none", length, offsets)
+		}
+	}
+}
