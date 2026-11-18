@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -293,7 +294,7 @@ func (f *Forwarder) tryUpstream(ctx context.Context, set *upstreamSet, index int
 	switch classify(response) {
 	case verdictFailure:
 		f.cfg.Logger.Warn("upstream forward failed", "event", "upstream.forward_failed",
-			"upstream", target.label, "error", "response code "+dns.RcodeToString[response.Rcode&0xF])
+			"upstream", target.label, "error", failureReason(response))
 		return Result{}, false
 	case verdictNegative:
 		// NXDOMAIN and NODATA are valid answers: no failover. The rebuilt message
@@ -449,3 +450,16 @@ func anyRecord(response *dns.Msg, match func(dns.RR) bool) bool {
 }
 
 func sameName(a, b string) bool { return strings.EqualFold(dns.Fqdn(a), dns.Fqdn(b)) }
+
+// failureReason names why classify rejected a response. The code is not
+// masked: an extended code such as BADVERS must not read as NOERROR.
+func failureReason(response *dns.Msg) string {
+	if response.Truncated {
+		return "truncated response (TC=1)"
+	}
+	name, known := dns.RcodeToString[response.Rcode]
+	if !known {
+		name = strconv.Itoa(response.Rcode)
+	}
+	return "response code " + name
+}

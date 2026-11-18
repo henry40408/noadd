@@ -431,3 +431,24 @@ func TestForwardOverDoHFailsOnHTTPError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestFailureReasonNamesTheRealCause(t *testing.T) {
+	cases := []struct {
+		name      string
+		truncated bool
+		rcode     int
+		want      string
+	}{
+		{"truncated empty NOERROR", true, dns.RcodeSuccess, "truncated response (TC=1)"},
+		{"servfail", false, dns.RcodeServerFailure, "response code SERVFAIL"},
+		{"extended rcode is not NOERROR", false, dns.RcodeBadCookie, "response code BADCOOKIE"},
+		{"unnamed rcode", false, 99, "response code 99"},
+	}
+	for _, c := range cases {
+		response := new(dns.Msg)
+		response.Truncated, response.Rcode = c.truncated, c.rcode
+		if got := failureReason(response); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
