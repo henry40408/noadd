@@ -265,6 +265,15 @@ func (e *Element) Fill(value string) error {
 	if _, err := callOn[chromedp.Void](e, `function() { this.value = ''; }`); err != nil {
 		return err
 	}
+	if value == "" {
+		// Clearing from script raises no change event, which a user's
+		// select-all-and-delete would; an auto-saving field listens for it.
+		_, err := callOn[chromedp.Void](e, `function() {
+			this.dispatchEvent(new Event('input', { bubbles: true }));
+			this.dispatchEvent(new Event('change', { bubbles: true }));
+		}`)
+		return err
+	}
 	return e.Type(value)
 }
 
