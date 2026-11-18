@@ -154,3 +154,24 @@ func TestInvalidJSONIsAParseErrorAndIsNotCached(t *testing.T) {
 		t.Fatalf("hits = %d, want a refetch after each failure", hits.Load())
 	}
 }
+
+// Status 400 is the first error; 399 is still a body to parse.
+func TestStatusErrorThresholdIs400(t *testing.T) {
+	for _, c := range []struct {
+		status  int
+		wantErr bool
+	}{{399, false}, {400, true}} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(`{"filters":[],"groups":[]}`))
+		}))
+		t.Cleanup(server.Close)
+		client := NewClient(server.URL, time.Hour, "ua")
+
+		_, err := client.List(context.Background())
+
+		if (err != nil) != c.wantErr {
+			t.Errorf("status %d: err = %v, want error %v", c.status, err, c.wantErr)
+		}
+	}
+}

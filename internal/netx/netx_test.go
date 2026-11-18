@@ -163,3 +163,20 @@ func TestTrustedProxiesLenCountsConfiguredCIDRs(t *testing.T) {
 		t.Fatalf("zero value Len() = %d", got)
 	}
 }
+
+func TestParseCIDRAcceptsTheLongestPrefix(t *testing.T) {
+	for _, text := range []string{"10.0.0.1/32", "::1/128"} {
+		if _, err := ParseCIDR(text); err != nil {
+			t.Errorf("%q: %v", text, err)
+		}
+	}
+}
+
+func TestParseCIDRNamesTheAddressFamilyOfARangeError(t *testing.T) {
+	for text, family := range map[string]string{"10.0.0.0/33": "IPv4", "::/129": "IPv6"} {
+		_, err := ParseCIDR(text)
+		if err == nil || !strings.Contains(err.Error(), "for "+family+" in") {
+			t.Errorf("%q: err = %v, want a %s range error", text, err, family)
+		}
+	}
+}

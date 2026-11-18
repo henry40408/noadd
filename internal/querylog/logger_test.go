@@ -3,8 +3,10 @@ package querylog
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -226,5 +228,86 @@ func TestCloseTwiceAndRunStopsOnContext(t *testing.T) {
 	}
 	if err := logger.Close(5 * time.Second); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type batchRecordingSink struct {
+	mu      sync.Mutex
+	batches []int
+}
+
+func (s *batchRecordingSink) InsertQueryLogs(_ context.Context, entries []db.QueryLogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batches = append(s.batches, len(entries))
+	return nil
+}
+
+func (s *batchRecordingSink) batchSizes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.batches...)
+}
+
+// Entries below the threshold wait for the timer or Close; reaching it flushes
+// them as one batch.
+func TestThresholdFlushWritesOneFullBatch(t *testing.T) {
+	sink := &batchRecordingSink{}
+	logger := startLogger(t, sink, 3, time.Hour)
+	for i := range 3 {
+		logger.Log(entry("batch"+strconv.Itoa(i)+".test", false, "A"))
+	}
+
+	eventually(t, "the threshold flush", func() bool { return len(sink.batchSizes()) > 0 })
+	if err := logger.Close(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sink.batchSizes(); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("batches = %v, want [3]", got)
+	}
+}
+
+// syncBuffer lets the logger goroutine write while the test reads.
+type syncBuffer struct {
+	mu   sync.Mutex
+	data strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
+}
+
+func flushAndCollectLog(t *testing.T, sink Sink) string {
+	t.Helper()
+	var output syncBuffer
+	logger := New(Config{
+		Sink:           sink,
+		FlushThreshold: 1000,
+		FlushInterval:  time.Hour,
+		Logger:         slog.New(slog.NewTextHandler(&output, nil)),
+	})
+	go logger.Run(context.Background())
+	logger.Log(entry("a.test", false, "A"))
+	if err := logger.Close(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	return output.String()
+}
+
+func TestFlushFailureIsLoggedAndSuccessIsNot(t *testing.T) {
+	if got := flushAndCollectLog(t, &failingSink{}); !strings.Contains(got, "querylog.flush_failed") {
+		t.Fatalf("a failed flush must be logged, got %q", got)
+	}
+	if got := flushAndCollectLog(t, &batchRecordingSink{}); strings.Contains(got, "flush_failed") {
+		t.Fatalf("a successful flush must not log a failure, got %q", got)
 	}
 }
