@@ -72,14 +72,61 @@ type addListResponse struct {
 	ID int64 `json:"id"`
 }
 
-// validList checks a list's name and URL. The URL check is only the scheme;
-// whether it serves a list is the job of the check endpoint.
-func validList(name, url string) bool {
+// listFailure is why a filter list could not be created or edited. field
+// places the form's message; the JSON endpoint answers a bare status.
+type listFailure struct {
+	field    string
+	message  string
+	internal bool
+}
+
+// validateList checks a list's name and URL, for both the form and the JSON
+// endpoint. The URL check is only the scheme; whether it serves a list is the
+// job of the check endpoint.
+func validateList(name, url string) *listFailure {
 	if strings.TrimSpace(name) == "" {
-		return false
+		return &listFailure{field: "name", message: "Name is required"}
 	}
 	url = strings.TrimSpace(url)
-	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	if url == "" {
+		return &listFailure{field: "url", message: "URL is required"}
+	}
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return &listFailure{field: "url", message: "URL must start with http:// or https://"}
+	}
+	return nil
+}
+
+// createFilterList adds an enabled list without fetching it, so a slow remote
+// does not hold the request open.
+func (a *api) createFilterList(r *http.Request, name, url string) (int64, *listFailure) {
+	if failure := validateList(name, url); failure != nil {
+		return 0, failure
+	}
+	id, err := a.DB.AddFilterList(writeCtx(r), strings.TrimSpace(name), strings.TrimSpace(url), true)
+	if err != nil {
+		return 0, &listFailure{internal: true}
+	}
+	return id, nil
+}
+
+// modifyFilterList changes a list's name and URL together, validated as a pair.
+func (a *api) modifyFilterList(r *http.Request, id int64, name, url string) *listFailure {
+	if failure := validateList(name, url); failure != nil {
+		return failure
+	}
+	if err := a.DB.UpdateFilterList(writeCtx(r), id, strings.TrimSpace(name), strings.TrimSpace(url)); err != nil {
+		return &listFailure{internal: true}
+	}
+	return nil
+}
+
+// listFailureStatus is the bare status the JSON endpoints answer.
+func listFailureStatus(failure *listFailure) int {
+	if failure.internal {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
 }
 
 // addList handles POST /api/lists. The list is created enabled but not
@@ -97,13 +144,9 @@ func (a *api) addList(w http.ResponseWriter, r *http.Request, _ authedUser) {
 		missingField(w, "url")
 		return
 	}
-	if !validList(*body.Name, *body.URL) {
-		writeStatus(w, http.StatusBadRequest)
-		return
-	}
-	id, err := a.DB.AddFilterList(writeCtx(r), strings.TrimSpace(*body.Name), strings.TrimSpace(*body.URL), true)
-	if err != nil {
-		writeStatus(w, http.StatusInternalServerError)
+	id, failure := a.createFilterList(r, *body.Name, *body.URL)
+	if failure != nil {
+		writeStatus(w, listFailureStatus(failure))
 		return
 	}
 	writeJSON(w, http.StatusCreated, addListResponse{ID: id})
@@ -134,12 +177,8 @@ func (a *api) updateList(w http.ResponseWriter, r *http.Request, _ authedUser) {
 		}
 	}
 	if body.Name != nil && body.URL != nil {
-		if !validList(*body.Name, *body.URL) {
-			writeStatus(w, http.StatusBadRequest)
-			return
-		}
-		if err := a.DB.UpdateFilterList(ctx, id, strings.TrimSpace(*body.Name), strings.TrimSpace(*body.URL)); err != nil {
-			writeStatus(w, http.StatusInternalServerError)
+		if failure := a.modifyFilterList(r, id, *body.Name, *body.URL); failure != nil {
+			writeStatus(w, listFailureStatus(failure))
 			return
 		}
 	}
