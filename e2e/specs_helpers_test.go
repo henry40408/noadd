@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/henry40408/noadd/e2e/internal/harness"
 )
@@ -59,6 +61,21 @@ type page struct {
 
 func (p page) goTo(path string) error {
 	return p.Goto(p.server.BaseURL + path)
+}
+
+// goToAfterSubmit is goTo for a page that follows a form submit the browser
+// may still be finishing: its pending navigation is cancelled by ours, which
+// Chrome reports as ERR_ABORTED. The submitted request still reaches the
+// server, so going again is safe.
+func (p page) goToAfterSubmit(path string) error {
+	var err error
+	for range 5 {
+		if err = p.goTo(path); err == nil || !strings.Contains(err.Error(), "ERR_ABORTED") {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return err
 }
 
 // open replays the spec's one login as a cookie, sparing the login budget,

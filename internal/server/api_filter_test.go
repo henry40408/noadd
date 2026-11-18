@@ -249,7 +249,7 @@ func TestRulesLifecycleAndFilterCheck(t *testing.T) {
 		return strings.Contains(h.authed("POST", "/api/filter/check", `{"domain":"ads.example.com"}`).Body.String(), "blocked")
 	})
 	h.eventually(func() bool {
-		return strings.Contains(h.authed("POST", "/api/filter/check", `{"domain":"ok.ads.example.com"}`).Body.String(), `"rule"`)
+		return strings.Contains(h.authed("POST", "/api/filter/check", `{"domain":"ok.ads.example.com"}`).Body.String(), `"rule":"ok.ads.example.com"`)
 	})
 
 	rules := h.authed("GET", "/api/rules", "").Body.String()

@@ -94,7 +94,7 @@ func TestSpecLogsNoJS(t *testing.T) {
 				// Straight back to the filtered view it was invoked from.
 				func() error { return p.ExpectURLContains("action=blocked") },
 				// And the rule is on the filters page.
-				func() error { return p.goTo("/filters") },
+				func() error { return p.goToAfterSubmit("/filters") },
 				func() error { return p.LocTestID("rule-row").First().ExpectTextContains(domain) },
 			)
 		}},
