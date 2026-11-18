@@ -53,41 +53,63 @@ func (a *api) putSettings(w http.ResponseWriter, r *http.Request, _ authedUser) 
 	if !ok {
 		return
 	}
-	var servers []string
-	if !settingsValid(settings, &servers) {
-		writeStatus(w, http.StatusBadRequest)
-		return
-	}
-	ctx := writeCtx(r)
-	if err := a.persistSettings(ctx, settings); err != nil {
+	failure := a.applySettings(writeCtx(r), settings)
+	switch {
+	case failure == nil:
+		writeStatus(w, http.StatusOK)
+	case failure.internal:
 		writeStatus(w, http.StatusInternalServerError)
-		return
+	default:
+		writeStatus(w, http.StatusBadRequest)
 	}
-	a.applyRuntimeSettings(ctx, settings, servers)
-	writeStatus(w, http.StatusOK)
 }
 
-// settingsValid reports whether every value passes, before anything is
-// written, so a bad value rejects the whole request. It fills servers with the
-// parsed upstream list when one was given.
-func settingsValid(settings map[string]string, servers *[]string) bool {
+// settingsFailure is why a settings save was refused. The API answers a bare
+// status; the settings page uses field to place the message beside the input.
+type settingsFailure struct {
+	field    string
+	message  string
+	internal bool
+}
+
+// applySettings validates, persists and applies runtime settings. Shared by
+// PUT /api/settings and the settings form. Everything is validated before
+// anything is written, so a bad value rejects the whole save.
+func (a *api) applySettings(ctx context.Context, settings map[string]string) *settingsFailure {
+	var servers []string
+	if failure := validateSettings(settings, &servers); failure != nil {
+		return failure
+	}
+	if err := a.persistSettings(ctx, settings); err != nil {
+		return &settingsFailure{internal: true}
+	}
+	a.applyRuntimeSettings(ctx, settings, servers)
+	return nil
+}
+
+// validateSettings checks every value before anything is written. It fills
+// servers with the parsed upstream list when one was given.
+func validateSettings(settings map[string]string, servers *[]string) *settingsFailure {
 	if value, present := settings["upstream_servers"]; present {
 		parsed, err := upstream.ParseUpstreams(value)
 		if err != nil {
-			return false
+			return &settingsFailure{
+				field:   "upstream_servers",
+				message: "Not a valid upstream — use ip:port, tls://host, or https://host/dns-query",
+			}
 		}
 		*servers = parsed
 	}
 	if mode, present := settings["block_mode"]; present && !dns.ValidBlockMode(mode) {
-		return false
+		return &settingsFailure{field: "block_mode", message: "Unknown block mode"}
 	}
 	if value := strings.TrimSpace(settings["block_custom_ipv4"]); value != "" && !dns.ValidCustomIPv4(value) {
-		return false
+		return &settingsFailure{field: "block_custom_ipv4", message: "Not a valid IPv4 address"}
 	}
 	if value := strings.TrimSpace(settings["block_custom_ipv6"]); value != "" && !dns.ValidCustomIPv6(value) {
-		return false
+		return &settingsFailure{field: "block_custom_ipv6", message: "Not a valid IPv6 address"}
 	}
-	return true
+	return nil
 }
 
 // persistSettings stores every key. Values are stored as sent, untrimmed, as in
