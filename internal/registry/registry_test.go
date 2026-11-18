@@ -105,3 +105,52 @@ func TestHomepageMayBeMissing(t *testing.T) {
 		t.Fatalf("data = %+v, %v", data, err)
 	}
 }
+
+func TestMalformedURLIsAnHTTPError(t *testing.T) {
+	client := NewClient("http://[::1", time.Hour, "ua")
+	_, err := client.List(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "http error:") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUnreachableRegistryIsAnHTTPError(t *testing.T) {
+	server, _ := fakeRegistry(t, http.StatusOK)
+	url := server.URL + "/filters.json"
+	server.Close()
+	_, err := NewClient(url, time.Hour, "ua").List(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "http error:") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTruncatedBodyIsAnHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = w.Write([]byte(`{"filters"`))
+	}))
+	t.Cleanup(server.Close)
+	_, err := NewClient(server.URL, time.Hour, "ua").List(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "http error:") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestInvalidJSONIsAParseErrorAndIsNotCached(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(server.URL, time.Hour, "ua")
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := client.List(context.Background())
+		if err == nil || !strings.HasPrefix(err.Error(), "parse error:") {
+			t.Fatalf("attempt %d: error = %v", attempt, err)
+		}
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("hits = %d, want a refetch after each failure", hits.Load())
+	}
+}
