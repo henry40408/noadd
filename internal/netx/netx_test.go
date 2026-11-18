@@ -154,3 +154,12 @@ func TestClientIPTrustsLinkLocalProxyWithZone(t *testing.T) {
 		t.Fatalf("peer %v keeps its zone, so rate-limit keys would split per interface", peer)
 	}
 }
+
+func TestTrustedProxiesLenCountsConfiguredCIDRs(t *testing.T) {
+	if got := mustTrusted(t, "10.0.0.0/8, ,192.168.0.0/16").Len(); got != 2 {
+		t.Fatalf("Len() = %d, want 2", got)
+	}
+	if got := (TrustedProxies{}).Len(); got != 0 {
+		t.Fatalf("zero value Len() = %d", got)
+	}
+}
