@@ -70,16 +70,14 @@ func (c *Coordinator) Subscribe() (<-chan Status, func()) {
 	}
 }
 
-// publish never blocks: a slow subscriber loses messages.
+// publish never blocks: a slow subscriber loses its oldest messages, so the
+// newest one, such as a rebuild finishing, always arrives.
 func (c *Coordinator) publish() {
 	status := c.Status()
 	c.subscribersMu.Lock()
 	defer c.subscribersMu.Unlock()
 	for updates := range c.subscribers {
-		select {
-		case updates <- status:
-		default:
-		}
+		offer(updates, status)
 	}
 }
 
@@ -144,4 +142,22 @@ func CatchPanic(task func() error) (err error) {
 		}
 	}()
 	return task()
+}
+
+// offer makes room by dropping the oldest message when the buffer is full.
+// publish holds subscribersMu, so it is the only sender and the retry fits.
+func offer(updates chan Status, status Status) {
+	select {
+	case updates <- status:
+		return
+	default:
+	}
+	select {
+	case <-updates:
+	default:
+	}
+	select {
+	case updates <- status:
+	default:
+	}
 }

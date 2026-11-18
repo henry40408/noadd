@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -15,6 +16,10 @@ import (
 
 // sseKeepAliveInterval matches axum's default keep-alive.
 const sseKeepAliveInterval = 15 * time.Second
+
+// sseWriteTimeout bounds each frame write, so a client that stops reading
+// cannot hold the handler (and its subscriptions) forever.
+const sseWriteTimeout = 10 * time.Second
 
 // eventStream is one open /api/events connection.
 type eventStream struct {
@@ -34,6 +39,11 @@ func (s *eventStream) send(name string, payload any) bool {
 }
 
 func (s *eventStream) write(frame string) bool {
+	// A writer without deadline support (ErrNotSupported) just goes without.
+	err := s.flush.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return false
+	}
 	if _, err := s.w.Write([]byte(frame)); err != nil {
 		return false
 	}

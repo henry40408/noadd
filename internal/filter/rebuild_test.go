@@ -153,3 +153,17 @@ func TestPanickingTaskResetsStateAndMarksFailure(t *testing.T) {
 		t.Fatal("the coordinator must keep working after a panic")
 	}
 }
+
+func TestFullSubscriberBufferDropsTheOldestStatus(t *testing.T) {
+	updates := make(chan Status, 2)
+	offer(updates, Status{StartedAt: 1, Rebuilding: true})
+	offer(updates, Status{StartedAt: 2, Rebuilding: true})
+	offer(updates, Status{StartedAt: 2, Rebuilding: false})
+
+	if first := <-updates; first.StartedAt != 2 || !first.Rebuilding {
+		t.Fatalf("oldest kept = %+v, want the second start", first)
+	}
+	if last := <-updates; last.Rebuilding {
+		t.Fatalf("newest kept = %+v, want the completion", last)
+	}
+}

@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -189,5 +190,43 @@ func TestEventStreamDoesNotBlockServerShutdown(t *testing.T) {
 	<-client.closed
 	if h.deps.Events.ConnectionCount() != 0 {
 		t.Fatal("the stream's subscription outlived Shutdown")
+	}
+}
+
+// deadlineRecorder is a ResponseWriter that records every write deadline.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+	writes    int
+}
+
+func (d *deadlineRecorder) Write(body []byte) (int, error) {
+	d.writes++
+	if len(d.deadlines) != d.writes {
+		return 0, errors.New("write without a fresh deadline")
+	}
+	return d.ResponseRecorder.Write(body)
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	d.deadlines = append(d.deadlines, deadline)
+	return nil
+}
+
+func TestEventStreamSetsAWriteDeadlineBeforeEveryFrame(t *testing.T) {
+	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	stream := &eventStream{w: recorder, flush: http.NewResponseController(recorder)}
+	for range 3 {
+		if !stream.send("ping", pingEvent{}) {
+			t.Fatal("send failed")
+		}
+	}
+	if len(recorder.deadlines) != 3 {
+		t.Fatalf("%d deadlines for 3 frames", len(recorder.deadlines))
+	}
+	for _, deadline := range recorder.deadlines {
+		if time.Until(deadline) <= 0 || time.Until(deadline) > sseWriteTimeout {
+			t.Fatalf("deadline %v not within the write timeout", deadline)
+		}
 	}
 }
