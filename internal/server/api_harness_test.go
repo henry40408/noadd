@@ -46,6 +46,8 @@ type harnessOptions struct {
 	forwardAuth  *auth.ForwardAuth
 	// logs, when set, receives the server log instead of a private buffer.
 	logs *capturedLogs
+	// registryURL replaces the unroutable registry address.
+	registryURL string
 }
 
 func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
@@ -78,6 +80,9 @@ func newAPIHarness(t *testing.T, options harnessOptions) *apiHarness {
 		Version:               "test",
 	}
 	harness.wireFilterSide(ctx, database)
+	if options.registryURL != "" {
+		harness.deps.Registry = registry.NewClient(options.registryURL, time.Minute, version.UserAgent())
+	}
 	harness.wireEventSide(ctx, database)
 	t.Cleanup(harness.settleRebuilds)
 	handler, err := New(Deps{API: &harness.deps, Slog: logs.logger()})

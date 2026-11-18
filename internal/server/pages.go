@@ -166,6 +166,8 @@ func (a *api) registerPageRoutes(t *routeTable) {
 	t.handleFunc(post, "/setup", a.setupSubmit)
 	t.handleFunc(post, "/logout", a.ssr(a.logoutSubmit))
 	t.handleFunc(get, "/filters", a.ssr(a.filtersPage))
+	t.handleFunc(get, "/filters/registry", a.ssr(a.registryPage))
+	t.handleFunc(post, "/filters/registry/add", a.ssr(a.registryAddSubmit))
 	t.handleFunc(post, "/filters/lists", a.ssr(a.filtersListAddSubmit))
 	t.handleFunc(post, "/filters/lists/update", a.ssr(a.filtersListsUpdateSubmit))
 	t.handleFunc(post, "/filters/lists/enable-recommended", a.ssr(a.filtersEnableRecommendedSubmit))
