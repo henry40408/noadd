@@ -18,12 +18,12 @@ func TestUDPTruncationPanicAnswersServfail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	query := []byte{0xAB, 0xCD, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, 1, 0, 1}
 	handler.answerDatagram(t.Context(), server, client.LocalAddr().(*net.UDPAddr).AddrPort(), query)

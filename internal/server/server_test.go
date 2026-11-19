@@ -298,7 +298,7 @@ func TestDoHRoutesGetNeitherAdminHeadersNorTheCSRFGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	handler := newTestServer(t, Deps{
 		DoH: dnsserver.NewDoH(dnsserver.DoHConfig{Store: database, Slog: quietLogger()}),
 	})

@@ -48,7 +48,7 @@ func TestWithDefaultsKeepsExplicitTimeouts(t *testing.T) {
 func idleConn(t *testing.T) *dns.Conn {
 	t.Helper()
 	client, server := net.Pipe()
-	t.Cleanup(func() { client.Close(); server.Close() })
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 	return &dns.Conn{Conn: client}
 }
 

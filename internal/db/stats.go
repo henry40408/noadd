@@ -269,7 +269,7 @@ func (d *DB) DomainStatsSince(ctx context.Context, since, limit int64) (DomainSt
 	if err != nil {
 		return DomainStats{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var stats DomainStats
 	for rows.Next() {
 		var top TopDomain
@@ -319,7 +319,7 @@ func (d *DB) TrafficListsSince(ctx context.Context, since, limit int64) (Traffic
 	if err != nil {
 		return TrafficLists{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	domains := map[string]int64{}
 	clients := map[clientKey]int64{}
 	for rows.Next() {
@@ -423,7 +423,7 @@ func (d *DB) TopUpstreamsSince(ctx context.Context, since, limit int64) ([]TopUp
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []TopUpstream
 	for rows.Next() {
 		var row TopUpstream
@@ -508,7 +508,7 @@ func (d *DB) StatsScanSince(ctx context.Context, rangeSince, heatmapSince int64)
 	if err != nil {
 		return StatsScan{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	grains := map[string]map[grainKey]int64{}
 	quarters := map[int64]*quarterSlot{}
@@ -607,7 +607,7 @@ func (d *DB) metricsByBucketSince(ctx context.Context, since, bucketSecs, tzOffs
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []MetricsBucket
 	for rows.Next() {
 		var bucketStart, blocked, cached, count int64
@@ -636,7 +636,7 @@ func (d *DB) metricsWindowSince(ctx context.Context, since int64) ([]WindowMetri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []WindowMetricsRow
 	for rows.Next() {
 		var row WindowMetricsRow
@@ -689,7 +689,7 @@ func (d *DB) HourlyHeatmapSince(ctx context.Context, since, tzOffsetSecs int64) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []HeatmapCell
 	for rows.Next() {
 		var cell HeatmapCell
@@ -780,7 +780,7 @@ func (d *DB) TimelineSince(ctx context.Context, since, bucketSecs int64) ([]Time
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []TimelinePoint
 	for rows.Next() {
 		var point TimelinePoint

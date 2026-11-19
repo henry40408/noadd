@@ -49,7 +49,7 @@ func schemaObjects(t *testing.T, conn *sql.DB) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var objects []string
 	for rows.Next() {
 		var kind, name, table, ddl string
@@ -71,7 +71,7 @@ func rustV17Schema(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return schemaObjects(t, conn)
 }
 
@@ -83,7 +83,7 @@ func TestUpgradeMatchesRustV17Structure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rust.Close()
+	defer func() { _ = rust.Close() }()
 	want := structure(t, rust)
 	for _, name := range []string{"rust-v0.sqlite3", "rust-v4.sqlite3", "rust-v8.sqlite3", "rust-v15.sqlite3"} {
 		t.Run(name, func(t *testing.T) {
@@ -124,7 +124,7 @@ func structure(t *testing.T, conn *sql.DB) string {
 		}
 		objects = append(objects, o)
 	}
-	rows.Close()
+	_ = rows.Close()
 	for _, o := range objects {
 		switch o.kind {
 		case "table":
@@ -144,7 +144,7 @@ func pragmaRows(t *testing.T, conn *sql.DB, pragma, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, _ := rows.Columns()
 	var out []string
 	for rows.Next() {
@@ -264,7 +264,7 @@ func selectRows(t *testing.T, conn *sql.DB, table string, columns []string) []st
 	if err != nil {
 		t.Fatalf("%s: %v", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out [][]any
 	for rows.Next() {
 		values := make([]any, len(columns))
@@ -337,7 +337,7 @@ func TestUpgradeKeepsRowCounts(t *testing.T) {
 			}
 			wantCounts := map[string]int{}
 			func() {
-				defer before.Close()
+				defer func() { _ = before.Close() }()
 				for _, table := range []string{"query_logs", "filter_lists", "custom_rules", "doh_tokens"} {
 					var n int
 					if err := before.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
@@ -469,7 +469,7 @@ func TestFailedMigrationRollsBackAndKeepsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	var version int
 	if err := raw.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 8 {
 		t.Fatalf("user_version = %d, err %v; want 8", version, err)

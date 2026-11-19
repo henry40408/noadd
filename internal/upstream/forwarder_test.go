@@ -386,7 +386,7 @@ func TestForwardOverDoTRecoversFromClosedConnection(t *testing.T) {
 	if _, err := forwarder.Forward(context.Background(), query); err != nil {
 		t.Fatal(err)
 	}
-	forwarder.set.Load().entries[0].exchanger.closeIdle()
+	forwarder.set.Load().entries[0].closeIdle()
 	if _, err := forwarder.Forward(context.Background(), query); err != nil {
 		t.Fatal(err)
 	}

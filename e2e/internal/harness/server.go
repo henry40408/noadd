@@ -109,7 +109,13 @@ func (s *Server) Start() error {
 func (s *Server) readStderr(stderr io.Reader) {
 	if path := os.Getenv(ServerLogEnv); path != "" {
 		if file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-			defer file.Close()
+			// The log file is written to, so a failed close (lost buffered data)
+			// must not pass silently; there is no error return here, so report it.
+			defer func() {
+				if err := file.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "e2e: close server log %s: %v\n", path, err)
+				}
+			}()
 			stderr = io.TeeReader(stderr, file)
 		}
 	}

@@ -14,7 +14,7 @@ func registryFixture(t *testing.T) string {
 	mux := http.NewServeMux()
 	var base string
 	mux.HandleFunc("/registry.json", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"groups":[{"groupId":1,"groupName":"General"},{"groupId":2,"groupName":"Security lists"}],
+		_, _ = fmt.Fprintf(w, `{"groups":[{"groupId":1,"groupName":"General"},{"groupId":2,"groupName":"Security lists"}],
 "filters":[
 {"filterId":10,"name":"Alpha","description":"ads","homepage":"https://alpha.example","downloadUrl":"%[1]s/alpha.txt","groupId":1,"deprecated":false,"timeUpdated":"x"},
 {"filterId":11,"name":"Beta","description":"malware","homepage":"javascript:alert(1)","downloadUrl":"%[1]s/beta.txt","groupId":2,"deprecated":false,"timeUpdated":"x"},
@@ -22,7 +22,7 @@ func registryFixture(t *testing.T) string {
 {"filterId":13,"name":"Broken","description":"404","downloadUrl":"%[1]s/missing.txt","groupId":1,"deprecated":false,"timeUpdated":"x"}]}`, base)
 	})
 	for _, name := range []string{"alpha", "beta", "old"} {
-		mux.HandleFunc("/"+name+".txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "||"+name+".example^\n") })
+		mux.HandleFunc("/"+name+".txt", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "||"+name+".example^\n") })
 	}
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)

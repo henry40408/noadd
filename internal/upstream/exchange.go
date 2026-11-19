@@ -59,7 +59,7 @@ func (u *udpExchanger) exchange(ctx context.Context, request *dns.Msg) (*dns.Msg
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
 
@@ -268,7 +268,7 @@ func (d *dohExchanger) exchange(ctx context.Context, request *dns.Msg) (*dns.Msg
 	if err != nil {
 		return nil, err
 	}
-	defer httpResponse.Body.Close()
+	defer func() { _ = httpResponse.Body.Close() }()
 	if httpResponse.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("doh status %d", httpResponse.StatusCode)
 	}

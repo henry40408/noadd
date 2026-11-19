@@ -22,7 +22,7 @@ func TestDoHPostBodyReadIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	request := "POST /dns-query HTTP/1.1\r\nHost: x\r\nContent-Type: application/dns-message\r\nContent-Length: 100\r\n\r\nabc"
 	if _, err := conn.Write([]byte(request)); err != nil {
 		t.Fatal(err)

@@ -46,7 +46,7 @@ func (h *apiHarness) openStream(baseURL, query string) *sseClient {
 	client := &sseClient{t: h.t, cancel: cancel, frames: make(chan string, 64), closed: make(chan struct{})}
 	go func() {
 		defer close(client.closed)
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		scanner := bufio.NewScanner(response.Body)
 		var frame strings.Builder
 		for scanner.Scan() {

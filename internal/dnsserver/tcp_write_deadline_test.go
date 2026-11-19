@@ -16,8 +16,8 @@ func TestTCPServeConnGivesUpOnAClientThatNeverReads(t *testing.T) {
 	t.Cleanup(handler.cancelLifetime)
 
 	server, client := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

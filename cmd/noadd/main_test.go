@@ -299,7 +299,7 @@ func TestNOADDLogLevelDebugLogsDebugLines(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = conn.Write([]byte("not a dns message"))
 		time.Sleep(300 * time.Millisecond)
 	}
@@ -353,7 +353,7 @@ func TestABusyDNSPortFailsStartupWithExitOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer taken.Close()
+	defer func() { _ = taken.Close() }()
 	addr := taken.LocalAddr().String()
 	_, errOut, code := run1(t, nil, "--db-path", filepath.Join(dir, "n.sqlite3"), "--dns-addr", addr,
 		"--http-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)))
@@ -368,7 +368,7 @@ func TestABusyHTTPPortFailsStartupWithExitOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer taken.Close()
+	defer func() { _ = taken.Close() }()
 	_, errOut, code := run1(t, nil, "--db-path", filepath.Join(dir, "n.sqlite3"), "--http-addr", taken.Addr().String(),
 		"--dns-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)))
 	if code != exitFailure || !strings.Contains(errOut, "bind HTTP") {

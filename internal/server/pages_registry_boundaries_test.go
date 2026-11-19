@@ -19,7 +19,7 @@ func pagesRegistryOf(t *testing.T, count int) string {
 			id, id, id))
 	}
 	body := `{"groups":[{"groupId":1,"groupName":"General"},{"groupId":2,"groupName":"Security"}],"filters":[` + strings.Join(filters, ",") + `]}`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, body) }))
 	t.Cleanup(server.Close)
 	return server.URL
 }

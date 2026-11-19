@@ -88,7 +88,7 @@ func startUpstream(t testing.TB, delay time.Duration, options ...func(*fakeUpstr
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	upstreamServer := &fakeUpstream{addr: conn.LocalAddr().String(), delay: delay}
 	for _, option := range options {
 		option(upstreamServer)

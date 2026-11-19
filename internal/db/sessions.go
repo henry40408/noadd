@@ -112,7 +112,7 @@ func (d *DB) ListSessions(ctx context.Context) ([]SessionRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []SessionRow
 	for rows.Next() {
 		var row SessionRow
@@ -147,7 +147,7 @@ func (d *DB) LoadSessions(ctx context.Context, maxAgeSecs, idleSecs, now int64) 
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var row LoadedSession
 			if err := rows.Scan(&row.TokenHash, &row.ID, &row.UserID, &row.CreatedAt, &row.LastSeen); err != nil {

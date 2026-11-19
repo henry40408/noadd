@@ -15,10 +15,11 @@ go build -o bin/noadd ./cmd/noadd
 go run ./cmd/noadd --dns-addr 127.0.0.1:5353 --http-addr 127.0.0.1:8080   # NOADD_LOG_LEVEL=debug for debug logs
 go test -race ./...                       # CI runs this with -mod=vendor
 go test ./internal/filter -run TestParse  # one package / test
-go vet -mod=vendor ./...
-go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
-gofmt -l $(git ls-files '*.go' | grep -v '^vendor/' | grep -v '^e2e/vendor/')   # must print nothing
+golangci-lint fmt --diff ./...            # gofmt; must print nothing
+golangci-lint run ./...                   # errcheck, govet, ineffassign, staticcheck, unused
 ```
+
+- **Lint (CI-enforced):** config in `.golangci.yml`; suppress with `//nolint:<linter> // reason` (`//lint:ignore` is not honoured). `run` does not check formatting, so `fmt --diff` is a separate step. The linter release comes from `golangci/golangci-lint-action` (`install-only`); dependabot tracks only the action. Run both commands in `e2e/` too.
 
 - **Coverage (as CI):** `NOADD_COVERDIR=$PWD/covdata go test -mod=vendor -coverprofile=coverage.out ./...`, then `go tool covdata textfmt -i=covdata -o coverage-bin.out` and append it to `coverage.out` without its `mode:` line. `-coverprofile` ignores the binary that `cmd/noadd`'s tests exec; with `NOADD_COVERDIR` set they build it with `-cover`.
 - **Benchmarks (user rule):** before and after a performance change run `go test -run='^$' -bench=<name> -benchmem -count=10`, compare with `go run golang.org/x/perf/cmd/benchstat@<version>` (check the version is at least 7 days old). A regression above 5% (p < 0.05) must not be committed. `scripts/bench-doh.py` and `scripts/fuzz-doh.py` load- and fuzz-test a running binary.
@@ -47,7 +48,7 @@ E2E_FEATURES=features/dashboard.feature go test -mod=vendor -count=1 .   # comma
 - Needs a local Chrome or Chromium. `E2E_CHROME` pins the binary, `E2E_BINARY` the server binary, `E2E_SERVER_LOG` appends every server's stderr (the setup token and fatal errors; the slog stream goes to stdout and is discarded) to a file, so a crashed server does not show only as a refused connection.
 - Run e2e one at a time, niced, and check afterwards that no `noadd` or Chrome process is left.
 - Every `Expect*` helper in `e2e/internal/harness` polls for 30 s and reports the last value seen. Text is `textContent`, not rendered text: the UI uppercases badges in CSS, so assert against the markup.
-- Run `gofmt`, `go vet` and staticcheck inside `e2e/` as well.
+- Run `golangci-lint fmt --diff` and `run` inside `e2e/` as well.
 - The former Rust-only regression specs (no-JS pages, settings autosave, live tail, chart touch, statistics charts, account actions) are ported to Go in `e2e/spec_*_test.go` and run with the rest of `go test` in `e2e/`. The screenshot-capturing binary is not ported (only its seed, `e2e/internal/harness/seed_screenshots.go`); see git history before the cutover commit.
 
 ## Build-time behavior

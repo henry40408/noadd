@@ -23,7 +23,7 @@ func TestReaderDoesNotSeeUncommittedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec("INSERT INTO settings (key, value) VALUES ('pending', '1')"); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestPragmasApplyToEveryReaderConnection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		var timeout int
 		if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&timeout); err != nil || timeout != 5000 {
 			t.Fatalf("busy_timeout = %d, err %v", timeout, err)

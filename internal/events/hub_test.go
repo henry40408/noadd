@@ -22,7 +22,7 @@ func openDB(t *testing.T) *db.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	return database
 }
 

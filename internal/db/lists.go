@@ -35,7 +35,7 @@ func (d *DB) GetFilterLists(ctx context.Context) ([]FilterListRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []FilterListRow
 	for rows.Next() {
 		var row FilterListRow

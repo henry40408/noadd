@@ -15,7 +15,7 @@ func (d *DB) GetDohTokens(ctx context.Context) ([]DohTokenRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []DohTokenRow
 	for rows.Next() {
 		var row DohTokenRow

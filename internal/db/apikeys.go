@@ -50,7 +50,7 @@ func (d *DB) ListAPIKeysForUser(ctx context.Context, userID int64) ([]APIKeyRow,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []APIKeyRow
 	for rows.Next() {
 		var row APIKeyRow

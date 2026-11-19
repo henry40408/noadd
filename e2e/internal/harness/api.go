@@ -40,7 +40,7 @@ func (a *API) NeedsSetup() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	var health struct {
 		NeedsSetup bool `json:"needs_setup"`
 	}
@@ -60,7 +60,7 @@ func (a *API) Setup(username, password string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusConflict {
 		return nil
 	}
@@ -74,7 +74,7 @@ func (a *API) Login(username, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("login answered %d", response.StatusCode)
 	}
@@ -130,7 +130,7 @@ func (a *API) GetJSONValue(session, path string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s answered %d", path, response.StatusCode)
 	}
@@ -165,7 +165,7 @@ func (a *API) WaitUntilRebuilt(session string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("GET /api/events: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /api/events answered %d", response.StatusCode)
 	}

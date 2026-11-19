@@ -62,7 +62,7 @@ func queryColumn[T any](ctx context.Context, pool *sql.DB, query string, args ..
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []T
 	for rows.Next() {
 		var value T
