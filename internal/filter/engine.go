@@ -93,26 +93,19 @@ func New(input EngineInput) *Engine {
 
 	var wg sync.WaitGroup
 	var blockOwners []terminalOwners
-	run := func(job func()) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			job()
-		}()
-	}
-	run(func() {
+	wg.Go(func() {
 		builder := &trieBuilder{trackOwners: true, unique: engine.uniqueRules}
 		sortTrieRules(buckets.subBlock)
 		buildTrie(buckets.subBlock, builder)
 		engine.blockTrie, blockOwners = builder.trie, builder.owners
 	})
-	run(func() {
+	wg.Go(func() {
 		sortTrieRules(buckets.subAllow)
 		builder := &trieBuilder{}
 		buildTrie(buckets.subAllow, builder)
 		engine.allowTrie = builder.trie
 	})
-	run(func() {
+	wg.Go(func() {
 		sortExactEntries(buckets.exactBlock)
 		engine.exactBlock = packExactSet(buckets.exactBlock, true)
 	})
@@ -187,17 +180,6 @@ func (e *Engine) UniqueRulesByList() map[int64]uint32 {
 		counts[list.ID] = e.uniqueRules[i]
 	}
 	return counts
-}
-
-// BlockedDomainCount is the number of distinct block rules: exact entries plus
-// trie terminals.
-func (e *Engine) BlockedDomainCount() int {
-	return e.exactBlock.len() + e.blockTrie.terminals
-}
-
-// HeapBytes estimates the heap the rule structures use, for diagnostics.
-func (e *Engine) HeapBytes() int {
-	return e.blockTrie.heapBytes() + e.allowTrie.heapBytes() + e.exactBlock.heapBytes() + e.exactAllow.heapBytes()
 }
 
 // NewFromNamed interns list names in order of first use, for callers that have

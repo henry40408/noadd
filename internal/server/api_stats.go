@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/noadd/internal/stats"
@@ -29,22 +30,13 @@ func strictQuery(r *http.Request, allowed ...string) *queryParams {
 	for _, pair := range strings.Split(r.URL.RawQuery, "&") {
 		rawKey, _, _ := strings.Cut(pair, "=")
 		key, err := url.QueryUnescape(rawKey)
-		if rawKey == "" || err != nil || containsString(allowed, key) {
+		if rawKey == "" || err != nil || slices.Contains(allowed, key) {
 			continue
 		}
 		params.fail(key, "unknown field `"+key+"`, "+expectedFields(allowed))
 		break
 	}
 	return params
-}
-
-func containsString(items []string, wanted string) bool {
-	for _, item := range items {
-		if item == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 // expectedFields words the field list the way serde does.

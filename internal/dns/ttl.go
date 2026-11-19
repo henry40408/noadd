@@ -64,15 +64,6 @@ func ApplyElapsed(buf []byte, offsets []uint32, elapsedSeconds uint32) {
 	}
 }
 
-// PatchTTL returns a copy of response with every TTL reduced by elapsedSeconds.
-// It is for one-off patching; a response served repeatedly should use
-// TTLOffsets once and ApplyElapsed per hit.
-func PatchTTL(response []byte, elapsedSeconds uint32) []byte {
-	patched := append([]byte(nil), response...)
-	ApplyElapsed(patched, TTLOffsets(response), elapsedSeconds)
-	return patched
-}
-
 // skipName returns the offset after the domain name that starts at pos.
 func skipName(buf []byte, pos int) (int, bool) {
 	for {

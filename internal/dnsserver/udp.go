@@ -18,8 +18,7 @@ const maxUDPSize = 4096
 
 // ServeUDP answers queries arriving on conn, one goroutine per datagram, until
 // ctx ends. It then waits for the queries still in flight, which can still
-// answer, closes conn and returns nil. A read error is logged and skipped, as
-// the Rust listener does.
+// answer, closes conn and returns nil. A read error is logged and skipped.
 //
 // Running queries are bounded by the handler's MaxInflight; up to as many more
 // wait for a permit, and datagrams beyond that are dropped.

@@ -73,19 +73,13 @@ func (d *DB) QueryLogs(ctx context.Context, filter QueryLogFilter, limit, offset
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []QueryLogEntry
-	for rows.Next() {
-		var entry QueryLogEntry
+	return collectRows(rows, func(rows *sql.Rows) (entry QueryLogEntry, err error) {
 		var blocked, cached, authenticated int64
-		if err := rows.Scan(&entry.Timestamp, &entry.Domain, &entry.QueryType, &entry.ClientIP, &blocked, &cached,
-			&entry.ResponseMs, &entry.Upstream, &entry.DohToken, &entry.Result, &authenticated); err != nil {
-			return nil, err
-		}
+		err = rows.Scan(&entry.Timestamp, &entry.Domain, &entry.QueryType, &entry.ClientIP, &blocked, &cached,
+			&entry.ResponseMs, &entry.Upstream, &entry.DohToken, &entry.Result, &authenticated)
 		entry.Blocked, entry.Cached, entry.AuthenticatedData = blocked != 0, cached != 0, authenticated != 0
-		out = append(out, entry)
-	}
-	return out, rows.Err()
+		return entry, err
+	})
 }
 
 // queryTypeOnlyPage reads (query_type, blocked, timestamp) as two

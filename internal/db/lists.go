@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // FilterListRow is one subscribed filter list.
 type FilterListRow struct {
@@ -35,18 +38,12 @@ func (d *DB) GetFilterLists(ctx context.Context) ([]FilterListRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []FilterListRow
-	for rows.Next() {
-		var row FilterListRow
+	return collectRows(rows, func(rows *sql.Rows) (row FilterListRow, err error) {
 		var enabled int64
-		if err := rows.Scan(&row.ID, &row.Name, &row.URL, &enabled, &row.LastUpdated, &row.RuleCount); err != nil {
-			return nil, err
-		}
+		err = rows.Scan(&row.ID, &row.Name, &row.URL, &enabled, &row.LastUpdated, &row.RuleCount)
 		row.Enabled = enabled != 0
-		out = append(out, row)
-	}
-	return out, rows.Err()
+		return row, err
+	})
 }
 
 // UpdateFilterList renames a list and changes its URL.

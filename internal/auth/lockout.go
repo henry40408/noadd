@@ -97,10 +97,3 @@ func (l *Lockout) RecordSuccess(userID int64) {
 	defer l.mu.Unlock()
 	delete(l.failures, userID)
 }
-
-// TrackedAccounts is the number of accounts currently carrying failures.
-func (l *Lockout) TrackedAccounts() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.failures)
-}

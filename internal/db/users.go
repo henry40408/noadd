@@ -112,16 +112,10 @@ func (d *DB) ListUsers(ctx context.Context) ([]UserRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []UserRow
-	for rows.Next() {
-		var row UserRow
-		if err := rows.Scan(&row.ID, &row.Username, &row.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row UserRow, err error) {
+		err = rows.Scan(&row.ID, &row.Username, &row.CreatedAt)
+		return row, err
+	})
 }
 
 // CountUsers returns the number of operators.

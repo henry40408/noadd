@@ -423,16 +423,10 @@ func (d *DB) TopUpstreamsSince(ctx context.Context, since, limit int64) ([]TopUp
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []TopUpstream
-	for rows.Next() {
-		var row TopUpstream
-		if err := rows.Scan(&row.Upstream, &row.Count, &row.AvgMs); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row TopUpstream, err error) {
+		err = rows.Scan(&row.Upstream, &row.Count, &row.AvgMs)
+		return row, err
+	})
 }
 
 // TimelineMultiSince returns query counts in bucketSecs-wide buckets aligned
@@ -607,16 +601,11 @@ func (d *DB) metricsByBucketSince(ctx context.Context, since, bucketSecs, tzOffs
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []MetricsBucket
-	for rows.Next() {
+	return collectRows(rows, func(rows *sql.Rows) (MetricsBucket, error) {
 		var bucketStart, blocked, cached, count int64
-		if err := rows.Scan(&bucketStart, &blocked, &cached, &count); err != nil {
-			return nil, err
-		}
-		out = append(out, MetricsBucket{Timestamp: bucketStart / 1000, Blocked: blocked != 0, Cached: cached != 0, Count: count})
-	}
-	return out, rows.Err()
+		err := rows.Scan(&bucketStart, &blocked, &cached, &count)
+		return MetricsBucket{Timestamp: bucketStart / 1000, Blocked: blocked != 0, Cached: cached != 0, Count: count}, err
+	})
 }
 
 // metricsWindowSince counts queries by outcome class, type and response time,
@@ -636,18 +625,12 @@ func (d *DB) metricsWindowSince(ctx context.Context, since int64) ([]WindowMetri
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []WindowMetricsRow
-	for rows.Next() {
-		var row WindowMetricsRow
+	return collectRows(rows, func(rows *sql.Rows) (row WindowMetricsRow, err error) {
 		var blocked, cached, hasResult int64
-		if err := rows.Scan(&blocked, &cached, &hasResult, &row.QueryType, &row.ResponseMs, &row.Count); err != nil {
-			return nil, err
-		}
+		err = rows.Scan(&blocked, &cached, &hasResult, &row.QueryType, &row.ResponseMs, &row.Count)
 		row.Blocked, row.Cached, row.HasResult = blocked != 0, cached != 0, hasResult != 0
-		out = append(out, row)
-	}
-	return out, rows.Err()
+		return row, err
+	})
 }
 
 // HourlyHeatmapSince counts queries by weekday and hour in the viewer's
@@ -689,28 +672,10 @@ func (d *DB) HourlyHeatmapSince(ctx context.Context, since, tzOffsetSecs int64) 
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []HeatmapCell
-	for rows.Next() {
-		var cell HeatmapCell
-		if err := rows.Scan(&cell.Weekday, &cell.Hour, &cell.Count); err != nil {
-			return nil, err
-		}
-		out = append(out, cell)
-	}
-	return out, rows.Err()
-}
-
-// QueryTypeBreakdownSince counts queries per type, busiest first.
-func (d *DB) QueryTypeBreakdownSince(ctx context.Context, since int64) ([]NameCount, error) {
-	rows, err := d.metricsWindowSince(ctx, since)
-	return queryTypesFromWindow(rows), err
-}
-
-// OutcomeBreakdownSince counts queries per outcome, busiest first.
-func (d *DB) OutcomeBreakdownSince(ctx context.Context, since int64) ([]NameCount, error) {
-	rows, err := d.metricsWindowSince(ctx, since)
-	return outcomesFromWindow(rows), err
+	return collectRows(rows, func(rows *sql.Rows) (cell HeatmapCell, err error) {
+		err = rows.Scan(&cell.Weekday, &cell.Hour, &cell.Count)
+		return cell, err
+	})
 }
 
 // UniqueDomainsSince counts the distinct domains in the window.
@@ -780,15 +745,9 @@ func (d *DB) TimelineSince(ctx context.Context, since, bucketSecs int64) ([]Time
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []TimelinePoint
-	for rows.Next() {
-		var point TimelinePoint
-		if err := rows.Scan(&point.Timestamp, &point.Total, &point.Blocked); err != nil {
-			return nil, err
-		}
+	return collectRows(rows, func(rows *sql.Rows) (point TimelinePoint, err error) {
+		err = rows.Scan(&point.Timestamp, &point.Total, &point.Blocked)
 		point.Timestamp /= 1000
-		out = append(out, point)
-	}
-	return out, rows.Err()
+		return point, err
+	})
 }

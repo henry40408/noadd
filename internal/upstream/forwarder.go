@@ -174,10 +174,6 @@ func (f *Forwarder) SetDNSSECEnabled(enabled bool) { f.dnssecOn.Store(enabled) }
 // DNSSECEnabled reports whether DO forcing is on.
 func (f *Forwarder) DNSSECEnabled() bool { return f.dnssecOn.Load() }
 
-// ServerOrder is the try-order for the current strategy, as indexes into the
-// configured servers.
-func (f *Forwarder) ServerOrder() []int { return f.orderFor(f.set.Load()) }
-
 func (f *Forwarder) orderFor(set *upstreamSet) []int {
 	count := len(set.entries)
 	if count == 0 {

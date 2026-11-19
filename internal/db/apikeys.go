@@ -50,16 +50,10 @@ func (d *DB) ListAPIKeysForUser(ctx context.Context, userID int64) ([]APIKeyRow,
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []APIKeyRow
-	for rows.Next() {
-		var row APIKeyRow
-		if err := rows.Scan(&row.ID, &row.Name, &row.Prefix, &row.CreatedAt, &row.LastUsedAt, &row.ExpiresAt); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row APIKeyRow, err error) {
+		err = rows.Scan(&row.ID, &row.Name, &row.Prefix, &row.CreatedAt, &row.LastUsedAt, &row.ExpiresAt)
+		return row, err
+	})
 }
 
 // DeleteAPIKey removes a key scoped to its owner and reports whether a row
