@@ -431,7 +431,7 @@ func TestQueryTypeOnlyPageMatchesTable(t *testing.T) {
 			must(t, rows.Scan(&ts))
 			want = append(want, ts)
 		}
-		rows.Close()
+		_ = rows.Close()
 		var gotTs []int64
 		for _, entry := range got {
 			gotTs = append(gotTs, entry.Timestamp)
@@ -446,7 +446,7 @@ func queryPlan(t *testing.T, database *DB, query string, args ...any) string {
 	t.Helper()
 	rows, err := database.reader.Query("EXPLAIN QUERY PLAN "+query, args...)
 	must(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var plan []string
 	for rows.Next() {
 		var id, parent, unused int

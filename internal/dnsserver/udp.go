@@ -30,7 +30,7 @@ func (h *Handler) ServeUDP(ctx context.Context, conn *net.UDPConn) error {
 	defer stopped()
 	h.log.Info("DNS listener started", "event", "dns.listener_started", "transport", "udp", "addr", conn.LocalAddr())
 
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	var inflight sync.WaitGroup
 	defer inflight.Wait()
 

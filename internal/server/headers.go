@@ -28,7 +28,7 @@ func (w *hookedWriter) runHook() {
 		return
 	}
 	w.wroteHeader = true
-	w.hook(w.ResponseWriter.Header())
+	w.hook(w.Header())
 }
 
 func (w *hookedWriter) WriteHeader(status int) {

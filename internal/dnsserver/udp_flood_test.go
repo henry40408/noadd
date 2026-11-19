@@ -19,7 +19,7 @@ func TestUDPFloodBehindASlowUpstreamKeepsGoroutinesBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	before := runtime.NumGoroutine()
 	peak := 0

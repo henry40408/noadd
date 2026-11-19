@@ -15,7 +15,7 @@ func SendDNSQuery(port int, name string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_, err = conn.Write(queryPacket(name))
 	return err
 }

@@ -46,7 +46,7 @@ func (d *DB) InsertQueryLogs(ctx context.Context, entries []QueryLogEntry) error
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 		for _, entry := range entries {
 			if _, err := stmt.ExecContext(ctx, entry.Timestamp, entry.Domain, entry.QueryType, entry.ClientIP,
 				boolToInt(entry.Blocked), boolToInt(entry.Cached), entry.ResponseMs,
@@ -73,7 +73,7 @@ func (d *DB) QueryLogs(ctx context.Context, filter QueryLogFilter, limit, offset
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []QueryLogEntry
 	for rows.Next() {
 		var entry QueryLogEntry

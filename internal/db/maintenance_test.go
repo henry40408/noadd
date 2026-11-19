@@ -101,7 +101,7 @@ func rowsAsText(t *testing.T, pool *sql.DB, query string) []string {
 	if err != nil {
 		t.Fatalf("%s: %v", query, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, err := rows.Columns()
 	if err != nil {
 		t.Fatal(err)

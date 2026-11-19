@@ -23,11 +23,11 @@ func (h *Handler) ServeTCP(ctx context.Context, ln net.Listener) error {
 
 	connections := newConnSet()
 	stopped := context.AfterFunc(ctx, func() {
-		ln.Close()
+		_ = ln.Close()
 		connections.interruptReads()
 	})
 	defer stopped()
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	var serving sync.WaitGroup
 	defer serving.Wait()
 
@@ -49,7 +49,7 @@ func (h *Handler) ServeTCP(ctx context.Context, ln net.Listener) error {
 		go func() {
 			defer serving.Done()
 			defer connections.remove(conn)
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			h.serveConn(ctx, conn)
 		}()
 	}

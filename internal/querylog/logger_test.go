@@ -20,7 +20,7 @@ func openDB(t *testing.T) *db.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	return database
 }
 
@@ -98,7 +98,7 @@ func TestFlushesRemainderOnClose(t *testing.T) {
 func TestFlushesOnInterval(t *testing.T) {
 	database := openDB(t)
 	logger := startLogger(t, database, 10000, 50*time.Millisecond)
-	defer logger.Close(5 * time.Second)
+	defer func() { _ = logger.Close(5 * time.Second) }()
 	logger.Log(entry("interval0.com", false, "A"))
 	logger.Log(entry("interval1.com", false, "A"))
 
@@ -109,7 +109,7 @@ func TestFlushesOnInterval(t *testing.T) {
 func TestPublishesToSubscribersBeforeTheFlush(t *testing.T) {
 	database := openDB(t)
 	logger := startLogger(t, database, 1000, time.Hour)
-	defer logger.Close(5 * time.Second)
+	defer func() { _ = logger.Close(5 * time.Second) }()
 	subscription := logger.Subscribe()
 	defer subscription.Cancel()
 
@@ -147,7 +147,7 @@ func (s *blockingSink) InsertQueryLogs(_ context.Context, entries []db.QueryLogE
 func TestSlowSubscriberIsDroppedAndDoesNotBlock(t *testing.T) {
 	database := openDB(t)
 	logger := startLogger(t, database, 100000, time.Hour)
-	defer logger.Close(5 * time.Second)
+	defer func() { _ = logger.Close(5 * time.Second) }()
 	slow := logger.Subscribe()
 	fast := logger.Subscribe()
 	defer fast.Cancel()

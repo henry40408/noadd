@@ -57,7 +57,7 @@ func fakeUDP(t *testing.T, handle reply) (string, *atomic.Int32) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	var received atomic.Int32
 	go func() {
 		buffer := make([]byte, 65535)
@@ -92,7 +92,7 @@ func closedUDPAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addr := conn.LocalAddr().String()
-	conn.Close()
+	_ = conn.Close()
 	return addr
 }
 
@@ -104,7 +104,7 @@ func fakeDoT(t *testing.T, handle reply) (addr string, connections *atomic.Int32
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 	var accepted atomic.Int32
 	go func() {
 		for {
@@ -120,7 +120,7 @@ func fakeDoT(t *testing.T, handle reply) (addr string, connections *atomic.Int32
 }
 
 func serveStream(conn net.Conn, handle reply) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	stream := &dns.Conn{Conn: conn}
 	for {
 		request, err := stream.ReadMsg()

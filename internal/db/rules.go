@@ -42,7 +42,7 @@ func (d *DB) scanCustomRules(ctx context.Context, query string, args ...any) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []CustomRuleRow
 	for rows.Next() {
 		var row CustomRuleRow

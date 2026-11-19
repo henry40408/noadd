@@ -112,7 +112,7 @@ func (d *DB) ListUsers(ctx context.Context) ([]UserRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []UserRow
 	for rows.Next() {
 		var row UserRow

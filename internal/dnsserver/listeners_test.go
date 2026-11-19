@@ -97,7 +97,7 @@ func TestTCPLengthPrefixedFraming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	response := unpack(t, queryOverTCP(t, conn, queryBytes(t, 0xABCD, blockedDomain+".", mdns.TypeA)))
 	if !response.Response || response.Id != 0xABCD || response.Rcode != mdns.RcodeSuccess {
@@ -115,7 +115,7 @@ func TestTCPConnectionReuseServesMultipleQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	for _, id := range []uint16{1, 2, 3} {
 		response := unpack(t, queryOverTCP(t, conn, queryBytes(t, id, blockedDomain+".", mdns.TypeA)))
@@ -128,7 +128,7 @@ func TestTCPConnectionReuseServesMultipleQueries(t *testing.T) {
 func TestTCPGarbageGetsServfailAndTheConnectionSurvives(t *testing.T) {
 	addr, _ := startTCP(t, blockingHandler(t).Handler)
 	conn, _ := net.Dial("tcp", addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	servfail := unpack(t, queryOverTCP(t, conn, []byte{0xAB, 0xCD, 1, 2, 3}))
 	if servfail.Rcode != mdns.RcodeServerFailure || servfail.Id != 0xABCD {
@@ -142,7 +142,7 @@ func TestTCPGarbageGetsServfailAndTheConnectionSurvives(t *testing.T) {
 func TestTCPZeroLengthFrameClosesTheConnection(t *testing.T) {
 	addr, _ := startTCP(t, blockingHandler(t).Handler)
 	conn, _ := net.Dial("tcp", addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte{0, 0}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +158,9 @@ func TestTCPShutdownClosesIdleConnectionsAndFinishesAQueryInFlight(t *testing.T)
 	addr, stop := startTCP(t, handler.Handler)
 
 	idle, _ := net.Dial("tcp", addr)
-	defer idle.Close()
+	defer func() { _ = idle.Close() }()
 	busy, _ := net.Dial("tcp", addr)
-	defer busy.Close()
+	defer func() { _ = busy.Close() }()
 	query := queryBytes(t, 5, "inflight.example.com.", mdns.TypeA)
 	if _, err := busy.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(query))), query...)); err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func roundTripUDP(t *testing.T, addr string, query []byte) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write(query); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestUDPTruncatesAnOversizedAnswerForAPlainClient(t *testing.T) {
 	// The same answer over TCP is whole.
 	tcpAddr, _ := startTCP(t, handler.Handler)
 	conn, _ := net.Dial("tcp", tcpAddr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if full := unpack(t, queryOverTCP(t, conn, queryBytes(t, 8, "big.example.com.", mdns.TypeA))); full.Truncated || len(full.Answer) != 61 {
 		t.Fatalf("TCP answer: truncated %v, %d answers", full.Truncated, len(full.Answer))
 	}
@@ -260,7 +260,7 @@ func TestUDPShutdownWaitsForInflightQueriesAndLeaksNothing(t *testing.T) {
 	addr, stop := startUDP(t, handler.Handler)
 
 	conn, _ := net.Dial("udp", addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write(queryBytes(t, 3, "late.example.com.", mdns.TypeA)); err != nil {
 		t.Fatal(err)
 	}

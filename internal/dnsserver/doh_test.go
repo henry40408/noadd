@@ -27,7 +27,7 @@ func newDoHFixture(t *testing.T, options handlerOptions) *dohFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	mux := http.NewServeMux()
 	NewDoH(DoHConfig{
 		Handler: newTestHandler(t, options).Handler,
@@ -301,7 +301,7 @@ func TestDoHClientIPFollowsTrustedProxies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	handler := newTestHandler(t, handlerOptions{blocked: []string{blockedDomain}})
 	mux := http.NewServeMux()
 	NewDoH(DoHConfig{Handler: handler.Handler, Store: database, Trusted: trusted, Slog: quietLogger()}).Register(mux)
@@ -331,7 +331,7 @@ func TestDoHRecordsTheTokenNameInTheLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close(context.Background()) })
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
 	if _, err := database.AddDohToken(context.Background(), "laptop"); err != nil {
 		t.Fatal(err)
 	}
