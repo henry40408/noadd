@@ -1,9 +1,10 @@
 package server
 
 import (
+	"maps"
 	"math"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/noadd/internal/upstream"
@@ -63,11 +64,7 @@ type upstreamLatencyEntry struct {
 // label so the answer, and the preferred pick on a tie, is stable.
 func (a *api) upstreamLatency(w http.ResponseWriter, _ *http.Request, _ authedUser) {
 	latencies := a.Forwarder.Latencies()
-	servers := make([]string, 0, len(latencies))
-	for server := range latencies {
-		servers = append(servers, server)
-	}
-	sort.Strings(servers)
+	servers := slices.Sorted(maps.Keys(latencies))
 
 	preferred := ""
 	if a.Forwarder.Strategy() == upstream.LowestLatency {

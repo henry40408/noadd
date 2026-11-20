@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // CustomRuleRow is one operator-written rule; RuleType is "block" or "allow".
 type CustomRuleRow struct {
@@ -42,16 +45,10 @@ func (d *DB) scanCustomRules(ctx context.Context, query string, args ...any) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []CustomRuleRow
-	for rows.Next() {
-		var row CustomRuleRow
-		if err := rows.Scan(&row.ID, &row.Rule, &row.RuleType); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row CustomRuleRow, err error) {
+		err = rows.Scan(&row.ID, &row.Rule, &row.RuleType)
+		return row, err
+	})
 }
 
 // DeleteCustomRule removes a rule by id.

@@ -33,11 +33,9 @@ func (f *Forwarder) buildSet(ctx context.Context, servers []string) *upstreamSet
 
 	var wg sync.WaitGroup
 	for i, server := range servers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			set.entries[i] = f.buildEntry(ctx, server)
-		}()
+		})
 	}
 	wg.Wait()
 	return set

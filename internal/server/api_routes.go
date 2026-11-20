@@ -3,13 +3,12 @@ package server
 import (
 	"net/http"
 	"slices"
-	"sort"
 	"strings"
 )
 
 // routeTable collects handlers by path and method, so every path can answer a
 // wrong method with 405 and an Allow header instead of falling through to the
-// static-file catch-all, as the Rust router did.
+// static-file catch-all.
 type routeTable struct {
 	byPath map[string]map[string]http.Handler
 }
@@ -49,7 +48,7 @@ func (t *routeTable) mount(mux *http.ServeMux) {
 				allowed = append(allowed, http.MethodHead)
 			}
 		}
-		sort.Strings(allowed)
+		slices.Sort(allowed)
 		refuse := methodNotAllowed(strings.Join(allowed, ", "))
 		for _, method := range refusedMethods {
 			if !slices.Contains(allowed, method) {

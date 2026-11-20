@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -100,7 +101,7 @@ func ParseUpstreams(input string) ([]string, error) {
 			return nil, err
 		}
 		canonical := parsed.canonical()
-		if !contains(servers, canonical) {
+		if !slices.Contains(servers, canonical) {
 			servers = append(servers, canonical)
 		}
 	}
@@ -108,15 +109,6 @@ func ParseUpstreams(input string) ([]string, error) {
 		return nil, errors.New("at least one upstream server is required")
 	}
 	return servers, nil
-}
-
-func contains(list []string, item string) bool {
-	for _, existing := range list {
-		if existing == item {
-			return true
-		}
-	}
-	return false
 }
 
 // parseHostPort parses `host[:port]`, including `[::1]:853`.

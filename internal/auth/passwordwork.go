@@ -33,9 +33,6 @@ func NewPasswordWork(limit int) *PasswordWork {
 // Limit is the number of operations allowed at once.
 func (w *PasswordWork) Limit() int { return cap(w.slots) }
 
-// Available is the number of free slots; equals Limit when idle.
-func (w *PasswordWork) Available() int { return cap(w.slots) - len(w.slots) }
-
 // run executes work once a slot is free. The slot is held until the work
 // finishes even if the caller gives up meanwhile, so a dropped request cannot
 // start unbounded extra work.

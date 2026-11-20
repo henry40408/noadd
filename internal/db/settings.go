@@ -50,26 +50,29 @@ func (d *DB) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
-// ListTables returns every user table name, for tests.
-func (d *DB) ListTables(ctx context.Context) ([]string, error) {
-	return queryColumn[string](ctx, d.reader,
-		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-}
-
 // queryColumn collects the first column of every row.
 func queryColumn[T any](ctx context.Context, pool *sql.DB, query string, args ...any) ([]T, error) {
 	rows, err := pool.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
+	return collectRows(rows, func(rows *sql.Rows) (value T, err error) {
+		err = rows.Scan(&value)
+		return value, err
+	})
+}
+
+// collectRows reads every row with scan and closes rows. A scan error returns
+// no rows; an error from the iteration itself returns the rows read so far.
+func collectRows[T any](rows *sql.Rows, scan func(*sql.Rows) (T, error)) ([]T, error) {
 	defer func() { _ = rows.Close() }()
 	var out []T
 	for rows.Next() {
-		var value T
-		if err := rows.Scan(&value); err != nil {
+		row, err := scan(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, value)
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }

@@ -2,8 +2,9 @@ package server
 
 import (
 	"context"
+	"maps"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/noadd/internal/dns"
@@ -115,12 +116,7 @@ func validateSettings(settings map[string]string, servers *[]string) *settingsFa
 // persistSettings stores every key. Values are stored as sent, untrimmed, as in
 // Rust; readers trim.
 func (a *api) persistSettings(ctx context.Context, settings map[string]string) error {
-	keys := make([]string, 0, len(settings))
-	for key := range settings {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
+	for _, key := range slices.Sorted(maps.Keys(settings)) {
 		if err := a.DB.SetSetting(ctx, key, settings[key]); err != nil {
 			return err
 		}

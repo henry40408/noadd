@@ -15,7 +15,7 @@ import (
 const stagingDirectory = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 // Static loads a certificate and key pair. The pair is read once; a renewed
-// certificate needs a restart, as it did in the Rust server.
+// certificate needs a restart.
 func Static(certFile, keyFile string) (*tls.Config, error) {
 	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {

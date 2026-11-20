@@ -9,9 +9,9 @@ import (
 
 const maxSummarizedAnswers = 3
 
-// hickoryTypeNames are the record types the Rust build names in the query log.
-// Any other type is logged as "Unknown", as hickory's RecordType does.
-var hickoryTypeNames = map[uint16]string{
+// queryTypeNames are the record types named in the query log. Any other type
+// is logged as "Unknown".
+var queryTypeNames = map[uint16]string{
 	1: "A", 28: "AAAA", 65305: "ANAME", 255: "ANY", 251: "IXFR", 252: "AXFR",
 	257: "CAA", 59: "CDS", 60: "CDNSKEY", 37: "CERT", 5: "CNAME", 62: "CSYNC",
 	39: "DNAME", 48: "DNSKEY", 43: "DS", 13: "HINFO", 65: "HTTPS", 25: "KEY",
@@ -22,7 +22,7 @@ var hickoryTypeNames = map[uint16]string{
 }
 
 func queryTypeName(queryType uint16) string {
-	if name, ok := hickoryTypeNames[queryType]; ok {
+	if name, ok := queryTypeNames[queryType]; ok {
 		return name
 	}
 	return "Unknown"

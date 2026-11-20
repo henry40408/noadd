@@ -179,9 +179,8 @@ func (m *Manager) UpdateAllListsNoRebuild(ctx context.Context) (bool, error) {
 			continue
 		}
 		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
+		wg.Go(func() {
+			defer func() { <-slots }()
 			var update ListUpdate
 			err := CatchPanic(func() (err error) {
 				update, err = m.DownloadAndUpdateList(ctx, list.ID)
@@ -196,7 +195,7 @@ func (m *Manager) UpdateAllListsNoRebuild(ctx context.Context) (bool, error) {
 			anyChanged = anyChanged || update.Changed
 			slog.Info("updated filter list", "event", "filter.list_updated",
 				"list_id", list.ID, "name", list.Name, "rule_count", update.RuleCount, "changed", update.Changed)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -205,12 +204,4 @@ func (m *Manager) UpdateAllListsNoRebuild(ctx context.Context) (bool, error) {
 			"event", "filter.list_update_failed", "failed", len(failures), "lists", strings.Join(failures, ", "))
 	}
 	return anyChanged, nil
-}
-
-// UpdateAllLists downloads every enabled list and rebuilds the engine.
-func (m *Manager) UpdateAllLists(ctx context.Context) error {
-	if _, err := m.UpdateAllListsNoRebuild(ctx); err != nil {
-		return err
-	}
-	return m.Rebuild(ctx)
 }

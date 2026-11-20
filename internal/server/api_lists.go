@@ -339,12 +339,11 @@ func (a *api) addListsBatch(ctx context.Context, items []batchAddItem) batchAddR
 	var wg sync.WaitGroup
 	for i, item := range items {
 		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
+		wg.Go(func() {
+			defer func() { <-slots }()
 			name, url := strings.TrimSpace(*item.Name), strings.TrimSpace(*item.URL)
 			outcomes[i] = a.addOneList(ctx, name, url)
-		}()
+		})
 	}
 	wg.Wait()
 

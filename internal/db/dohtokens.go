@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // DohTokenRow is one DoH access token; the token is stored in clear because
 // it is a URL path segment the operator must be able to copy again.
@@ -15,16 +18,10 @@ func (d *DB) GetDohTokens(ctx context.Context) ([]DohTokenRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []DohTokenRow
-	for rows.Next() {
-		var row DohTokenRow
-		if err := rows.Scan(&row.ID, &row.Token); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row DohTokenRow, err error) {
+		err = rows.Scan(&row.ID, &row.Token)
+		return row, err
+	})
 }
 
 // AddDohToken inserts a token and returns its id.
@@ -45,11 +42,4 @@ func (d *DB) DeleteDohToken(ctx context.Context, id int64) error {
 // ValidateDohToken returns the token and true when it exists.
 func (d *DB) ValidateDohToken(ctx context.Context, token string) (string, bool, error) {
 	return queryOptional[string](ctx, d.reader, "SELECT token FROM doh_tokens WHERE token = ?1", token)
-}
-
-// HasDohTokens reports whether any token exists.
-func (d *DB) HasDohTokens(ctx context.Context) (bool, error) {
-	var count int64
-	err := d.reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM doh_tokens").Scan(&count)
-	return count > 0, err
 }

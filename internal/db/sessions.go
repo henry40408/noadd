@@ -112,16 +112,10 @@ func (d *DB) ListSessions(ctx context.Context) ([]SessionRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []SessionRow
-	for rows.Next() {
-		var row SessionRow
-		if err := rows.Scan(&row.ID, &row.Username, &row.CreatedAt, &row.LastSeen, &row.IP, &row.UserAgent, &row.TokenHash); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return collectRows(rows, func(rows *sql.Rows) (row SessionRow, err error) {
+		err = rows.Scan(&row.ID, &row.Username, &row.CreatedAt, &row.LastSeen, &row.IP, &row.UserAgent, &row.TokenHash)
+		return row, err
+	})
 }
 
 // PurgeExpiredSessions removes sessions past either timeout and returns how

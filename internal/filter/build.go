@@ -95,11 +95,9 @@ func parseListsConcurrently(payloads []listPayload) []parsedList {
 	parsed := make([]parsedList, len(payloads))
 	var wg sync.WaitGroup
 	for i, payload := range payloads {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			parsed[i] = parsedList{meta: payload.meta, rules: ParseList(payload.content)}
-		}()
+		})
 	}
 	wg.Wait()
 	return parsed

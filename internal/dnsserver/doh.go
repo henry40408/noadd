@@ -21,7 +21,6 @@ const (
 	dnsMessageContentType = "application/dns-message"
 
 	// maxDoHBodyBytes is the request body limit; larger POST bodies get 413.
-	// It is the limit the Rust server's body extractor applied.
 	maxDoHBodyBytes = 2 * 1024 * 1024
 
 	dohPolicySetting = "doh_access_policy"
@@ -150,7 +149,7 @@ func (d *DoH) authorise(r *http.Request) (tokenName string, status int) {
 }
 
 // isOpenAccess reports whether tokenless access is allowed: unless the policy
-// is "deny". A failed lookup counts as open, as in the Rust server.
+// is "deny". A failed lookup counts as open.
 func (d *DoH) isOpenAccess(ctx context.Context) bool {
 	policy, found, err := d.cfg.Store.GetSetting(ctx, dohPolicySetting)
 	if err != nil {
