@@ -1,145 +1,105 @@
 package views
 
 import (
-	"html"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 )
 
 var (
-	logRowPattern     = regexp.MustCompile(`(?s)<tr data-testid="log-row">(.*?)</tr>`)
-	logCellPattern    = regexp.MustCompile(`(?s)<td[^>]*>(.*?)</td>`)
-	optionPattern     = regexp.MustCompile(`<option value="([^"]*)"[^>]*>`)
-	tagPattern        = regexp.MustCompile(`</?[a-z][^>]*>`)
-	attrValuePattern  = func(name string) *regexp.Regexp { return regexp.MustCompile(name + `="([^"]*)"`) }
-	datalistPattern   = regexp.MustCompile(`(?s)<datalist id="log-domain-list">(.*?)</datalist>`)
-	nextFieldPattern  = regexp.MustCompile(`name="next" value="([^"]*)"`)
-	ruleFieldPattern  = regexp.MustCompile(`name="rule" value="([^"]*)"`)
-	actionLabelRegexp = regexp.MustCompile(`data-blocked="(?:true|false)">([^<]*)</button>`)
+	logQueryTypes = []string{"A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV", "CAA", "HTTPS"}
+	logTokens     = []string{"alpha-token", "beta-token"}
+	logDomains    = []string{
+		"allowed.example.com", "ads.example.com", "ads.list-one.test", "adserver.list-two.test", "cname.example.com",
+		"dnssec.example.com", "nodata.example.com", "nxd.example.com", "ok.ads.example.com", "ok.list-two.test",
+		"telemetry.list-one.test", "tracker.example.net",
+	}
 )
 
-func firstGroup(t *testing.T, pattern *regexp.Regexp, source string) string {
-	t.Helper()
-	match := pattern.FindStringSubmatch(source)
-	if match == nil {
-		return ""
-	}
-	return html.UnescapeString(match[1])
+func logsShell() ShellData {
+	return ShellData{Version: goldenVersion, Host: "127.0.0.1:19080", CurrentPath: "/logs"}
 }
 
-func visibleText(markup string) string {
-	return html.UnescapeString(tagPattern.ReplaceAllString(markup, ""))
-}
-
-// logRowFromGolden reads one table row of a Rust golden back into the values
-// the view takes, so the data goldens can be checked without the database
-// they were captured from.
-func logRowFromGolden(t *testing.T, row string) LogRow {
-	t.Helper()
-	cells := logCellPattern.FindAllStringSubmatch(row, -1)
-	if len(cells) != 8 {
-		t.Fatalf("log row has %d cells: %.200s", len(cells), row)
-	}
-	domainCell, clientCell, sourceCell := cells[2][1], cells[4][1], cells[6][1]
-	result := ""
-	if strings.Contains(domainCell, "→ ") {
-		result = firstGroup(t, attrValuePattern("title"), domainCell[strings.Index(domainCell, `<div class="mono"`):])
-	}
-	token := ""
-	if strings.Contains(clientCell, "<br>") {
-		token = visibleText(clientCell[strings.Index(clientCell, "<br>"):])
-	}
-	ms, _ := strconv.ParseInt(visibleText(cells[7][1]), 10, 64)
-	upstream := ""
-	if strings.Contains(sourceCell, `class="mono"`) {
-		upstream = visibleText(sourceCell)
-	}
-	return LogRow{
-		TimestampMS: 1,
-		TimeText:    visibleText(cells[0][1]),
-		Blocked:     strings.Contains(cells[1][1], "st-block"),
-		Domain:      firstGroup(t, attrValuePattern("title"), domainCell),
-		Result:      strings.TrimPrefix(result, ""),
-		DNSSEC:      strings.Contains(domainCell, "badge-dnssec"),
-		QueryType:   visibleText(cells[3][1]),
-		ClientIP:    strings.TrimSuffix(html.UnescapeString(tagPattern.ReplaceAllString(strings.SplitN(clientCell, "<br>", 2)[0], "")), token),
-		DoHToken:    token,
-		Cached:      strings.Contains(sourceCell, "badge-cached"),
-		Upstream:    upstream,
-		ResponseMS:  ms,
-		ActionRule:  firstGroup(t, ruleFieldPattern, cells[5][1]),
-		ActionLabel: firstGroup(t, actionLabelRegexp, cells[5][1]),
-	}
-}
-
-func goldenOptions(t *testing.T, golden, selectID string) []LogOption {
-	t.Helper()
-	block := regexp.MustCompile(`(?s)<select id="log-` + selectID + `".*?</select>`).FindString(golden)
-	var options []LogOption
-	for i, match := range optionPattern.FindAllStringSubmatch(block, -1) {
-		if i == 0 {
-			continue // the "All …" entry is the view's own
-		}
-		options = append(options, LogOption{Value: html.UnescapeString(match[1]), Selected: strings.Contains(match[0], "selected")})
+func logOptions(selected string, values []string) []LogOption {
+	options := make([]LogOption, 0, len(values))
+	for _, value := range values {
+		options = append(options, LogOption{Value: value, Selected: value == selected})
 	}
 	return options
 }
 
-// logsPageFromGolden builds the page a golden shows from the golden itself,
-// except for what the caller states: the filters, paging and totals.
-func logsPageFromGolden(t *testing.T, name string, page LogsPage) LogsPage {
+// parseLogRows reads a table like logRowsFirstPage. The Rust server offered to
+// allow a blocked row's domain and to block any other.
+func parseLogRows(t *testing.T, table string) []LogRow {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", name+".golden.html"))
-	if err != nil {
-		t.Fatal(err)
+	var rows []LogRow
+	for _, line := range strings.Split(strings.TrimSpace(table), "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) != 7 {
+			t.Fatalf("log row has %d fields: %q", len(fields), line)
+		}
+		flags, domain := fields[0], fields[1]
+		ms, err := strconv.ParseInt(fields[6], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocked := strings.Contains(flags, "b")
+		rule, label := "||"+domain+"^", "Block"
+		if blocked {
+			rule, label = "@@||"+domain+"^", "Allow"
+		}
+		rows = append(rows, LogRow{
+			TimestampMS: 1, TimeText: "3 minutes ago", Blocked: blocked, Domain: domain, Result: fields[3],
+			DNSSEC: strings.Contains(flags, "d"), QueryType: fields[2], ClientIP: "192.168.215.1", DoHToken: fields[4],
+			Cached: strings.Contains(flags, "c"), Upstream: fields[5], ResponseMS: ms, ActionRule: rule, ActionLabel: label,
+		})
 	}
-	// The goldens carry normalisation markers where the values were volatile;
-	// any stand-in works, since the Go output is normalised the same way.
-	golden := strings.NewReplacer("<TS>", "1", "<AGO>", "3 minutes ago").Replace(string(raw))
-	for _, match := range logRowPattern.FindAllStringSubmatch(golden, -1) {
-		page.Rows = append(page.Rows, logRowFromGolden(t, match[1]))
-	}
-	page.QueryTypes = goldenOptions(t, golden, "type")
-	page.Tokens = goldenOptions(t, golden, "token")
-	page.CurrentHref = firstGroup(t, nextFieldPattern, golden)
-	for _, option := range optionPattern.FindAllStringSubmatch(datalistPattern.FindString(golden), -1) {
-		page.DomainSuggestions = append(page.DomainSuggestions, html.UnescapeString(option[1]))
-	}
-	page.Shell = ShellData{Version: goldenVersion, Host: "127.0.0.1:19080", CurrentPath: "/logs"}
+	return rows
+}
+
+// logsPageWith completes the page a data golden shows: its rows, the filter
+// menus (the one the page filters on is selected) and the shell. The caller
+// states the filters, paging and totals.
+func logsPageWith(t *testing.T, page LogsPage, rows string) LogsPage {
+	t.Helper()
+	page.Rows = parseLogRows(t, rows)
+	page.QueryTypes = logOptions(page.QueryType, logQueryTypes)
+	page.Tokens = logOptions(page.Token, logTokens)
+	page.DomainSuggestions = logDomains
+	page.Shell = logsShell()
 	return page
 }
 
 func TestLogsEmptyMatchesGolden(t *testing.T) {
 	page := LogsPage{
-		Shell: ShellData{
-			Version: goldenVersion, Host: "127.0.0.1:19080", CurrentPath: "/logs",
-			ShowNextStep: true, NextStepAddr: "127.0.0.1:53",
-		},
-		Page: 1, TotalPages: 1, Total: "0", CurrentHref: "/logs",
+		Shell:      logsShell(),
+		QueryTypes: logOptions("", logQueryTypes),
+		Page:       1, TotalPages: 1, Total: "0", CurrentHref: "/logs",
 	}
-	page = logsPageFromGolden(t, "logs_empty", page)
 	page.Shell.ShowNextStep, page.Shell.NextStepAddr = true, "127.0.0.1:53"
 	assertGolden(t, "logs_empty", Logs(page))
 }
 
 func TestLogsDataMatchesGoldens(t *testing.T) {
-	cases := map[string]LogsPage{
-		"logs_data":     {Page: 1, TotalPages: 4, Total: "200", HasNext: true, NextHref: "/logs?page=2", CurrentHref: "/logs"},
-		"logs_bad_page": {Page: 1, TotalPages: 4, Total: "200", HasNext: true, NextHref: "/logs?page=2", CurrentHref: "/logs"},
-		"logs_filtered": {
+	cases := []struct {
+		name string
+		rows string
+		page LogsPage
+	}{
+		{"logs_data", logRowsFirstPage, LogsPage{Page: 1, TotalPages: 4, Total: "200", HasNext: true, NextHref: "/logs?page=2", CurrentHref: "/logs"}},
+		{"logs_bad_page", logRowsFirstPage, LogsPage{Page: 1, TotalPages: 4, Total: "200", HasNext: true, NextHref: "/logs?page=2", CurrentHref: "/logs"}},
+		{"logs_filtered", logRowsFiltered, LogsPage{
 			Q: "ads", Action: "blocked", QueryType: "A", Token: "alpha-token", Page: 1, TotalPages: 1, Total: "9", Filtered: true,
-		},
-		"logs_wildcard": {
+			CurrentHref: "/logs?q=ads&action=blocked&type=A&token=alpha-token",
+		}},
+		{"logs_wildcard", logRowsWildcardPage, LogsPage{
 			Q: "*example*", Page: 2, TotalPages: 3, Total: "148", Filtered: true, HasPrev: true, HasNext: true,
 			PrevHref: "/logs?q=%2Aexample%2A", NextHref: "/logs?q=%2Aexample%2A&page=3",
-		},
+			CurrentHref: "/logs?q=%2Aexample%2A&page=2",
+		}},
 	}
-	for name, page := range cases {
-		assertGolden(t, name, Logs(logsPageFromGolden(t, name, page)))
+	for _, c := range cases {
+		assertGolden(t, c.name, Logs(logsPageWith(t, c.page, c.rows)))
 	}
 }
 

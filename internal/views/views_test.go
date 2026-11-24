@@ -1,61 +1,63 @@
 package views
 
 import (
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-type normalizeRule struct {
-	Pattern string `json:"pattern"`
-	Replace string `json:"replace"`
+// normalizeRules are applied in order, RE2 syntax, to the Rust golden HTML at
+// capture time and to the Go output before it is digested. The Go side renders
+// its own version string as v0.41.1 and applies the last rule too.
+var normalizeRules = []struct {
+	pattern *regexp.Regexp
+	replace string
+}{
+	{regexp.MustCompile(`data-ts="\d+"`), `data-ts="<TS>"`},
+	{regexp.MustCompile(`data-date-ts="\d+"`), `data-date-ts="<TS>"`},
+	{regexp.MustCompile(`(?:just now|\d+ (?:seconds?|minutes?|hours?|days?|months?|years?) ago)`), "<AGO>"},
+	{regexp.MustCompile(`noadd_[A-Za-z0-9_-]{4,}`), "<APIKEY>"},
+	{regexp.MustCompile(`[\d.]+((?:<span[^>]*>)?\s?ms\b)`), "<MS>${1}"},
+	{regexp.MustCompile(`v0\.41\.1`), "<VERSION>"},
 }
 
-// normalize applies testdata/normalize.json, which the Rust goldens went
-// through at capture time, to the Go output.
-func normalize(t *testing.T, html string) string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "normalize.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var config struct {
-		Rules []normalizeRule `json:"rules"`
-	}
-	if err := json.Unmarshal(raw, &config); err != nil {
-		t.Fatal(err)
-	}
-	for _, rule := range config.Rules {
-		html = regexp.MustCompile(rule.Pattern).ReplaceAllString(html, rule.Replace)
+func normalize(html string) string {
+	for _, rule := range normalizeRules {
+		html = rule.pattern.ReplaceAllString(html, rule.replace)
 	}
 	return html
 }
 
-// assertGolden compares the normalised page with testdata/<name>.golden.html
-// byte for byte.
+// assertGolden compares the sha256 of the normalised page with the digest of
+// the Rust golden of the same name (goldenDigests), so it is a byte for byte
+// comparison. On a mismatch the page is written to a temp file, to diff
+// against the golden kept in git history.
 func assertGolden(t *testing.T, name, html string) {
 	t.Helper()
-	want, err := os.ReadFile(filepath.Join("testdata", name+".golden.html"))
+	want, ok := goldenDigests[name]
+	if !ok {
+		t.Fatalf("no golden digest named %s", name)
+	}
+	got := normalize(html)
+	sum := sha256.Sum256([]byte(got))
+	if hex.EncodeToString(sum[:]) == want {
+		return
+	}
+	file, err := os.CreateTemp("", name+".actual.*.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := normalize(t, html)
-	if got != string(want) {
-		t.Errorf("%s differs from the Rust golden:\n got: %.400q\nwant: %.400q", name, firstDifference(got, string(want)), firstDifference(string(want), got))
+	defer func() { _ = file.Close() }()
+	if _, err := file.WriteString(got); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// firstDifference returns the text of a from a little before where it first
-// departs from b.
-func firstDifference(a, b string) string {
-	i := 0
-	for i < len(a) && i < len(b) && a[i] == b[i] {
-		i++
-	}
-	return a[max(i-60, 0):]
+	path := "internal/views/testdata/" + name + ".golden.html"
+	t.Errorf("%s differs from the Rust golden (%d bytes of normalised output written to %s).\n"+
+		"The golden is in git history: git show $(git log --diff-filter=D --format=%%h -1 -- %s)^:%s",
+		name, len(got), file.Name(), path, path)
 }
 
 const goldenVersion = "v0.41.1"

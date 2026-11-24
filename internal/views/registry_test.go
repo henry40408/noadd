@@ -1,41 +1,10 @@
 package views
 
 import (
-	"encoding/json"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-type registryFixture struct {
-	Groups []struct {
-		GroupID   int64  `json:"groupId"`
-		GroupName string `json:"groupName"`
-	} `json:"groups"`
-	Filters []struct {
-		FilterID    int64  `json:"filterId"`
-		GroupID     int64  `json:"groupId"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Homepage    string `json:"homepage"`
-		Deprecated  bool   `json:"deprecated"`
-		DownloadURL string `json:"downloadUrl"`
-	} `json:"filters"`
-}
-
-func loadRegistryFixture(t *testing.T) registryFixture {
-	t.Helper()
-	raw, err := os.ReadFile("testdata/registry-filters.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture registryFixture
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	return fixture
-}
 
 type registryView struct {
 	query          string
@@ -56,22 +25,21 @@ func groupClass(name string) string {
 
 // registryPageFor does what the handler will do with the fixture: filter, mark
 // what is already added and resolve each group.
-func registryPageFor(t *testing.T, view registryView) RegistryPage {
-	fixture := loadRegistryFixture(t)
+func registryPageFor(view registryView) RegistryPage {
 	page := RegistryPage{
 		Shell: ShellData{Version: goldenVersion, Host: "127.0.0.1:19080", CurrentPath: "/filters"},
 		Q:     view.query, ShowDeprecated: view.showDeprecated, CurrentQuery: view.currentQuery,
-		Total: len(fixture.Filters), Limit: 50,
+		Total: len(registryFilters), Limit: 50,
 	}
 	names := map[int64]string{}
-	for _, group := range fixture.Groups {
+	for _, group := range registryGroups {
 		names[group.GroupID] = group.GroupName
 		page.Groups = append(page.Groups, RegistryGroup{
 			Value: strconv.FormatInt(group.GroupID, 10), Label: group.GroupName, Selected: group.GroupID == view.group,
 		})
 	}
 	needle := strings.ToLower(view.query)
-	for _, filter := range fixture.Filters {
+	for _, filter := range registryFilters {
 		haystack := strings.ToLower(filter.Name + " " + filter.Description)
 		if (filter.Deprecated && !view.showDeprecated) || (view.group != 0 && filter.GroupID != view.group) ||
 			!strings.Contains(haystack, needle) {
@@ -89,19 +57,19 @@ func registryPageFor(t *testing.T, view registryView) RegistryPage {
 }
 
 func TestRegistryMatchesGoldens(t *testing.T) {
-	data := registryPageFor(t, registryView{})
+	data := registryPageFor(registryView{})
 	assertGolden(t, "registry_data", Registry(data))
 
-	empty := registryPageFor(t, registryView{})
+	empty := registryPageFor(registryView{})
 	empty.Shell.ShowNextStep, empty.Shell.NextStepAddr = true, "127.0.0.1:53"
 	assertGolden(t, "registry_empty", Registry(empty))
 
-	search := registryPageFor(t, registryView{query: "ad", group: 1, showDeprecated: true, currentQuery: "?q=ad&group=1&deprecated=1"})
+	search := registryPageFor(registryView{query: "ad", group: 1, showDeprecated: true, currentQuery: "?q=ad&group=1&deprecated=1"})
 	assertGolden(t, "registry_search", Registry(search))
 }
 
 func TestRegistryOutcomesMatchGoldens(t *testing.T) {
-	none := registryPageFor(t, registryView{})
+	none := registryPageFor(registryView{})
 	none.Failures = []RegistryFailure{{Name: "No lists selected", Error: "tick at least one list before adding"}}
 	assertGolden(t, "registry_add_none", Registry(none))
 
