@@ -3,9 +3,6 @@ package dns
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,38 +10,19 @@ import (
 )
 
 type wireCase struct {
-	Name     string            `json:"name"`
-	Settings map[string]string `json:"settings"`
-	Steps    []wireStep        `json:"steps"`
+	Name     string
+	Settings map[string]string
+	Steps    []wireStep
 }
 
 type wireStep struct {
-	Request  string `json:"request"`
-	Response string `json:"response"`
-	Upstream *struct {
-		Response string `json:"response"`
-	} `json:"upstream"`
+	Request  string
+	Response string
+	Upstream *wireUpstream
 }
 
-func loadWireCases(t *testing.T) []wireCase {
-	t.Helper()
-	paths, err := filepath.Glob("testdata/wire/*.json")
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("no wire fixtures: %v", err)
-	}
-	var cases []wireCase
-	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var c wireCase
-		if err := json.Unmarshal(raw, &c); err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		cases = append(cases, c)
-	}
-	return cases
+type wireUpstream struct {
+	Response string
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -88,7 +66,7 @@ func synthesize(query []byte, settings map[string]string) (response []byte, ok b
 // byte for byte: these helpers build all of them.
 func TestSynthesizedResponsesMatchRust(t *testing.T) {
 	checked := 0
-	for _, c := range loadWireCases(t) {
+	for _, c := range rustWireCases {
 		for _, step := range c.Steps {
 			if step.Upstream != nil || step.Response == "" {
 				continue
@@ -112,7 +90,7 @@ func TestSynthesizedResponsesMatchRust(t *testing.T) {
 // must carry the same TC bit, question and OPT as the Rust answer.
 func TestTruncationMatchesRustSemantics(t *testing.T) {
 	checked := 0
-	for _, c := range loadWireCases(t) {
+	for _, c := range rustWireCases {
 		if !strings.HasPrefix(c.Name, "truncate_udp_") {
 			continue
 		}
@@ -136,7 +114,7 @@ func TestTruncationMatchesRustSemantics(t *testing.T) {
 
 // TTLOffsets must locate the TTL the parser reads in every recorded response.
 func TestTTLOffsetsOnRecordedResponses(t *testing.T) {
-	for _, c := range loadWireCases(t) {
+	for _, c := range rustWireCases {
 		for _, step := range c.Steps {
 			if step.Response == "" {
 				continue

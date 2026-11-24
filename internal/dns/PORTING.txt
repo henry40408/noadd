@@ -1,0 +1,31 @@
+DNS wire cases recorded from the Rust image ghcr.io/henry40408/noadd:0.41.1. They are written in
+rustWireCases (wire_cases_test.go); the 92 recordings were one JSON file each under testdata/wire
+before that was inlined (see the git history before that commit).
+
+Each case: name, the block settings in force, and steps. A step holds the client request (hex), what
+Rust answered (hex; empty = no answer) and, when Rust asked upstream, the answer its forwarder got
+(nil = answered without asking upstream: blocked, synthesized or cache hit). The recordings also had
+the transport, a sleep before the step (for TTL decrement), the upstream call count and the other
+settings; no test reads them, so they are not carried over.
+
+Replay: a Go fake upstream answers with the recorded upstream response; compare the Go output to the
+recorded response after normalising the ID, and compare TTLs (cache cases: patched TTL = original -
+elapsed, min 1). miekg and hickory compress names differently: compare parsed messages + TTL byte
+offsets, not raw bytes, except for the synthesized cases (block / NOTIMP / BADVERS / SERVFAIL).
+The fake upstream (fakes.py in the capture directory) answered from a fixed table and truncated UDP
+answers above the client's EDNS size (1232 for Rust's own queries).
+Block rules for the block_* cases: ads.example.com (block), @@||ok.ads.example.com^ (allow).
+
+Observed behaviour worth pinning:
+  * truncate_huge_* : an upstream UDP answer with TC=1 is NOT retried over TCP; Rust logs
+    "response was truncated; TCP already tried or no other transport available" and answers SERVFAIL.
+  * truncate_udp_noedns / edns512 / edns100: Rust's TC=1 answer keeps header+question (+OPT when the
+    client sent one). truncate_tcp_* are not truncated.
+  * garbage_*: a malformed UDP packet is answered with a bare 12-byte SERVFAIL header, not dropped.
+  * servfail_upstream_unreachable waits for the forward timeout (~5 s) and answers a synthesized SERVFAIL.
+  * dnssec_*: Rust always asks upstream with DO; non-DO clients get RRSIG stripped and AD cleared.
+Coverage vs section 1.2: opcode/NOTIMP, BADVERS (v1, v255, DO), block modes x A/AAAA/MX/TXT x EDNS,
+custom_ip with each address unset, RD unset, CD/AD request flags, upper-case names, allow-over-block,
+cache (TTL patched, case-insensitive key, EDNS/DO profiles, negative NXDOMAIN, SERVFAIL not cached,
+multi-TTL CNAME), truncation (UDP sizes, TCP), DNSSEC on/off x DO. Not covered: rate limiting,
+single-flight, stale serving (need load or a slow upstream; Go covers them with its own tests).
