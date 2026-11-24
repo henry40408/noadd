@@ -15,19 +15,43 @@ import (
 
 var whitespace = regexp.MustCompile(`\s+`)
 
-// copyFixture copies a testdata database into a temp dir: opening migrates in
-// place, and the legacy files are WAL databases.
+// copyFixture puts a database in a temp dir: opening migrates in place, and
+// the legacy databases are WAL ones. The legacy shapes are built from
+// legacySQL; rust-v17.sqlite3, which the Rust server wrote, is copied.
 func copyFixture(t *testing.T, name string) string {
 	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if statements, ok := legacySQL[name]; ok {
+		buildLegacyDatabase(t, path, statements)
+		return path
+	}
 	data, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func buildLegacyDatabase(t *testing.T, path, statements string) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One connection, so the journal mode and the statements share it.
+	conn.SetMaxOpenConns(1)
+	if _, err := conn.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(statements); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func openDB(t *testing.T, path string) *DB {
@@ -196,12 +220,8 @@ type migratedDump struct {
 func TestUpgradeMatchesRustMigratedRows(t *testing.T) {
 	for _, version := range []string{"v0", "v4", "v8", "v15"} {
 		t.Run(version, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join("testdata", "rust-"+version+".migrated.dump.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
 			var dump migratedDump
-			if err := json.Unmarshal(raw, &dump); err != nil {
+			if err := json.Unmarshal([]byte(rustMigratedDumps[version]), &dump); err != nil {
 				t.Fatal(err)
 			}
 			database := openDB(t, copyFixture(t, "rust-"+version+".sqlite3"))
