@@ -1,26 +1,20 @@
 package filter
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
 
-// The lists and verdicts in testdata were produced by the released Rust
-// image ghcr.io/henry40408/noadd:0.41.1 (see PORTING.txt).
+// rustFixtureLists and rustFixtureVerdicts (fixture_data_test.go) were
+// produced by the released Rust image ghcr.io/henry40408/noadd:0.41.1 (see
+// PORTING.txt).
 func TestEngineMatchesRustOnFixture(t *testing.T) {
 	var input EngineInput
-	for i := 1; i <= 3; i++ {
-		content, err := os.ReadFile(filepath.Join("testdata", "fixture-list"+string(rune('0'+i))+".txt"))
-		if err != nil {
-			t.Fatal(err)
-		}
+	for i, content := range rustFixtureLists {
 		listIdx := uint16(len(input.Lists))
-		input.Lists = append(input.Lists, ListMeta{Name: "fx" + string(rune('0'+i)), ID: int64(i)})
-		for _, rule := range ParseList(string(content)) {
+		input.Lists = append(input.Lists, ListMeta{Name: "fx" + string(rune('1'+i)), ID: int64(i + 1)})
+		for _, rule := range ParseList(content) {
 			if rule.Action == ActionAllow {
 				input.Allow = append(input.Allow, rule)
 				continue
@@ -30,25 +24,24 @@ func TestEngineMatchesRustOnFixture(t *testing.T) {
 	}
 	engine := New(input)
 
-	verdicts, err := os.ReadFile(filepath.Join("testdata", "verdicts.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checked, blocked := 0, 0
-	for _, line := range strings.Split(strings.TrimSuffix(string(verdicts), "\n"), "\n") {
-		fields := strings.Split(line, "\t")
-		domain, action, list, rule := fields[0], fields[1], fields[2], fields[3]
-		want := Verdict{Blocked: action == "blocked", Rule: rule, List: list}
-		if got := engine.Check(domain); got != want {
-			t.Errorf("Check(%q) = %+v, Rust said %+v", domain, got, want)
+	var blocked, allowedByRule, allowedWithoutRule int
+	for _, rust := range rustFixtureVerdicts {
+		want := Verdict{Blocked: rust.blocked, Rule: rust.rule, List: rust.list}
+		if got := engine.Check(rust.domain); got != want {
+			t.Errorf("Check(%q) = %+v, Rust said %+v", rust.domain, got, want)
 		}
-		checked++
-		if want.Blocked {
+		switch {
+		case want.Blocked:
 			blocked++
+		case want.Rule != "":
+			allowedByRule++
+		default:
+			allowedWithoutRule++
 		}
 	}
-	if checked < 3000 || blocked < 1000 {
-		t.Fatalf("fixture too small: %d checked, %d blocked", checked, blocked)
+	if len(rustFixtureVerdicts) < 280 || blocked < 180 || allowedByRule < 90 || allowedWithoutRule < 6 {
+		t.Fatalf("fixture too small: %d checked, %d blocked, %d allowed by a rule, %d allowed without",
+			len(rustFixtureVerdicts), blocked, allowedByRule, allowedWithoutRule)
 	}
 }
 
