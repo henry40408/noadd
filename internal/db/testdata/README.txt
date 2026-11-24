@@ -15,7 +15,7 @@ rust-v17.sqlite3  (PRAGMA user_version = 17, journal_mode WAL, single file, chec
     second      / another long passphrase 42
     cjk-user    / 這是一個很長的中文密碼測試用的密碼
   API keys: ci-expiring (expires_at 4102444800), ci-forever (expires_at NULL), ui-key (created
-    through the SSR form, expires 2100-01-01).  Plaintext tokens: ../../auth/testdata/password_vectors.json
+    through the SSR form, expires 2100-01-01).  Plaintext tokens: rustTokenVectors in ../../auth/password_test.go
     and $CLAUDE_JOB_DIR/tmp/noadd-capture/out/raw/info.json.
   DoH tokens: alpha-token, beta-token.
   Custom rules: ads.example.com (block), @@||ok.ads.example.com^ (allow), ||tracker.example.net^ (block).
@@ -30,7 +30,6 @@ rust-v17.sqlite3  (PRAGMA user_version = 17, journal_mode WAL, single file, chec
     bridge address 192.168.215.1. NULL combinations NOT covered: upstream NULL with cached=0 and
     blocked=0 (every forwarded row names the one fake upstream), rate-limited rows, a forward-auth
     account (users.password_hash = NO_PASSWORD_SENTINEL), a session without ip/user_agent.
-  rust-v17.schema.sql is `.schema` of this file.
 
 rust-v0 / v4 / v8 / v15.sqlite3  (hand-written SQL, scripts: mk-legacy.sh)
   v0   schema batch of a fresh database (all tables but sessions) with user_version 0.

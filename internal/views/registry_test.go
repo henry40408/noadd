@@ -26,7 +26,7 @@ type registryFixture struct {
 
 func loadRegistryFixture(t *testing.T) registryFixture {
 	t.Helper()
-	raw, err := os.ReadFile("../server/testdata/rust/registry-filters.json")
+	raw, err := os.ReadFile("testdata/registry-filters.json")
 	if err != nil {
 		t.Fatal(err)
 	}

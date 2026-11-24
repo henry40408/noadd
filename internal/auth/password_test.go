@@ -2,9 +2,7 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -46,51 +44,37 @@ func TestHashWrittenByRustStillVerifies(t *testing.T) {
 	}
 }
 
-type passwordVectors struct {
-	Passwords []struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		PHC      string `json:"phc"`
-	} `json:"passwords"`
-	TokenHashes []struct {
-		Kind   string `json:"kind"`
-		Token  string `json:"token"`
-		Digest string `json:"blake2b512_hex"`
-	} `json:"token_hashes"`
+// rustPasswordVectors are argon2id hashes (m=19456,t=2,p=1) written by the Rust
+// server 0.41.1. They are never regenerated from Go output.
+var rustPasswordVectors = []struct{ username, password, phc string }{
+	{"admin", "correct horse battery", "$argon2id$v=19$m=19456,t=2,p=1$a6HbvUBHXd81hVLaT7XBKA$IQ38bNVwFOCsLh0vem2N1oYI3GTv/qbAYs7Bg8qhWgQ"},
+	{"second", "another long passphrase 42", "$argon2id$v=19$m=19456,t=2,p=1$hLp14PeCkaRxg/at+jJlsg$NPvrGiWQ5rZcFaozvkf2YbSNqULTWM3WuPWbw7jkUKk"},
+	{"cjk-user", "這是一個很長的中文密碼測試用的密碼", "$argon2id$v=19$m=19456,t=2,p=1$X5Fj3nRFvDUl6f3Pxgu40g$neKymKhsfJZwYCeFzhNGzahJWp/JZB4cU7baBPWjpJA"},
 }
 
-func loadVectors(t *testing.T) passwordVectors {
-	t.Helper()
-	raw, err := os.ReadFile("testdata/password_vectors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var vectors passwordVectors
-	if err := json.Unmarshal(raw, &vectors); err != nil {
-		t.Fatal(err)
-	}
-	return vectors
+// rustTokenVectors are unsalted BLAKE2b-512 digests (lower hex) of the token
+// string, written by the Rust server 0.41.1.
+var rustTokenVectors = []struct{ kind, token, digest string }{
+	{"api_key", "noadd_CifGOW4zNCuriUmy9HIDnwGHfGpg3CzdcJ7oFz5D", "208bf4513fafc42e3de165f4b95c1aa035b4a212ef807f2dc4c2dc3c5a704976e6d53d14e7136c54e89300cc0e6934309ec1403756e47617671021b286865d48"},
+	{"api_key", "noadd_O3lQsU5VJMRtSrkUoTBTDtcMEfQEGga4sjtjJryN", "12a998c60382c04f3f8dc68efbc590d67340c7cff74a954781532c307d02849b89d25d95ae57cf98a48e3270210ebf436efa8ebc9fe1f63feb3dd59879e3539d"},
+	{"session", "AfvdpY9m8f1Y6vKx9NiAOEYzHs4ieyGRfoM6FVVJVgOQn4TtAi7hBNvD5VYVqrXb", "dbb68cc1180435602de30284d84182d2acf30ad6904a13a9789494932d1b3928725d00a1fc15b031663986c39b756109bb925e94f359038b922dc3c1525d7df8"},
 }
 
 func TestRustPasswordVectorsVerify(t *testing.T) {
-	vectors := loadVectors(t)
-	if len(vectors.Passwords) == 0 {
-		t.Fatal("no vectors")
-	}
-	for _, v := range vectors.Passwords {
-		if ok, err := VerifyPassword(v.Password, v.PHC); !ok || err != nil {
-			t.Errorf("%s: ok=%v err=%v", v.Username, ok, err)
+	for _, v := range rustPasswordVectors {
+		if ok, err := VerifyPassword(v.password, v.phc); !ok || err != nil {
+			t.Errorf("%s: ok=%v err=%v", v.username, ok, err)
 		}
-		if ok, _ := VerifyPassword(v.Password+"x", v.PHC); ok {
-			t.Errorf("%s: wrong password verified", v.Username)
+		if ok, _ := VerifyPassword(v.password+"x", v.phc); ok {
+			t.Errorf("%s: wrong password verified", v.username)
 		}
 	}
 }
 
 func TestRustTokenHashVectors(t *testing.T) {
-	for _, v := range loadVectors(t).TokenHashes {
-		if got := HashToken(v.Token); got != v.Digest {
-			t.Errorf("%s: got %s, want %s", v.Kind, got, v.Digest)
+	for _, v := range rustTokenVectors {
+		if got := HashToken(v.token); got != v.digest {
+			t.Errorf("%s: got %s, want %s", v.kind, got, v.digest)
 		}
 	}
 }

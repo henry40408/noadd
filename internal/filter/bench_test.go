@@ -10,7 +10,7 @@ import (
 )
 
 // benchListSHA256 pins the generated list to the one the Rust baseline in
-// testdata/bench-baseline.txt was measured with.
+// PORTING.txt was measured with.
 const benchListSHA256 = "65b6e790a07311c45529a6ee6ba835322c59f5b0aae0b6e08dd36ebb738ec735"
 
 func benchListLine(i int) string {

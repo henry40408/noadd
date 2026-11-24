@@ -1,10 +1,7 @@
 package server
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
-	"os"
 	"testing"
 
 	"github.com/henry40408/noadd/internal/db"
@@ -85,24 +82,53 @@ func TestDeleteLogsClearsEverything(t *testing.T) {
 	}
 }
 
+// rustMobileConfig is the profile the Rust server answered with for the token
+// "alpha-token" and the public URL below. It is never regenerated from Go output.
+const rustMobileConfig = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>DNSSettings</key>
+			<dict>
+				<key>DNSProtocol</key>
+				<string>HTTPS</string>
+				<key>ServerURL</key>
+				<string>https://dns.example.test/dns-query/alpha-token</string>
+			</dict>
+			<key>PayloadDisplayName</key>
+			<string>noadd DNS (alpha-token)</string>
+			<key>PayloadIdentifier</key>
+			<string>com.noadd.dns.alpha-token.dns</string>
+			<key>PayloadType</key>
+			<string>com.apple.dnsSettings.managed</string>
+			<key>PayloadUUID</key>
+			<string>db7aea8a-a3be-57cc-a0d5-ce5b44136e11</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>noadd DNS (alpha-token)</string>
+	<key>PayloadIdentifier</key>
+	<string>com.noadd.dns.alpha-token</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>388a618e-d08e-5b04-ba88-7ad7e400475a</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadDescription</key>
+	<string>Configures DNS-over-HTTPS to use noadd ad-blocking DNS server.</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+</dict>
+</plist>`
+
 func TestMobileConfigMatchesTheRustProfileByteForByte(t *testing.T) {
 	h := newAPIHarness(t, harnessOptions{})
-	raw, err := os.ReadFile("testdata/rust/api_mobileconfig.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var golden struct {
-		Headers [][2]string `json:"headers"`
-		BodyB64 string      `json:"body_b64"`
-	}
-	if err := json.Unmarshal(raw, &golden); err != nil {
-		t.Fatal(err)
-	}
-	want, err := base64.StdEncoding.DecodeString(golden.BodyB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	if err := h.db.SetSetting(ctxBackground(), "public_url", "https://dns.example.test/"); err != nil {
 		t.Fatal(err)
 	}
@@ -110,12 +136,15 @@ func TestMobileConfigMatchesTheRustProfileByteForByte(t *testing.T) {
 	// No cookie: the token is the credential.
 	recorder := h.do(request{method: "GET", path: "/api/mobileconfig/alpha-token"})
 	wantStatus(t, recorder, http.StatusOK)
-	if recorder.Body.String() != string(want) {
-		t.Fatalf("body differs:\n%s\nwant:\n%s", recorder.Body.String(), want)
+	if recorder.Body.String() != rustMobileConfig {
+		t.Fatalf("body differs:\n%s\nwant:\n%s", recorder.Body.String(), rustMobileConfig)
 	}
-	for _, header := range golden.Headers[:2] {
-		if got := recorder.Header().Get(header[0]); got != header[1] {
-			t.Errorf("%s = %q, want %q", header[0], got, header[1])
+	for header, want := range map[string]string{
+		"Content-Type":        "application/x-apple-aspen-config; charset=utf-8",
+		"Content-Disposition": `attachment; filename="noadd-alpha-token.mobileconfig"`,
+	} {
+		if got := recorder.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
 		}
 	}
 }
