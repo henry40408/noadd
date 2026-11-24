@@ -2,29 +2,56 @@ package db
 
 import (
 	"context"
-	"encoding/json"
-	"os"
+	"database/sql"
 	"testing"
 )
 
-type dumpTable struct {
-	Columns []string `json:"columns"`
-	Rows    [][]any  `json:"rows"`
+// dumpQueries read the non-secret columns of every table the read functions
+// cover, in the order the tests index them.
+var dumpQueries = map[string]string{
+	"users":               "SELECT id, username, created_at FROM users ORDER BY id",
+	"doh_tokens":          "SELECT id, token FROM doh_tokens ORDER BY id",
+	"custom_rules":        "SELECT id, rule, rule_type FROM custom_rules ORDER BY id",
+	"filter_lists":        "SELECT id, name, url, enabled, last_updated, rule_count FROM filter_lists ORDER BY id",
+	"filter_list_content": "SELECT list_id FROM filter_list_content ORDER BY list_id",
+	"api_keys":            "SELECT id, user_id, name, prefix, created_at, last_used_at, expires_at FROM api_keys ORDER BY id",
+	"sessions":            "SELECT id, user_id, created_at, last_seen, ip, user_agent FROM sessions ORDER BY id",
+	"settings":            "SELECT key, value FROM settings ORDER BY key",
+	"query_logs": `SELECT id, timestamp, domain, query_type, client_ip, blocked, cached, response_ms,
+		upstream, doh_token, result, authenticated_data FROM query_logs ORDER BY id`,
 }
 
-func loadDump(t *testing.T) map[string]dumpTable {
+// loadDump reads the tables with plain SQL, so each read function is held
+// against the rows themselves rather than against its own query. Call it
+// before openDB: the rows are then what the fixture held, and a test also
+// notices if opening the database changes or drops them.
+func loadDump(t *testing.T, path string) map[string][][]any {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/rust-v17.dump.json")
+	conn, err := sql.Open("sqlite", dsn(path, nil, "ro"))
 	must(t, err)
-	var dump struct {
-		Tables map[string]dumpTable `json:"tables"`
+	defer func() { _ = conn.Close() }()
+	dump := map[string][][]any{}
+	for table, query := range dumpQueries {
+		rows, err := conn.Query(query)
+		must(t, err)
+		columns, err := rows.Columns()
+		must(t, err)
+		for rows.Next() {
+			row := make([]any, len(columns))
+			targets := make([]any, len(columns))
+			for i := range row {
+				targets[i] = &row[i]
+			}
+			must(t, rows.Scan(targets...))
+			dump[table] = append(dump[table], row)
+		}
+		must(t, rows.Err())
+		must(t, rows.Close())
 	}
-	must(t, json.Unmarshal(raw, &dump))
-	return dump.Tables
+	return dump
 }
 
-// asInt64 reads a JSON number; the dump decodes numbers as float64.
-func asInt64(value any) int64 { return int64(value.(float64)) }
+func asInt64(value any) int64 { return value.(int64) }
 
 func optionalInt(value any) *int64 {
 	if value == nil {
@@ -50,15 +77,16 @@ func equalOptional[T comparable](a, b *T) bool {
 // Every read function must return what the Rust binary stored in v17.
 func TestReadFunctionsMatchRustFixture(t *testing.T) {
 	ctx := context.Background()
-	database := openDB(t, copyFixture(t, "rust-v17.sqlite3"))
-	dump := loadDump(t)
+	path := copyFixture(t, "rust-v17.sqlite3")
+	dump := loadDump(t, path)
+	database := openDB(t, path)
 
 	users, err := database.ListUsers(ctx)
 	must(t, err)
-	if len(users) != len(dump["users"].Rows) {
+	if len(users) != len(dump["users"]) {
 		t.Fatalf("users %d", len(users))
 	}
-	for i, row := range dump["users"].Rows {
+	for i, row := range dump["users"] {
 		if users[i].ID != asInt64(row[0]) || users[i].Username != row[1] || users[i].CreatedAt != asInt64(row[2]) {
 			t.Errorf("user %d: %+v vs %v", i, users[i], row)
 		}
@@ -66,7 +94,7 @@ func TestReadFunctionsMatchRustFixture(t *testing.T) {
 
 	tokens, err := database.GetDohTokens(ctx)
 	must(t, err)
-	for i, row := range dump["doh_tokens"].Rows {
+	for i, row := range dump["doh_tokens"] {
 		if tokens[i].ID != asInt64(row[0]) || tokens[i].Token != row[1] {
 			t.Errorf("token %d: %+v", i, tokens[i])
 		}
@@ -77,7 +105,7 @@ func TestReadFunctionsMatchRustFixture(t *testing.T) {
 
 	rules, err := database.GetAllCustomRules(ctx)
 	must(t, err)
-	for i, row := range dump["custom_rules"].Rows {
+	for i, row := range dump["custom_rules"] {
 		if rules[i].ID != asInt64(row[0]) || rules[i].Rule != row[1] || rules[i].RuleType != row[2] {
 			t.Errorf("rule %d: %+v", i, rules[i])
 		}
@@ -85,23 +113,23 @@ func TestReadFunctionsMatchRustFixture(t *testing.T) {
 
 	lists, err := database.GetFilterLists(ctx)
 	must(t, err)
-	if len(lists) != len(dump["filter_lists"].Rows) {
+	if len(lists) != len(dump["filter_lists"]) {
 		t.Fatalf("lists %d", len(lists))
 	}
-	for i, row := range dump["filter_lists"].Rows {
+	for i, row := range dump["filter_lists"] {
 		list := lists[i]
 		if list.ID != asInt64(row[0]) || list.Name != row[1] || list.URL != row[2] ||
 			list.Enabled != (asInt64(row[3]) != 0) || list.LastUpdated != asInt64(row[4]) || list.RuleCount != asInt64(row[5]) {
 			t.Errorf("list %d: %+v vs %v", i, list, row)
 		}
 	}
-	for _, row := range dump["filter_list_content"].Rows {
+	for _, row := range dump["filter_list_content"] {
 		if content, found, _ := database.GetFilterListContent(ctx, asInt64(row[0])); !found || content == "" {
 			t.Errorf("content of list %v missing", row[0])
 		}
 	}
 
-	for _, row := range dump["api_keys"].Rows {
+	for _, row := range dump["api_keys"] {
 		userID := asInt64(row[1])
 		keys, err := database.ListAPIKeysForUser(ctx, userID)
 		must(t, err)
@@ -119,13 +147,13 @@ func TestReadFunctionsMatchRustFixture(t *testing.T) {
 
 	sessions, err := database.ListSessions(ctx)
 	must(t, err)
-	row := dump["sessions"].Rows[0]
+	row := dump["sessions"][0]
 	if len(sessions) != 1 || sessions[0].CreatedAt != asInt64(row[2]) || sessions[0].LastSeen != asInt64(row[3]) ||
 		!equalOptional(sessions[0].IP, optionalString(row[4])) || !equalOptional(sessions[0].UserAgent, optionalString(row[5])) {
 		t.Errorf("session: %+v vs %v", sessions, row)
 	}
 
-	for _, row := range dump["settings"].Rows {
+	for _, row := range dump["settings"] {
 		if row[0] == "session_log_salt" || row[0] == queryLogCountKey {
 			continue
 		}
@@ -137,8 +165,9 @@ func TestReadFunctionsMatchRustFixture(t *testing.T) {
 
 func TestQueryLogsMatchRustFixture(t *testing.T) {
 	ctx := context.Background()
-	database := openDB(t, copyFixture(t, "rust-v17.sqlite3"))
-	rows := loadDump(t)["query_logs"].Rows
+	path := copyFixture(t, "rust-v17.sqlite3")
+	rows := loadDump(t, path)["query_logs"]
+	database := openDB(t, path)
 	if total, _ := database.TotalLogCount(ctx); total != int64(len(rows)) {
 		t.Fatalf("maintained count %d vs %d", total, len(rows))
 	}

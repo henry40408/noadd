@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,23 +14,16 @@ import (
 
 var whitespace = regexp.MustCompile(`\s+`)
 
-// copyFixture puts a database in a temp dir: opening migrates in place, and
-// the legacy databases are WAL ones. The legacy shapes are built from
-// legacySQL; rust-v17.sqlite3, which the Rust server wrote, is copied.
+// copyFixture builds a database from legacySQL in a temp dir, as a WAL one:
+// opening migrates in place.
 func copyFixture(t *testing.T, name string) string {
 	t.Helper()
+	statements, ok := legacySQL[name]
+	if !ok {
+		t.Fatalf("no fixture named %s", name)
+	}
 	path := filepath.Join(t.TempDir(), name)
-	if statements, ok := legacySQL[name]; ok {
-		buildLegacyDatabase(t, path, statements)
-		return path
-	}
-	data, err := os.ReadFile(filepath.Join("testdata", name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	buildLegacyDatabase(t, path, statements)
 	return path
 }
 
