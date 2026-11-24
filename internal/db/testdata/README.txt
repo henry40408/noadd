@@ -31,7 +31,11 @@ rust-v17.sqlite3  (PRAGMA user_version = 17, journal_mode WAL, single file, chec
     blocked=0 (every forwarded row names the one fake upstream), rate-limited rows, a forward-auth
     account (users.password_hash = NO_PASSWORD_SENTINEL), a session without ip/user_agent.
 
-rust-v0 / v4 / v8 / v15.sqlite3  (hand-written SQL, scripts: mk-legacy.sh)
+rust-v0 / v4 / v8 / v15  (no files: legacySQL and rustMigratedDumps in ../legacy_fixtures_test.go)
+  The files were hand-written SQL (mk-legacy.sh), so the SQL is kept inline and copyFixture builds the
+  WAL database from it. A rebuilt database equals the file it replaced: the same .dump, user_version,
+  journal_mode, page_size and sqlite_master. The sqlite_stat1 rows are inserted as the file held
+  them, since ANALYZE gives different numbers on this SQLite.
   v0   schema batch of a fresh database (all tables but sessions) with user_version 0.
   v4   oldest shape Rust 0.41.1 can still open: query_logs has cached/doh_token/upstream/result but no
        authenticated_data/has_result, legacy idx_query_logs_domain, settings rows admin_password_hash
@@ -44,6 +48,6 @@ rust-v0 / v4 / v8 / v15.sqlite3  (hand-written SQL, scripts: mk-legacy.sh)
   added for the legacy-domain-index case.
   Each file was opened by the Rust binary (container started, then stopped): all four end at
   user_version 17 with a schema identical (pragma table_xinfo / index_xinfo) to rust-v17.sqlite3.
-  rust-vN.migrated.dump.json is the non-secret content after that migration (legacy session rows are
+  rustMigratedDumps["vN"] is the non-secret content after that migration (legacy session rows are
   gone, rollups are backfilled from the surviving query_logs, query_log_count is rewritten).
-  The legacy files have WAL journal mode; copy them to a t.TempDir() before opening.
+  The legacy databases have WAL journal mode; build them in a t.TempDir() before opening.
