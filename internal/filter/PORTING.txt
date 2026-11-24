@@ -10,13 +10,24 @@ Tests
   TestHolderSwapUnderLoad (run with -race).
   Rust tests/filter_lists_test.rs and rebuild_coordinator_test.rs belong to Step 7.
 
-Fixture (testdata/fixture-list{1,2,3}.txt, verdicts.txt)
-  Three generated lists (2000 lines each, mixed ||, @@||, hosts, plain, comments, upper case,
+Fixture (rustFixtureLists, rustFixtureVerdicts in fixture_data_test.go)
+  Captured from the Rust image ghcr.io/henry40408/noadd:0.41.1 through POST /api/filter/check:
+  three generated lists (2000 lines each, mixed ||, @@||, hosts, plain, comments, upper case,
   shared domains across lists) and 3866 query verdicts (2073 blocked, 257 allowed by a rule,
-  1536 allowed without) captured from the Rust image ghcr.io/henry40408/noadd:0.41.1 through
-  POST /api/filter/check. The plan asked for a 10k-line sample; this is 6k lines because
+  1536 allowed without). The plan asked for a 10k-line sample; this is 6k lines because
   no real-world list was captured in Step 1 and the generated one already covers every
   rule form and the cross-list priority cases.
+  The test keeps one verdict per behaviour class (outcome, reporting list, query case, and per
+  list allow or block and exact or subdomain match; two for classes of 25 or more), a single-label
+  query and a parent of a rule (the trie walk misses), and, per list, only the rule lines that
+  can touch one of those queries, plus one of each line that is no rule (comment, blank,
+  localhost, junk). The full set is no longer in the tree: find it with
+  `git log --diff-filter=D -- internal/filter/testdata`, then check out the parent of that
+  commit. The trie nodes are smaller than in the full set (at most about 40 children, not 300).
+  Local mutation testing of this package (gremlins v0.6.0) gave the same killed, lived and timed
+  out mutants for this test as for this test plus the full set. One mutant is killed only by
+  the fixture and by no other test: exact.go:18:46 (the domain compare in sortExactEntries,
+  negated, leaves the packed set unsorted).
 
 Engine data structures (plan section 3.1)
   Chosen: option B for the exact sets (sorted packed arena: data []byte, offsets []uint32,
