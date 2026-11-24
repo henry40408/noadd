@@ -2,10 +2,10 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -164,29 +164,38 @@ func TestTZOffsetClampsThenRoundsToAQuarterHour(t *testing.T) {
 	}
 }
 
+// openAPIRustDigest is the SHA-256 of the OpenAPI document the Rust server
+// answered with, written as canonical JSON: sorted keys, no whitespace, no HTML
+// escaping. It is never regenerated from Go output.
+const openAPIRustDigest = "bfe6d507c2eb46e519820a5484f18479eeedbc2310b292e4234f365f20cf4d0c"
+
+func canonicalJSONDigest(t *testing.T, document []byte) string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(document, &value); err != nil {
+		t.Fatal(err)
+	}
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(bytes.TrimSuffix(canonical.Bytes(), []byte("\n")))
+	return hex.EncodeToString(digest[:])
+}
+
 func TestOpenAPIAndDocsMatchTheRustResponses(t *testing.T) {
 	h := newAPIHarness(t, harnessOptions{})
-	// The golden stores the document as JSON, not a string, so it is compared
-	// semantically and byte-for-byte against the embedded copy.
+	// The Rust document is compared as JSON, and the response byte for byte
+	// against the embedded copy.
 	spec := h.authed("GET", "/api/openapi.json", "")
 	wantStatus(t, spec, http.StatusOK)
 	if spec.Header().Get("Content-Type") != "application/json" || !bytes.Equal(spec.Body.Bytes(), openAPIJSON) {
 		t.Error("openapi response differs from the embedded document")
 	}
-	raw, err := os.ReadFile("testdata/rust/api_openapi.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var captured struct {
-		Body any `json:"body"`
-	}
-	var served any
-	if err := json.Unmarshal(raw, &captured); err != nil {
-		t.Fatal(err)
-	}
-	decodeBody(t, spec, &served)
-	if !reflect.DeepEqual(captured.Body, served) {
-		t.Error("openapi document differs from the Rust golden")
+	if got := canonicalJSONDigest(t, spec.Body.Bytes()); got != openAPIRustDigest {
+		t.Errorf("openapi document differs from the Rust document (digest %s)", got)
 	}
 	assertMatchesGolden(t, h.authed("GET", "/api/docs", ""), loadGolden(t, "api_docs"))
 }

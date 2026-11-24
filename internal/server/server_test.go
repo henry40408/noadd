@@ -3,14 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,37 +44,136 @@ func serve(handler http.Handler, method, target string, headers map[string]strin
 	return recorder
 }
 
-// golden is a response captured from the Rust server (testdata/rust).
+// golden is a response captured from the Rust server. Status and headers are
+// compared as captured; the body is the text in Body, or only its SHA-256 in
+// BodySHA256 when the document is large, or absent when the test compares the
+// body with something else.
 type golden struct {
-	Status  int        `json:"status"`
-	Headers [][]string `json:"headers"`
-	Body    string     `json:"body"`
-	BodyB64 string     `json:"body_b64"`
+	Status     int
+	Headers    [][]string
+	Body       string
+	BodySHA256 string
+}
+
+// rustGoldens were recorded from the Rust image ghcr.io/henry40408/noadd:0.41.1
+// (date dropped). They are never regenerated from Go output.
+var rustGoldens = map[string]golden{
+	"api_apple_touch_icon": {
+		Status: 200,
+		Headers: [][]string{
+			{"content-type", "image/png"},
+			{"etag", "\"9b6f217c4c01188d\""},
+			{"cache-control", "no-cache"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "3809"},
+		},
+	},
+	"api_doh_get_missing_param": {
+		Status: 400,
+		Headers: [][]string{
+			{"content-type", "text/plain; charset=utf-8"},
+			{"content-length", "55"},
+		},
+		Body: "Failed to deserialize query string: missing field `dns`",
+	},
+	"api_static_app_css": {
+		Status: 200,
+		Headers: [][]string{
+			{"content-type", "text/css"},
+			{"etag", "\"5cfec8610c318452\""},
+			{"cache-control", "no-cache"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "40621"},
+		},
+	},
+	"api_static_app_css_304": {
+		Status: 304,
+		Headers: [][]string{
+			{"etag", "\"5cfec8610c318452\""},
+			{"cache-control", "no-cache"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+		},
+	},
+	"api_static_app_js": {
+		Status: 200,
+		Headers: [][]string{
+			{"content-type", "text/javascript"},
+			{"etag", "\"ed445fb322955ecf\""},
+			{"cache-control", "no-cache"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "95767"},
+		},
+	},
+	"api_static_favicon_svg": {
+		Status: 200,
+		Headers: [][]string{
+			{"content-type", "image/svg+xml"},
+			{"etag", "\"a33ba3d96655196b\""},
+			{"cache-control", "no-cache"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "566"},
+		},
+	},
+	"api_stats_v2_bad_range": {
+		Status: 400,
+		Headers: [][]string{
+			{"cache-control", "no-cache, no-store, must-revalidate, max-age=0"},
+			{"pragma", "no-cache"},
+			{"expires", "0"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "0"},
+		},
+		Body: "",
+	},
+	"api_stats_v2_unknown_param": {
+		Status: 400,
+		Headers: [][]string{
+			{"content-type", "text/plain; charset=utf-8"},
+			{"cache-control", "no-cache, no-store, must-revalidate, max-age=0"},
+			{"pragma", "no-cache"},
+			{"expires", "0"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "97"},
+		},
+		Body: "Failed to deserialize query string: bogus: unknown field `bogus`, expected `range` or `tz_offset`",
+	},
+	"api_docs": {
+		Status: 200,
+		Headers: [][]string{
+			{"content-type", "text/html; charset=utf-8"},
+			{"cache-control", "no-cache, no-store, must-revalidate, max-age=0"},
+			{"pragma", "no-cache"},
+			{"expires", "0"},
+			{"content-security-policy", "frame-ancestors 'none'"},
+			{"x-frame-options", "DENY"},
+			{"x-content-type-options", "nosniff"},
+			{"content-length", "18992"},
+		},
+		BodySHA256: "9d4ed5d4a15be477afe91e6467af02a856beb3fbc1ede651428fcd11776a929c",
+	},
 }
 
 func loadGolden(t *testing.T, name string) golden {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "rust", name+".json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var captured golden
-	if err := json.Unmarshal(raw, &captured); err != nil {
-		t.Fatal(err)
+	captured, found := rustGoldens[name]
+	if !found {
+		t.Fatalf("no Rust golden named %q", name)
 	}
 	return captured
-}
-
-func (g golden) body(t *testing.T) []byte {
-	t.Helper()
-	if g.BodyB64 == "" {
-		return []byte(g.Body)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(g.BodyB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return decoded
 }
 
 func (g golden) header(name string) string {
@@ -92,8 +190,14 @@ func (g golden) header(name string) string {
 func assertMatchesGolden(t *testing.T, got *httptest.ResponseRecorder, want golden) {
 	t.Helper()
 	assertHeadersMatchGolden(t, got, want)
-	if !bytes.Equal(got.Body.Bytes(), want.body(t)) {
-		t.Errorf("body differs: %d bytes, want %d", got.Body.Len(), len(want.body(t)))
+	if want.BodySHA256 != "" {
+		if digest := sha256.Sum256(got.Body.Bytes()); hex.EncodeToString(digest[:]) != want.BodySHA256 {
+			t.Errorf("body digest differs from the Rust response (%d bytes)", got.Body.Len())
+		}
+		return
+	}
+	if got.Body.String() != want.Body {
+		t.Errorf("body = %q, want %q", got.Body.String(), want.Body)
 	}
 }
 

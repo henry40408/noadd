@@ -9,8 +9,8 @@ HTTP-level and moves with the admin API (Step 14); the SQL it exercises is
 covered in internal/db.
 
 Rust-parity evidence:
-- testdata/password_vectors.json: 3 Rust PHC hashes verify, 3 token digests match.
-- testdata/zxcvbn_scores.json: 198 passwords sent to Rust 0.41.1
+- rustPasswordVectors and rustTokenVectors (password_test.go): 3 Rust PHC hashes verify, 3 token digests match.
+- rustPolicyVerdicts (policy_test.go): 198 passwords sent to Rust 0.41.1
   POST /api/users/me/password (username "admin"); only accept/reject is
   observable. TestPolicyParityWithRust logs the differences.
 - One-off manual check: a Go HashPassword hash, stored in a DB created by
