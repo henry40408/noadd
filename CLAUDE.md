@@ -187,7 +187,7 @@ After any change to the UI's appearance, regenerate the affected `docs/screensho
 Query path (`internal/dnsserver/handler.go`): **filter → cache → upstream forward**, logging async over a buffered channel. Filter runs *before* cache so new block rules take effect immediately.
 
 - **Filter engine** (`internal/filter/engine.go`): exact-match set plus a flat reverse-domain trie, serialised into contiguous byte buffers. The live engine sits behind an atomic holder (`holder.go`); updates build a fresh engine and swap it in. Coordination in `internal/filter/rebuild.go`.
-- **Storage** (`internal/db`): all schema, migrations and CRUD. Versioned by `PRAGMA user_version`, incremental and forward-only. An hourly task prunes `query_logs` and runs maintenance.
+- **Storage** (`internal/db`): all schema, migrations and CRUD. Migrations are SQL files in `internal/db/migrations`, versioned by `PRAGMA user_version`, forward-only; read ARCHITECTURE.md *Schema Migrations* before adding one. An hourly task prunes `query_logs` and runs maintenance.
 - **Async logging** (`internal/querylog`): channel → a goroutine batches to SQLite (500 entries or 1 s).
 - **Upstream** (`internal/upstream`): forwarder plus strategies (Sequential / Round Robin / Lowest Latency via EMA), switchable at runtime.
 - **DoH** (`internal/dnsserver/doh.go`), optionally gated by URL tokens.

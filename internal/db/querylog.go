@@ -193,6 +193,11 @@ func logFilterClauses(filter QueryLogFilter) (string, []any) {
 	return clauses.String(), args
 }
 
+// execer is the part of *sql.Tx a write on another's transaction needs.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // bumpLogCount moves the maintained query_logs row count by delta, on the
 // write's own transaction.
 func bumpLogCount(ctx context.Context, tx execer, delta int64) error {

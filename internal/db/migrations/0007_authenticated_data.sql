@@ -1,0 +1,1 @@
+ALTER TABLE query_logs ADD COLUMN authenticated_data INTEGER NOT NULL DEFAULT 0;

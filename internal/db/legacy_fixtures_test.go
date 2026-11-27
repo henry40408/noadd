@@ -14,9 +14,9 @@ package db
 // session without ip and user agent. The passwords and API tokens of its
 // accounts are in rustPasswordVectors and rustTokenVectors (internal/auth).
 //
-// The older shapes: v0 is the schema batch of a fresh database (a true pre-v1
-// file cannot be opened by Rust 0.41.1, which indexes doh_token before it
-// migrates); v4 is the oldest it opens, with the legacy domain index and the
+// The older shapes: v0 is the schema batch of a fresh database without a
+// version, which is refused (nothing says which migrations it has had); v4 is
+// the oldest version that opens, with the legacy domain index and the
 // admin_password_hash and sessions settings; v8 has users, api_keys and
 // sessions with a plaintext token column; v15 has hashed sessions, has_result,
 // query_log_count and no rollups.
@@ -598,35 +598,6 @@ CREATE INDEX idx_api_keys_user ON api_keys(user_id);`,
 // rustMigratedDumps is the non-secret content of each legacy database after
 // the Rust server migrated it: user_version and, per table, columns and rows.
 var rustMigratedDumps = map[string]string{
-	"v0": `{"user_version":17,"tables":{"api_keys":{"columns":["id","user_id","name","prefix","created_at","last_used_at","expires_at"],
-"rows":[]},
-"custom_rules":{"columns":["id","rule","rule_type"],
-"rows":[]},
-"doh_tokens":{"columns":["id","token"],
-"rows":[]},
-"filter_list_content":{"columns":["list_id"],
-"rows":[]},
-"filter_lists":{"columns":["id","name","url","enabled","last_updated","rule_count"],
-"rows":[[1,"v0 list","http://example.test/a.txt",1,0,0]]},
-"query_logs":{"columns":["id","timestamp","domain","query_type","client_ip","blocked","cached","response_ms","upstream","doh_token","result","authenticated_data"],
-"rows":[[1,1794910000000,"a.test","A","10.0.0.1",1,0,0,null,null,"0.0.0.0",0],[2,1794910001000,"ok.example.com","AAAA","10.0.0.2",0,1,3,"1.1.1.1:53","legacy-token",null,1]]},
-"query_stats_client_hour":{"columns":["hour","client_ip","doh_token","count"],
-"rows":[[498586,"10.0.0.1","",1],[498586,"10.0.0.2","legacy-token",1]]},
-"query_stats_domain_hour":{"columns":["hour","domain","count"],
-"rows":[[498586,"a.test",1],[498586,"ok.example.com",1]]},
-"query_stats_metrics_hour":{"columns":["hour","blocked","cached","query_type","response_ms","count"],
-"rows":[[498586,0,1,"AAAA",3,1],[498586,1,0,"A",0,1]]},
-"query_stats_quarter":{"columns":["quarter","blocked","cached","count","sum_ms"],
-"rows":[[1994344,0,1,1,3],[1994344,1,0,1,0]]},
-"query_stats_upstream_hour":{"columns":["hour","upstream","count","sum_ms"],
-"rows":[[498586,"1.1.1.1:53",1,3]]},
-"sessions":{"columns":["id","user_id","created_at","last_seen","ip","user_agent"],
-"rows":[]},
-"settings":{"columns":["key","value"],
-"rows":[["block_mode","null_ip"],["query_log_count","2"],["session_log_salt","c8662bf39286ba906cae53a6966cf88f"]]},
-"users":{"columns":["id","username","created_at"],
-"rows":[]}},
-"indexes":["idx_api_keys_user","idx_query_logs_blocked_ts","idx_query_logs_domain_ts","idx_query_logs_timestamp","idx_query_logs_token_ts","idx_query_logs_type_blocked_ts"]}`,
 	"v4": `{"user_version":17,"tables":{"api_keys":{"columns":["id","user_id","name","prefix","created_at","last_used_at","expires_at"],
 "rows":[]},
 "custom_rules":{"columns":["id","rule","rule_type"],

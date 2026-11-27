@@ -143,7 +143,16 @@ The logger also publishes each entry to the event hub, which feeds the query log
 
 ### Schema Migrations
 
-Versioned by `PRAGMA user_version`, applied incrementally and forward-only. New databases get the latest schema directly.
+Versioned by `PRAGMA user_version`, forward-only. Each step is a file `internal/db/migrations/<version>_<description>.sql`, embedded in the binary; a new database runs them all. `0001_initial.sql` is the schema of the first release, which stored version 4, so versions 2 to 4 have no file.
+
+On start `migrate` applies the files newer than the database, in order, each in one `BEGIN IMMEDIATE` transaction together with the version, so a failure leaves neither behind. It refuses a database newer than the latest file, and a non-empty one at version 0, where nothing says what has run.
+
+Rules for a new file:
+
+- Never edit a released file; add one with the next number.
+- Make it safe to run twice where SQLite allows it: `CREATE` and `DROP` take `IF (NOT) EXISTS`, and a data change leaves the data alone the second time. A restored `.dump` gets its version back by hand and may get it too low. `ADD COLUMN` has no such guard: let it fail.
+- No `BEGIN` or `COMMIT`; the runner owns the transaction.
+- Rebuilding a table that foreign keys point to (`users`) deletes its child rows: foreign keys stay on inside the transaction (`PRAGMA foreign_keys` has no effect there), so `DROP TABLE` cascades without an error. Preserve the child rows in the same file.
 
 ### Upstream DNS
 
@@ -270,7 +279,7 @@ A timestamp-first index can only serve a filter by walking the window: on a 1.48
 
 Across the Rust `logs_page_miss_bench`'s 42 readings (no Go counterpart: the pure-Go driver has no page-miss counter) the query log went from 368 963 page misses to 159 649 on the 1.48 M-row database. Migrating it takes ~3 s on an SSD and leaves a 25% freelist, past `VACUUM_FREELIST_RATIO`, so the first hourly maintenance rewrites the file once — measure on the appliance before relying on either figure there.
 
-The query-log index tests in `internal/db` (`queries_test.go`, `migrate_test.go`) bound each filter's reads and check that every database opens to the same indexes; the latter opens databases from versions 9, 10, 11, 16 and fresh, requires the same five indexes, and runs every reader that once named a dropped index.
+The tests in `internal/db` bound each filter's reads (`queries_test.go`) and check that the fixtures at versions 4, 8 and 15 upgrade to the version 17 structure, indexes included (`migrate_test.go`).
 
 ### Rollups
 
