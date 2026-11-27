@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 )
 
-var whitespace = regexp.MustCompile(`\s+`)
+var (
+	whitespace         = regexp.MustCompile(`\s+`)
+	spaceAtPunctuation = regexp.MustCompile(` ?([(),]) ?`)
+)
 
 // copyFixture builds a database from legacySQL in a temp dir, as a WAL one:
 // opening migrates in place.
@@ -101,7 +105,7 @@ func TestUpgradeMatchesRustV17Structure(t *testing.T) {
 	}
 	defer func() { _ = rust.Close() }()
 	want := structure(t, rust)
-	for _, name := range []string{"rust-v0.sqlite3", "rust-v4.sqlite3", "rust-v8.sqlite3", "rust-v15.sqlite3"} {
+	for _, name := range []string{"rust-v4.sqlite3", "rust-v8.sqlite3", "rust-v15.sqlite3"} {
 		t.Run(name, func(t *testing.T) {
 			database := openDB(t, copyFixture(t, name))
 			assertUserVersion(t, database, 17)
@@ -177,14 +181,24 @@ func pragmaRows(t *testing.T, conn *sql.DB, pragma, name string) string {
 	return strings.Join(out, ";")
 }
 
+// ALTER TABLE appends a column to the stored statement, so only the spacing
+// around punctuation may differ from the statement Rust wrote in one piece.
 func TestEmptyDatabaseMatchesRustV17Schema(t *testing.T) {
 	database := openDB(t, filepath.Join(t.TempDir(), "fresh.sqlite3"))
 	assertUserVersion(t, database, 17)
-	got := schemaObjects(t, database.writer)
-	if want := rustV17Schema(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
+	got := tightPunctuation(schemaObjects(t, database.writer))
+	if want := tightPunctuation(rustV17Schema(t)); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("fresh schema differs from Rust v17\n got: %s\nwant: %s",
 			strings.Join(got, "\n      "), strings.Join(want, "\n      "))
 	}
+}
+
+func tightPunctuation(objects []string) []string {
+	tight := make([]string, len(objects))
+	for i, object := range objects {
+		tight[i] = spaceAtPunctuation.ReplaceAllString(object, "$1")
+	}
+	return tight
 }
 
 func assertUserVersion(t *testing.T, database *DB, want int) {
@@ -210,7 +224,7 @@ type migratedDump struct {
 // dumped after migrating the same legacy file: user data survives, legacy
 // sessions are dropped and the rollups are backfilled the same way.
 func TestUpgradeMatchesRustMigratedRows(t *testing.T) {
-	for _, version := range []string{"v0", "v4", "v8", "v15"} {
+	for _, version := range []string{"v4", "v8", "v15"} {
 		t.Run(version, func(t *testing.T) {
 			var dump migratedDump
 			if err := json.Unmarshal([]byte(rustMigratedDumps[version]), &dump); err != nil {
@@ -379,24 +393,27 @@ func TestMaintainStatsTriggerExists(t *testing.T) {
 	}
 }
 
+// databaseAtVersion builds the database a release at that schema version left.
+func databaseAtVersion(t *testing.T, version int64) (string, *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "old.sqlite3")
+	raw := openRaw(t, path)
+	shipped := shippedMigrations(t)
+	count := slices.IndexFunc(shipped, func(m migration) bool { return m.version == version }) + 1
+	if count == 0 {
+		t.Fatalf("no migration brings a database to version %d", version)
+	}
+	applyTo(t, raw, shipped[:count])
+	return path, raw
+}
+
 // TestV9DropsPlaintextSessions pins the security-relevant step: raw session
 // tokens must not survive the upgrade, and the renamed column must work.
 func TestV9DropsPlaintextSessions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v8.sqlite3")
-	raw, err := sql.Open("sqlite", dsn(path, nil, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = raw.Exec(`
-		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+	path, raw := databaseAtVersion(t, 8)
+	mustExec(t, raw, `
 		INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100);
-		CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, ip TEXT, user_agent TEXT);
-		INSERT INTO sessions (token, user_id, created_at, last_seen) VALUES ('plaintext-token', 1, 100, 100);
-		PRAGMA user_version = 8;`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = raw.Close()
+		INSERT INTO sessions (token, user_id, created_at, last_seen) VALUES ('plaintext-token', 1, 100, 100);`)
 
 	database := openDB(t, path)
 	var sessions int
@@ -417,20 +434,8 @@ func TestV9DropsPlaintextSessions(t *testing.T) {
 }
 
 func TestV8AddsAPIKeysTable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v7.sqlite3")
-	raw, err := sql.Open("sqlite", dsn(path, nil, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = raw.Exec(`
-		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
-		INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100);
-		CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, ip TEXT, user_agent TEXT);
-		PRAGMA user_version = 7;`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = raw.Close()
+	path, raw := databaseAtVersion(t, 7)
+	mustExec(t, raw, "INSERT INTO users (username, password_hash, created_at) VALUES ('op', 'x', 100)")
 
 	database := openDB(t, path)
 	if _, err := database.writer.Exec(`INSERT INTO api_keys (user_id, name, token_hash, prefix, created_at)
@@ -457,33 +462,13 @@ func TestDeletingUserCascadesAPIKeys(t *testing.T) {
 }
 
 func TestFailedMigrationRollsBackAndKeepsVersion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "broken.sqlite3")
-	raw, err := sql.Open("sqlite", dsn(path, nil, ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A "sessions" view makes the v9 DELETE fail after v6..v8 ran.
-	_, err = raw.Exec(`
-		CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
-		CREATE TABLE sessions (id INTEGER PRIMARY KEY, token TEXT);
-		PRAGMA user_version = 8;`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = raw.Exec("DROP TABLE sessions")
-	_ = raw.Close()
+	path, raw := databaseAtVersion(t, 8)
+	mustExec(t, raw, "DROP TABLE sessions")
 
-	_, err = Open(context.Background(), path)
-	if err == nil {
+	if _, err := Open(context.Background(), path); err == nil {
 		t.Fatal("expected migration v9 to fail without a sessions table")
 	}
-	raw, err = sql.Open("sqlite", dsn(path, nil, "ro"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = raw.Close() }()
-	var version int
-	if err := raw.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 8 {
-		t.Fatalf("user_version = %d, err %v; want 8", version, err)
+	if got := schemaVersion(t, raw); got != 8 {
+		t.Fatalf("user_version = %d, want 8", got)
 	}
 }

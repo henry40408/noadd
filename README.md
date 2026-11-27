@@ -93,6 +93,20 @@ The container runs from `/data`, so the database is `/data/noadd.sqlite3`. A
 legacy `noadd.db` from older releases is picked up automatically (rename it to
 `noadd.sqlite3` to silence the startup warning).
 
+### Upgrading and restoring the database
+
+noadd records the schema version in the database (`PRAGMA user_version`) and
+upgrades the database when it starts, from any earlier release. It refuses to
+start on a database whose schema is newer than it knows.
+
+`sqlite3`'s `.dump` does not carry the version, so noadd refuses a database
+restored from one until you copy it over (`.backup` keeps it):
+
+```bash
+sqlite3 source.sqlite3 "PRAGMA user_version"          # prints the version
+sqlite3 restored.sqlite3 "PRAGMA user_version = 17"   # use the number printed
+```
+
 ## Usage
 
 ```

@@ -129,6 +129,11 @@ func dsn(path string, pragmas []string, mode string) string {
 	}
 	if mode != "" {
 		query.Set("mode", mode)
+	} else {
+		// A transaction on a writable connection is there to write. Taking the
+		// write lock at BEGIN lets busy_timeout wait out another process; a lock
+		// upgraded after a read fails at once.
+		query.Set("_txlock", "immediate")
 	}
 	if path == memoryPath {
 		// Each ":memory:" connection is its own database, which is why the
